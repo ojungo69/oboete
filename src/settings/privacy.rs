@@ -347,22 +347,13 @@ fn labels(
     excluded: &[String],
 ) -> anyhow::Result<BTreeSet<String>> {
     let mut labels: BTreeSet<String> = excluded.iter().cloned().collect();
-    let (conn, query) = match raw {
-        RawRepos::Main(conn) => (
-            conn,
-            "SELECT DISTINCT repo FROM main.records
-             WHERE type = 'event' AND repo IS NOT NULL AND repo <> ''",
-        ),
-        RawRepos::Attached(conn) => (
-            conn,
-            "SELECT DISTINCT repo FROM privacy_raw.records
-             WHERE type = 'event' AND repo IS NOT NULL AND repo <> ''",
-        ),
+    // Every device's and every kind's: a rule's record and another device's records are in no
+    // table of knowledge.db. By the records' index where one is built (`raw::event_repos`).
+    let (conn, schema) = match raw {
+        RawRepos::Main(conn) => (conn, "main"),
+        RawRepos::Attached(conn) => (conn, "privacy_raw"),
     };
-    let mut records = conn.prepare(query)?;
-    for label in records.query_map([], |row| row.get::<_, String>(0))? {
-        labels.insert(label?);
-    }
+    labels.extend(crate::raw::event_repos(conn, schema)?);
     if let Some(k) = k {
         let tables: i64 = k.query_row(
             "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table'
@@ -823,6 +814,78 @@ mod tests {
             rows.iter().all(|(_, label)| !label.contains("secret-a1")),
             "{rows:?}"
         );
+    }
+
+    /// #899 W2: what the read of raw.db's records is for. A repository only a rule's record
+    /// names (the index gives a directive no row) and one only another device's records name (the
+    /// index reads this device's alone) are in no table of knowledge.db once the worker has run,
+    /// and both are listed.
+    #[test]
+    fn repositories_the_index_never_names_are_listed_from_the_records() {
+        let mut store = Store::new();
+        let home = store.home.path().to_owned();
+        store.said("s", "github.com/o/indexed", 1_000, "Indexed work.");
+        store.said(
+            "remote",
+            "github.com/o/remote",
+            2_000,
+            "Another device's work.",
+        );
+        let rule = crate::raw::Event {
+            kind: "directive".into(),
+            session: "d".into(),
+            repo: Some("github.com/o/ruled".into()),
+            ts: 3_000,
+            ..crate::raw::test_event("Tag every release.")
+        };
+        store.raw.append(&rule).unwrap();
+        Connection::open(crate::raw::path(&home))
+            .unwrap()
+            .execute(
+                "UPDATE records SET device = 'remote-device' WHERE repo = 'github.com/o/remote'",
+                [],
+            )
+            .unwrap();
+        store.run();
+        let (_raw, k) = crate::search::b::stores(&home).unwrap().unwrap();
+        assert_eq!(
+            crate::view::repo_names_in(&k).unwrap(),
+            ["github.com/o/indexed"]
+        );
+        let listed = || {
+            show(&home)["repositories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["label"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let all = [
+            "github.com/o/indexed",
+            "github.com/o/remote",
+            "github.com/o/ruled",
+        ];
+        let sought = || crate::raw::EVENT_REPOS_SOUGHT.get();
+        let before = sought();
+        assert_eq!(listed(), all);
+        assert_eq!(sought(), before, "with no index every record is read");
+        assert!(
+            !store.raw.has_repo_index().unwrap(),
+            "a read builds no index"
+        );
+        // The same names through the records' index, once something has built it.
+        store.raw.repo_index().unwrap();
+        assert_eq!(listed(), all);
+        assert_eq!(sought(), before + 1, "the index is what is read");
+        // With no knowledge.db yet, raw.db is read under its own name, by its index too.
+        let mut fresh = Store::new();
+        fresh.said("s", "github.com/o/new", 1_000, "Work no worker has seen.");
+        fresh.raw.repo_index().unwrap();
+        let shown = show(fresh.home.path());
+        assert_eq!(shown["repositories"][0]["label"], "github.com/o/new");
+        assert_eq!(shown["repositories"].as_array().unwrap().len(), 1);
+        assert_eq!(sought(), before + 2);
+        assert!(!fresh.home.path().join("knowledge.db").exists());
     }
 
     #[cfg(unix)]

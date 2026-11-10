@@ -179,6 +179,68 @@ const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
 const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
     ON records(device, agent, session, seq)";
 
+/// The repositories the events of `schema`'s records name, each once (`event_repos`). Through
+/// `records_repo` each name is one seek of the index: the least name, then the least one above
+/// it, and so on. Without it every record is read.
+fn event_repos_sql(schema: &str, indexed: bool) -> String {
+    if indexed {
+        // `repo > ''` leaves out a record of no repository and one of an empty name, as the
+        // read of every record does.
+        format!(
+            "WITH RECURSIVE names(repo) AS (
+               SELECT MIN(repo) FROM {schema}.records INDEXED BY records_repo
+                WHERE type = 'event' AND repo > ''
+               UNION ALL
+               SELECT (SELECT MIN(repo) FROM {schema}.records INDEXED BY records_repo
+                        WHERE type = 'event' AND repo > names.repo)
+               FROM names WHERE names.repo IS NOT NULL)
+             SELECT repo FROM names WHERE repo IS NOT NULL"
+        )
+    } else {
+        format!(
+            "SELECT DISTINCT repo FROM {schema}.records
+             WHERE type = 'event' AND repo IS NOT NULL AND repo <> ''"
+        )
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the events' repositories through their index: a test's
+    /// look at `event_repos`.
+    pub(crate) static EVENT_REPOS_SOUGHT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The repositories the events name, each once, in no order: every device's and every kind's (a
+/// rule's record and another device's records are in no table of knowledge.db, #899 W2). Where
+/// `records_repo` is built (`Raw::repo_index`) the names are read from it; a reader builds no
+/// index, and without one reads every record (5.6 s cold on this PC's store, 2026-11-10).
+/// `schema` is the name the caller's connection has raw.db under.
+pub(crate) fn event_repos(conn: &Connection, schema: &str) -> Result<Vec<String>> {
+    let indexed = has_repo_index(conn, schema)?;
+    #[cfg(test)]
+    if indexed {
+        EVENT_REPOS_SOUGHT.set(EVENT_REPOS_SOUGHT.get() + 1);
+    }
+    let rows = conn
+        .prepare(&event_repos_sql(schema, indexed))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Whether `records_repo` is built in the raw.db `conn` has under `schema`.
+fn has_repo_index(conn: &Connection, schema: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_master
+               WHERE type = 'index' AND name = 'records_repo')"
+        ),
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// A session's events before a window, newest first: the seek `SESSION_INDEX` serves.
 const SESSION_LATEST: &str = "SELECT seq, source FROM records WHERE device = ?1 AND seq < ?2
        AND type = 'event' AND agent = ?3 AND session = ?4
@@ -2415,8 +2477,14 @@ impl Raw {
             .collect())
     }
 
+    /// Whether `records_repo` is built.
+    pub(crate) fn has_repo_index(&self) -> Result<bool> {
+        has_repo_index(&self.conn, "main")
+    }
+
     /// The index of the events' repositories, built the first time something reads them by
-    /// repository: an exclusion (`sessions_in`) or a forget's preview; never by `open` or a hook.
+    /// repository: an exclusion (`sessions_in`) or a forget's preview, or by the worker in a pause
+    /// of the owner's work (`worker::maintain`); never by `open`, a hook or a reader.
     pub(crate) fn repo_index(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
@@ -12470,6 +12538,78 @@ mod tests {
         assert_eq!(latest(&raw), vec![3, 1]);
         drop(raw);
         assert!(open(home.path()).unwrap().has_session_index().unwrap());
+    }
+
+    /// #899 W2: the events' repositories read through `records_repo` are those read from every
+    /// record: each once, none for a record of no repository or an empty one, a rule's record's
+    /// too. Once the index is there it is what is read, by seeks, and no record.
+    #[test]
+    fn the_events_repositories_are_read_from_their_index_once_it_is_built() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        for (repo, kind) in [
+            (Some("b/two"), "prompt"),
+            (Some("a/one"), "prompt"),
+            (Some("a/one"), "tool"),
+            (Some(""), "prompt"),
+            (None, "prompt"),
+            (Some("c/rule"), "directive"),
+        ] {
+            let e = Event {
+                kind: kind.into(),
+                repo: repo.map(str::to_owned),
+                ..test_event("words")
+            };
+            raw.append(&e).unwrap();
+        }
+        let names = |raw: &Raw| {
+            let mut names = event_repos(&raw.conn, "main").unwrap();
+            names.sort();
+            names
+        };
+        let plan = |raw: &Raw, indexed: bool| -> String {
+            raw.conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    event_repos_sql("main", indexed)
+                ))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join(" | ")
+        };
+        assert!(!raw.has_repo_index().unwrap());
+        assert_eq!(names(&raw), ["a/one", "b/two", "c/rule"]);
+        assert!(
+            plan(&raw, false).contains("SCAN main.records"),
+            "{}",
+            plan(&raw, false)
+        );
+        raw.repo_index().unwrap();
+        assert!(raw.has_repo_index().unwrap());
+        assert_eq!(names(&raw), ["a/one", "b/two", "c/rule"]);
+        let seeks = plan(&raw, true);
+        assert!(
+            seeks.contains("SEARCH main.records USING COVERING INDEX records_repo"),
+            "{seeks}"
+        );
+        assert!(!seeks.contains("SCAN main.records"), "{seeks}");
+        // A name that sorts after every other, and one a byte above another's prefix.
+        for repo in ["zz/last", "a/one-more", "a/on"] {
+            let e = Event {
+                repo: Some(repo.into()),
+                ..test_event("more words")
+            };
+            raw.append(&e).unwrap();
+        }
+        assert_eq!(
+            names(&raw),
+            ["a/on", "a/one", "a/one-more", "b/two", "c/rule", "zz/last"]
+        );
+        drop(raw);
+        assert!(open(home.path()).unwrap().has_repo_index().unwrap());
     }
 
     /// Forget's `records_sessions` and the seek's `records_session_seq` are two indexes, each as

@@ -1579,19 +1579,21 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     })
 }
 
-/// How long no hook has recorded before the worker builds raw's session index: long enough that
+/// How long no hook has recorded before the worker builds raw's indexes (`maintain`): long enough that
 /// a hook seldom comes during the build, which it waits out for at most its 2 s before it keeps
 /// its events for the next hook to write back (docs/unwritten.md).
 const INDEX_PAUSE_MS: i64 = 30 * 60_000;
 
-/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`),
-/// built once in a pause of the owner's work, since its first build takes seconds a hook's write
-/// would wait out. Not while a command waits for the worker to step aside (R12) or it is leaving,
-/// nor with a call out (R10). A build that fails is tried again at a later idle time; the seek
-/// works without the index, only slower.
+/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`)
+/// and the index of the events' repositories (`Raw::repo_index`, which the settings page's list of
+/// repositories reads: #899 W2), each built once in a pause of the owner's work, since its first
+/// build takes seconds a hook's write would wait out. Not while a command waits for the worker to
+/// step aside (R12) or it is leaving, nor with a call out (R10). A build that fails is tried again
+/// at a later idle time; the readers work without the indexes, only slower.
 fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
     // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
-    if leaving || calling || asked_aside(home) || raw.has_session_index().unwrap_or(true) {
+    let built = raw.has_session_index().unwrap_or(true) && raw.has_repo_index().unwrap_or(true);
+    if leaving || calling || asked_aside(home) || built {
         return;
     }
     let paused = raw
@@ -1599,6 +1601,7 @@ fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
         .is_ok_and(|ts| ts.is_none_or(|ts| crate::db::now_ms() - ts >= INDEX_PAUSE_MS));
     if paused {
         let _ = raw.ensure_session_index();
+        let _ = raw.repo_index();
     }
 }
 
@@ -2542,6 +2545,43 @@ mod tests {
         std::fs::remove_file(asked).unwrap();
         maintain(p, &raw, false, false);
         assert!(raw.has_session_index().unwrap());
+    }
+
+    /// #899 W2: the index of the events' repositories is the idle worker's to build too, in the
+    /// same pause, on a store whose session index an earlier worker built.
+    #[test]
+    fn the_repository_index_is_built_in_a_pause_beside_the_session_index() {
+        for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
+            let e = crate::raw::Event {
+                ts: crate::db::now_ms() - ago,
+                ..crate::raw::test_event("a step")
+            };
+            raw.append(&e).unwrap();
+            raw.ensure_session_index().unwrap();
+            assert!(!raw.has_repo_index().unwrap());
+            maintain(p, &raw, true, false);
+            maintain(p, &raw, false, true);
+            assert!(
+                !raw.has_repo_index().unwrap(),
+                "leaving, or with a call out"
+            );
+            maintain(p, &raw, false, false);
+            assert_eq!(raw.has_repo_index().unwrap(), built, "{ago} ms ago");
+        }
+        // Neither built: one pause builds both.
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let e = crate::raw::Event {
+            ts: crate::db::now_ms() - INDEX_PAUSE_MS,
+            ..crate::raw::test_event("a step")
+        };
+        raw.append(&e).unwrap();
+        maintain(p, &raw, false, false);
+        assert!(raw.has_session_index().unwrap() && raw.has_repo_index().unwrap());
     }
 
     /// A resident worker that went idle before the pause came builds the index once it has: its
