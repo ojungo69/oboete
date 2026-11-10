@@ -371,14 +371,9 @@ fn labels(
             |row| row.get(0),
         )?;
         if tables == 3 {
-            for row in crate::view::repos_in(k)? {
-                labels.insert(
-                    row["repo"]
-                        .as_str()
-                        .context("invalid repository row")?
-                        .to_owned(),
-                );
-            }
+            // Their names alone: the list's counts are not shown here, and take seconds on a
+            // large store (#899 W2).
+            labels.extend(crate::view::repo_names_in(k)?);
         }
     }
     Ok(labels)
@@ -767,6 +762,67 @@ mod tests {
             "privacy lookup or exclusion indexed the new raw records"
         );
         assert!(!store.home.path().join("providers.db").exists());
+    }
+
+    /// #899 W2: the names knowledge.db gives the page are read without their counts
+    /// (`view::repo_names_in`). One only it names (an imported document's project) is listed, and
+    /// one a rule masks is shown masked, under the selector of the name as stored.
+    #[test]
+    fn the_names_only_knowledge_holds_are_listed_and_masked_as_shown() {
+        let mut store = Store::new();
+        let home = store.home.path().to_owned();
+        std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret-[a-z][0-9]' }]\n",
+        )
+        .unwrap();
+        store.imported("plain", "notes-app", 1_000, "A note", "Imported work.");
+        store.imported(
+            "masked",
+            "secret-a1",
+            2_000,
+            "A note",
+            "More imported work.",
+        );
+        store.run();
+        let (_raw, k) = crate::search::b::stores(&home).unwrap().unwrap();
+        let mut stored = crate::view::repo_names_in(&k).unwrap();
+        stored.sort();
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        let settings = crate::capture::Settings::load(&home).unwrap();
+        let wanted: Vec<(String, String)> = stored
+            .iter()
+            .map(|name| {
+                (
+                    selector(name),
+                    crate::redact::outbound_with(name, &settings.rules),
+                )
+            })
+            .collect();
+        let counted = crate::view::REPOS_COUNTED.get();
+        let shown = show(&home);
+        assert_eq!(
+            crate::view::REPOS_COUNTED.get(),
+            counted,
+            "the page's names are read with no count"
+        );
+        let rows: Vec<(String, String)> = shown["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["selector"].as_str().unwrap().to_owned(),
+                    r["label"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, wanted);
+        assert!(rows.iter().any(|(_, label)| label.contains("notes-app")));
+        assert!(
+            rows.iter().all(|(_, label)| !label.contains("secret-a1")),
+            "{rows:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -3500,8 +3500,16 @@ const REPOS: &str = "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(
        SELECT repo, 0, 0, COUNT(*), MAX(ts) FROM raw_docs WHERE repo IS NOT NULL GROUP BY repo)
      GROUP BY repo ORDER BY MAX(last) DESC, repo";
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread counted the repositories: a test's look at `repos_in`.
+    pub(crate) static REPOS_COUNTED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Existing repository enumeration on a caller-owned connection, without opening stores.
 pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
+    #[cfg(test)]
+    REPOS_COUNTED.set(REPOS_COUNTED.get() + 1);
     let mut st = k.prepare(REPOS)?;
     let rows = st.query_map([], |r| {
         Ok(json!({
@@ -3512,6 +3520,20 @@ pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
             "last": r.get::<_, i64>(4)?,
         }))
     })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The names alone of the repositories `REPOS` lists: its three tables under its filters, with no
+/// count, so each is read from an index of its own (#899 W2: 0.14 s where the counts took 3.1 s
+/// cold on this PC's store, 2026-11-10). In no order.
+const REPO_NAMES: &str = "SELECT repo FROM derivations WHERE repo IS NOT NULL
+     UNION SELECT repo FROM imported
+     UNION SELECT repo FROM raw_docs WHERE repo IS NOT NULL";
+
+/// The repositories `repos_in` lists, by name only, on a caller-owned connection.
+pub(crate) fn repo_names_in(k: &rusqlite::Connection) -> Result<Vec<String>> {
+    let mut st = k.prepare(REPO_NAMES)?;
+    let rows = st.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -3741,6 +3763,84 @@ mod tests {
         assert!(
             records.contains(&("github.com/o/b".into(), 1)),
             "{records:?}"
+        );
+    }
+
+    /// #899 W2: the names of the repositories the list holds, each table read from an index with
+    /// no count: the same names as `repos_in` gives, one in a single table too (records alone,
+    /// imported documents alone, a claim alone).
+    #[test]
+    fn the_repositories_names_are_the_lists_names_read_from_indexes() {
+        let mut s = Store::new();
+        s.said(
+            "s1",
+            "github.com/o/records-only",
+            1_000,
+            "Only a record here.",
+        );
+        s.imported(
+            "i1",
+            "imported-only",
+            2_000,
+            "A note",
+            "Only a document here.",
+        );
+        s.decided(
+            "github.com/o/claimed",
+            3_000,
+            "We deploy from release only.",
+            &[],
+        );
+        s.said("s2", "github.com/o/both", 4_000, "A record there.");
+        s.decided("github.com/o/both", 5_000, "And a claim there.", &[]);
+        // A record of no repository is indexed with none, and is no name.
+        s.raw
+            .append(&crate::raw::test_event("No repository."))
+            .unwrap();
+        s.run();
+        // The claimed repository's records leave the index: its claim alone names it.
+        let gone = rusqlite::Connection::open(s.home.path().join("knowledge.db"))
+            .unwrap()
+            .execute(
+                "DELETE FROM raw_docs WHERE repo = 'github.com/o/claimed'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(gone, 1);
+        let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
+        let listed: std::collections::BTreeSet<String> = (repos_in(&k).unwrap().iter())
+            .map(|r| r["repo"].as_str().unwrap().to_owned())
+            .collect();
+        let names = repo_names_in(&k).unwrap();
+        let set: std::collections::BTreeSet<String> = names.iter().cloned().collect();
+        assert_eq!(set, listed);
+        assert_eq!(names.len(), set.len(), "a name twice: {names:?}");
+        for name in [
+            "github.com/o/records-only".to_owned(),
+            crate::import::repo("imported-only"),
+            "github.com/o/claimed".to_owned(),
+            "github.com/o/both".to_owned(),
+        ] {
+            assert!(set.contains(&name), "{name} of {set:?}");
+        }
+        let plan: Vec<String> = (k
+            .prepare(&format!("EXPLAIN QUERY PLAN {REPO_NAMES}"))
+            .unwrap())
+        .query_map([], |r| r.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+        for index in ["derivations_repo", "raw_docs_repo"] {
+            assert!(
+                plan.iter()
+                    .any(|p| p.contains(&format!("COVERING INDEX {index}"))),
+                "{plan:?}"
+            );
+        }
+        assert!(
+            plan.iter()
+                .all(|p| !p.starts_with("SCAN") || p.contains("COVERING INDEX")),
+            "a table read where an index names the repository: {plan:?}"
         );
     }
 
