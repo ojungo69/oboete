@@ -820,6 +820,7 @@ pub(super) fn preview(home: &Path, body: &[u8]) -> Result<Value, Refusal> {
                 } else if let Some(r) = crate::budget::admit_with_history(
                     db,
                     (&p, &selected.provider),
+                    "probe",
                     input,
                     selected.paid_cap,
                     &[],

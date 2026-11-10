@@ -398,6 +398,7 @@ pub(crate) fn probe_estimate(p: &Provider) -> u32 {
                 PROBE_PROMPT,
                 &probe_schema(),
                 &probe_extra(limits),
+                false,
             )
             .to_string(),
         ),
@@ -814,6 +815,7 @@ fn probe_send(
             &probe_schema(),
             admission,
             0,
+            false,
         ),
         Provider::Cli {
             cli,
@@ -948,6 +950,7 @@ impl<'a> Chain<'a> {
         let mut fallbacks = Vec::new();
         let est = budget::estimate(prompt);
         let system = system_for(role);
+        let hour = config::cache_hour(role);
         // A ceiling a provider refused this request at (413): its peers with it are skipped.
         let mut ceiling_hit = Vec::new();
         for p in self.providers {
@@ -1109,7 +1112,7 @@ impl<'a> Chain<'a> {
                 drop(admission);
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
             } else {
-                ready.and_then(|()| call(p, system, prompt, schema, admission))
+                ready.and_then(|()| call(p, system, prompt, schema, admission, hour))
             };
             let sent = report_sent(reservation.id(), forced, &result, observer);
             // A second request goes through the budget and the egress gate again, so nothing
@@ -1206,7 +1209,7 @@ impl<'a> Chain<'a> {
                 } else {
                     None
                 };
-                result = ready.and_then(|()| call(p, system, prompt, schema, admission));
+                result = ready.and_then(|()| call(p, system, prompt, schema, admission, hour));
                 report_sent(reservation.id(), forced, &result, observer);
             }
             // The headers hold whatever the answer turns out to be.
@@ -1467,12 +1470,15 @@ fn report_sent(
     sent
 }
 
+/// `hour`: oboete's cache marker on a Messages request keeps its entry for an hour
+/// (`config::cache_hour`).
 fn call(
     p: &Provider,
     system: &str,
     prompt: &str,
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
+    hour: bool,
 ) -> Result<Answer, CallError> {
     #[cfg(test)]
     if let Some(error) = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take()) {
@@ -1541,6 +1547,7 @@ fn call(
                 schema,
                 admission,
                 10,
+                hour,
             )
         }
         Provider::Cli {
@@ -1944,12 +1951,14 @@ fn openai_compat(
         schema,
         admission,
         10,
+        false,
     )
 }
 
 /// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy; a call
 /// to OpenRouter asks for no reasoning (`reasoning_switch`). A model that refuses the switch is
 /// asked again without it by the caller (`refused_switch`), through the egress gate again.
+/// `hour`: a Messages request's cache marker keeps its entry for an hour (`config::cache_hour`).
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
 fn http_call(
     api: Api,
@@ -1963,6 +1972,7 @@ fn http_call(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
+    hour: bool,
 ) -> Result<Answer, CallError> {
     let mut off;
     let extra = if reasoning_switch(api, base_url, model, extra) {
@@ -1974,7 +1984,7 @@ fn http_call(
     };
     http_send(
         api, base_url, key_file, model, timeout_s, extra, headers, prompt, schema, admission,
-        redirects,
+        redirects, hour,
     )
 }
 
@@ -2056,9 +2066,10 @@ fn http_send(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
+    hour: bool,
 ) -> Result<Answer, CallError> {
     let openai = config::openai_api(base_url);
-    let body = request(api, openai, model, prompt, schema, extra);
+    let body = request(api, openai, model, prompt, schema, extra, hour);
     let url = endpoint(base_url, api);
     // ureq drops `Authorization` on a redirect, not the Messages API's `x-api-key`: none is
     // followed, so the key reaches no host but `base_url`'s.
@@ -2210,10 +2221,11 @@ fn request(
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
+    hour: bool,
 ) -> Value {
     match api {
         Api::Openai => openai_request(model, prompt, schema, extra, openai),
-        Api::Anthropic => anthropic_request(model, prompt, schema, extra),
+        Api::Anthropic => anthropic_request(model, prompt, schema, extra, hour),
     }
 }
 
@@ -2229,10 +2241,11 @@ fn anthropic_request(
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
+    hour: bool,
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": [{"role": "user", "content": anthropic_content(prompt, extra)}],
+        "messages": [{"role": "user", "content": anthropic_content(prompt, extra, hour)}],
         "output_config": {"format": {"type": "json_schema", "schema": anthropic_schema(schema)}}
     });
     for (k, v) in extra {
@@ -2251,11 +2264,13 @@ fn anthropic_request(
 
 /// A prompt as a Messages request's content. A fenced prompt's instructions, all before the sentence
 /// that names its fence, are the same bytes for every call of its kind (`curate::FENCE_SENTENCE`,
-/// G09): they go in a block of their own that writes the prompt cache, for five minutes or as the
-/// entry's own `cache_control` asks (a longer cache must come first), so a call within that time
-/// reads them at a tenth of the input price. Any other prompt goes whole, as does one whose entry's
-/// `extra` already takes every breakpoint a request may have (Codex on #636).
-fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>) -> Value {
+/// G09): they go in a block of their own that writes the prompt cache, for five minutes, for an
+/// hour when `hour` asks (`config::cache_hour`) and the entry marks nothing of its own, or as the
+/// entry's own `cache_control` asks (a longer cache must come first, and the entry's markers come
+/// before this block), so a call within that time reads them at a tenth of the input price. Any
+/// other prompt goes whole, as does one whose entry's `extra` already takes every breakpoint a
+/// request may have (Codex on #636).
+fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>, hour: bool) -> Value {
     let Some(n) = instructions_end(prompt)
         .filter(|_| crate::config::cache_markers(extra) < ANTHROPIC_BREAKPOINTS)
     else {
@@ -2263,6 +2278,9 @@ fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>) -> Va
     };
     let cache = match extra.get("cache_control") {
         Some(own) if own.is_object() => own.clone(),
+        _ if hour && crate::config::cache_markers(extra) == 0 => {
+            json!({"type": "ephemeral", "ttl": "1h"})
+        }
         _ => json!({"type": "ephemeral"}),
     };
     json!([
@@ -5736,6 +5754,7 @@ child.wait()
             &json!({}),
             None,
             0,
+            false,
         )
     }
 
@@ -5961,7 +5980,14 @@ child.wait()
         );
         // The loop has begun: the watchdog counts from here on.
         crate::watchdog::progressed();
-        let _ = call(&stub(url), CURATOR_SYSTEM, "prompt", &json!({}), None);
+        let _ = call(
+            &stub(url),
+            CURATOR_SYSTEM,
+            "prompt",
+            &json!({}),
+            None,
+            false,
+        );
         assert!(stuck.try_recv().is_err(), "stuck while a call was out");
     }
 
@@ -7248,7 +7274,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             *daily_budget = Some(1);
         }
         let gate = || {
-            let refusal = budget::admit_with_history(&peer, (&p, &p), 1.0, 5.0, &[])?;
+            let refusal = budget::admit_with_history(&peer, (&p, &p), "curator", 1.0, 5.0, &[])?;
             assert!(
                 refusal.is_some(),
                 "the in-flight call must take the only daily slot"
@@ -8135,6 +8161,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 "short",
                 &json!({"type": "object"}),
                 None,
+                false,
             )
             .unwrap();
             let req = got.recv().unwrap();
@@ -8895,7 +8922,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 "items": {"type": "object", "properties": {"t": {"type": "string", "minLength": 1}}}},
             "notes": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
             "required": ["summary"], "additionalProperties": true});
-        let a = call(&p, CURATOR_SYSTEM, "p", &schema, None).unwrap();
+        let a = call(&p, CURATOR_SYSTEM, "p", &schema, None, false).unwrap();
         assert_eq!(a.value, json!({"summary": "s"}));
         let want = Usage {
             prompt: Some(125),
@@ -8940,7 +8967,15 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         if let Provider::Openai { api, .. } = &mut p {
             *api = Api::Anthropic;
         }
-        call(&p, CURATOR_SYSTEM, "p", &json!({"type": "object"}), None).unwrap();
+        call(
+            &p,
+            CURATOR_SYSTEM,
+            "p",
+            &json!({"type": "object"}),
+            None,
+            false,
+        )
+        .unwrap();
         let req = request.recv().unwrap();
         let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["max_tokens"], 4000);
@@ -8983,6 +9018,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 &json!({}),
                 None,
                 0,
+                false,
             )
             .unwrap_err();
             assert!(e.invalid() && e.status.is_none(), "{stop}: {}", e.message);
@@ -9020,6 +9056,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 &json!({}),
                 None,
                 0,
+                false,
             )
             .unwrap_err()
         };
@@ -9128,7 +9165,15 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             extra.insert("max_completion_tokens".into(), 900.into());
         }
         assert_eq!(p.declared_output(), 900);
-        call(&p, CURATOR_SYSTEM, "p", &json!({"type": "object"}), None).unwrap();
+        call(
+            &p,
+            CURATOR_SYSTEM,
+            "p",
+            &json!({"type": "object"}),
+            None,
+            false,
+        )
+        .unwrap();
         let req = request.recv().unwrap();
         let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["max_tokens"], 900);
@@ -9156,7 +9201,15 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 limits.usd_per_mtok_out = 1.0;
                 limits.max_output_tokens = cap;
             }
-            call(&p, CURATOR_SYSTEM, "p", &json!({"type": "object"}), None).unwrap();
+            call(
+                &p,
+                CURATOR_SYSTEM,
+                "p",
+                &json!({"type": "object"}),
+                None,
+                false,
+            )
+            .unwrap();
             let req = request.recv().unwrap();
             let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
             assert_eq!(body["max_tokens"], cap, "{body}");
@@ -9189,8 +9242,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         // The test sends none of the entry's `cache_control` and writes no cache: its preview prices
         // its input once (`settings::providers::preview`), and its reservation allows for the cache
         // write of a fenced prompt (`Provider::input_weight`), which it never makes.
-        assert_eq!(p.input_weight(), 2.0);
-        assert_eq!(probe_provider(&p).unwrap().input_weight(), 1.25);
+        assert_eq!(p.input_weight("probe"), 2.0);
+        assert_eq!(probe_provider(&p).unwrap().input_weight("probe"), 1.25);
         let result = probe(&conn, &p, 5.0, &|| Ok(None)).unwrap();
         assert_eq!(
             (result["status"].as_str(), result["http_status"].as_u64()),
@@ -9241,18 +9294,33 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         );
         let schema = json!({"type": "object"});
         let none = serde_json::Map::new();
-        let content = &anthropic_request("m", &fenced, &schema, &none)["messages"][0]["content"];
+        let content =
+            &anthropic_request("m", &fenced, &schema, &none, false)["messages"][0]["content"];
         let at = fenced.find(crate::curate::FENCE_SENTENCE).unwrap();
         assert_eq!(content[0]["text"], fenced[..at]);
         assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
         assert_eq!(content[1]["text"], fenced[at..]);
         assert!(content[1].get("cache_control").is_none(), "{content}");
         let hour = json!({"cache_control": {"type": "ephemeral", "ttl": "1h"}});
-        let content =
-            &anthropic_request("m", &fenced, &schema, hour.as_object().unwrap())["messages"][0];
+        let content = &anthropic_request("m", &fenced, &schema, hour.as_object().unwrap(), false)["messages"]
+            [0];
         assert_eq!(content["content"][0]["cache_control"]["ttl"], "1h");
-        let plain = anthropic_request("m", PROBE_PROMPT, &schema, &none);
+        let plain = anthropic_request("m", PROBE_PROMPT, &schema, &none, false);
         assert_eq!(plain["messages"][0]["content"], PROBE_PROMPT);
+        // Decision 86: a summary's or My Work's call keeps the entry for an hour; an entry's own
+        // `cache_control` still wins, and one that marks a block of its own keeps five minutes,
+        // since its markers come first and an hour's may not follow five minutes'.
+        let content =
+            &anthropic_request("m", &fenced, &schema, &none, true)["messages"][0]["content"];
+        assert_eq!(
+            content[0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert!(content[1].get("cache_control").is_none(), "{content}");
+        let five = json!({"cache_control": {"type": "ephemeral"}});
+        let content = &anthropic_request("m", &fenced, &schema, five.as_object().unwrap(), true)["messages"]
+            [0]["content"];
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
         // A request has at most four breakpoints, automatic caching's among them (Codex on #636):
         // an entry whose own take all four leaves the prompt whole, and one with three gets ours.
         let marked = json!({"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}});
@@ -9261,12 +9329,53 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         four["cache_control"] = json!({"type": "ephemeral"});
         let five = json!({"system": [marked, marked, marked, marked, marked]});
         for (extra, split) in [(&three, true), (&four, false), (&five, false)] {
-            let body = anthropic_request("m", &fenced, &schema, extra.as_object().unwrap());
-            let content = &body["messages"][0]["content"];
-            assert_eq!(content.is_array(), split, "{extra}");
-            if !split {
-                assert_eq!(content, &json!(fenced), "{extra}");
+            for hour in [false, true] {
+                let body =
+                    anthropic_request("m", &fenced, &schema, extra.as_object().unwrap(), hour);
+                let content = &body["messages"][0]["content"];
+                assert_eq!(content.is_array(), split, "{extra}");
+                if split {
+                    assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+                } else {
+                    assert_eq!(content, &json!(fenced), "{extra}");
+                }
             }
+        }
+    }
+
+    /// Decision 86: the role sets the lifetime of oboete's marker on a Messages request. A summary's
+    /// and My Work's keep the instructions' entry for an hour, the curator's five minutes, and a
+    /// connection test marks nothing.
+    #[test]
+    fn a_summary_and_my_work_keep_their_messages_cache_for_an_hour() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let sentence = crate::curate::FENCE_SENTENCE;
+        let fenced = format!(
+            "Sum it up.\n{sentence}=== RECORD a ===`.\n\n=== RECORD a ===\nL1 hi\n=== RECORD a ==="
+        );
+        let answer = json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"summary\":\"s\"}"}],
+            "usage": {"input_tokens": 12, "output_tokens": 4}});
+        let roles = [
+            ("summary", Some("1h")),
+            (crate::my_work::ROLE, Some("1h")),
+            ("curator", None),
+        ];
+        for (role, ttl) in roles {
+            let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+            let mut p = stub(url);
+            if let Provider::Openai { api, .. } = &mut p {
+                *api = Api::Anthropic;
+            }
+            Chain::new(&[p], &conn)
+                .run(role, "s", &fenced, &json!({"type": "object"}))
+                .unwrap();
+            let req = request.recv().unwrap();
+            let body: Value = serde_json::from_str(req.split_once("\r\n\r\n").unwrap().1).unwrap();
+            let cache = &body["messages"][0]["content"][0]["cache_control"];
+            assert_eq!(cache["type"], "ephemeral", "{role}: {body}");
+            assert_eq!(cache["ttl"].as_str(), ttl, "{role}: {body}");
         }
     }
 
@@ -9282,10 +9391,28 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         if let Provider::Openai { api, .. } = &mut messages {
             *api = Api::Anthropic;
         }
-        assert_eq!(messages.billed_input(10_000, Some(4_000), None), 6_400.0);
-        assert_eq!(messages.billed_input(10_000, None, Some(4_000)), 11_000.0);
-        assert_eq!(messages.billed_input(10_000, None, None), 10_000.0);
-        assert_eq!(messages.input_weight(), 1.25);
+        assert_eq!(
+            messages.billed_input("curator", 10_000, Some(4_000), None),
+            6_400.0
+        );
+        assert_eq!(
+            messages.billed_input("curator", 10_000, None, Some(4_000)),
+            11_000.0
+        );
+        assert_eq!(
+            messages.billed_input("curator", 10_000, None, None),
+            10_000.0
+        );
+        assert_eq!(messages.input_weight("curator"), 1.25);
+        // Decision 86: a summary's or My Work's write is an hour's, at twice the input price.
+        for role in ["summary", crate::my_work::ROLE] {
+            assert_eq!(
+                messages.billed_input(role, 10_000, None, Some(4_000)),
+                14_000.0,
+                "{role}"
+            );
+            assert_eq!(messages.input_weight(role), 2.0, "{role}");
+        }
         let own = [
             ("cache_control", json!({"type": "ephemeral"})),
             ("cache_control", json!({"type": "ephemeral", "ttl": "1h"})),
@@ -9301,18 +9428,18 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 extra.insert(key.into(), value.clone());
             }
             assert_eq!(
-                entry.billed_input(10_000, None, Some(4_000)),
+                entry.billed_input("curator", 10_000, None, Some(4_000)),
                 14_000.0,
                 "{value}"
             );
-            assert_eq!(entry.input_weight(), 2.0, "{value}");
+            assert_eq!(entry.input_weight("curator"), 2.0, "{value}");
         }
         let other = stub(url);
         assert_eq!(
-            other.billed_input(10_000, Some(4_000), Some(1_000)),
+            other.billed_input("summary", 10_000, Some(4_000), Some(1_000)),
             11_000.0
         );
-        assert_eq!(other.input_weight(), 1.0);
+        assert_eq!(other.input_weight("summary"), 1.0);
     }
 
     /// Haiku 5.5's thinking is adaptive and its depth is `output_config.effort`: an entry's own
@@ -9325,6 +9452,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             "p",
             &json!({"type": "object"}),
             extra.as_object().unwrap(),
+            false,
         );
         assert_eq!(body["output_config"]["effort"], "low");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
@@ -9352,7 +9480,15 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             *api = Api::Anthropic;
             *k = Some(key_file);
         }
-        let e = call(&p, CURATOR_SYSTEM, "p", &json!({"type": "object"}), None).unwrap_err();
+        let e = call(
+            &p,
+            CURATOR_SYSTEM,
+            "p",
+            &json!({"type": "object"}),
+            None,
+            false,
+        )
+        .unwrap_err();
         assert_eq!((e.status, e.message.as_str()), (Some(302), "http 302"));
         assert!(matches!(target.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }

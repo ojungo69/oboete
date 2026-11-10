@@ -88,9 +88,11 @@ impl Reservation {
     pub(crate) fn cost(&self, p: &Provider, usage: Usage, billed: bool) -> Option<f64> {
         (billed && p.limits().is_paid()).then(|| {
             p.limits().usd(
-                usage.prompt.map_or(self.input * p.input_weight(), |n| {
-                    p.billed_input(n, usage.cached, usage.written)
-                }),
+                usage
+                    .prompt
+                    .map_or(self.input * p.input_weight(&self.role), |n| {
+                        p.billed_input(&self.role, n, usage.cached, usage.written)
+                    }),
                 usage.completion.map_or(self.output, |n| n as f64),
             )
         })
@@ -320,9 +322,14 @@ pub(crate) fn reserve_with_history(
         }));
     }
     let input = f64::from(est) * factor(&tx, p.name())?;
-    if let Some(refusal) =
-        admit_with_history(&tx, (p, history), input, paid_usd_per_month, ceiling_hit)?
-    {
+    if let Some(refusal) = admit_with_history(
+        &tx,
+        (p, history),
+        role,
+        input,
+        paid_usd_per_month,
+        ceiling_hit,
+    )? {
         return Ok(Err(refusal));
     }
     let output = f64::from(output_bound(p));
@@ -342,7 +349,7 @@ pub(crate) fn reserve_with_history(
             usd: p
                 .limits()
                 .is_paid()
-                .then(|| p.limits().usd(input * p.input_weight(), output)),
+                .then(|| p.limits().usd(input * p.input_weight(role), output)),
         },
     )?;
     let id = tx.last_insert_rowid();
@@ -440,6 +447,7 @@ pub fn key_budget(db: Option<&Connection>, p: &Provider) -> Result<String> {
 pub(crate) fn admit_with_history(
     db: &Connection,
     providers: (&Provider, &Provider),
+    role: &str,
     tokens: f64,
     paid_usd_per_month: f64,
     ceiling_hit: &[u32],
@@ -530,7 +538,7 @@ pub(crate) fn admit_with_history(
         let spent = providers_db::usd_this_month(db)?;
         // The output the request asks for at most, as `provider::call` sends it, and the input at
         // the most a token of it may be billed (`Provider::input_weight`).
-        let this = limits.usd(tokens * p.input_weight(), f64::from(output));
+        let this = limits.usd(tokens * p.input_weight(role), f64::from(output));
         if spent + this > paid_usd_per_month {
             return Ok(Some(Refusal {
                 outcome: "budget",
@@ -645,7 +653,8 @@ pub(crate) fn most_usd_calibrated(
             None => 1.0,
         };
         calibrations.push(calibration);
-        let input = f64::from(tokens) * calibration * p.input_weight();
+        // Recuration's windows are the curator's.
+        let input = f64::from(tokens) * calibration * p.input_weight("curator");
         let output = calls as f64 * f64::from(largest_output(p));
         let usd = p.limits().usd(input, output);
         most = Some(most.unwrap_or(0.0) + usd);
@@ -686,7 +695,7 @@ mod tests {
         cap: f64,
         ceilings: &[u32],
     ) -> Result<Option<Refusal>> {
-        admit_with_history(db, (p, p), tokens, cap, ceilings)
+        admit_with_history(db, (p, p), "curator", tokens, cap, ceilings)
     }
 
     fn entry(name: &str, limits: Limits) -> Provider {
@@ -1777,11 +1786,11 @@ mod tests {
             *base_url = "https://api.openai.com:443/v1".into();
             *model = "gpt-6-luna".into();
         }
-        assert_eq!(p.input_weight(), 1.25);
+        assert_eq!(p.input_weight("curator"), 1.25);
         // 60,000 tokens in and 100 out at USD 1 a million each: USD 0.0601 at the input price,
         // 0.0751 at 1.25 times, so a cap of USD 0.07 refuses it.
         assert!(
-            admit_with_history(&db, (&p, &p), 60_000.0, 0.07, &[])
+            admit_with_history(&db, (&p, &p), "curator", 60_000.0, 0.07, &[])
                 .unwrap()
                 .is_some()
         );
@@ -1829,9 +1838,10 @@ mod tests {
 
     /// Codex on #409: a Messages entry prices each input token at what a cache write may bill,
     /// 1.25 times its input price for a fenced prompt's instructions and twice with a cache of its
-    /// own (`cache_control`), wherever its usage is not known: admission, the reservation, a call
-    /// whose usage never comes back, recuration's estimate. Its tokens count once: a prompt that
-    /// fits its ceiling is not refused for its price.
+    /// own (`cache_control`) or for a summary's or My Work's call (decision 86), wherever its usage
+    /// is not known: admission, the reservation, a call whose usage never comes back, recuration's
+    /// estimate; and a write its usage reports at the same rate. Its tokens count once: a prompt
+    /// that fits its ceiling is not refused for its price.
     #[test]
     fn a_cache_writing_entry_prices_its_input_twice_and_counts_its_tokens_once() {
         let limits = Limits {
@@ -1842,8 +1852,16 @@ mod tests {
             ..Default::default()
         };
         // A Messages entry's input at 1.25 times its price, the write of a fenced prompt's
-        // instructions to its cache; twice with a cache of its own.
-        for (cache, usd) in [(false, 0.0751), (true, 0.1201)] {
+        // instructions to its cache; twice with a cache of its own, and for a summary's or My
+        // Work's call, whose marker keeps its entry for an hour (decision 86). Recuration's
+        // estimate is the curator's.
+        let roles = [
+            (false, "curator", 0.0751),
+            (true, "curator", 0.1201),
+            (false, "summary", 0.1201),
+            (false, crate::my_work::ROLE, 0.1201),
+        ];
+        for (cache, role, usd) in roles {
             let home = tempfile::tempdir().unwrap();
             let db = open(home.path()).unwrap();
             let mut p = entry("p", limits.clone());
@@ -1858,23 +1876,47 @@ mod tests {
             }
             // 60,000 input tokens and 100 output tokens at USD 1 per million each: within USD 0.10
             // a month at 1.25 times, not twice.
-            let refused = admit_with_history(&db, (&p, &p), 60_000.0, 0.1, &[]).unwrap();
-            assert_eq!(refused.is_some(), cache);
-            let reservation = reserve(&db, &p, "probe", "s", 60_000, 5.0, &[])
-                .unwrap()
-                .unwrap();
+            let refused = admit_with_history(&db, (&p, &p), role, 60_000.0, 0.1, &[]).unwrap();
+            assert_eq!(refused.is_some(), usd > 0.1, "{role} cache {cache}");
+            // The reservation is admitted at its role's price too.
+            let capped = reserve(&db, &p, role, "s", 60_000, 0.1, &[]).unwrap();
+            assert_eq!(capped.is_err(), usd > 0.1, "{role} cache {cache}");
+            let reservation = match capped {
+                Ok(reservation) => reservation,
+                Err(_) => reserve(&db, &p, role, "s", 60_000, 5.0, &[])
+                    .unwrap()
+                    .unwrap(),
+            };
             let pending = providers_db::reserved_since(&db, "p", 0).unwrap();
-            assert_eq!(pending.tokens, 60_100.0, "cache {cache}");
+            assert_eq!(pending.tokens, 60_100.0, "{role} cache {cache}");
             let priced = [
                 providers_db::reserved_usd_this_month(&db).unwrap(),
                 reservation.cost(&p, Usage::default(), true).unwrap(),
-                most_usd(None, std::slice::from_ref(&p), 60_000, 1)
-                    .unwrap()
-                    .unwrap(),
             ];
             assert!(
                 priced.iter().all(|u| (u - usd).abs() < 1e-12),
-                "cache {cache}: {priced:?}"
+                "{role} cache {cache}: {priced:?}"
+            );
+            let most = most_usd(None, std::slice::from_ref(&p), 60_000, 1)
+                .unwrap()
+                .unwrap();
+            let curator = if cache { 0.1201 } else { 0.0751 };
+            assert!(
+                (most - curator).abs() < 1e-12,
+                "{role} cache {cache}: {most}"
+            );
+            // A write the usage reports is priced as the role's marker writes it.
+            let reported = Usage {
+                prompt: Some(10_000),
+                completion: Some(0),
+                written: Some(4_000),
+                ..Default::default()
+            };
+            let write = if usd > 0.1 { 2.0 } else { 1.25 };
+            let billed = reservation.cost(&p, reported, true).unwrap();
+            assert!(
+                (billed - (6_000.0 + 4_000.0 * write) / 1e6).abs() < 1e-12,
+                "{role} cache {cache}: {billed}"
             );
         }
     }
