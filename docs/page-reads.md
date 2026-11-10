@@ -187,8 +187,11 @@ its own plan.
 | one repository's | `cards_repo (repo, ts)`, as before | the cards of one `ts` |
 | one session's | `cards_session (agent, session, ts)`, new | the cards of one `ts` |
 
-A page after a card starts at that card in its index, not at the newest. The cards on either
-side of a time are read the same way, through `cards_newest` or `cards_repo`.
+A page after a card does not start at the newest. Every repository's seeks to that card on all
+four of its columns (`(ts, device, op_seq, n) < (...)` in `cards_newest`). One repository's and one
+session's seek to the card's `ts`, which is as far as their indexes go, then pass over the cards
+of that `ts` at or after the card and sort the rest of them. The cards on either side of a time
+are read the same way, through `cards_newest` or `cards_repo`.
 
 On a copy of the table in memory, a page of 300 with every column:
 
@@ -213,7 +216,7 @@ The other steps of a My Work read are not looked into here (#899).
 Test: `cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` (every shape of the
 page's statement and of `around`'s is read through the index in its order, none sorts more than
 the cards of one `ts`, every repository's page sorts nothing, and a page after a card seeks to
-it).
+that card on its four columns, or to its `ts` for one repository's and one session's).
 
 ## W1: a request keeps one clone of each rule's regex
 
