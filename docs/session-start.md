@@ -52,3 +52,7 @@ Measured here with `oboete inject` (2026-11-07): the index went from 22 lines an
 - The parity table's reading of claude-mem 15.10 and 15.11 (rows X20, X22, 41, 33, 58, and decision 77's row); since done, to 15.12 (docs/claude-mem-parity.md).
 - Shorter MCP tool descriptions (not done: oboete's nine tools with their arguments come to 12,809 characters on 2026-11-08, where claude-mem 15.12 offers nineteen).
 - The curator's label for a Claude Code prompt from `claude -p` (`entrypoint` `sdk-cli`), which `typed` leaves out but the curator reads as `[user]` (since done: the curator labels a Claude Code prompt from an entry point no person types in `[agent prompt]`).
+
+## Since: no backlog line while summaries are off (2026-11-10)
+
+A new home has `[summary] curate` off, and its second session's start read `## Backlog` with `N record(s) / M min not yet curated`, a count that only grew: nothing waits to be curated where nothing curates. The line is now a home's that curates, as the count beside the page's mark is (decision 67). With summaries off it is not shown; a config.toml that does not load stops curation too, and what it holds back is shown. Test: `consumer::manifest::tests::the_backlog_gains_its_minutes_when_read_later`.

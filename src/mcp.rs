@@ -877,6 +877,9 @@ mod tests {
     #[test]
     fn session_start_context_shows_what_session_start_injects() {
         let (s, server, _) = seeded("Parser errors go to stderr.");
+        // A home that curates, so the backlog line is among what both show.
+        let config = "providers = []\n[summary]\ncurate = true\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
         let shown = body(
             server
                 .session_start_context(Parameters(SessionStartContextArgs::default()))

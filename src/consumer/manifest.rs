@@ -194,7 +194,11 @@ pub fn text(
     }
     let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let manifest = stored(&k, raw, repo, branch, &stamp(rules.version()))?.unwrap_or_default();
-    let live = live(&k, raw, repo, branch, session, rules, now)?;
+    // With `[summary] curate` off no curation waits, as the page's count has it
+    // (`view::waiting`). A config.toml that does not load stops curation too, and what it holds
+    // back is shown.
+    let curating = crate::config::load(home).map_or(true, |c| c.summary.curate);
+    let live = live(&k, raw, repo, branch, session, rules, now, curating)?;
     let parts = delivered(&k, raw, repo, &manifest, rules, (index, now))?;
     // The cards after the decisions (docs/cards.md S1): the most, halved each time and then as
     // many back as fit (decision 75), whose packet
@@ -339,7 +343,10 @@ fn stamp(version: &str) -> String {
 /// sessions on the repository (this device's; sync brings the others' in milestone 6): at most
 /// `SESSIONS`, each with a record in the `ACTIVE_MS` before `now` and no end, the newest first,
 /// with its agent, branch and minutes since. A stored list kept naming a checkout left idle.
-/// Nothing while a tombstone the worker has not applied may change the facts (as `stored`).
+/// Nothing while a tombstone the worker has not applied may change the facts (as `stored`). The
+/// backlog is a home's that curates (`curating`): with summaries off nothing waits to be curated,
+/// and "not yet curated" would say it does.
+#[allow(clippy::too_many_arguments)]
 fn live(
     k: &Connection,
     raw: &Raw,
@@ -348,6 +355,7 @@ fn live(
     session: &str,
     rules: &crate::redact::Rules,
     now: i64,
+    curating: bool,
 ) -> Result<String> {
     let device = raw.device();
     if !exists(k, "table", "manifest_facts")?
@@ -377,7 +385,7 @@ fn live(
         params![device, repo, branch, curated],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if let Some(ts) = oldest.filter(|ts| now - ts > LAG_MS) {
+    if let Some(ts) = oldest.filter(|ts| curating && now - ts > LAG_MS) {
         out.push_str(&format!(
             "## Backlog\n{waiting} record(s) / {} min not yet curated\n",
             (now - ts) / 60_000
@@ -1602,6 +1610,14 @@ mod tests {
                 "Backlog",
             )
         };
+        // With summaries off, as a new home is, nothing waits to be curated: no backlog, however
+        // long the records have been there. One whose `[summary]` does not load stops curation
+        // too, and its backlog is shown.
+        assert_eq!(backlog(60 * min), Vec::<String>::new());
+        let config = home.path().join("config.toml");
+        std::fs::write(&config, "[summary]\ncurate = \"yes\"\n").unwrap();
+        assert_eq!(backlog(60 * min), ["9 record(s) / 59 min not yet curated"]);
+        curates(home.path());
         // The first record is at minute 1.
         assert_eq!(backlog(3 * min), Vec::<String>::new());
         assert_eq!(
@@ -2130,7 +2146,8 @@ extra_rules = [
             [rules.version()],
         )
         .unwrap();
-        assert!(!shown(home.path(), &store).unwrap().contains("old"));
+        // Nothing of it is shown: with summaries off there is no backlog line either.
+        assert!(!shown(home.path(), &store).is_some_and(|text| text.contains("old")));
         worker::run_once(home.path()).unwrap();
         let (text, built) = manifest(home.path());
         assert!(text.contains("prompt: look at it") && built > 0, "{text}");
@@ -2205,6 +2222,12 @@ extra_rules = [
         shown_at(home, store, "none", NOW).map(|s| s.text)
     }
 
+    /// `[summary] curate` on, with no AI to call: a home that curates has a backlog to show.
+    fn curates(home: &Path) {
+        let config = "providers = []\n[summary]\ncurate = true\n";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+    }
+
     /// `text` for checkout (r, main), uncut, read by `session` at `now`.
     fn shown_at(home: &Path, store: &Raw, session: &str, now: i64) -> Option<Start> {
         let rules = crate::capture::Settings::load(home).unwrap().rules;
@@ -2229,6 +2252,7 @@ extra_rules = [
         let store = raw::open(home.path()).unwrap();
         assert_eq!(shown(home.path(), &store), None);
         assert!(!home.path().join("knowledge.db").exists());
+        curates(home.path());
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
         let shown = shown(home.path(), &store).unwrap();
@@ -2328,6 +2352,13 @@ extra_rules = [
             (claims, shown(home.path(), &store).unwrap())
         };
         drop(store);
+        // A home that curates, before the first look so both show its backlog: the rebuild
+        // still asks no provider (the phase would open providers.db for its pending window, here
+        // with no budget, so nothing leaves).
+        let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
+                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                      daily_budget = 0\n";
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
         let before = snapshot();
         assert_eq!(before.0.len(), 2);
         // Only the old file has it.
@@ -2335,12 +2366,6 @@ extra_rules = [
             .unwrap()
             .execute_batch("CREATE TABLE marker(x)")
             .unwrap();
-        // A home that curates: the rebuild still asks no provider (the phase would open
-        // providers.db for its pending window, here with no budget, so nothing leaves).
-        let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
-                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
-                      daily_budget = 0\n";
-        std::fs::write(home.path().join("config.toml"), config).unwrap();
         worker::rebuild(home.path()).unwrap();
         assert_eq!(snapshot(), before);
         let k = rusqlite::Connection::open(&knowledge).unwrap();
@@ -2985,6 +3010,7 @@ extra_rules = [
     fn the_backlog_line_does_not_count_parked_records() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
+        curates(home.path());
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
         let mut store = raw::open(home.path()).unwrap();

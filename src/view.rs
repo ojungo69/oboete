@@ -8169,6 +8169,9 @@ curate = false
     #[test]
     fn the_context_page_is_what_session_start_shows_for_that_checkout() {
         let (_s, v, _) = seeded();
+        // A home that curates, so the backlog line is among what both show.
+        let config = "providers = []\n[summary]\ncurate = true\n";
+        std::fs::write(v.home.join("config.toml"), config).unwrap();
         let ctx = get(&v, "/api/context");
         assert_eq!(
             (
