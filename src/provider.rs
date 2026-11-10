@@ -3070,7 +3070,13 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 /// (core/src/session/mod.rs), so a fork gets no tool its parent lacks;
 /// `reasoning_effort_override` records a configuration item in the history when the chosen
 /// reasoning effort changes (core/src/session/reasoning_effort.rs).
-pub(crate) const CODEX_ON: [&str; 61] = [
+/// That of 0.167.0 (codex-rs/features/src/lib.rs at rust-v0.167.0), not a tool:
+/// `deferred_tool_world_state` names the namespaces of the deferred tools, those `tool_search`
+/// loads on request, in a section of the model's world state (core/src/context/world_state/tools.rs,
+/// nothing when there are none), and has `tool_search` leave that list out of its own description
+/// (`append_tool_search_executor`, core/src/tools/spec_plan.rs). The tools registered are the same
+/// with it on or off, and `tool_search` is offered when it was before.
+pub(crate) const CODEX_ON: [&str; 62] = [
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "auth_elicitation",
@@ -3084,6 +3090,7 @@ pub(crate) const CODEX_ON: [&str; 61] = [
     "compaction_image_budget",
     "content_item_kinds",
     "daemon_auto_start",
+    "deferred_tool_world_state",
     "enable_request_compression",
     "fast_mode",
     "goals",

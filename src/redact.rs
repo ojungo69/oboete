@@ -399,8 +399,8 @@ impl Compiled {
 static COMPILED: std::sync::LazyLock<Compiled> =
     std::sync::LazyLock::new(|| Compiled::new(COMPILED_CAP));
 
-/// A pattern's regex, compiled on first use and kept for the process (a hook compiles a handful at
-/// most): `Compiled::get`.
+/// A pattern's regex, compiled on first use and kept until the map starts again at
+/// `COMPILED_CAP` (a scan compiles every rule whose keyword hits): `Compiled::get`.
 fn compiled(pattern: &str) -> Option<Regex> {
     COMPILED.get(pattern)
 }

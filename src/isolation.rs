@@ -724,6 +724,17 @@ mod tests {
         assert_eq!(g, Gate::Passed);
     }
 
+    /// codex 0.167.0 turns `deferred_tool_world_state` on by default: the namespaces of the tools
+    /// `tool_search` loads on request are named in the model's world state, not in that tool's
+    /// description. It offers the model no tool (`provider::CODEX_ON`): the gate passes with it on.
+    #[test]
+    fn the_deferred_tool_world_state_of_codex_0_167_does_not_fail_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let features = FEATURES.to_owned() + "; echo 'deferred_tool_world_state  stable  true'";
+        let (_, g) = gate_with(&fake(dir.path(), &features, REFUSES), dir.path());
+        assert_eq!(g, Gate::Passed);
+    }
+
     #[test]
     fn a_hosted_tool_left_on_fails_the_gate() {
         let dir = tempfile::tempdir().unwrap();
