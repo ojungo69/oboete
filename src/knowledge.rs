@@ -39,9 +39,11 @@ pub(crate) fn open_report(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
     }
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    // rusqlite 0.41 registers a hook through `&mut`: only the test build's harness needs it.
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     #[cfg(test)]
-    crate::crash::arm(&conn);
+    crate::crash::arm(&mut conn);
     crate::db::wal_until(&conn, "NORMAL", deadline)?;
     // The base and vector objects commit together, including vec0's shadow tables.
     let schema = format!(

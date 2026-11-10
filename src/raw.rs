@@ -1576,7 +1576,7 @@ fn open_within_report(
     // failure: the resident worker's existing before/after observation reopens the stores.
     let mut bound = !file_before.is_empty() && crate::db::store_file(&path) == file_before;
     #[cfg(test)]
-    crate::crash::arm(&conn);
+    crate::crash::arm(&mut conn);
     // docs/store-format.md: a raw.db a newer oboete wrote is refused before anything writes the
     // file, its journal mode included (CodeRabbit, Codex and Cursor on #503).
     let format = crate::db::retry_busy(&conn, deadline, || format_of(&conn))?;
