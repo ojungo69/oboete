@@ -6,7 +6,6 @@
 //! One line of the file differs from upstream: the global allowlist's `true`, `false` or `null`
 //! is anchored as a whole (gitleaks#2293). A copy taken again from upstream must keep it.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -340,27 +339,33 @@ fn short_hash_full(s: &str) -> String {
         .collect()
 }
 
-thread_local! {
-    static COMPILED: RefCell<HashMap<String, Regex>> = RefCell::new(HashMap::new());
-}
+/// The regexes compiled so far, one map for every thread of the process: the viewer serves each
+/// connection on a thread of its own, which compiled them all again when each thread had its own
+/// map (M4).
+static COMPILED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Regex>>> =
+    std::sync::LazyLock::new(Default::default);
 
-/// Regexes are compiled on first use and kept for the process (a hook compiles a handful at most).
+/// Regexes are compiled on first use and kept for the process (a hook compiles a handful at most),
+/// outside the lock, so a thread's lookups never wait for another's compile.
 /// ASCII mode first: that is what gitleaks' Go RE2 means by `\w`/`\s`/`\b`, and it compiles
 /// ~30x faster than Unicode mode for the generic rules (measured: 90 ms vs 3 ms, debug build).
 /// The few patterns ASCII mode rejects (negated classes that could match non-UTF-8) fall back.
 fn compiled(pattern: &str) -> Option<Regex> {
-    COMPILED.with(|c| {
-        if let Some(re) = c.borrow().get(pattern) {
-            return Some(re.clone());
-        }
-        let re = regex::RegexBuilder::new(pattern)
-            .unicode(false)
-            .build()
-            .or_else(|_| Regex::new(pattern))
-            .ok()?;
-        c.borrow_mut().insert(pattern.to_string(), re.clone());
-        Some(re)
-    })
+    let map = || {
+        COMPILED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some(re) = map().get(pattern).cloned() {
+        return Some(re);
+    }
+    let re = regex::RegexBuilder::new(pattern)
+        .unicode(false)
+        .build()
+        .or_else(|_| Regex::new(pattern))
+        .ok()?;
+    map().insert(pattern.to_string(), re.clone());
+    Some(re)
 }
 
 /// The one gate for text that leaves this machine: summary providers now; embeddings, sync and
@@ -1641,6 +1646,21 @@ fn shannon_entropy(s: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4: a regex compiled on one thread serves every other, as the viewer's, one per connection,
+    /// read the same rules.
+    #[test]
+    fn a_regex_compiled_on_one_thread_serves_every_thread() {
+        let pattern = "m4-one-map-[0-9]{3}";
+        let re = std::thread::spawn(|| compiled(pattern).unwrap())
+            .join()
+            .unwrap();
+        assert!(re.is_match("m4-one-map-123"));
+        let map = COMPILED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(map.contains_key(pattern));
+    }
 
     #[test]
     fn every_bundled_regex_compiles() {
