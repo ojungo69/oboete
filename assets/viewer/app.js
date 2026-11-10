@@ -335,8 +335,9 @@ const storedView = recall('oboete-view', 'my_work');
 let view = !firstMyWork && VIEWS.includes(storedView) ? storedView : 'my_work';
 let currentRepo = '';
 let reposLoaded = false;
-// A poll left the list unread under a view that reads none: the next view that reads it reads it
-// again (`show`). And the last read of the list failed: a poll's retry asks the list alone.
+// A poll left the list unread under a view that reads none, or its last read failed: the next view
+// that uses it reads it again (`show`). And the last read of the list failed: before any list was
+// read, a poll's retry asks the list alone (`refresh`).
 let reposStale = false;
 let reposFailed = false;
 
@@ -10917,6 +10918,9 @@ const LOADERS = new Map([
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
 let generation = 0;
+// How many times a view's read has begun (`show`). `generation` also moves where nothing is read
+// (`routeShow`, a list that failed), so a poll knows by this one that the view was read.
+let shows = 0;
 let drawnWithoutBaseline = false;
 
 // Whether the view on the page reads the repository list. My Work, My Rules, Settings and Stats
@@ -10929,6 +10933,7 @@ function usesRepos() {
 async function show() {
   // First, so a settings render still out cannot draw over the tab opened after it.
   const mine = ++generation;
+  shows += 1;
   feed?.observer?.disconnect();
   feed = null;
   sessionsList?.observer?.disconnect();
@@ -10936,8 +10941,13 @@ async function show() {
   // The settings tab needs no repository: it names the config.toml mistake that fails their list
   // (#325). Nor does a view that reads no list wait for one.
   if (!reposLoaded && usesRepos()) return refresh();
-  // The list a poll left unread is read again beside this view's own read.
-  if (reposStale && usesRepos()) void loadRepos().catch(() => { reposStale = true; });
+  // The list a poll left unread is read again beside this view's own read; Settings waits for
+  // none, and its preview of a session's start chooses among the list's repositories. A choice
+  // the list no longer holds goes back to All repositories: the view is then read again, for
+  // what the picker says.
+  if (reposStale && (usesRepos() || view === 'settings')) {
+    void loadRepos().then((kept) => { if (!kept && usesRepos()) void show(); }, () => {});
+  }
   const repo = $('repo').value;
   const q = $('q').value.trim();
   if (view === 'timeline' || view === 'sessions') {
@@ -10961,9 +10971,21 @@ async function show() {
 
 // All repositories leads the list; the current checkout is listed before its first stored record
 // too, and stays selectable in Records. The resident viewer has none (docs/resident.md R8).
+// Answers whether the picker's choice is still listed.
 async function loadRepos() {
   reposStale = false;
-  const { current, repos } = await api('repos');
+  let answer;
+  try {
+    answer = await api('repos');
+  } catch (e) {
+    // A list read before is still to be read: the next view that uses it asks again. One never
+    // read is the poll's to ask for (`poll`).
+    reposFailed = true;
+    reposStale = reposLoaded;
+    throw e;
+  }
+  reposFailed = false;
+  const { current, repos } = answer;
   const keep = reposLoaded ? $('repo').value : view === 'timeline' ? '' : current;
   currentRepo = current;
   const listed = current === '' || repos.some((r) => r.repo === current) ? repos
@@ -10977,13 +10999,15 @@ async function loadRepos() {
     return o;
   });
   $('repo').replaceChildren(new Option(t('all_repositories'), ''), ...options);
-  $('repo').value = keep === '' || options.some((o) => o.value === keep) ? keep : '';
+  const kept = keep === '' || options.some((o) => o.value === keep);
+  $('repo').value = kept ? keep : '';
   reposLoaded = true;
   syncContextRepos();
+  return kept;
 }
 
 async function refresh(live, selectedRepo) {
-  const seen = generation;
+  const seen = shows;
   const free = view !== 'settings' && !usesRepos();
   // A poll under a view that reads no list reads none.
   if (live && free && reposLoaded) {
@@ -10996,11 +11020,9 @@ async function refresh(live, selectedRepo) {
   let listed = true;
   try {
     await loadRepos();
-    reposFailed = false;
     // An explicit scope is applied after the initial list chooses its default checkout.
     if(selectedRepo!==undefined)$('repo').value=selectedRepo;
   } catch (e) {
-    reposFailed = true;
     if (view !== 'settings') {
       // A read still on its way draws nothing over the error.
       if (beside) generation += 1;
@@ -11014,9 +11036,8 @@ async function refresh(live, selectedRepo) {
   // note of a config.toml mistake stays while the list still fails, and goes once it loads.
   if (view === 'settings' && $('panel').querySelector('.settings') && (form || !listed)) return true;
   // A click or a search that began while the list was read has read the view itself, after the
-  // version this poll saw: reading it again would only repeat it. Not My Work, whose way back
-  // from a request moves the count with no read behind it (`routeShow`).
-  if (live && generation !== seen && view !== 'my_work') return true;
+  // version this poll saw: reading it again would only repeat it.
+  if (live && shows !== seen) return true;
   if (live && activeFeed(feed) && feed.session) ses.stale = true;
   if (live && activeFeed(feed) && feed.repo === $('repo').value) return readFeed(feed, 'live');
   if (live && activeSessions(sessionsList) && sessionsList.repo === $('repo').value) return readSessions(sessionsList, 'live');
@@ -11079,6 +11100,8 @@ async function poll() {
     // (claude-mem ages its requests each minute).
     const wanted = !reposLoaded || (view !== 'settings' && (changed || (view === 'stats' && !$('q').value.trim())
       || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
+    // Settings reads no list at a change: the next view that uses it does (`show`).
+    if (view === 'settings' && changed) reposStale = true;
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;

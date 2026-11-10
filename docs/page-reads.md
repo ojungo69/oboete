@@ -24,20 +24,31 @@ answers are as they were.
 - A view that reads no list does not wait for one. At the first paint, and on the Refresh button,
   its own read begins beside the list's (`refresh`), not after it.
 - A poll under such a view reads no list (`reposStale`). The next view that reads the list reads
-  it again beside its own read (`show`), so a repository made meanwhile is in the picker when the
-  picker is next used.
+  it again beside its own read (`show`), so a repository made meanwhile is in the picker there.
+  - Settings does the same as it opens, waiting for none: its preview of a session's start
+    chooses among the list's repositories. A change seen under Settings marks the list unread
+    too (`poll`); before, the list stayed as it was until the next change after Settings was left.
+  - A choice the list no longer holds (a repository forgotten meanwhile) goes back to All
+    repositories, and the view, asked for beside the list with the old choice, is read again for
+    what the picker says.
+  - Under Stats with no search the picker is on the page and reads no list: a repository first
+    recorded since the list was last read is in it after a search, another tab or the Refresh
+    button.
 - A list that fails is shown as before, and a read still on its way draws nothing over the
-  error. The poll asks the list again each time, as before, and the list alone: the view is not
-  read again every 3 seconds while the list fails (`reposFailed`).
-- W6: `refresh` notes the page's count of reads (`generation`) as it begins. If a click or a
-  search moved it while the list was read, the poll's refresh ends there: the view was read after
-  the version the poll saw. Not under My Work, whose way back from a request moves the count
-  with no read behind it (`routeShow`).
+  error. While no list was ever read, the poll asks the list again each time, as before, and the
+  list alone: the view is not read again every 3 seconds while the list fails (`reposFailed`).
+  A list read before that fails stays marked unread (`loadRepos`): a poll under a view that
+  reads no list asks for none after a failure either, and the next view that uses the list asks
+  again.
+- W6: `refresh` notes how many times a view's read has begun (`shows`) as it begins. If a click
+  or a search moved it while the list was read, the poll's refresh ends there: the view was read
+  after the version the poll saw. The count that guards drawing (`generation`) also moves where
+  nothing is read (My Work's way back from a request, `routeShow`), so it is not the one used.
 
-Unchanged: Settings waits for the list as before (it keeps unsaved drafts and the note of a
-config.toml mistake by it); the Refresh button, a forget and a restore read the list under any
-view; a view that reads the list has it read live at each change; every answer still passes the
-viewer's masking gate (`view::answered`).
+Unchanged: under Settings a poll reads the list only while none was ever read (it keeps unsaved
+drafts and the note of a config.toml mistake by it); the Refresh button, a forget and a restore
+read the list under any view; a view that reads the list has it read live at each change; every
+answer still passes the viewer's masking gate (`view::answered`).
 
 ## Not in this change
 
@@ -62,4 +73,13 @@ counted:
 - a view that reads the list has it read live; the Refresh button reads it under Stats too;
 - a list that fails at the first paint leaves its error shown, the poll asks the list alone, and
   once it loads the view is read;
-- a click while a poll reads the list: the view is read once.
+- a click while a poll reads the list: the view is read once, My Work opened then too; a count
+  moved with no read behind it does not end the poll;
+- Settings opened on a list left unread reads it, once; a change under Settings reads no list
+  and leaves it to the next view; Settings opened before any list was read leaves it to the poll;
+- a choice gone from the list read beside the view: the picker is at All repositories and the
+  view is read again for it; a choice still listed is read once;
+- a list read before that fails on the Refresh button: no poll under Stats asks for it, and the
+  next view that reads the list does.
+
+24 hand-made mutants of the page's change, each run against the harness, all fail it.

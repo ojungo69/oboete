@@ -7401,19 +7401,20 @@ console.log('PASS: decision 67: the records waiting to be curated beside the mar
 }
 // Audit W3 and W6 (docs/page-reads.md): a view that reads no repository list waits for none and
 // has none read under it by a poll, and a click made while a poll reads the list is not read
-// twice. Each view's read here is one request that draws nothing: what is counted is what the page
-// asks the viewer for.
+// twice. Each view's read here is one request that draws nothing and names the repository it was
+// asked for: what is counted is what the page asks the viewer for.
 {
 const run=code=>vm.runInContext(code,ctx);
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const reply=value=>({ok:true,status:200,json:async()=>value});
 const q=document.getElementById('q');q.value='';
-run(`globalThis.__reads={view,reposLoaded,reposStale,reposFailed,version,rows:mw.rows,fetched:mw.fetched,loaders:[...LOADERS]};
-for(const [v,name] of [['my_work','my-work'],['my_rules','my-rules'],['stats','stats'],['records','timeline']])
-  LOADERS.set(v,async()=>{await api(name);return()=>{setStatus('');};});`);
-let asked=[],held=null,heldView=null,listFails=false,v='v1';
+run(`globalThis.__reads={view,reposLoaded,reposStale,reposFailed,version,rows:mw.rows,fetched:mw.fetched,loaders:[...LOADERS],
+  picker:[...$('repo').children],picked:$('repo').value};
+for(const [v,name] of [['my_work','my-work'],['my_rules','my-rules'],['stats','stats'],['records','timeline'],['settings','settings-read']])
+  LOADERS.set(v,async(repo)=>{await api(name,{repo:repo??''});return()=>{setStatus('');};});`);
+let asked=[],held=null,heldView=null,listFails=false,v='v1',repos=[];
 const count=name=>asked.filter(url=>url.split('?')[0]===`/api/${name}`).length;
-const listing=()=>reply({current:'',repos:[]});
+const listing=()=>reply({current:'',repos});
 ctx.fetch=url=>{
   url=String(url);asked.push(url);
   if(url.startsWith('/api/version'))return Promise.resolve(reply({v}));
@@ -7507,10 +7508,94 @@ release();
 assert.equal(await live,true,'the poll\'s refresh ends');
 await click;await settle();
 assert.equal(count('timeline'),1,'and does not read the view again');
+// My Work opened while a poll reads the list is read once too (cubic's review of #902).
+on('records','reposLoaded=true;reposStale=false');
+held=[];
+const under=run('refresh(true)');await settle();
+run("view='my_work'");const opened=run('show()');await settle();
+assert.equal(count('my-work'),1);
+release();
+assert.equal(await under,true);
+await opened;await settle();
+assert.equal(count('my-work'),1,'My Work opened while a poll reads the list is read once');
+// The way back from a request moves the page's count with no read behind it (`routeShow`): the
+// poll then reads My Work itself.
+on('records','reposLoaded=true;reposStale=false');
+held=[];
+const back=run('refresh(true)');await settle();
+run("view='my_work';generation+=1");
+release();
+assert.equal(await back,true);await settle();
+assert.equal(count('my-work'),1,'a count moved with no read behind it does not end the poll');
+
+// Settings' preview of a session's start chooses among the list's repositories: a list left
+// unread is read as Settings opens, beside its own read (Codex's and cubic's reviews of #902).
+on('settings','reposLoaded=true;reposStale=true');
+assert.equal(await run('show()'),true);await settle();
+assert.equal(count('repos'),1,'Settings opened on a list left unread reads it');
+assert.equal(count('settings-read'),1);
+asked=[];await run('show()');await settle();
+assert.equal(count('repos'),0,'once');
+// A change seen under Settings reads no list, and leaves it to the next view that uses it.
+on('settings','reposLoaded=true;reposStale=false;version="v1"');
+v='v2';await polled();v='v1';
+assert.equal(count('repos'),0,'a poll under Settings reads no list');
+assert.equal(run('reposStale'),true,'and leaves it to the next view');
+run("view='records'");asked=[];
+assert.equal(await run('show()'),true);await settle();
+assert.equal(count('repos'),1);
+// A list never read that fails is the poll's to ask for again: Settings opened then asks for none.
+on('settings','reposLoaded=false;reposStale=false;reposFailed=false');
+listFails=true;
+await run('loadRepos().catch(()=>{})');
+assert.equal(run('reposFailed'),true);
+asked=[];assert.equal(await run('show()'),true);await settle();
+assert.equal(count('repos'),0,'Settings opened before the list was ever read leaves it to the poll');
+listFails=false;
+
+// The picker's choice gone from the list read beside the view: the picker goes back to All
+// repositories, and the view is read again for it (cubic's review of #902).
+const pick=name=>run(`$('repo').replaceChildren(new Option('all',''),new Option(${JSON.stringify(name)},${JSON.stringify(name)}));$('repo').value=${JSON.stringify(name)};`);
+const timelines=()=>asked.filter(url=>url.startsWith('/api/timeline')).map(url=>url.split('repo=')[1]);
+pick('gone');
+on('records','reposLoaded=true;reposStale=true');
+held=[];
+const scoped=run('show()');await settle();
+assert.deepEqual(timelines(),['gone'],'the view is asked for the repository chosen, beside the list');
+release();
+await scoped;await settle();await settle();
+assert.equal(run("$('repo').value"),'','a choice no longer listed goes back to All repositories');
+assert.deepEqual(timelines(),['gone',''],'and the view is read again for it');
+assert.equal(count('repos'),1);
+// One still listed is kept, and the view is read once.
+repos=[{repo:'kept',claims:0,imported:0,records:1}];
+pick('kept');
+on('records','reposLoaded=true;reposStale=true');
+assert.equal(await run('show()'),true);await settle();await settle();
+assert.equal(run("$('repo').value"),'kept');
+assert.deepEqual(timelines(),['kept'],'a choice still listed is read once');
+repos=[];run("$('repo').replaceChildren(new Option('all',''));$('repo').value='';");
+
+// A list read before that fails is still to be read: no poll under a view that reads none asks
+// for it, and the next view that reads the list does (cubic's review of #902).
+on('stats','reposLoaded=true;reposStale=false;reposFailed=false;version="v1"');
+listFails=true;
+assert.equal(await run('refresh()'),false,'the Refresh button shows a list that fails');
+assert.equal(run('reposStale'),true,'a list that failed is still to be read');
+listFails=false;
+asked=[];await polled();
+assert.equal(count('repos'),0,'a poll under Stats asks for no list after a failure either');
+assert.equal(count('stats'),1,'and reads the statistics');
+run("view='records'");asked=[];
+assert.equal(await run('show()'),true);await settle();
+assert.equal(count('repos'),1,'the next view that reads the list asks for it again');
+assert.equal(run('reposFailed'),false);
+assert.equal(run('reposStale'),false);
 
 run(`LOADERS.clear();for(const [v,f] of __reads.loaders)LOADERS.set(v,f);
 view=__reads.view;reposLoaded=__reads.reposLoaded;reposStale=__reads.reposStale;reposFailed=__reads.reposFailed;
-version=__reads.version;mw.rows=__reads.rows;mw.fetched=__reads.fetched;polling=false;delete globalThis.__reads;`);
+version=__reads.version;mw.rows=__reads.rows;mw.fetched=__reads.fetched;polling=false;
+$('repo').replaceChildren(...__reads.picker);$('repo').value=__reads.picked;delete globalThis.__reads;`);
 delete document.visibilityState;
-console.log('PASS: W3 and W6: a view that reads no list waits for none, a poll under it reads none, a click while the list is read is read once');
+console.log('PASS: W3 and W6: a view that reads no list waits for none, a poll under it reads none, a click while the list is read is read once, a list left unread or failed is read by the next view that uses it');
 }
