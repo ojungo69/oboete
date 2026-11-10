@@ -116,8 +116,10 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            PRIMARY KEY (device, op_seq, n)
          );
          CREATE INDEX IF NOT EXISTS cards_repo ON cards(repo, ts);
-         -- The order every reader's page is in (`page_sql`, `around_sql`): W4.
-         CREATE INDEX IF NOT EXISTS cards_newest ON cards(ts, device, op_seq, n);",
+         -- The order every reader's page is in, and one session's page (`page_sql`,
+         -- `around_sql`): W4.
+         CREATE INDEX IF NOT EXISTS cards_newest ON cards(ts, device, op_seq, n);
+         CREATE INDEX IF NOT EXISTS cards_session ON cards(agent, session, ts);",
     )?;
     // Parity row 3: 1 for a card removed from the page (`hide`), left out by every reader. Before
     // the full-text backfill below, which leaves such a card out.
@@ -609,37 +611,45 @@ pub fn recent(
     Ok(out)
 }
 
+/// `page`'s rows, the newest first, for what is asked: one repository's (`repo`), one session's
+/// (`session`), those after a card (`before`), or any of them together. A statement names only
+/// what it filters on, its parameters in that order, so SQLite reads each through the index that
+/// is in its order and stops at the page's last row: every repository's through `cards_newest`,
+/// one repository's through `cards_repo`, one session's through `cards_session` (the last two
+/// sort only the cards of one `ts`). One statement for every shape (`?1 IS NULL OR repo = ?1`)
+/// had one plan for all of them; with no index in the order that plan read and sorted every card
+/// of the store (W4: 85 ms a page at 43,767 cards).
+fn page_sql(shown: &str, repo: bool, session: bool, before: bool) -> String {
+    let mut sql = format!("SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}");
+    for (asked, filter) in [
+        (repo, " AND repo = ?"),
+        (session, " AND agent = ? AND session = ?"),
+        (before, " AND (ts, device, op_seq, n) < (?, ?, ?, ?)"),
+    ] {
+        if asked {
+            sql.push_str(filter);
+        }
+    }
+    sql + " ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+}
+
+/// `around`'s rows on one side of a time, every repository's or one's, as `page_sql` shapes its
+/// own: the repository first when it is asked for, then the time.
+fn around_sql(shown: &str, repo: bool, older: bool) -> String {
+    let repo = if repo { " AND repo = ?" } else { "" };
+    let side = if older {
+        "ts <= ? ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
+    } else {
+        "ts > ? ORDER BY ts, device, op_seq, n"
+    };
+    format!("SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}{repo} AND {side}")
+}
+
 /// A repository's (or all repositories') cards after `before`, newest first, or one agent's
 /// session's (`session`, `(agent, session)`, docs/page.md S4: a card whose window is that
 /// session's alone, K2). The one reader still skips K4-hidden rows without using a slot. The
 /// boolean says another visible row exists: at most one extra is inspected for exhaustion, never
 /// returned or used as a cursor.
-/// `page`'s rows, the newest first. Its order is `cards_newest`'s, so a page reads its own rows
-/// from the index's end and stops; without that index every card was read and sorted for each
-/// page (W4: 85 ms of each read at 43,767 cards).
-fn page_sql(shown: &str) -> String {
-    format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
-           AND (?1 IS NULL OR repo = ?1)
-           AND (?6 IS NULL OR (agent = ?6 AND session = ?7))
-           AND (?2 IS NULL OR (ts, device, op_seq, n) < (?2, ?3, ?4, ?5))
-         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
-    )
-}
-
-/// `around`'s rows on one side of `?2`, in `cards_newest`'s order too.
-fn around_sql(shown: &str, older: bool) -> String {
-    let side = if older {
-        "ts <= ?2 ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
-    } else {
-        "ts > ?2 ORDER BY ts, device, op_seq, n"
-    };
-    format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL {shown}
-           AND (?1 IS NULL OR repo = ?1) AND {side}"
-    )
-}
-
 pub fn page(
     k: &Connection,
     raw: &Raw,
@@ -651,16 +661,26 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok((Vec::new(), false));
     }
-    let mut st = k.prepare(&page_sql(&crate::hide::shown(k, "cards", "")?))?;
-    let mut rows = st.query(rusqlite::params![
-        repo,
-        before.map(|p| p.0),
-        before.map(|p| p.1.as_str()),
-        before.map(|p| p.2),
-        before.map(|p| p.3),
-        session.map(|s| s.0),
-        session.map(|s| s.1)
-    ])?;
+    let shown = crate::hide::shown(k, "cards", "")?;
+    let sql = page_sql(&shown, repo.is_some(), session.is_some(), before.is_some());
+    let mut st = k.prepare(&sql)?;
+    use rusqlite::types::Value;
+    let text = |s: &str| Value::Text(s.to_owned());
+    let asked = (repo.map(text).into_iter())
+        .chain(
+            session
+                .into_iter()
+                .flat_map(|(agent, session)| [text(agent), text(session)]),
+        )
+        .chain(before.into_iter().flat_map(|p| {
+            [
+                Value::Integer(p.0),
+                text(&p.1),
+                Value::Integer(p.2),
+                Value::Integer(p.3),
+            ]
+        }));
+    let mut rows = st.query(rusqlite::params_from_iter(asked))?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         if let Some(c) = read(r, raw, rules)? {
@@ -688,8 +708,11 @@ pub fn around(
     if !crate::consumer::manifest::exists(k, "table", "cards")? {
         return Ok(Vec::new());
     }
-    let mut st = k.prepare(&around_sql(&crate::hide::shown(k, "cards", "")?, older))?;
-    let mut rows = st.query(rusqlite::params![repo, at])?;
+    let shown = crate::hide::shown(k, "cards", "")?;
+    let mut st = k.prepare(&around_sql(&shown, repo.is_some(), older))?;
+    use rusqlite::types::Value;
+    let asked = (repo.map(|r| Value::Text(r.to_owned())).into_iter()).chain([Value::Integer(at)]);
+    let mut rows = st.query(rusqlite::params_from_iter(asked))?;
     let mut out = Vec::new();
     while out.len() < limit
         && let Some(r) = rows.next()?
@@ -1087,8 +1110,11 @@ mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone};
 
-    /// W4: a page of cards, every repository's or one's, and the cards on either side of a time
-    /// are read in an index's order: none is read to be sorted, however many the store holds.
+    /// W4: a page of cards and the cards on either side of a time are read through the index in
+    /// their order, whatever is asked: every repository's through `cards_newest`, one
+    /// repository's through `cards_repo`, one session's through `cards_session`. None reads every
+    /// card to sort it: a repository's and a session's sort the cards of one `ts` alone. A page
+    /// after a card starts at that card, not at the newest.
     #[test]
     fn the_newest_cards_are_read_in_the_order_of_an_index() {
         let k = Connection::open_in_memory().unwrap();
@@ -1107,16 +1133,44 @@ mod tests {
                 .collect::<rusqlite::Result<_>>()
                 .unwrap()
         };
-        for sql in [
-            page_sql(&shown),
-            around_sql(&shown, true),
-            around_sql(&shown, false),
-        ] {
-            let plan = plan(&sql);
+        let pages = [false, true].into_iter().flat_map(|before| {
+            [(false, false), (true, false), (false, true), (true, true)]
+                .map(|(repo, session)| (repo, session, before))
+        });
+        for (repo, session, before) in pages {
+            let plan = plan(&page_sql(&shown, repo, session, before));
+            // Asked for both, either of the two is its order.
+            let read: &[&str] = match (repo, session) {
+                (false, false) => &["INDEX cards_newest"],
+                (true, false) => &["INDEX cards_repo (repo=?"],
+                (false, true) => &["INDEX cards_session (agent=? AND session=?"],
+                (true, true) => &[
+                    "INDEX cards_repo (repo=?",
+                    "INDEX cards_session (agent=? AND session=?",
+                ],
+            };
             assert!(
-                plan.iter().any(|p| p.contains("USING INDEX cards_newest"))
-                    && !plan.iter().any(|p| p.contains("TEMP B-TREE")),
-                "{plan:?}"
+                plan.iter().any(|p| read.iter().any(|r| p.contains(r)))
+                    && !plan.iter().any(|p| p.contains("TEMP B-TREE FOR ORDER BY")),
+                "{repo} {session} {before}: {plan:?}"
+            );
+            // Every repository's page sorts nothing at all, and one after a card seeks to it.
+            if !repo && !session {
+                assert!(!plan.iter().any(|p| p.contains("TEMP B-TREE")), "{plan:?}");
+                assert_eq!(plan[0].contains("SEARCH cards"), before, "{plan:?}");
+            }
+        }
+        for (repo, older) in [(false, true), (false, false), (true, true), (true, false)] {
+            let plan = plan(&around_sql(&shown, repo, older));
+            let read = if repo {
+                "SEARCH cards USING INDEX cards_repo (repo=? AND ts"
+            } else {
+                "SEARCH cards USING INDEX cards_newest (ts"
+            };
+            assert!(
+                plan.iter().any(|p| p.contains(read))
+                    && !plan.iter().any(|p| p.contains("TEMP B-TREE FOR ORDER BY")),
+                "{repo} {older}: {plan:?}"
             );
         }
     }

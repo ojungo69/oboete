@@ -148,7 +148,10 @@ too); `settings::privacy::tests::repositories_the_index_never_names_are_listed_f
 knowledge.db and without, and a read builds no index);
 `worker::tests::the_repository_index_is_built_in_a_pause_beside_the_session_index`.
 
-## W4: a page of cards is read in an index's order
+## The cards' part of W4: a page of cards is read in an index's order
+
+W4 is the timeline's whole cost, which stays with #899. This is its cards, and the same statement
+is the first step of a My Work read.
 
 Measured on 2026-11-10 with `main` at 5e775fda, on this PC's store (43,767 cards). A read of My
 Work (`my_work::listed`, every range) took 550 to 575 ms inside the process, timed step by step:
@@ -164,23 +167,50 @@ Work (`my_work::listed`, every range) took 550 to 575 ms inside the process, tim
 | the subagents | 85 to 104 ms |
 
 The cards came first. `cards::page` asks for them the newest first (`ts`, `device`, `op_seq`, `n`,
-all descending), and the table had no index in that order: SQLite's plan was `SCAN cards` and
-`USE TEMP B-TREE FOR ORDER BY`, so every card the store holds was read, with every column the page
-returns, and sorted, for a page of 300. The timeline's page of cards and the cards around a time
-(`cards::around`) run the same plan. On a copy of the table in memory the statement took 85 ms; a
-read grew with the store, not with the page.
+all descending), with one statement for every page: every repository's, one repository's, one
+session's, from the start or after a card (`?1 IS NULL OR repo = ?1`, and so on). One statement has
+one plan, and the table had no index in that order: `SCAN cards` and `USE TEMP B-TREE FOR ORDER
+BY`. Every card the store holds was read and what the filters left was sorted, for a page of 300.
+`cards::around` ran the same plan. A read grew with the store, not with the page.
 
-`cards_newest`, on `(ts, device, op_seq, n)`, is that order. The page is now read from the index's
-end and stops at its last row: 0.2 ms for the same statement on the same copy, and the index took
-16 ms to build there. `cards::schema` makes it where it makes the table, so a store gets it at the
-worker's next pass or at the first search, whichever opens it first; a reader that finds none
-reads as before.
+Two things changed.
 
-One repository's page (`repo = ?1`) reads in the same order and passes over the other
-repositories' cards, where it sorted its own before. For a repository with few cards far back
-that is still every card read, as it was, without the sort.
+**A statement names only what it filters on** (`page_sql`, `around_sql`): the repository when one
+is asked for, the session when one is, the card to start after when there is one. Each shape has
+its own plan.
+
+**Each shape has an index in its order**, made by `cards::schema` where it makes the table:
+
+| A page of | Read through | Sorted |
+|---|---|---|
+| every repository's cards | `cards_newest (ts, device, op_seq, n)`, new | nothing |
+| one repository's | `cards_repo (repo, ts)`, as before | the cards of one `ts` |
+| one session's | `cards_session (agent, session, ts)`, new | the cards of one `ts` |
+
+A page after a card starts at that card in its index, not at the newest. The cards on either
+side of a time are read the same way, through `cards_newest` or `cards_repo`.
+
+On a copy of the table in memory, a page of 300 with every column:
+
+| A page of | Before | After |
+|---|---|---|
+| every repository's cards | 85 ms | 0.2 ms |
+| the repository with the most cards (23,059) | 21 ms | 0.3 ms |
+| a repository with 20 cards, none of them recent | 8 ms | 0.1 ms |
+| a session with 10 cards, none of them recent | 7 to 8 ms | 0.1 ms |
+| every repository's cards after the 30,000th | 85 ms | 0.2 ms |
+
+The two new indexes took 16 and 24 ms to build there. With `cards_newest` alone and the one
+statement kept, the repository with 20 cards and the session would have gone to 13 and 12 ms: the index's order
+passes over every other repository's cards one at a time, which is why the statements were split.
+
+An existing store gets the two indexes when `cards::schema` next runs on it: at the worker's next
+summary or embedding pass, or at the first search, whichever comes first. A reader makes no
+index, and one that finds none reads as before.
 
 The other steps of a My Work read are not looked into here (#899).
 
-Test: `cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` (the page's statement and
-both sides of `around` are read through `cards_newest`, with no sort).
+Test: `cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` (every shape of the
+page's statement and of `around`'s is read through the index in its order, none sorts more than
+the cards of one `ts`, every repository's page sorts nothing, and a page after a card seeks to
+it).
