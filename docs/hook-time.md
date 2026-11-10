@@ -37,8 +37,9 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   - the read fence is waited for `READ_WAIT` or what remains, whichever is less. With nothing left
     the hook injects nothing, by the path of a fence that was not had: the record is written, and
     an injection point the session claimed is given back;
-  - the prompt point runs only with time left, and its wait for the viewer ends at
-    `per_prompt_wait_ms` or with the hook's time, whichever comes first;
+  - the prompt point's wait for the viewer ends at `per_prompt_wait_ms` or with the hook's time,
+    whichever comes first. With no time left the viewer is not waited for: the prompt takes the
+    words side, and its side is counted `late`;
   - a read's hook (the note on a file, a memory lookup) gives nothing once its time is over, and
     its lookup's wait, its store's wait and its fence's wait take what remains.
 - An agent whose hook oboete writes no timeout for (OpenCode's and Pi's plugins, an agent with no
@@ -48,10 +49,17 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
 
 | Agent | Event | Timeout | Time for what it injects |
 |---|---|---|---|
-| claude, codex | `SessionStart` | 10 s | 9 s |
-| claude, codex, grok | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | 5 s | 4 s |
-| grok | `SessionStart` | 5 s | 4 s |
-| agy, cursor | every event | 10 s | 9 s |
+| claude | `SessionStart` | 10 s | 9 s |
+| claude | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact`, `SubagentStop` | 5 s | 4 s |
+| codex | `SessionStart`, `SubagentStart` | 10 s | 9 s |
+| codex | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `PostCompact` | 5 s | 4 s |
+| grok | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact` | 5 s | 4 s |
+| claude, codex, grok | `SessionEnd` | 3 s | 2 s |
+| agy | `SessionStart`, `PreInvocation`, `PostToolUse`, `Stop` | 10 s | 9 s |
+| cursor | each of the seven hooks `setup` writes | 10 s | 9 s |
+
+An event that injects nothing (a `Stop`, a `SessionEnd`) has the time all the same: it only
+places the `late` line below. An event `setup` writes no hook for has none.
 
 ### A record of slow hooks
 
@@ -62,8 +70,9 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   hook inside its time does no I/O for them.
 - A thread beside the hook (`Clock::watch`) writes a line when the hook is still running 2 s
   after its start (`"at": "slow"`), and one more half a second past the hook's time for what it
-  injects (`"at": "late"`), the last look before the agent's timeout. The thread ends with the
-  process: a hook that ends inside 2 s never hears it.
+  injects (`"at": "late"`), the last look before the agent's timeout. A hook with no such time
+  (an agent oboete writes no timeout for) gets no `late` line. The thread ends with the process:
+  a hook that ends inside 2 s never hears it.
 - A hook that took 2 s or more writes a line at its end (`"at": "end"`).
 - A hook with `slow` or `late` lines and no `end` never ended: the agent cancelled it, or it was
   killed. Its last line names the phase it was in.
@@ -84,28 +93,39 @@ A line holds names and numbers only, never text, a path or a session:
 - The agent's and the event's names are the command line's, kept to letters, digits, `-` and `_`,
   32 at most.
 - The file starts again at 256 KiB, the one before it kept as `hook-time.jsonl.1`. It is 0600.
-  No home is made for it.
+  No home is made for it. Two hooks that turn it over at once lose nothing but what the first
+  kept: the second's line begins the new file.
+- A line begins on a line of its own, an empty one before it: a line cut short (a full disk, a
+  hook killed as it wrote) takes only itself with it.
 
-`oboete doctor` reads both files and says, under the per-prompt lines, how many hooks of the last
-7 days were still running at 2 s, how many of them never ended, and the phase most of them were in.
+`oboete doctor` reads both files and says, after the injection's lines and whatever `[inject]`
+holds, how many hooks on record in the last 7 days were still running at 2 s, how many of them
+never ended, and the phase most of them were in (`slow hooks: …`; no line when there is none).
+The two files hold some hundreds of slow hooks: where more than that were slow inside 7 days, the
+newest are counted.
 
 ## Where it does not reach
 
 - A start later than the margin is not fixed by a deadline: an agent that starts the hook late,
   or a binary that takes seconds to page in. `before_ms` and a late `ts` show the second; the
   first shows only against the transcript.
-- One local read that takes seconds is not cut: SQLite reads are not interrupted. The record says
-  whether that is where the time goes, in `manifest` or `prompt`.
-- O1 is closed on what the record shows after the install, not on the deadline alone.
+- One local read that takes seconds is not cut: SQLite reads are not interrupted, and a hook past
+  its deadline that finishes them still injects. Throwing the result away then would save no
+  time and lose what may still arrive inside the agent's timeout. The record says whether that
+  is where the time goes, in `manifest`, `prompt` or `note`; cutting those reads is #897's.
+- O1 is closed on what the record shows after the install, not on the deadline alone (#897).
 
 ## Tests
 
 - `hook_time::tests`: what remains of a timeout and when it is over; a hook inside its time writes
   nothing; a slow hook's `slow`, `late` and `end` lines and what they hold; an end with no thread;
-  names only, and no home made; the time before `main` on Linux; the file's turn-over at its cap;
-  doctor's line; an end's longest phase.
+  names only, and no home made; the time before `main` on Linux, its arithmetic by hand; the
+  file's turn-over at its cap, a turn-over another hook made first, and one that fails; a line
+  cut short; doctor's line; an end's longest phase.
+- `tests/doctor_hook_time.rs`: doctor prints the line, with `[inject]` right or wrong.
 - `hook::tests::a_hook_with_no_time_left_records_and_injects_nothing`,
   `the_read_fence_is_waited_for_within_the_hooks_time`,
   `the_prompt_points_wait_ends_with_the_hooks_time`,
-  `a_read_whose_hook_has_no_time_left_gets_no_note`.
+  `a_read_whose_hook_has_no_time_left_gets_no_note`,
+  `a_memory_lookup_waits_within_the_hooks_time`.
 - `setup::tests::a_hooks_timeout_is_the_one_setup_writes`.

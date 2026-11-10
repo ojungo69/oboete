@@ -4,8 +4,9 @@
 //! when it was not:
 //! - One deadline for what a hook injects (`Clock::by`): the agent's timeout as `setup` writes it,
 //!   less `MARGIN`, counted from the process's start. Recording is never cut short by it
-//!   (MUST-M16, docs/unwritten.md); the read fence, the manifest, the prompt point, a file's note
-//!   and a memory lookup take what remains.
+//!   (MUST-M16, docs/unwritten.md); the waits of what it injects take what remains: the read
+//!   fence's, the prompt point's for the viewer, a file's note's and a memory lookup's. A local
+//!   read is not cut.
 //! - A record of slow hooks (`state/hook-time.jsonl`). A cancelled hook writes nothing at its
 //!   end, so a thread beside the hook writes a line while it still runs: at `SLOW`, and once more
 //!   past its deadline. A hook that took `SLOW` or more writes a line at its end too. A line
@@ -271,17 +272,24 @@ fn sleep_until(at: Instant) {
 #[cfg(target_os = "linux")]
 fn before_ms(start: Instant) -> Option<u64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let up = std::fs::read_to_string("/proc/uptime").ok()?;
+    // SAFETY: sysconf reads a constant of the system and takes no pointer.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    before_from(&stat, &up, hz as f64, start.elapsed().as_secs_f64())
+}
+
+/// `before_ms` of `/proc/self/stat`'s and `/proc/uptime`'s text, the clock ticks a second, and the
+/// seconds since `main`'s first line.
+#[cfg(target_os = "linux")]
+fn before_from(stat: &str, uptime: &str, hz: f64, since_start: f64) -> Option<u64> {
     // Past the command's name, which may hold spaces and parentheses, the 20th field is the
     // process's start in clock ticks since boot (proc(5): starttime, field 22).
     let fields = stat.rsplit_once(')')?.1;
     let ticks: f64 = fields.split_whitespace().nth(19)?.parse().ok()?;
-    // SAFETY: sysconf reads a constant of the system and takes no pointer.
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    let up = std::fs::read_to_string("/proc/uptime").ok()?;
-    let up: f64 = up.split_whitespace().next()?.parse().ok()?;
-    let before = up - ticks / hz as f64 - start.elapsed().as_secs_f64();
+    let up: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+    let before = up - ticks / hz - since_start;
     // Both clocks tick in hundredths of a second: a small negative is zero.
-    (hz > 0).then(|| (before.max(0.0) * 1000.0) as u64)
+    (hz > 0.0).then(|| (before.max(0.0) * 1000.0).round() as u64)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -299,9 +307,7 @@ fn append(home: &Path, line: &Value) -> std::io::Result<()> {
     std::fs::create_dir_all(&state)?;
     let path = state.join(FILE);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= CAP) {
-        // Two hooks at once may both turn it over, and the second replaces what the first kept:
-        // a diagnostic's loss, not a record's.
-        std::fs::rename(&path, state.join(format!("{FILE}.1")))?;
+        turn_over(&path, &state.join(format!("{FILE}.1")))?;
     }
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -310,14 +316,30 @@ fn append(home: &Path, line: &Value) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    // One write: lines of hooks that end together do not mix.
-    options
-        .open(&path)?
-        .write_all(format!("{line}\n").as_bytes())
+    let mut file = options.open(&path)?;
+    // A file that was there before (restored, or copied in) is the person's alone too.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    // One write: lines of hooks that end together do not mix. It begins on a line of its own, so
+    // a line before it that was cut short (a full disk, a hook killed as it wrote) takes only
+    // itself with it.
+    file.write_all(format!("\n{line}\n").as_bytes())
 }
 
-/// Doctor's line: the hooks of the last 7 days that still ran at `SLOW`, those of them that never
-/// ended (the agent cancelled them, or they were killed), and the phase most of them were in.
+/// The full record becomes the one kept beside it. Two hooks at once may both turn it over: the
+/// second finds no file, which is the first's turn-over and no error (its line begins the new
+/// file), or replaces what the first kept, a diagnostic's loss and not a record's. Any other
+/// failure is one: nothing is written past the cap.
+fn turn_over(path: &Path, kept: &Path) -> std::io::Result<()> {
+    match std::fs::rename(path, kept) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Doctor's line: the hooks on record in the last 7 days that still ran at `SLOW`, those of them
+/// that never ended (the agent cancelled them, or they were killed), and the phase most of them
+/// were in. The record is two files of `CAP`: past that many slow hooks, the newest are counted.
 pub(crate) fn doctor_line(home: &Path, now: i64) -> Option<String> {
     let state = home.join("state");
     let since = now - DAYS * 86_400_000;
@@ -358,7 +380,7 @@ pub(crate) fn doctor_line(home: &Path, now: i64) -> Option<String> {
         .max_by_key(|(c, _)| *c)
         .map_or("?", |(_, n)| n);
     Some(format!(
-        "  slow hooks in the last {DAYS} days: {} still ran at {} s, {unended} of them never ended (cancelled or killed); most often in: {most}",
+        "slow hooks: {} on record in the last {DAYS} days still ran at {} s, {unended} of them never ended (cancelled or killed); most often in: {most}",
         hooks.len(),
         SLOW.as_secs(),
     ))
@@ -391,21 +413,23 @@ mod tests {
     fn lines(home: &Path) -> Vec<Value> {
         let text = std::fs::read_to_string(home.join("state").join(FILE)).unwrap_or_default();
         text.lines()
+            .filter(|l| !l.is_empty())
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
     }
 
     #[test]
     fn what_a_hook_injects_takes_what_remains_of_its_agents_timeout() {
-        // 5 s less the margin, from a start 3.9 s ago: 100 ms remain.
-        let clock = Clock::started(Duration::from_millis(3_900), SLOW);
+        // 5 s less the margin, from a start 1 s ago: 3 s remain. The bounds leave a slow machine
+        // 2 s between this line and the last.
+        let clock = Clock::started(Duration::from_secs(1), SLOW);
         assert_eq!(clock.by(), None);
-        assert_eq!(clock.left(Duration::from_secs(1)), Duration::from_secs(1));
+        assert_eq!(clock.left(Duration::from_secs(60)), Duration::from_secs(60));
         assert!(!clock.over());
         clock.inject_within(Some(Duration::from_secs(5)));
-        let left = clock.left(Duration::from_secs(1));
-        assert!(left <= Duration::from_millis(100), "{left:?}");
-        assert!(!left.is_zero());
+        let left = clock.left(Duration::from_secs(60));
+        assert!(left <= Duration::from_secs(3), "{left:?}");
+        assert!(left > Duration::from_secs(1), "{left:?}");
         assert!(!clock.over());
         // A wait shorter than what remains is kept.
         assert_eq!(
@@ -425,6 +449,32 @@ mod tests {
         clock.inject_within(None);
         assert!(!clock.over());
         assert_eq!(clock.no_later(far), far);
+    }
+
+    /// Each phase is written under its own name: `NAMES` is in `Phase`'s order.
+    #[test]
+    fn each_phase_is_written_under_its_name() {
+        let named = [
+            (Phase::Parse, "parse"),
+            (Phase::Lookup, "lookup"),
+            (Phase::Note, "note"),
+            (Phase::Settings, "settings"),
+            (Phase::Open, "open"),
+            (Phase::Record, "record"),
+            (Phase::Fence, "fence"),
+            (Phase::Manifest, "manifest"),
+            (Phase::Prompt, "prompt"),
+            (Phase::After, "after"),
+            (Phase::Output, "output"),
+        ];
+        assert_eq!(named.len(), NAMES.len());
+        for (phase, name) in named {
+            let clock = Clock::starting_now();
+            clock.begin(phase);
+            let line = clock.line("claude", "Stop", "end");
+            assert_eq!(line["phase"], name);
+            assert!(line["began"][name].is_u64(), "{line}");
+        }
     }
 
     #[test]
@@ -484,8 +534,13 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(home.path().join("state").join(FILE)).unwrap();
-            assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+            let file = home.path().join("state").join(FILE);
+            let mode = || std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(), 0o600);
+            // A file others could read, from before: the next line makes it the person's alone.
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            clock.finish(home.path(), "codex", "Stop");
+            assert_eq!(mode(), 0o600);
         }
     }
 
@@ -525,12 +580,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_time_before_main_is_read_on_linux() {
-        // This process was made before this test began: some time, and less than its age.
-        let start = Instant::now();
-        let before = before_ms(start).unwrap();
+        // A process made 123.45 s after boot (12,345 ticks at 100 a second), whose `main` began
+        // 0.25 s ago, on a machine up for 200 s: 200 - 123.45 - 0.25 s passed before `main`. Its
+        // name holds spaces and parentheses.
+        let stat = "4242 (a (b) c) S 1 4242 4242 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 12345 \
+                    1000000 100 18446744073709551615";
+        assert_eq!(
+            before_from(stat, "200.00 150.00\n", 100.0, 0.25),
+            Some(76_300)
+        );
+        // A start the two clocks' hundredths put after now is no time, not a negative one.
+        assert_eq!(before_from(stat, "123.44 1.00\n", 100.0, 0.0), Some(0));
+        // Text that is not theirs gives none.
+        assert_eq!(before_from("4242 (a) S 1", "200.00", 100.0, 0.0), None);
+        assert_eq!(before_from(stat, "", 100.0, 0.0), None);
+        assert_eq!(before_from(stat, "200.00", 0.0, 0.0), None);
+        // This process's own: some time.
+        assert!(before_ms(Instant::now()).is_some());
         let clock = Clock::of_process();
         assert!(clock.line("claude", "Stop", "end")["before_ms"].is_u64());
-        assert!(before < 3_600_000, "{before}");
     }
 
     #[test]
@@ -543,7 +611,7 @@ mod tests {
         append(home.path(), &json!({"a": 1})).unwrap();
         assert_eq!(
             std::fs::read_to_string(state.join(FILE)).unwrap(),
-            "{\"a\":1}\n"
+            "\n{\"a\":1}\n"
         );
         assert_eq!(
             std::fs::read_to_string(state.join(format!("{FILE}.1"))).unwrap(),
@@ -553,8 +621,45 @@ mod tests {
         append(home.path(), &json!({"a": 2})).unwrap();
         assert_eq!(
             std::fs::read_to_string(state.join(FILE)).unwrap(),
-            "{\"a\":1}\n{\"a\":2}\n"
+            "\n{\"a\":1}\n\n{\"a\":2}\n"
         );
+    }
+
+    /// Two hooks turn the full record over at once: the second finds no file, which is no error,
+    /// and its line is written. A turn-over that fails otherwise writes nothing past the cap.
+    #[test]
+    fn a_record_another_hook_turned_over_still_takes_the_line() {
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let (file, kept) = (state.join(FILE), state.join(format!("{FILE}.1")));
+        // The file went between this hook's look at its size and its rename.
+        turn_over(&file, &kept).unwrap();
+        assert!(!kept.exists());
+        // What is kept cannot be replaced: a folder that is not empty stands where it goes.
+        std::fs::create_dir_all(kept.join("held")).unwrap();
+        let full = "x".repeat(usize::try_from(CAP).unwrap());
+        std::fs::write(&file, &full).unwrap();
+        assert!(append(home.path(), &json!({"a": 1})).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), full);
+    }
+
+    /// A line cut short takes only itself with it: the next begins on a line of its own.
+    #[test]
+    fn a_line_cut_short_does_not_take_the_next_with_it() {
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(FILE), "\n{\"ts\":1,\"pid\":2,\"at\":\"sl").unwrap();
+        let now = 1_000_000;
+        append(
+            home.path(),
+            &json!({"ts": now, "pid": 3, "at": "end", "ms": 2_000, "phase": "output"}),
+        )
+        .unwrap();
+        let line = doctor_line(home.path(), now).unwrap();
+        assert!(line.starts_with("slow hooks: 1 on record"), "{line}");
+        assert!(line.contains(" 0 of them never ended"), "{line}");
     }
 
     #[test]
@@ -587,8 +692,10 @@ mod tests {
                 line(now - day, 2, "end", "output"),
                 line(now - 1_000, 3, "slow", "open"),
                 line(now - 1_000, 3, "late", "prompt"),
-                // Hook 4 ended with no line before it: `open` took 1,890 of its 2,000 ms.
+                // Hooks 4 and 5 ended with no line before them: `open` took 1,890 of their
+                // 2,000 ms. Two in `open` and two in `prompt`: the earlier phase is named.
                 line(now - 500, 4, "end", "output"),
+                line(now - 400, 5, "end", "output"),
                 "not json".to_owned(),
             ]
             .join("\n"),
@@ -597,7 +704,7 @@ mod tests {
         assert_eq!(
             doctor_line(home.path(), now).as_deref(),
             Some(
-                "  slow hooks in the last 7 days: 3 still ran at 2 s, 1 of them never ended (cancelled or killed); most often in: prompt"
+                "slow hooks: 4 on record in the last 7 days still ran at 2 s, 1 of them never ended (cancelled or killed); most often in: open"
             )
         );
     }

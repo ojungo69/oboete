@@ -4811,7 +4811,9 @@ mod tests {
             hook_clocked(home, "claude", "PreToolUse", &payload, &over),
             ""
         );
-        assert_eq!(over.begun(), ["parse", "lookup", "after"]);
+        // The lookup asks nothing and is not late (the read is no lookup), and the note's turn
+        // comes and gives none.
+        assert_eq!(over.begun(), ["parse", "lookup", "note", "after"]);
         // The note itself is not read past the hook's time, whatever came before it.
         let mut fence = None;
         let noted = file_notes(home, "claude", &payload, &mut fence, NOTE_ROOM, &over).unwrap();
@@ -7242,14 +7244,14 @@ mod tests {
     }
 
     /// docs/hook-time.md: the read fence is waited for no longer than the hook's time lasts. A
-    /// forget's write holds it; the hook has 300 ms left, and returns well inside `READ_WAIT`.
+    /// forget's write holds it; the hook has 150 ms left, and returns well inside `READ_WAIT`.
     #[test]
     fn the_read_fence_is_waited_for_within_the_hooks_time() {
         let mut p = Prompts::new(true);
         p.decided(1, "Parser errors go to stderr.", &[]);
         p.s.run();
         let held = crate::dispatch::exclusive(p.s.home.path()).unwrap();
-        let clock = prompt_clock(Duration::from_millis(300));
+        let clock = prompt_clock(Duration::from_millis(150));
         let start = std::time::Instant::now();
         let ask = json!({"prompt": "where do parser errors go"});
         assert_eq!(p.hook_clocked("UserPromptSubmit", "a", ask, &clock), "");
@@ -7262,8 +7264,9 @@ mod tests {
     }
 
     /// docs/hook-time.md: the prompt point's wait for the resident viewer ends with the hook's
-    /// time where that comes first. The viewer answers at 2.5 s and `per_prompt_wait_ms` would
-    /// wait 3 s for it; the hook has 800 ms left, and the prompt takes the words side.
+    /// time where that comes first. The viewer answers at 2.9 s and `per_prompt_wait_ms` would
+    /// wait 3 s for it; the hook has 1.5 s left, and the prompt takes the words side before the
+    /// viewer answers. A slow machine has 1.5 s to reach the prompt point and 1.3 s after it.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_prompt_points_wait_ends_with_the_hooks_time() {
@@ -7271,13 +7274,13 @@ mod tests {
         p.decided(1, "The output goes to stderr when we quit.", &[]);
         let (card, _) = work(&mut p, 2, "Streams flush on exit", "", "Flush the streams");
         let near = json!([{"key": card, "kind": "card", "cosine": 0.9}]);
-        let r = Resident::start(p.s.home.path(), 3_000, near, Duration::from_millis(2_500));
-        let clock = prompt_clock(Duration::from_millis(800));
+        let r = Resident::start(p.s.home.path(), 3_000, near, Duration::from_millis(2_900));
+        let clock = prompt_clock(Duration::from_millis(1_500));
         let start = std::time::Instant::now();
         let ask = json!({"prompt": "where does the output go when we quit"});
         let text = p.hook_clocked("UserPromptSubmit", "s1", ask, &clock);
         assert!(
-            start.elapsed() < Duration::from_millis(2_000),
+            start.elapsed() < Duration::from_millis(2_800),
             "{:?}",
             start.elapsed()
         );

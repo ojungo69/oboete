@@ -76,6 +76,10 @@ const GROK_EVENTS: &[(&str, u32)] = &[
     ("SessionEnd", 3),
 ];
 const AGY_FLAT_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
+/// The timeout, in seconds, of every hook `setup` writes for agy and for Cursor: what their specs
+/// write and what `hook_timeout` counts a hook's time from.
+const AGY_TIMEOUT: u32 = 10;
+const CURSOR_TIMEOUT: u32 = 10;
 const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("sessionStart", "SessionStart"),
     ("beforeSubmitPrompt", "UserPromptSubmit"),
@@ -94,8 +98,10 @@ pub(crate) fn hook_timeout(agent: &str, event: &str) -> Option<std::time::Durati
         "claude" => CLAUDE_EVENTS.iter().find(|(e, _)| *e == event)?.1,
         "codex" => CODEX_EVENTS.iter().find(|(e, ..)| *e == event)?.2,
         "grok" => GROK_EVENTS.iter().find(|(e, _)| *e == event)?.1,
-        "agy" => (AGY_FLAT_EVENTS.contains(&event) || event == "PostToolUse").then_some(10_u32)?,
-        "cursor" => (CURSOR_EVENTS.iter().any(|(_, e)| *e == event)).then_some(10_u32)?,
+        "agy" => {
+            (AGY_FLAT_EVENTS.contains(&event) || event == "PostToolUse").then_some(AGY_TIMEOUT)?
+        }
+        "cursor" => (CURSOR_EVENTS.iter().any(|(_, e)| *e == event)).then_some(CURSOR_TIMEOUT)?,
         _ => return None,
     };
     Some(std::time::Duration::from_secs(u64::from(secs)))
@@ -1971,12 +1977,12 @@ fn agy_spec(cmd: &HookCommand, windows: bool) -> Result<Value> {
     for event in AGY_FLAT_EVENTS {
         spec.insert(
             event.to_string(),
-            json!([{"type":"command", "command":cmd.agy_line(event, windows)?, "timeout":10}]),
+            json!([{"type":"command", "command":cmd.agy_line(event, windows)?, "timeout":AGY_TIMEOUT}]),
         );
     }
     spec.insert(
         "PostToolUse".to_string(),
-        json!([{"matcher":"*", "hooks":[{"type":"command", "command":cmd.agy_line("PostToolUse", windows)?, "timeout":10}]}]),
+        json!([{"matcher":"*", "hooks":[{"type":"command", "command":cmd.agy_line("PostToolUse", windows)?, "timeout":AGY_TIMEOUT}]}]),
     );
     Ok(Value::Object(spec))
 }
@@ -2360,7 +2366,7 @@ fn cursor_hook_spec(cmd: &HookCommand, windows: bool) -> Result<Value> {
     for (step, event) in CURSOR_EVENTS {
         hooks.insert(
             step.to_string(),
-            json!([{"command":cmd.cursor_line(event, windows)?,"timeout":10}]),
+            json!([{"command":cmd.cursor_line(event, windows)?,"timeout":CURSOR_TIMEOUT}]),
         );
     }
     Ok(Value::Object(hooks))
@@ -2546,7 +2552,8 @@ fn cursor_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String 
                 Ok(s) => s,
                 Err(e) => return format!("cannot run: {e}"),
             };
-            if entry["command"] == command && entry["timeout"] == 10 && !correct[index] {
+            if entry["command"] == command && entry["timeout"] == CURSOR_TIMEOUT && !correct[index]
+            {
                 correct[index] = true;
             } else {
                 stale += 1;
@@ -3097,10 +3104,6 @@ pub fn doctor(home: &Path) -> Result<()> {
             if let Some(line) = crate::hook::prompt_blocks_line(home, crate::db::now_ms()) {
                 println!("{line}");
             }
-            // The hooks that were still running at 2 s (docs/hook-time.md).
-            if let Some(line) = crate::hook_time::doctor_line(home, crate::db::now_ms()) {
-                println!("{line}");
-            }
             match i.correction {
                 true => println!(
                     "corrections: on, up to {} characters at the next prompt",
@@ -3113,6 +3116,11 @@ pub fn doctor(home: &Path) -> Result<()> {
             println!("injection: settings are wrong, so nothing is injected: {e:#}");
             unhealthy.push("injection settings are wrong");
         }
+    }
+    // The hooks that were still running at 2 s (docs/hook-time.md), whatever `[inject]` holds:
+    // the record is every hook's.
+    if let Some(line) = crate::hook_time::doctor_line(home, crate::db::now_ms()) {
+        println!("{line}");
     }
     // `[chain]` as it applies, under each entry's line.
     let cfg = config::load(home)?;
@@ -3982,17 +3990,38 @@ mod tests {
         assert_eq!(secs("agy", "PreInvocation"), Some(10));
         assert_eq!(secs("agy", "PostToolUse"), Some(10));
         assert_eq!(secs("cursor", "UserPromptSubmit"), Some(10));
-        // Every hook `setup` writes for Claude Code has one, as written.
+        // Every hook `setup` writes has one, as written: each agent's own spec is read.
         let cmd = HookCommand {
             exe: "/x/oboete".into(),
             home: None,
         };
-        for (event, group) in claude_groups(&cmd) {
-            assert_eq!(
-                secs("claude", &event),
-                group["hooks"][0]["timeout"].as_u64(),
-                "{event}"
-            );
+        for (agent, groups) in [
+            ("claude", claude_groups(&cmd)),
+            ("codex", codex_groups(&cmd)),
+            ("grok", grok_groups(&cmd)),
+        ] {
+            assert!(!groups.is_empty());
+            for (event, group) in groups {
+                let written = group["hooks"][0]["timeout"].as_u64();
+                assert!(written.is_some(), "{agent} {event}");
+                assert_eq!(secs(agent, &event), written, "{agent} {event}");
+            }
+        }
+        let agy = agy_spec(&cmd, false).unwrap();
+        assert_eq!(agy.as_object().unwrap().len(), 4);
+        for (event, hooks) in agy.as_object().unwrap() {
+            let written = match event.as_str() {
+                "PostToolUse" => hooks[0]["hooks"][0]["timeout"].as_u64(),
+                _ => hooks[0]["timeout"].as_u64(),
+            };
+            assert!(written.is_some(), "agy {event}");
+            assert_eq!(secs("agy", event), written, "agy {event}");
+        }
+        let cursor = cursor_hook_spec(&cmd, false).unwrap();
+        for (step, event) in CURSOR_EVENTS {
+            let written = cursor[step][0]["timeout"].as_u64();
+            assert!(written.is_some(), "cursor {step}");
+            assert_eq!(secs("cursor", event), written, "cursor {step}");
         }
         for (agent, event) in [
             ("claude", "Nope"),

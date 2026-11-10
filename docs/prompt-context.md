@@ -68,9 +68,9 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    takes counts against it. The hook builds the words side (as now but over the same kinds: the
    full-text index of claims, cards, summaries and imports, with the same 0.53 cut; imports left
    out as built, the second slice) while it waits for the viewer, so a late or missing answer
-   leaves a block that is already built. Since docs/hook-time.md the wait also ends with the hook's
-   own time (its agent's timeout less a margin), where that comes first, and a prompt whose hook
-   has no time left gets nothing. The hook's own reads are local and not cut at the
+   leaves a block that is already built. The wait also ends with the hook's own time, its
+   agent's timeout less a margin (docs/hook-time.md), where that comes first, and a prompt whose
+   hook has no time left before the read fence gets nothing. The hook's own reads are local and not cut at the
    deadline, as the prompt point's reads were not before; they are measured (As built). The default
    comes from measurement, before the code merges: the prompt point's time (the fence, the viewer's
    answer with its query vector within 1.2 s, the search, the lines) on this PC's WSL with the
