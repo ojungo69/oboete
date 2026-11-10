@@ -1,0 +1,21 @@
+docs/curation-timing.md
+  s_b837d726e3a0bf::t_de85754d38a2ed 152-158
+docs/page-reads.md
+  s_b837d726e3a0bf::t_eb31f7ae8d999f 251-258
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "250a60c41f00ea893e537479fcbae5df2315339e",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
