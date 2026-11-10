@@ -149,12 +149,13 @@ much is the larger window at work. The wait before the first call fell by two fi
 and to under a quarter at the ninth decile, and the share of it behind other sessions' calls fell
 from 34% to 4%.
 
-Those two are a week against a week, not the larger window against none. Split by day (#923), a
-day's median runs from 4 s to 3.9 hours: the first week holds 10-28 to 11-01, with thousands of
-refused calls a day and the chain's entries changing; the second holds four days with none refused
-(11-04 to 11-07) and three with about a thousand a day, all of one entry's cap. How many
-conversations ran at once differed too. What the larger window gave of the fall is not separated
-from what the days gave.
+Those two are one period against the next (the table's two columns: nine days from 2026-10-26,
+then seven from 2026-11-04), not the larger window against none. Split by day (#923), a day's
+median runs from 4 s to 3.9 hours, and the two periods hold different days. Of the first's nine,
+five (10-28 to 11-01) had between 1,100 and 5,500 refused calls each, with the chain's entries
+changing; of the second's seven, four (11-04 to 11-07) had none refused and three (11-08 to
+11-10) had 1,049, 165 and 1,042, all of one entry's cap. How many conversations ran at once
+differed too. What the larger window gave of the fall is not separated from what the days gave.
 
 It is still minutes at the median, not the replay's 29 s. The replay was a model of the queue
 with a call's time drawn from the chain's; these are the live windows, where three fifths of the
