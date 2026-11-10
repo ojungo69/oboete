@@ -1,0 +1,26 @@
+src/isolation.rs
+  s_b837d726e3a0bf::t_28bc960c0dd058 727-737
+src/provider.rs
+  s_b837d726e3a0bf::t_be04cefebaed99 3093
+  s_b837d726e3a0bf::t_f57f1a947bcf9f 3073-3079
+src/redact.rs
+  s_b837d726e3a0bf::t_0e05f9b790ac5f 402-403
+docs/spike/curator-isolation.md
+  s_b837d726e3a0bf::t_1bdc950cb369d0 133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b6eee9c892ec8a6753f2d3d869e140545a593d96",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
