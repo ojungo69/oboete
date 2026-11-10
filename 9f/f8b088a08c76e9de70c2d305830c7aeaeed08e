@@ -1,0 +1,42 @@
+docs/claude-mem-parity.md
+  s_b837d726e3a0bf::t_cf7eb9c118aafa 62
+  s_b837d726e3a0bf::t_a5ec735902e640 137
+  s_b837d726e3a0bf::t_fbb22105523eb8 118
+  s_b837d726e3a0bf::t_ec3422f5fade7a 61
+  s_b837d726e3a0bf::t_84e90cfb85f889 52
+  s_b837d726e3a0bf::t_9c83c339539503 129
+  s_b837d726e3a0bf::t_9f9f884852684f 136
+  s_b837d726e3a0bf::t_434cf9f8684753 50
+  s_b837d726e3a0bf::t_bd8cde875f9cd8 121
+  s_b837d726e3a0bf::t_5e94fb681dd757 12
+  s_b837d726e3a0bf::t_85d71aaa986b49 105
+  s_b837d726e3a0bf::t_343558ca701721 46
+  s_b837d726e3a0bf::t_b63a928659c624 97
+  s_b837d726e3a0bf::t_dd893a4cc437cd 21-22,24
+  s_b837d726e3a0bf::t_9cdc69f664f0d8 8
+  s_b837d726e3a0bf::t_4144e4c295ef68 71
+  s_b837d726e3a0bf::t_a661fa220c91d7 138-140
+  s_b837d726e3a0bf::t_15ffc08db96723 125
+  s_b837d726e3a0bf::t_d3219c6bbc2d13 84
+  s_b837d726e3a0bf::t_5d7da721ecc746 103
+  s_b837d726e3a0bf::t_924cfc30c8cdbb 88
+  s_b837d726e3a0bf::t_a076ca6629f4b6 20,212
+docs/my-work-model.md
+  s_b837d726e3a0bf::t_3b77dc85515fbb 68-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ff8b088a08c76e9de70c2d305830c7aeaeed08e",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
