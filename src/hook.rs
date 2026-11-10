@@ -1263,10 +1263,13 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
             "oboete: 記録は有効です。記憶を読み出せませんでした。oboete doctor で状態を確認できます。".into()
         }
         (true, Handed::Shown(n, cards)) => {
-            let what = match cards {
-                0 => format!("記憶 {n} 件"),
-                c if n == 0 => format!("最近の作業 {c} 件"),
-                c => format!("記憶 {n} 件と最近の作業 {c} 件"),
+            let what = match (n, cards) {
+                // No claim and no card, as in a home with summaries off: the checkout's own state
+                // (the last exchange, the files, git) is what was handed over.
+                (0, 0) => "直近の状態".to_owned(),
+                (n, 0) => format!("記憶 {n} 件"),
+                (0, c) => format!("最近の作業 {c} 件"),
+                (n, c) => format!("記憶 {n} 件と最近の作業 {c} 件"),
             };
             format!(
                 "oboete: 記憶は有効です。このリポジトリの{what}を渡しました。画面を開くには oboete view --open"
@@ -1281,14 +1284,23 @@ fn session_start_note(japanese: bool, handed: Handed) -> String {
             "oboete: recording is on. Memory could not be read. Check with: oboete doctor".into()
         }
         (false, Handed::Shown(n, cards)) => {
-            let what = match cards {
-                0 => format!("{n} remembered items"),
-                c if n == 0 => format!("{c} recent work entries"),
-                c => format!("{n} remembered items and {c} recent work entries"),
+            let items = |n: usize| match n {
+                1 => "1 remembered item".to_owned(),
+                n => format!("{n} remembered items"),
             };
-            format!(
-                "oboete: memory is on. {what} for this repository were handed over. Open the page with: oboete view --open"
-            )
+            let entries = |c: usize| match c {
+                1 => "1 recent work entry".to_owned(),
+                c => format!("{c} recent work entries"),
+            };
+            let what = match (n, cards) {
+                (0, 0) => "This repository's latest state was".to_owned(),
+                (1, 0) => format!("{} for this repository was", items(1)),
+                (0, 1) => format!("{} for this repository was", entries(1)),
+                (n, 0) => format!("{} for this repository were", items(n)),
+                (0, c) => format!("{} for this repository were", entries(c)),
+                (n, c) => format!("{} and {} for this repository were", items(n), entries(c)),
+            };
+            format!("oboete: memory is on. {what} handed over. Open the page with: oboete view --open")
         }
         (false, Handed::Nothing) => "oboete: recording is on. This repository has no memory to hand over yet. Open the page with: oboete view --open".into(),
         (false, Handed::Rebuilding) => "oboete: recording is on. Memory is being rebuilt, so none was handed over this time; it is handed over again from the next session once the rebuild ends.".into(),
@@ -8690,6 +8702,29 @@ mod tests {
             note(false, 0, 5),
             "oboete: memory is on. 5 recent work entries for this repository were handed over. Open the page with: oboete view --open"
         );
+        // One of a kind is singular.
+        assert_eq!(
+            note(false, 1, 0),
+            "oboete: memory is on. 1 remembered item for this repository was handed over. Open the page with: oboete view --open"
+        );
+        assert_eq!(
+            note(false, 0, 1),
+            "oboete: memory is on. 1 recent work entry for this repository was handed over. Open the page with: oboete view --open"
+        );
+        assert_eq!(
+            note(false, 1, 1),
+            "oboete: memory is on. 1 remembered item and 1 recent work entry for this repository were handed over. Open the page with: oboete view --open"
+        );
+        // A packet with no claim and no card, as in a home with summaries off: the line says what
+        // was handed over, not a count of nothing.
+        assert_eq!(
+            note(false, 0, 0),
+            "oboete: memory is on. This repository's latest state was handed over. Open the page with: oboete view --open"
+        );
+        assert_eq!(
+            note(true, 0, 0),
+            "oboete: 記憶は有効です。このリポジトリの直近の状態を渡しました。画面を開くには oboete view --open"
+        );
     }
 
     /// G22 (parity row 11): while curation waits for the owner, session start says so to the
@@ -8823,7 +8858,7 @@ mod tests {
             let v: Value = serde_json::from_str(&out).unwrap();
             assert_eq!(
                 v["systemMessage"].as_str().unwrap().lines().last().unwrap(),
-                "oboete: memory is on. 1 remembered items for this repository were handed over. Open the page with: oboete view --open",
+                "oboete: memory is on. 1 remembered item for this repository was handed over. Open the page with: oboete view --open",
                 "{language}"
             );
         }
