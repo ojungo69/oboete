@@ -1,0 +1,39 @@
+docs/settings-ai-models.md
+  s_9d8c4e25263f8f::t_79178676a68bac 35
+src/provider.rs
+  s_9d8c4e25263f8f::t_85eb6f2a8ae3c4 4254-4271,4277-4281,4283-4320
+  s_9d8c4e25263f8f::t_1e7c09d5e1f1ea 4272-4276,4282
+  s_9d8c4e25263f8f::t_563af3f7a6e389 2985-2986
+  s_9d8c4e25263f8f::t_4b2fbe0c742916 2277-2285
+  s_9d8c4e25263f8f::t_08f637cb1b2014 3207-3212
+  s_9d8c4e25263f8f::t_89c06778cf293b 4321-4345
+  s_9d8c4e25263f8f::t_1ebccd5677a151 6984
+  s_9d8c4e25263f8f::t_f4b9009c6e7d9d 6954-6956,6959-6983,6985-6989
+  s_9d8c4e25263f8f::t_48c6ada7e92757 2259-2260
+  s_9d8c4e25263f8f::t_957ea233cad828 6957-6958
+  s_9d8c4e25263f8f::t_8398ae6078017e 2386-2389,2397,2401-2404,2407
+  s_9d8c4e25263f8f::t_ac5b1adf370c1a 3266-3280,3284
+  s_9d8c4e25263f8f::t_390be2f8a1229d 2398-2400
+docs/prompt-cache.md
+  s_9d8c4e25263f8f::t_e60161742dc772 43-50
+  s_9d8c4e25263f8f::t_fd50dbf8c2b198 1-42,51-60,65-78
+  s_9d8c4e25263f8f::t_5e39d2552d7714 61-64
+docs/spec.md
+  s_9d8c4e25263f8f::t_9efa0c1275c0c1 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87e011653b1a3d3f29c105ab39dc6a202bc9f7a9",
+  "prompts": {},
+  "sessions": {
+    "s_9d8c4e25263f8f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "de61d988-4cc5-4419-8d58-1c14b18baf2a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
