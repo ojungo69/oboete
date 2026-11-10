@@ -54,7 +54,8 @@ note (docs/file-note.md).
   `CLAUDE_MEM_MEMORY_SEARCH_HOOK_ENABLED`), on the detailed settings page; where nothing is
   recorded; before the stores are made; when the search fails; when it has not answered 3 s after
   the hook started, its discovery, the reads of the stores and the vector's wait included
-  (`LOOKUP_WAIT`, claude-mem's `timeoutMs: 3_000` for its worker's search), the search left on its
+  (`LOOKUP_WAIT`, claude-mem's `timeoutMs: 3_000` for its worker's search), or by the end of the
+  hook's time for what it injects where that comes sooner (docs/hook-time.md), the search left on its
   thread until the hook exits, and then no file note either, since the wait spent the hook's time.
   A subagent's lookup gets it too, as claude-mem's handler runs before its subagent check.
 

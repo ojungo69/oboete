@@ -76,6 +76,10 @@ const GROK_EVENTS: &[(&str, u32)] = &[
     ("SessionEnd", 3),
 ];
 const AGY_FLAT_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
+/// The timeout, in seconds, of every hook `setup` writes for agy and for Cursor: what their specs
+/// write and what `hook_timeout` counts a hook's time from.
+const AGY_TIMEOUT: u32 = 10;
+const CURSOR_TIMEOUT: u32 = 10;
 const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("sessionStart", "SessionStart"),
     ("beforeSubmitPrompt", "UserPromptSubmit"),
@@ -85,6 +89,23 @@ const CURSOR_EVENTS: [(&str, &str); 7] = [
     ("preCompact", "PreCompact"),
     ("sessionEnd", "SessionEnd"),
 ];
+
+/// The timeout `setup` writes for `agent`'s hook on `event`, which the hook's own time is counted
+/// from (docs/hook-time.md): none where oboete writes no timeout (OpenCode's and Pi's plugins, an
+/// agent with no adapter) or no such hook.
+pub(crate) fn hook_timeout(agent: &str, event: &str) -> Option<std::time::Duration> {
+    let secs = match agent {
+        "claude" => CLAUDE_EVENTS.iter().find(|(e, _)| *e == event)?.1,
+        "codex" => CODEX_EVENTS.iter().find(|(e, ..)| *e == event)?.2,
+        "grok" => GROK_EVENTS.iter().find(|(e, _)| *e == event)?.1,
+        "agy" => {
+            (AGY_FLAT_EVENTS.contains(&event) || event == "PostToolUse").then_some(AGY_TIMEOUT)?
+        }
+        "cursor" => (CURSOR_EVENTS.iter().any(|(_, e)| *e == event)).then_some(CURSOR_TIMEOUT)?,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(u64::from(secs)))
+}
 
 /// MUST-M10 (spec 4.7): each agent's injection points (`POINTS`), each with the tests that drive
 /// it through `run_io`, `inject_text` or a Node harness. None is live-verified yet: Task 8 Step
@@ -1956,12 +1977,12 @@ fn agy_spec(cmd: &HookCommand, windows: bool) -> Result<Value> {
     for event in AGY_FLAT_EVENTS {
         spec.insert(
             event.to_string(),
-            json!([{"type":"command", "command":cmd.agy_line(event, windows)?, "timeout":10}]),
+            json!([{"type":"command", "command":cmd.agy_line(event, windows)?, "timeout":AGY_TIMEOUT}]),
         );
     }
     spec.insert(
         "PostToolUse".to_string(),
-        json!([{"matcher":"*", "hooks":[{"type":"command", "command":cmd.agy_line("PostToolUse", windows)?, "timeout":10}]}]),
+        json!([{"matcher":"*", "hooks":[{"type":"command", "command":cmd.agy_line("PostToolUse", windows)?, "timeout":AGY_TIMEOUT}]}]),
     );
     Ok(Value::Object(spec))
 }
@@ -2345,7 +2366,7 @@ fn cursor_hook_spec(cmd: &HookCommand, windows: bool) -> Result<Value> {
     for (step, event) in CURSOR_EVENTS {
         hooks.insert(
             step.to_string(),
-            json!([{"command":cmd.cursor_line(event, windows)?,"timeout":10}]),
+            json!([{"command":cmd.cursor_line(event, windows)?,"timeout":CURSOR_TIMEOUT}]),
         );
     }
     Ok(Value::Object(hooks))
@@ -2531,7 +2552,8 @@ fn cursor_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String 
                 Ok(s) => s,
                 Err(e) => return format!("cannot run: {e}"),
             };
-            if entry["command"] == command && entry["timeout"] == 10 && !correct[index] {
+            if entry["command"] == command && entry["timeout"] == CURSOR_TIMEOUT && !correct[index]
+            {
                 correct[index] = true;
             } else {
                 stale += 1;
@@ -3094,6 +3116,11 @@ pub fn doctor(home: &Path) -> Result<()> {
             println!("injection: settings are wrong, so nothing is injected: {e:#}");
             unhealthy.push("injection settings are wrong");
         }
+    }
+    // The hooks that were still running at 2 s (docs/hook-time.md), whatever `[inject]` holds:
+    // the record is every hook's.
+    if let Some(line) = crate::hook_time::doctor_line(home, crate::db::now_ms()) {
+        println!("{line}");
     }
     // `[chain]` as it applies, under each entry's line.
     let cfg = config::load(home)?;
@@ -3946,6 +3973,67 @@ fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/hook-time.md: a hook's own time is counted from the timeout its agent's settings
+    /// were given, and there is none where oboete writes no timeout.
+    #[test]
+    fn a_hooks_timeout_is_the_one_setup_writes() {
+        fn secs(agent: &str, event: &str) -> Option<u64> {
+            hook_timeout(agent, event).map(|t| t.as_secs())
+        }
+        assert_eq!(secs("claude", "UserPromptSubmit"), Some(5));
+        assert_eq!(secs("claude", "SessionStart"), Some(10));
+        assert_eq!(secs("claude", "SessionEnd"), Some(3));
+        assert_eq!(secs("codex", "PostToolUse"), Some(5));
+        assert_eq!(secs("codex", "SessionStart"), Some(10));
+        assert_eq!(secs("grok", "SessionStart"), Some(5));
+        assert_eq!(secs("agy", "PreInvocation"), Some(10));
+        assert_eq!(secs("agy", "PostToolUse"), Some(10));
+        assert_eq!(secs("cursor", "UserPromptSubmit"), Some(10));
+        // Every hook `setup` writes has one, as written: each agent's own spec is read.
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        for (agent, groups) in [
+            ("claude", claude_groups(&cmd)),
+            ("codex", codex_groups(&cmd)),
+            ("grok", grok_groups(&cmd)),
+        ] {
+            assert!(!groups.is_empty());
+            for (event, group) in groups {
+                let written = group["hooks"][0]["timeout"].as_u64();
+                assert!(written.is_some(), "{agent} {event}");
+                assert_eq!(secs(agent, &event), written, "{agent} {event}");
+            }
+        }
+        let agy = agy_spec(&cmd, false).unwrap();
+        assert_eq!(agy.as_object().unwrap().len(), 4);
+        for (event, hooks) in agy.as_object().unwrap() {
+            let written = match event.as_str() {
+                "PostToolUse" => hooks[0]["hooks"][0]["timeout"].as_u64(),
+                _ => hooks[0]["timeout"].as_u64(),
+            };
+            assert!(written.is_some(), "agy {event}");
+            assert_eq!(secs("agy", event), written, "agy {event}");
+        }
+        let cursor = cursor_hook_spec(&cmd, false).unwrap();
+        for (step, event) in CURSOR_EVENTS {
+            let written = cursor[step][0]["timeout"].as_u64();
+            assert!(written.is_some(), "cursor {step}");
+            assert_eq!(secs("cursor", event), written, "cursor {step}");
+        }
+        for (agent, event) in [
+            ("claude", "Nope"),
+            ("agy", "SessionEnd"),
+            ("cursor", "beforeSubmitPrompt"),
+            ("opencode", "SessionStart"),
+            ("pi", "SessionStart"),
+            ("aider", "Stop"),
+        ] {
+            assert_eq!(secs(agent, event), None, "{agent} {event}");
+        }
+    }
 
     /// Parity row 50 (CodeRabbit on #618): the delete command is copied as it is, so neither
     /// PowerShell nor a POSIX shell reads anything in the home's path.

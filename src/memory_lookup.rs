@@ -222,15 +222,25 @@ pub fn lookup(tool: &str, args: &Value, cwd: &Path, roots: &Roots) -> Option<Loo
 /// id and title: `Search::lookup_index`), inside the memory fence after
 /// `LOOKUP`, the whole within `room` UTF-16 units and cut at a line; none for any other call, with
 /// `[inject] memory_lookup` off, where nothing is recorded, before the stores are made, or when
-/// the search fails or has not answered within `LOOKUP_WAIT` (`Late`; the native lookup goes on as
-/// it would). A subagent's lookup gets it too, as claude-mem's handler runs before its subagent
-/// check.
-pub fn answer(home: &Path, payload: &Value, room: usize) -> anyhow::Result<Option<String>> {
-    #[cfg(test)]
-    if let Some(wait) = TEST_WAIT.get() {
-        return answer_within(home, payload, room, wait);
+/// the search fails or has not answered within `LOOKUP_WAIT`, or within what remains of the
+/// hook's time where that is less (`Late`; the native lookup goes on as it would). A hook with no
+/// time left asks nothing, and is not late: the call may be no lookup at all (docs/hook-time.md).
+/// A subagent's lookup gets it too, as claude-mem's handler runs before its subagent check.
+pub fn answer(
+    home: &Path,
+    payload: &Value,
+    room: usize,
+    clock: &crate::hook_time::Clock,
+) -> anyhow::Result<Option<String>> {
+    if clock.over() {
+        return Ok(None);
     }
-    answer_within(home, payload, room, LOOKUP_WAIT)
+    #[cfg(test)]
+    let wait = TEST_WAIT.get().unwrap_or(LOOKUP_WAIT);
+    #[cfg(not(test))]
+    let wait = LOOKUP_WAIT;
+    // What remains of the hook's time when that is less (docs/hook-time.md).
+    answer_within(home, payload, room, clock.left(wait))
 }
 
 /// A lookup whose search did not answer within its wait: it spent the hook's time, so the hook
@@ -598,6 +608,19 @@ mod tests {
             codex_memories: "/h/.codex/memories".into(),
             custom: custom.iter().map(PathBuf::from).collect(),
         }
+    }
+
+    /// cubic on #895: a hook with no time left asks nothing and is not late. The call may be no
+    /// lookup at all, and a late lookup's line on stderr would name one.
+    #[test]
+    fn a_hook_with_no_time_left_asks_no_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let over =
+            crate::hook_time::Clock::started(Duration::from_secs(10), Duration::from_secs(2));
+        over.inject_within(Some(Duration::from_secs(5)));
+        let read = json!({"session_id": "s1", "cwd": "/x", "tool_name": "Read",
+            "tool_input": {"file_path": "/x/a.rs"}});
+        assert!(matches!(answer(home.path(), &read, 1_000, &over), Ok(None)));
     }
 
     /// Codex on #830: an answer heard past the deadline is late, as one not heard by then is,
