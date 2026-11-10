@@ -1,0 +1,35 @@
+src/memory_lookup.rs
+  s_b837d726e3a0bf::t_4eb997306a6476 613-624
+  s_b837d726e3a0bf::t_92e993bcdc55bc 625
+  s_b837d726e3a0bf::t_543a3e282934d7 225-228,235-236,238-241,243
+docs/hook-time.md
+  s_b837d726e3a0bf::t_5e6136d8b9d818 40-42,52-62,73-75,96-99,101-105,112-116,122-125,129-130
+docs/memory-lookup.md
+  s_b837d726e3a0bf::t_af9828c4671252 57-58
+docs/prompt-context.md
+  s_b837d726e3a0bf::t_41afe2c56840ed 71-73
+src/hook.rs
+  s_b837d726e3a0bf::t_f61b6f1d9b589a 4814-4816,7247,7254,7267-7269,7277-7278,7283
+src/hook_time.rs
+  s_b837d726e3a0bf::t_9885b28c8607a2 7-9,275-284,289-290,292,310,319-337,340-342,383,416,423-425,427,430-432,454-479,537-543,583-599,614,624,628-664,695-696,698,707
+src/setup.rs
+  s_b837d726e3a0bf::t_ae823a02e9dc7c 79-82,101-104,1980,1985,2369,2555-2556,3120-3124,3993,3998-4024
+tests/doctor_hook_time.rs
+  s_b837d726e3a0bf::t_52cb30fc126414 1-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67505b4a42465492656bc4a7ef2605094a854a53",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
