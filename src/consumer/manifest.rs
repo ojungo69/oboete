@@ -1462,10 +1462,10 @@ fn status(cwd: &Path) -> Option<String> {
                 std::thread::sleep(Duration::from_millis(10));
             }
             _ => {
-                // No blocking wait: a git stuck in the kernel may not exit at once. It is
-                // reaped when the worker exits.
+                // No blocking wait: a git stuck in the kernel may not exit at once. A thread
+                // waits for it, or it sits as a zombie for as long as a resident worker runs.
                 child.kill().ok();
-                let _ = child.try_wait();
+                std::thread::spawn(move || child.wait());
                 break false;
             }
         }
@@ -1481,6 +1481,60 @@ fn status(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{knowledge, raw, worker};
+
+    /// Audit L1: a git that does not end in time is killed and waited for, so none is left a
+    /// zombie under a worker that stays. Its index here is a pipe no one writes to, which git
+    /// waits on for good.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_git_status_that_does_not_end_is_killed_and_reaped() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let done = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(done.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        let index = repo.path().join(".git/index");
+        let _ = std::fs::remove_file(&index);
+        assert!(
+            Command::new("mkfifo")
+                .arg(&index)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let began = Instant::now();
+        assert_eq!(status(repo.path()), None);
+        assert!(began.elapsed() >= GIT_TIMEOUT, "{:?}", began.elapsed());
+        // This process's children named `git` that ended and were not waited for (`Z` in
+        // `/proc/<pid>/stat`, whose name may hold spaces and parentheses).
+        let zombies = || {
+            let me = std::process::id().to_string();
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| std::fs::read_to_string(entry.path().join("stat")).ok())
+                .filter(|stat| {
+                    let Some((head, rest)) = stat.rsplit_once(')') else {
+                        return false;
+                    };
+                    let mut fields = rest.split_whitespace();
+                    head.ends_with("(git")
+                        && fields.next() == Some("Z")
+                        && fields.next() == Some(&me)
+                })
+                .count()
+        };
+        let until = Instant::now() + Duration::from_secs(10);
+        while zombies() > 0 {
+            assert!(Instant::now() < until, "the killed git stays a zombie");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     fn ev(kind: &str, session: &str, ts: i64, cwd: &Path, body: Value) -> Event {
         Event {
