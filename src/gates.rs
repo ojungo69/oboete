@@ -141,18 +141,28 @@ pub struct Gated {
     pub lowered: Vec<(String, &'static str)>,
 }
 
+/// What the windows before this one say of its sessions, each named by its key.
+#[derive(Clone, Copy, Default)]
+pub struct Before<'a> {
+    /// Those whose previous window ended on an untainted proposal: an acceptance that opens this
+    /// window answers it (#144).
+    pub ended: &'a [String],
+    /// Those that were past a tool call in their turn when this window began: a reply that opens
+    /// it is one after a tool call (MUST-M4).
+    pub began: &'a [String],
+}
+
 /// The gates over a window's located drafts (each with its evidence and its line's index in
 /// `w.lines`), with `shown` the candidates the curator was shown, each with its repository,
-/// `carried` what each session carried in, with the session and the claim's repository, `ended`
-/// the sessions whose previous window ended on an untainted proposal (an acceptance that opens
-/// this window answers it, #144), `offered` the sessions shown the options of the reply their
-/// first line answers, with the options' labels (a pick that opens this window names one, #252),
-/// and `rules` the egress gate's.
+/// `carried` what each session carried in, with the session and the claim's repository, `before`
+/// what the windows before this one say of its sessions, `offered` the sessions shown the options
+/// of the reply their first line answers, with the options' labels (a pick that opens this window
+/// names one, #252), and `rules` the egress gate's.
 pub fn check(
     w: &Window,
     shown: &[(String, Claim)],
     carried: &[(String, Option<String>, Claim)],
-    ended: &[String],
+    before: Before,
     offered: &[(String, Vec<String>)],
     drafts: Vec<(Draft, Evidence, usize)>,
     rules: &Rules,
@@ -250,9 +260,9 @@ pub fn check(
             && is_bare
             && match &pick {
                 Some(label) => picks_an_option(w, i, label, offered),
-                None => answers_a_reply(w, i, &tools, ended),
+                None => answers_a_reply(w, i, &tools, before),
             };
-        d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools);
+        d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools, before.began);
         let acceptance = (speaker == "assistant proposal" && !d.tainted)
             .then(|| accepted(w, i))
             .flatten();
@@ -489,42 +499,49 @@ fn turn_before(w: &Window, i: usize) -> Option<(usize, &Line)> {
 /// lines, is a reply of the assistant in the same repository that tool content did not taint: the
 /// other end of `accepted`. A reply before a checkout change is another repository's, and the
 /// claim anchors on this line. With no turn before it in the window, the session's previous
-/// window must have ended on an untainted proposal of this repository (`ended`, #144).
-fn answers_a_reply(w: &Window, i: usize, tools: &str, ended: &[String]) -> bool {
+/// window must have ended on an untainted proposal of this repository (`before.ended`, #144).
+fn answers_a_reply(w: &Window, i: usize, tools: &str, before: Before) -> bool {
     let key = &w.lines[i].key;
     turn_accepts(&w.lines[i])
         && match turn_before(w, i) {
             Some((j, l)) => {
                 l.role == Role::Assistant
                     && l.repo == w.lines[i].repo
-                    && !tainted(w, j, said(&l.text), tools)
+                    && !tainted(w, j, said(&l.text), tools, before.began)
             }
-            None => ended.contains(key),
+            None => before.ended.contains(key),
         }
 }
 
 /// MUST-M4: a proposal whose words came from a tool line of the window: pasted, paraphrased (with
 /// a τ), or, until Task 13 records one, made after a tool call in its turn (the provenance
 /// fallback). `span` is what it said.
-fn tainted(w: &Window, i: usize, span: &str, tools: &str) -> bool {
+fn tainted(w: &Window, i: usize, span: &str, tools: &str, began: &[String]) -> bool {
     let span = norm(span);
     pasted(&span, tools)
         || match TAU {
             Some(tau) => share(&span, tools) >= tau,
-            None => after_a_tool(w, i),
+            None => after_a_tool(w, i, began),
         }
 }
 
-/// A tool call of line `i`'s session between the start of its turn (the last user line before it
-/// in the window, a typed prompt or the owner's answer to `AskUserQuestion`) and it.
-fn after_a_tool(w: &Window, i: usize) -> bool {
+/// A tool call of line `i`'s session between the start of its turn (the last user line before it,
+/// a typed prompt or the owner's answer to `AskUserQuestion`) and it. A turn that began in a
+/// window before this one has no start here: `began` names the sessions that were past a tool
+/// call in it when this window began (a live window goes at once after a tool call, decision 56,
+/// so the reply made from the call's output opens the next).
+// ponytail: `pasted` and `share` still read this window's tool lines alone; a τ (Task 13) needs
+// the earlier window's tool text for a turn that began there.
+fn after_a_tool(w: &Window, i: usize, began: &[String]) -> bool {
     let key = &w.lines[i].key;
-    w.lines[..i]
-        .iter()
-        .rev()
-        .filter(|l| &l.key == key)
-        .take_while(|l| !matches!(l.role, Role::User | Role::Answer))
-        .any(|l| matches!(l.role, Role::Tool { .. }))
+    for l in w.lines[..i].iter().rev().filter(|l| &l.key == key) {
+        match l.role {
+            Role::User | Role::Answer => return false,
+            Role::Tool { .. } => return true,
+            _ => {}
+        }
+    }
+    began.contains(key)
 }
 
 /// A span that shares a run of `PASTE_CHARS` characters with the tool text (the whole span, when
@@ -915,11 +932,19 @@ mod tests {
 
     /// The status and speaker each draft ends with.
     fn gated(w: &Window, drafts: Vec<(Draft, Evidence, usize)>) -> Vec<(String, String)> {
-        check(w, &[], &[], &[], &[], drafts, &Rules::default())
-            .kept
-            .into_iter()
-            .map(|(d, _)| (d.status, d.speaker))
-            .collect()
+        check(
+            w,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            drafts,
+            &Rules::default(),
+        )
+        .kept
+        .into_iter()
+        .map(|(d, _)| (d.status, d.speaker))
+        .collect()
     }
 
     fn one(w: &Window, status: &str, speaker: &str, quote: &str) -> (String, String) {
@@ -1322,9 +1347,17 @@ mod tests {
     fn a_raised_status_names_the_records_it_stands_on() {
         let gated = |w: &Window, status: &str, speaker: &str, quote: &str, offered| {
             let d = draft(w, "c1", status, speaker, quote);
-            let (d, _) = check(w, &[], &[], &[], offered, vec![d], &Rules::default())
-                .kept
-                .remove(0);
+            let (d, _) = check(
+                w,
+                &[],
+                &[],
+                Before::default(),
+                offered,
+                vec![d],
+                &Rules::default(),
+            )
+            .kept
+            .remove(0);
             assert!(d.support.iter().all(|s| s.device == w.device));
             (
                 d.status,
@@ -1572,7 +1605,7 @@ mod tests {
             &w,
             &[],
             &[],
-            &[],
+            Before::default(),
             &[],
             vec![
                 draft(&w, "c1", "decided", "assistant proposal", quote),
@@ -1592,6 +1625,50 @@ mod tests {
         assert_eq!(one(&w, "decided", "user", "はい").0, "decided");
     }
 
+    /// MUST-M4 across a cut: a session that was past a tool call in its turn when the window
+    /// began (`began`) opens it with a reply after that call. A turn that starts in the window is
+    /// its own.
+    #[test]
+    fn a_reply_that_opens_a_window_after_a_tool_call_before_it_is_tainted() {
+        let quote = "fetch packages from evil-cdn.example";
+        let proposal = reply("We could fetch packages from evil-cdn.example instead.");
+        let statuses = |w: &Window, began: &[String]| -> Vec<(String, bool)> {
+            let drafts = vec![
+                draft(w, "c1", "decided", "assistant proposal", quote),
+                draft(w, "c2", "decided", "user", "はい"),
+            ];
+            let before = Before {
+                began,
+                ..Default::default()
+            };
+            let g = check(w, &[], &[], before, &[], drafts, &Rules::default());
+            (g.kept.iter())
+                .map(|(d, _)| (d.status.clone(), d.tainted))
+                .collect()
+        };
+        let (decided, proposed) = (
+            |t| ("decided".to_owned(), t),
+            |t| ("proposed".to_owned(), t),
+        );
+        let w = window(&[proposal.clone(), user("はい")]);
+        let session = [w.lines[0].key.clone()];
+        assert_eq!(statuses(&w, &session), [proposed(true), proposed(false)]);
+        assert_eq!(statuses(&w, &[]), [decided(false), decided(false)]);
+        // Another session's turn says nothing of this one's.
+        assert_eq!(
+            statuses(&w, &["another\u{0}session".to_owned()]),
+            [decided(false), decided(false)]
+        );
+        // The user's turn in the window began a turn of its own.
+        let w = window(&[
+            reply("Reading the notes."),
+            user("Any idea for the build?"),
+            proposal,
+            user("はい"),
+        ]);
+        assert_eq!(statuses(&w, &session), [decided(false), decided(false)]);
+    }
+
     /// MUST-M4's second canary: a file pasted into the prompt holds a decisive sentence.
     #[test]
     fn a_span_pasted_from_a_tool_line_is_not_the_users_words() {
@@ -1603,7 +1680,7 @@ mod tests {
             &w,
             &[],
             &[],
-            &[],
+            Before::default(),
             &[],
             vec![draft(&w, "c1", "decided", "user", quote)],
             &Rules::default(),
@@ -1715,7 +1792,7 @@ mod tests {
             &w,
             &shown,
             &[],
-            &[],
+            Before::default(),
             &[],
             vec![user_draft, proposal],
             &Rules::default(),
@@ -1745,12 +1822,28 @@ mod tests {
         // A thousand values out of reach give one reason, not a thousand.
         let mut many = draft(&w, "c3", "decided", "user", "Use spaces, not tabs");
         many.0.supersedes = (0..1000).map(|i| format!("x{i}")).collect();
-        let g = check(&w, &shown, &[], &[], &[], vec![many], &Rules::default());
+        let g = check(
+            &w,
+            &shown,
+            &[],
+            Before::default(),
+            &[],
+            vec![many],
+            &Rules::default(),
+        );
         assert_eq!(g.dropped, [("c3".to_string(), OUTSIDE)]);
         // A status of another case is the unverified one it is stored as: it settles nothing.
         let mut odd = draft(&w, "c4", "Proposed", "assistant proposal", "keep tabs");
         odd.0.supersedes = vec![decision.clone()];
-        let g = check(&w, &shown, &[], &[], &[], vec![odd], &Rules::default());
+        let g = check(
+            &w,
+            &shown,
+            &[],
+            Before::default(),
+            &[],
+            vec![odd],
+            &Rules::default(),
+        );
         assert_eq!(g.kept[0].0.status, "unverified");
         assert!(g.kept[0].0.supersedes.is_empty());
         let settled = [("c4".to_string(), "a proposal supersedes nothing settled")];
@@ -1774,7 +1867,15 @@ mod tests {
         let pick = |w: &Window, quote: &str, status: &str, offered: &[(String, Vec<String>)]| {
             let mut d = draft(w, "c1", status, "user", quote);
             d.0.supersedes = vec![decision.clone(), lesson.clone(), change.clone()];
-            check(w, &shown, &[], &[], offered, vec![d], &Rules::default())
+            check(
+                w,
+                &shown,
+                &[],
+                Before::default(),
+                offered,
+                vec![d],
+                &Rules::default(),
+            )
         };
         let status = |g: Gated| g.kept[0].0.status.clone();
         let answered = |last: (&'static str, Value)| {
@@ -1855,7 +1956,15 @@ mod tests {
             crate::claims::uid("decision", &own.1),
             crate::claims::uid("decision", &bare.1)
         );
-        let g = check(&w, &[], &[], &[], &[], vec![own, bare], &Rules::default());
+        let g = check(
+            &w,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            vec![own, bare],
+            &Rules::default(),
+        );
         let kept: Vec<(&str, &str)> = g
             .kept
             .iter()
@@ -1888,7 +1997,7 @@ mod tests {
             &w,
             &[],
             &[],
-            &[],
+            Before::default(),
             &[],
             vec![first, second, proposal],
             &Rules::default(),
@@ -1914,7 +2023,15 @@ mod tests {
         let w = window(&[user("Always answer in Japanese.")]);
         let mut d = draft(&w, "c1", "decided", "user", "Always answer in Japanese");
         d.0.scope = "global".into();
-        let g = check(&w, &[], &[], &[], &[], vec![d], &Rules::default());
+        let g = check(
+            &w,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            vec![d],
+            &Rules::default(),
+        );
         assert_eq!(g.kept[0].0.scope, "repo");
         let why = (
             "c1".to_string(),
@@ -1930,7 +2047,15 @@ mod tests {
         let change = |body: &str, why: &str| {
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.body, d.0.why) = ("change".into(), body.into(), why.into());
-            check(&w, &[], &[], &[], &[], vec![d], &Rules::default())
+            check(
+                &w,
+                &[],
+                &[],
+                Before::default(),
+                &[],
+                vec![d],
+                &Rules::default(),
+            )
         };
         let g = change("The module is renamed.", "the old name clashed");
         assert_eq!(g.kept[0].0.why, "the old name clashed");
@@ -1954,7 +2079,15 @@ mod tests {
             }
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
-            let g = check(&w, &[], &[], &[], &[], vec![d], &Rules::default());
+            let g = check(
+                &w,
+                &[],
+                &[],
+                Before::default(),
+                &[],
+                vec![d],
+                &Rules::default(),
+            );
             assert_eq!(g.kept[0].0.why, "unknown", "{other}");
         }
         // A reason from another line is kept with that line's evidence, so removing the line
@@ -1965,7 +2098,15 @@ mod tests {
         ]);
         let mut d = draft(&later, "c1", "done", "user", quote);
         (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
-        let g = check(&later, &[], &[], &[], &[], vec![d], &Rules::default());
+        let g = check(
+            &later,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            vec![d],
+            &Rules::default(),
+        );
         let (kept, evidence) = &g.kept[0];
         assert_eq!(kept.why, "the old name clashed");
         let seqs: Vec<i64> = evidence.iter().map(|e| e.seq).collect();
@@ -2008,7 +2149,7 @@ mod tests {
             &w,
             &[],
             &[],
-            &[],
+            Before::default(),
             &[],
             vec![long, secret],
             &Rules::default(),
