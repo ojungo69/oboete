@@ -188,6 +188,10 @@ impl Job for OwnerGoals {
         NAME
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     /// M2: a typed prompt the last goals op did not read is due at once when it came before that
     /// op (the op stopped at the budget: a first run goes on), else a day after the op.
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {

@@ -452,6 +452,10 @@ impl Job for Suggestions {
         NAME
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     fn due(&self, s: &Stores, _now: i64) -> Result<Vec<Due>> {
         let round = self.read(s)?;
         Ok((since(&round).into_iter())

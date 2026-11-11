@@ -174,6 +174,10 @@ impl Job for Progress {
         NAME
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
         let read = self.read(s, now)?;
         let (inputs, hidden) = &*read;
@@ -1314,6 +1318,49 @@ mod tests {
         h.s.raw.append_ops(&[(OpKind::Exclusion, undo)]).unwrap();
         let ask = h.ask(&id).unwrap();
         assert!(ask.prompt.contains("An update"), "{}", ask.prompt);
+    }
+
+    /// A5: a round's two passes are one runner's (`turns::round`), and the job keeps its read for
+    /// the round. A repository excluded between them, while the windows' calls are out, is in
+    /// what the job read before, and the second pass's gate holds the list as it is by then: the
+    /// job reads again, and nothing of the repository is sent.
+    #[test]
+    fn an_exclusion_between_a_rounds_two_passes_sends_nothing_of_the_repository() {
+        let mut h = Home::new();
+        // Due for less than an hour: the pass before the windows leaves it for the one after.
+        let a = h.said("s1", 100, "Build the parser.");
+        let b = h.said("s2", 105, "Add tests for the parser.");
+        h.grouped(&["s1", "s2"], &[a, b]);
+        h.s.run();
+        let k = crate::knowledge::open(h.s.home.path()).unwrap();
+        let db = crate::providers_db::open(h.s.home.path()).unwrap();
+        let (rules, summary) = (Rules::load(h.s.home.path()).unwrap(), Summary::default());
+        let sent = RefCell::new(Vec::new());
+        let call = |_: &str,
+                    prompt: &str,
+                    _: &Value,
+                    _: &AnswerCheck,
+                    gate: &Gate|
+         -> Result<ChainResult> {
+            gate()?;
+            sent.borrow_mut().push(prompt.to_owned());
+            Ok(ChainResult {
+                provider: "fake".into(),
+                output: review("in-progress", 40, "", &[]),
+                tier: 1,
+            })
+        };
+        let mut runner = Runner::new(
+            (true, 100),
+            vec![Box::new(Progress::default()) as Box<dyn Job>],
+            Box::new(call),
+            (&rules, &summary, "chain"),
+        );
+        runner.pass(&mut h.s.raw, &k, &db, true).unwrap();
+        assert_eq!(*sent.borrow(), Vec::<String>::new());
+        h.s.exclude(R);
+        runner.pass(&mut h.s.raw, &k, &db, false).unwrap();
+        assert_eq!(*sent.borrow(), Vec::<String>::new());
     }
 
     /// S6: a review that read a summary of a session since excluded, or a card of a window with one

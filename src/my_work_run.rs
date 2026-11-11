@@ -133,6 +133,11 @@ pub(crate) trait Job {
     fn judged(&self, _s: &Stores, _judge: &mut Judging, _now: i64) -> Result<Vec<MyWorkOp>> {
         Ok(Vec::new())
     }
+    /// The list the job read under is no longer the store's (an exclusion, a forget, between a
+    /// round's two passes): what it kept of its read for the round is dropped, and its next `due`
+    /// or `ask` reads again. Every job says so itself: one that keeps a read and did not drop it
+    /// would send, under the newer list, what it read under the older one.
+    fn reread(&self);
 }
 
 /// A request past `[my_work] calls_a_day`, a retry's or a fallback's too (A7): nothing is sent,
@@ -205,6 +210,8 @@ pub(crate) struct Runner<'a> {
     /// Decision 70: the refresh request standing as the round began, by its time, and where its
     /// end is marked.
     refresh: Option<(std::path::PathBuf, i64)>,
+    /// The list the pass before this one read under, which the jobs' kept reads were made by.
+    read_under: Option<crate::curate::Reading>,
 }
 
 impl<'a> Runner<'a> {
@@ -225,6 +232,7 @@ impl<'a> Runner<'a> {
             called: None,
             judge: None,
             refresh: None,
+            read_under: None,
         }
     }
 
@@ -267,6 +275,15 @@ impl<'a> Runner<'a> {
             });
         }
         let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
+        // A5: a job reads once a round and keeps it, and a round has two passes with the windows'
+        // calls between them. This pass's gate holds the list as it is now, so what a job kept
+        // under an older one (before an exclusion, a forget) would pass it: the jobs read again.
+        if self.read_under.as_ref().is_some_and(|was| *was != reading) {
+            for job in &self.jobs {
+                job.reread();
+            }
+        }
+        self.read_under = Some(reading.clone());
         // #730: the subjects a failed batch holds, each by its own wait; read before the judge's
         // pass too, as a job's read for the round (placement's) is kept for the chain's (J5).
         let holds = crate::providers_db::my_work_held(db, now)?;
@@ -994,6 +1011,8 @@ mod tests {
             "group"
         }
 
+        fn reread(&self) {}
+
         fn due(&self, s: &Stores, _: i64) -> Result<Vec<Due>> {
             let mut due = Vec::new();
             for (about, since) in &self.subjects {
@@ -1439,6 +1458,92 @@ mod tests {
         );
         assert_eq!(kept(&s, "r1"), None);
         assert_eq!(asked.borrow().len(), 2);
+    }
+
+    /// A job that keeps what it read for its round, as the real ones do: it shows the session's
+    /// text unless the list it read under excludes a session.
+    #[derive(Default)]
+    struct Keeper {
+        read: RefCell<Option<String>>,
+    }
+
+    impl Job for Keeper {
+        fn name(&self) -> &'static str {
+            "group"
+        }
+
+        fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
+            if self.read.borrow().is_none() {
+                let shown = match s.reading.excluded.is_empty() {
+                    true => "Build the parser.",
+                    false => "",
+                };
+                *self.read.borrow_mut() = Some(shown.to_owned());
+            }
+            Ok(vec![Due {
+                about: "r1".into(),
+                since: now - MINUTE,
+            }])
+        }
+
+        fn ask(&self, _: &Stores, _: &str, _: i64) -> Result<Option<Ask>> {
+            Ok(Some(Ask {
+                prompt: self.read.borrow().clone().unwrap_or_default(),
+                schema: json!({"type": "object"}),
+                read: Read {
+                    spans: vec![],
+                    ops: vec![],
+                },
+                removed: vec![],
+                check: Box::new(|_: &Value| None),
+                subjects: Vec::new(),
+                keep: Box::new(|_: &Value| BTreeMap::new()),
+            }))
+        }
+
+        fn reread(&self) {
+            self.read.take();
+        }
+    }
+
+    /// A5: a round's two passes are one runner's, and a job reads once a round. An exclusion made
+    /// between them (while the windows' calls are out) is not in what the job kept of its read
+    /// under the first pass's list, and the second pass's own list is the newer one, so its gate
+    /// had nothing to refuse: the job reads again under the list the pass sends by.
+    #[test]
+    fn a_job_reads_again_when_the_list_changed_between_a_rounds_passes() {
+        let mut s = Store::new();
+        s.said("s1", "r", 1_000, "Build the parser.");
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let db = crate::providers_db::open(s.home.path()).unwrap();
+        let (rules, summary) = (Rules::load(s.home.path()).unwrap(), Summary::default());
+        let sent = RefCell::new(Vec::new());
+        let call = |_: &str,
+                    prompt: &str,
+                    _: &Value,
+                    _: &AnswerCheck,
+                    gate: &Gate|
+         -> Result<ChainResult> {
+            gate()?;
+            sent.borrow_mut().push(prompt.to_owned());
+            Ok(ChainResult {
+                provider: "fake".into(),
+                output: json!({}),
+                tier: 1,
+            })
+        };
+        let mut runner = Runner::new(
+            (true, 100),
+            vec![Box::new(Keeper::default()) as Box<dyn Job>],
+            Box::new(call),
+            (&rules, &summary, "chain"),
+        );
+        // Before the windows: due a minute, so not yet asked, and its read is kept.
+        let phase = runner.pass(&mut s.raw, &k, &db, true).unwrap();
+        assert!(matches!(phase, Phase::Idle), "{phase:?}");
+        s.exclude("r");
+        runner.pass(&mut s.raw, &k, &db, false).unwrap();
+        assert_eq!(*sent.borrow(), Vec::<String>::new());
     }
 
     fn entry(name: &str, limits: crate::config::Limits) -> crate::config::Provider {

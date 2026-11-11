@@ -276,6 +276,10 @@ impl Job for Grouping {
         "group"
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     /// A repository is due when it has a candidate the newest op about it was not shown (a skip
     /// keeps the ones it gave up on until another comes), from 30 minutes after that op (C5).
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {

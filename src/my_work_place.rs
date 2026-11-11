@@ -202,6 +202,10 @@ impl Job for Place {
         NAME
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
         let round = self.read(s, now)?;
         let mut due: Vec<Due> = (round.batches.iter())
@@ -1552,6 +1556,9 @@ mod tests {
         impl Job for Racing {
             fn name(&self) -> &'static str {
                 self.0.name()
+            }
+            fn reread(&self) {
+                self.0.reread()
             }
             fn due(&self, s: &Stores, now: i64) -> Result<Vec<Due>> {
                 self.0.due(s, now)
