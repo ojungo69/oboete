@@ -5,8 +5,22 @@ on:
   pull_request:
 permissions:
   contents: read
+# A push to a pull request ends the run of the push before it. A run on main is never ended.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  check:
+  # Linux: the format, the lints and the tests, once for each build, side by side. The local
+  # model's code (milestone 4, Task 10) is the `local-embed` build: its tests run on stubs, so
+  # wherever it builds.
+  linux:
+    name: linux (${{ matrix.build.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - { name: default, flags: "" }
+          - { name: local-embed, flags: "--features local-embed" }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -17,19 +31,30 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.build.name }}
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      # The local model's code (milestone 4, Task 10): its tests run on stubs, so wherever it builds.
-      - run: cargo clippy --all-targets --features local-embed -- -D warnings
-      - run: cargo test --features local-embed
-  # The tests on the other two platforms the owner uses (milestone 2 plan, "After the tasks").
-  # Windows builds with MSVC here, the release toolchain the WSL cross-build does not cover.
-  test-os:
+      - run: cargo clippy --locked --all-targets ${{ matrix.build.flags }} -- -D warnings
+      - run: cargo test --locked ${{ matrix.build.flags }}
+  # The name the ruleset requires: it passes when both Linux builds passed.
+  check:
+    needs: linux
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.linux.result }}" = success
+  # The other two platforms the owner uses (milestone 2 plan, "After the tasks"), each build side
+  # by side. Windows builds with MSVC here, the release toolchain the WSL cross-build does not
+  # cover. The lints run here too: code that only these platforms compile is seen by no other run.
+  os:
+    name: ${{ matrix.os }} (${{ matrix.build.name }})
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+        build:
+          - { name: default, flags: "" }
+          - { name: local-embed, flags: "--features local-embed" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,21 +63,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test
-      # A hook test leaves the worker it starts idling for its minute (tests/hook_output.rs), and
-      # Windows cannot replace a running exe: the next step's link of oboete.exe fails while it
-      # waits. No test runs between the steps, so what is left is ended.
-      - if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # One that ends by itself meanwhile throws on Kill: nothing is left to end then.
-          Get-Process -Name oboete -ErrorAction SilentlyContinue | ForEach-Object {
-            try { $_.Kill(); $_.WaitForExit(30000) | Out-Null } catch {}
-          }
-          # One still running would hold the exe the next build links: the step says so instead.
-          if (Get-Process -Name oboete -ErrorAction SilentlyContinue) { throw "an oboete process is still running" }
-      - run: cargo test --features local-embed
+        with:
+          key: ${{ matrix.build.name }}
+      - run: cargo clippy --locked --all-targets ${{ matrix.build.flags }} -- -D warnings
+      - run: cargo test --locked ${{ matrix.build.flags }}
+  # The names the ruleset requires: each passes when every build on both platforms passed.
+  test-os:
+    name: test-os (${{ matrix.os }})
+    needs: os
+    if: always()
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.os.result }}" = success
+  # Cargo.toml's rust-version is a promise to whoever builds from source: both builds compile
+  # with that toolchain.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo check --locked --all-targets
+      - run: cargo check --locked --all-targets --features local-embed
   # SonarQube Cloud: Rust is not covered by its automatic analysis, so the scanner runs here.
   # Forks and Dependabot get no SONAR_TOKEN, so their pull requests skip this job.
   sonar:
@@ -73,7 +114,7 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov
-      # Both builds, as the check job tests them (the local model's code runs only with its
+      # Both builds, as the linux job tests them (the local model's code runs only with its
       # feature), merged as cargo-llvm-cov's README shows.
       - run: cargo llvm-cov clean --workspace
       - run: cargo llvm-cov --no-report

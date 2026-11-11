@@ -1222,7 +1222,7 @@ pub(crate) fn viewer_vector(
 }
 
 /// `local_query` as an agent's MCP server runs it (tests): whether it got a vector.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))] // Its test runs on Linux alone.
 pub(crate) fn reader_query(
     home: &Path,
     q: &Query,

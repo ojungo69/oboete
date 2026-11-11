@@ -1068,6 +1068,8 @@ fn copy_first_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
         .parent()
         .ok_or(std::io::ErrorKind::InvalidInput)?;
     let directory = parent.join(format!(".oboete-backup-{name}"));
+    // Its mode is set on Unix alone.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -3764,8 +3766,10 @@ pub(crate) fn diagnostic_directory_names(
             let name: Vec<u16> = rest
                 .get(start..end)
                 .ok_or(std::io::ErrorKind::InvalidData)?
-                .chunks_exact(2)
-                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_ne_bytes(*pair))
                 .collect();
             // Entry offsets are documented as aligned; byte parsing does not assume that.
             let name = std::ffi::OsString::from_wide(&name);
