@@ -1,0 +1,31 @@
+.github/workflows/ci.yml
+  s_b837d726e3a0bf::t_af2c73cfb4754e 8-11,13-23,34-35,37-50,55-57,66-93,95-96,117
+src/isolation.rs
+  s_b837d726e3a0bf::t_3746a1cefc7737 405-406
+src/provider.rs
+  s_b837d726e3a0bf::t_c7d21f1706a9c3 2959-2960
+src/search/b.rs
+  s_b837d726e3a0bf::t_294d21de6ee3f3 1225
+src/settings/judge.rs
+  s_b837d726e3a0bf::t_84435716271748 203
+src/setup.rs
+  s_b837d726e3a0bf::t_81a771631a1958 1071-1072,3769-3772
+src/view.rs
+  s_b837d726e3a0bf::t_4a194ab1d55fb2 9696,9728,9739,10469,10521
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1d1f3e5c97c4d6b5ea9d444a764d8386c5ddccb8",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
