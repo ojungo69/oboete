@@ -124,6 +124,39 @@ regex = '''(?i)\bhooks\.slack\.com/(?:services|workflows|triggers)/t[a-z0-9]+/[a
 keywords = ["hooks.slack.com"]
 
 [[rules]]
+id = "microsoft-teams-webhook-secret"
+description = "The path of a Microsoft Teams incoming webhook URL, whole: gitleaks' rule names no group for the secret, so its first group, a repeat inside the first GUID, was masked (five characters) and the rest of the URL kept"
+regex = '''(?i)\b[a-z0-9-]+\.webhook\.office\.com/webhookb2/((?:[a-z0-9*-]|\[REDACTED\])+@[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}(?:/[a-z0-9_-]+)*)'''
+keywords = ["webhook.office.com"]
+# The first GUID may hold masks or a tombstone's stars: that is how a record stored under gitleaks'
+# rule alone reads (`…-[REDACTED][REDACTED]@…`), and a rescan has to find the rest of its path.
+
+[[rules]]
+id = "workflow-trigger-signature"
+description = "The signature of an Azure Logic Apps or Power Automate HTTP trigger URL, which a Teams workflow webhook is (they replace the incoming webhooks above): the `sig` parameter is the URL's only credential, and gitleaks has no rule for it"
+regex = '''(?i)/workflows/[0-9a-f]{32}/triggers/[^\s"'`<>]+?[?&](?:amp;)?sig=([a-z0-9_%+/=-]{20,})'''
+entropy = 3
+keywords = ["/triggers/"]
+# Both hosts: `prod-NN.<region>.logic.azure.com` and `<environment>.environment.api.powerplatform.com`
+# have `/workflows/<32 hex>/triggers/` in the path. A placeholder (`sig=XXXX…`) is below the entropy.
+
+[[rules]]
+id = "jwt-base64-whole"
+description = "A Base64-encoded JSON Web Token, whole: gitleaks' rule names its header markers as groups, so the marker that took part was masked (ten characters), masked-remainder took the rest of its line, and a token wrapped over lines kept every line after the first"
+regex = '''\b(?:(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}(?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$)|(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}={0,2})|ZXlK\[REDACTED\](?:\[REDACTED\]|\*+)?((?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$))'''
+entropy = 2
+keywords = ["zxlk"]
+# Three forms, the wrapped one first. Wrapped: the first line, then lines of 60 to 80 Base64 characters
+# (64 and 76 are the common widths), then at most one shorter last line, and then the line's end or
+# a closing quote, which is matched outside the group: so the line after a token is not taken for
+# its last line unless it is a bare word alone on its line after a token that ended a full line.
+# On one line: gitleaks' pattern without its line breaks and backslash, so the token ends with its
+# line. A last line that other text follows on the same line is left.
+# Last, what a record stored under gitleaks' rule alone holds of a wrapped token: its head masked
+# (`ZXlK[REDACTED]`, then the mask or the stars of the line's rest) and the lines after it, which a
+# rescan has to find. The head stays as it is; the lines after it are the secret.
+
+[[rules]]
 id = "masked-remainder"
 description = "What is glued to a mask already there, right after it or after the quote that closed the masked value: the end of a secret a rule stopped short of, as gitleaks' slack-webhook-url left the end of a workflow webhook's secret after 56 characters of its path (which a rescan finds no other way, the host being masked), or a shell's word that goes on after a quoted value ('abc'def is one argument)"
 regex = '''\[REDACTED\](?:([A-Za-z0-9+]{4,})|["']([A-Za-z0-9_+-][^\s"'`\\<>;,(){}\[\]$|&]{3,})|/([A-Za-z0-9+]{16,}))|["'][ \t]+\[REDACTED\][ \t]+["']([A-Za-z0-9_+-][^\s"'`\\<>;,(){}\[\]$|&]{3,})'''

@@ -444,6 +444,52 @@ mod tests {
         assert_eq!(tombstones(&raw), 1);
     }
 
+    /// #932: a rule that takes a secret whole finds what the rules before it left in a stored
+    /// record, also over the tombstone an earlier rescan wrote inside it. The new range holds the
+    /// old one and is no part of it, so it gets its tombstone: the record reads with all of it
+    /// starred, its body is the JSON it was, and the next pass adds none.
+    #[test]
+    fn a_range_over_an_earlier_tombstone_is_tombstoned_and_reads_starred_whole() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let guid = |first: &str| format!("{first}-4e5f-6a7b-8c9d-{}", "0e1f2a3b4c5d");
+        let (user, last) = (guid("9f8e7d6c"), guid("0a9b8c7d"));
+        let key = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+        // As a binary before `masked-remainder` stored a Teams webhook: five characters of the
+        // first GUID masked and its end glued to the mask, which an earlier rescan then took.
+        let url = "curl https://contoso.webhook.office.com/webhookb2/";
+        let stored = format!(
+            "{url}1a2b3c4d-4e5f-6a7b-{}0e1f2a3b4c5d@{user}/IncomingWebhook/{key}/{last} -v\nnext line",
+            crate::redact::MASK
+        );
+        let event = serde_json::json!({ "prompt": stored }).to_string();
+        let seq = raw.append(&raw::test_event(&event)).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Range {
+            device,
+            seq,
+            offset: event.find("0e1f2a3b4c5d@").unwrap() as i64,
+            length: 12,
+        })
+        .unwrap();
+        assert!(body(&raw, seq).contains(&format!("{}************@", crate::redact::MASK)));
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 2);
+        let read = body(&raw, seq);
+        for part in [user.as_str(), key.as_str(), last.as_str()] {
+            assert!(!read.contains(part), "{read}");
+        }
+        let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+        let prompt = read["prompt"].as_str().unwrap();
+        assert!(
+            prompt.starts_with(&format!("{url}**")) && prompt.ends_with("** -v\nnext line"),
+            "{prompt}"
+        );
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 2); // once
+    }
+
     #[test]
     fn a_restore_that_skips_the_tombstone_masks_its_target_again() {
         // #83, raised on #110: the tombstone is sealed in a later segment than its target.
