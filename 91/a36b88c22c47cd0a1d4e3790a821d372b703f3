@@ -1,0 +1,30 @@
+src/import.rs
+  s_b837d726e3a0bf::t_4eb613009e5f97 29-30
+  s_b837d726e3a0bf::t_0425ac06c4e2ac 305-310,323-325,458-459,1670,1787
+  s_b837d726e3a0bf::t_95a01a2ee15ad0 235,293,311-321,343,1674
+  s_b837d726e3a0bf::t_7b632e286695c4 48-50,162,231-234,289-292,322,342,344-346,460-462,616-617,632-633,638,672-695,715,744-749,1025-1031,1538-1669,1671-1673,1675-1786,1788-1789
+docs/claude-mem-import.md
+  s_b837d726e3a0bf::t_614a95ab2435ca 114-129,147-156
+docs/redaction-switch.md
+  s_b837d726e3a0bf::t_518c73658b5506 82-87
+src/raw.rs
+  s_b837d726e3a0bf::t_0b35f213e658c4 733-735,737,742-750,890-892,1823,3251,6884,11907-11951
+src/redact.rs
+  s_b837d726e3a0bf::t_a5ed5b470c297e 718-721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "91a36b88c22c47cd0a1d4e3790a821d372b703f3",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
