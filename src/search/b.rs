@@ -21,6 +21,9 @@ const DEPTH: usize = 100;
 const PAGES: usize = 10;
 /// Candidates the bit index gives a leg's vector side before they are scored in fp32 (D8).
 const CANDIDATES: i64 = 400;
+/// The most one KNN may ask the index for (sqlite-vec's `SQLITE_VEC_VEC0_K_MAX`): a larger `k` is
+/// an error, not a shorter list.
+const K_MAX: i64 = 4096;
 /// The query embedding's own timeout (D8): past it, search answers from full text.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 /// A reader's local model goes after this long without a search (D14), and one whose load
@@ -1784,7 +1787,10 @@ impl Near {
         ];
         let mut args = vec![
             Value::Blob(crate::embed::bits(&self.vector)),
-            Value::Integer(CANDIDATES.max(depth as i64)),
+            // A depth past the limit (each uid a forget tombstoned widens the imported leg's)
+            // reads the limit: a search that many forgets failed answers from the nearest it may
+            // ask for.
+            Value::Integer(CANDIDATES.max(depth as i64).min(K_MAX)),
             Value::Text(self.embedder.clone()),
         ];
         if kind != "i" {
@@ -3989,6 +3995,44 @@ mod tests {
             super::tests::keys(&query_with(s.home.path(), &skip, Some(&vector)).unwrap()),
             [ids[2].as_str()]
         );
+    }
+
+    /// sqlite-vec refuses a `k` over 4,096. Each uid a forget ever tombstoned (a claim made from a
+    /// forgotten record, a document forgotten by its uid) widens the imported leg's vector read,
+    /// as its vector may still be in the index: a store with more of them than that asked for a
+    /// `k` the index refuses, and every search with a vector failed.
+    #[test]
+    fn more_forgotten_uids_than_a_knn_may_ask_for_do_not_fail_the_search() {
+        let mut s = Store::new();
+        let ids = s.imported_all(vec![(
+            "obs".into(),
+            "work",
+            "feature",
+            1_000,
+            "Nebula".into(),
+        )]);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        // Another device's forgets, as its ops arrive: more uids than one KNN may ask for.
+        rusqlite::Connection::open(s.home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+                 INSERT INTO ops (device, op_seq, type, ts, body, batch)
+                 SELECT 'elsewhere', i, 'forget', 0, json_object('uid', 'gone-' || i), i FROM n",
+                [],
+            )
+            .unwrap();
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            raw: RawArm::Off,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(keys(&found), [ids[0].as_str()]);
     }
 
     /// Tools slice 3 (V1, V4): cards and summaries are found by their vectors where no full-text
