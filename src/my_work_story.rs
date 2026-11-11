@@ -812,6 +812,22 @@ mod tests {
         assert!(h.due().is_empty());
     }
 
+    /// A5: what the job read is kept for the round, and `Job::reread` drops it. Here
+    /// a milestone a review kept since is in its next read, and not while the first is
+    /// kept. The runner tells every job so when the list changed between a round's two passes
+    /// (`my_work_run`).
+    #[test]
+    fn the_job_keeps_its_read_until_it_is_told_to_read_again() {
+        let mut h = Home::new();
+        let job = Story::default();
+        let due = |h: &Home| h.with(|s| job.due(s, crate::db::now_ms()).unwrap().len());
+        assert_eq!(due(&h), 0);
+        h.reviewed("g:1", &[("2026-09-02", "It reads a line.")]);
+        assert_eq!(due(&h), 0, "kept for the round");
+        job.reread();
+        assert_eq!(due(&h), 1, "read again");
+    }
+
     /// P7: unlike claude-mem's, a story behind its reviews is due by itself, three hours after the
     /// last run; with none written, at once.
     #[test]

@@ -1031,6 +1031,22 @@ mod tests {
             "requests": requests, "same_as": same_as, "evidence": "They belong together."})
     }
 
+    /// A5: what the job read is kept for the round, and `Job::reread` drops it. Here
+    /// a request made since is in its next read, and not while the first is
+    /// kept. The runner tells every job so when the list changed between a round's two passes
+    /// (`my_work_run`).
+    #[test]
+    fn the_job_keeps_its_read_until_it_is_told_to_read_again() {
+        let mut h = Home::new();
+        let job = Place::default();
+        let due = |h: &Home| h.with(|s| job.due(s, crate::db::now_ms()).unwrap().len());
+        assert_eq!(due(&h), 0);
+        h.requests(2);
+        assert_eq!(due(&h), 0, "kept for the round");
+        job.reread();
+        assert!(due(&h) > 0, "read again");
+    }
+
     /// F3: every request is placed once, by its anchor, in a listed area or Other; placed, it is
     /// not due; a conversation joining it places it again, alone.
     #[test]

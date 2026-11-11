@@ -1100,6 +1100,22 @@ mod tests {
         );
     }
 
+    /// A5: what the job read is kept for the round, and `Job::reread` drops it. Here
+    /// a prompt typed since is in its next read, and not while the first is
+    /// kept. The runner tells every job so when the list changed between a round's two passes
+    /// (`my_work_run`).
+    #[test]
+    fn the_job_keeps_its_read_until_it_is_told_to_read_again() {
+        let mut h = Home::new();
+        let job = OwnerGoals::default();
+        let due = |h: &Home| h.with(|s| job.due(s, crate::db::now_ms()).unwrap().len());
+        assert_eq!(due(&h), 0);
+        h.said("s1", R, 0, "Make the parser fail fast on a bad header.");
+        assert_eq!(due(&h), 0, "kept for the round");
+        job.reread();
+        assert_eq!(due(&h), 1, "read again");
+    }
+
     /// M2: with no typed prompt after the last goals, nothing is due and no call goes; an agent's
     /// marked prompt is none.
     #[test]

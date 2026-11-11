@@ -1336,6 +1336,37 @@ mod tests {
         );
     }
 
+    /// A5: what the job read is kept for the round, and `Job::reread` drops it. Here
+    /// a repository whose conversation came since is in its next read, and not while the first is
+    /// kept. The runner tells every job so when the list changed between a round's two passes
+    /// (`my_work_run`).
+    #[test]
+    fn the_job_keeps_its_read_until_it_is_told_to_read_again() {
+        let mut h = Home::new();
+        let job = Grouping::default();
+        let due = |h: &Home| {
+            let k = crate::knowledge::open(h.s.home.path()).unwrap();
+            let rules = Rules::load(h.s.home.path()).unwrap();
+            let summary = Summary::default();
+            let reading = Reading::now(&h.s.raw, Reads::Live).unwrap();
+            let stores = Stores {
+                raw: &h.s.raw,
+                k: &k,
+                rules: &rules,
+                summary: &summary,
+                reading: &reading,
+                held: &crate::my_work_run::NOT_HELD,
+            };
+            job.due(&stores, crate::db::now_ms()).unwrap().len()
+        };
+        assert_eq!(due(&h), 0);
+        h.said("s1", R, 0, "Build the parser.");
+        h.s.run();
+        assert_eq!(due(&h), 0, "kept for the round");
+        job.reread();
+        assert_eq!(due(&h), 1, "read again");
+    }
+
     /// C1: a conversation whose work names a request id is that request's, named by its agent,
     /// and not grouped; nor is one last active more than 14 days ago.
     #[test]
