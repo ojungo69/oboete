@@ -8570,6 +8570,8 @@ mod tests {
                 .unwrap(),
             None
         );
+        let records = |raw: &raw::Raw| raw.after(raw.device(), 0, 10_000).unwrap().len();
+        let before = records(&raw);
         crate::unwritten::keep(
             h,
             &[crate::capture::Captured {
@@ -8582,6 +8584,9 @@ mod tests {
         crate::unwritten::write_back(h, &mut raw, &Default::default())
             .1
             .unwrap();
+        // The kept call is taken, and nothing of it is in the store.
+        assert_eq!(crate::unwritten::counts(h).unwrap(), (0, 0));
+        assert_eq!(records(&raw), before);
         // In the range, from before it: not recorded, nor imported.
         assert_eq!(
             raw.append_with_ledger(&event(None, 9_500), &[], "")
