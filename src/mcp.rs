@@ -2721,7 +2721,10 @@ mod tests {
     fn mem_search_gates_a_title_before_it_cuts_it() {
         let (mut s, server, _, _) = quartz();
         let seq = s.said("work", "github.com/o/r", 1_700_000_006_000, "Quartz cut.");
-        let title = format!("Quartz cut {} amber-123456", "x".repeat(222));
+        // 241 bytes: cut first, the title would end `amber-12345`, one digit short of the rule,
+        // and be shown; gated first it is 239 bytes, and the mask is shown whole.
+        let title = format!("Quartz cut {} amber-123456", "x".repeat(217));
+        assert_eq!(title.len(), 241);
         s.cards(seq, seq, json!([{"type": "bugfix", "title": title}]), false);
         s.run();
         std::fs::write(
@@ -2732,6 +2735,7 @@ mod tests {
         let found = body(mem(&server, json!({"query": "quartz cut"})));
         assert!(found.contains("Quartz cut xxx"), "{found}");
         assert!(!found.contains("amber-1"), "{found}");
+        assert!(found.contains("xxx [REDACTED]"), "{found}");
     }
 
     /// claude-mem's timeline always holds its anchor: a record a timeline does not show (an
