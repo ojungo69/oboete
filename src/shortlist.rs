@@ -696,7 +696,6 @@ pub fn report(
 /// The shortlist the worker keeps for `key`'s session on a checkout, the best first: none when
 /// it keeps none (`per_prompt` was off, or the key is not built yet).
 // The prompt point (Step 6) reads it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn of(
     k: &Connection,
     (agent, session, repo, branch): (&str, &str, &str, &str),

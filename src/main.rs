@@ -56,8 +56,6 @@ mod my_work_subagents;
 mod provenance;
 mod provider;
 mod providers_db;
-// Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
-#[allow(dead_code)]
 mod raw;
 mod redact;
 mod replay;
@@ -71,7 +69,6 @@ mod shortlist;
 mod transcript;
 mod turns;
 // docs/my-work-model.md slice 1: My Work's grouping, goals and rules (slices 3 to 5) read it.
-#[cfg_attr(not(test), allow(dead_code))]
 mod typed;
 mod unwritten;
 mod view;

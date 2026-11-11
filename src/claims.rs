@@ -1395,7 +1395,6 @@ pub(crate) const DECIDED: &str = concat!(
 );
 
 /// `DECIDED`'s filter alone, on a row `a` of the `active` view: what the shortlist keeps (D9).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const DECIDED_WHERE: &str = decided_where!();
 
 /// A repository's current claims, over the `active` view; `?1` is the repository. A claim `a` is

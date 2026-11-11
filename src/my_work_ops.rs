@@ -247,7 +247,7 @@ pub(crate) struct Kept {
 /// The newest op of `job` about `about`, whichever device wrote it: the latest time, then the
 /// greater device and op seq, as the newest hide op wins (card-hide.md). The older ones are
 /// replaced (S4).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn newest(k: &Connection, job: &str, about: &str) -> Result<Option<Kept>> {
     newest_shown(
         k,

@@ -258,6 +258,7 @@ pub(crate) const SUBAGENT_STOP: &str = "subagent_stop";
 /// end, and a subagent's stop. Nothing a window, a turn or a request made holds a word of one, so a
 /// forget or a mask of one takes nothing made there, and an excluded session's one keeps nothing
 /// made there back (docs/subagents.md).
+#[cfg(test)]
 pub(crate) const LINELESS: [&str; 3] = ["start", "end", SUBAGENT_STOP];
 
 /// `LINELESS` as an SQL list.
@@ -4461,6 +4462,7 @@ impl Raw {
 
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
+    #[cfg(test)]
     pub fn append(&mut self, e: &Event) -> Result<i64> {
         self.append_with_ledger(e, &[], "")?.context(
             "a record of a forgotten session from before its forget, or of a place never recorded: not recorded",
@@ -4602,6 +4604,7 @@ impl Raw {
     /// with its checkpoint, and a killed import leaves neither. A record `denied` asks to leave out
     /// is not recorded; the checkpoint still moves past it. Refuses a record of a live source, and
     /// more than `IMPORT_BATCH` records or `MAX_BATCH_BYTES` of bodies. The seqs recorded.
+    #[cfg(test)]
     pub fn append_imported(
         &mut self,
         batch: &[crate::capture::Captured],
@@ -4615,6 +4618,7 @@ impl Raw {
     /// (`forget::origin`): kept beside the record, and a record whose origin forget denies is not
     /// recorded (D1 rule 5). After any forget, an import without identities is refused: nothing
     /// could tell a forgotten record in it.
+    #[cfg(test)]
     pub fn append_imported_origins(
         &mut self,
         batch: &[crate::capture::Captured],
@@ -6404,6 +6408,7 @@ impl Raw {
     /// dispatch lock: a work state write orders against no provider call. `cwd` is the label of
     /// the writer's working directory: refused (`NeverRecorded`) in a folder never recorded, as in
     /// a repository never recorded (slice 4a).
+    #[cfg(test)]
     pub fn work_state(
         &mut self,
         repo: &str,
@@ -6816,6 +6821,7 @@ impl Raw {
     /// and `MAX_BATCH_BYTES`, each its own batch: an import stopped midway keeps what it appended.
     /// A body that would take its op over `MAX_OP_BYTES` is clipped with a marker; a document
     /// `denied` asks to leave out is not appended. The ops appended.
+    #[cfg(test)]
     pub fn append_imports(&mut self, docs: Vec<ImportDoc>) -> Result<usize> {
         self.append_imports_counted(docs, |_| {})
     }
@@ -7671,6 +7677,7 @@ impl Rebuild {
         Ok(cut)
     }
 
+    #[cfg(test)]
     pub fn finish(self) -> Result<usize> {
         Ok(self.finish_report()?.dropped)
     }
@@ -9866,6 +9873,13 @@ mod tests {
         let last = raw.append(&ev("reply", "github.com/o/one")).unwrap();
         let repo = raw.session_repo(("claude", "s"), first, last).unwrap();
         assert_eq!(repo.as_deref(), Some("github.com/o/one"));
+    }
+
+    /// The SQL list the statements carry is the list the tests walk.
+    #[test]
+    fn the_lineless_kinds_are_one_list_in_sql_and_in_rust() {
+        let kinds: Vec<String> = LINELESS.iter().map(|kind| format!("'{kind}'")).collect();
+        assert_eq!(LINELESS_SQL, format!("({})", kinds.join(", ")));
     }
 
     /// docs/subagents.md: a removal or a mask of a record a curator is shown no line of (a

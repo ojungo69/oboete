@@ -2450,22 +2450,6 @@ fn put_back(home: &Path, name: &str, guard: &crate::executable::CommandHome) -> 
     Ok(())
 }
 
-/// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
-/// return at once: a worker a hook started holds it only while it drains, and a lock just
-/// released can still be held for a moment by a child another thread forked (it keeps the open
-/// file until it execs), which made hook tests run nothing under a parallel suite.
-#[allow(dead_code)] // Task 12's replay drains without waiting.
-/// `run_once` under a lock the caller holds, which it releases when the consumers have run.
-pub fn run_once_holding(home: &Path, held: Lock) -> Result<()> {
-    run_holding(
-        home,
-        0,
-        consumers(home),
-        || {},
-        Some(held),
-        Phases::default(),
-    )
-}
 fn run_once_holding_report(
     home: &Path,
     held: Lock,
@@ -2500,6 +2484,12 @@ fn drain_holding_report(
     result
 }
 
+/// One run now, for a command that has written ops and waits for the consumers to read them (a
+/// claim's correction or mute, `oboete recurate` once it lets the lock go) and for tests. It waits
+/// up to 2 s for the lock rather than return at once: a worker a hook started holds it only while
+/// it drains, and a lock just released can still be held for a moment by a child another thread
+/// forked (it keeps the open file until it execs), which made hook tests run nothing under a
+/// parallel suite.
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut held = lock(home)?;
@@ -5958,7 +5948,11 @@ mod tests {
         assert!(
             kind == "rebuild" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
         );
-        assert_eq!(curation_pause(p), None);
+        // The rebuild has let its lock go, but a child that another test's thread forked holds the
+        // open file until it execs (`run_once`): the pause ends once that child has.
+        until("the pause ends with the rebuild", || {
+            curation_pause(p).is_none()
+        });
     }
 
     /// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
