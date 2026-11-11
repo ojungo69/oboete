@@ -3324,7 +3324,8 @@ struct DiagnosticDirectory {
 
 impl DiagnosticDirectory {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[allow(clippy::useless_conversion)] // statvfs integer widths vary by platform.
+    // statvfs integer widths vary by platform: `f_bavail` is 64 bits on Linux and 32 on macOS.
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     fn available_bytes(&self) -> std::io::Result<u64> {
         use std::os::fd::AsRawFd;
         let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
