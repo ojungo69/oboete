@@ -1,0 +1,38 @@
+src/my_work_run.rs
+  s_b837d726e3a0bf::t_4a8ef3c9ddfafb 278-286
+  s_b837d726e3a0bf::t_9298b92d539db8 1463-1548
+  s_b837d726e3a0bf::t_8b637ee5b71855 235
+  s_b837d726e3a0bf::t_376384c7b716ee 213-214
+  s_b837d726e3a0bf::t_6a05da7aadd882 136-140,1014-1015
+src/my_work_progress.rs
+  s_b837d726e3a0bf::t_5304cc145b5e2d 179,1323-1365
+  s_b837d726e3a0bf::t_37ee28d458b71d 177-178,180
+src/my_work_goals.rs
+  s_b837d726e3a0bf::t_1ab16a6aa01b0f 191-194
+src/my_work_group.rs
+  s_b837d726e3a0bf::t_620b40c8cb70d4 279-282
+src/my_work_judge.rs
+  s_b837d726e3a0bf::t_093a6fdf257c32 1145,1228-1230,1299-1301,1359-1361
+src/my_work_place.rs
+  s_b837d726e3a0bf::t_63bfb22352cf62 205-208,1560-1562
+src/my_work_rules.rs
+  s_b837d726e3a0bf::t_5d0e6ec3549485 455-458
+src/my_work_story.rs
+  s_b837d726e3a0bf::t_389e6473ea6d0e 260-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a8b1acfab7784146b8738cf0cc1f7c8c789488cb",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
