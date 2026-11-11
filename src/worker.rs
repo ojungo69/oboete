@@ -5950,11 +5950,9 @@ mod tests {
         );
         // The rebuild has let its lock go, but a child that another test's thread forked holds the
         // open file until it execs (`run_once`): the pause ends once that child has.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while curation_pause(p).is_some() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(curation_pause(p), None);
+        until("the pause ends with the rebuild", || {
+            curation_pause(p).is_none()
+        });
     }
 
     /// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
