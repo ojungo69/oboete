@@ -157,7 +157,7 @@ deny にしない。
 （2026-10-11、「Slice 3 の決定」の 3a で改訂）bridge は session 単位で作る。live hook の identity は
 device・seq・ts から計算し、v1 と transcript とは agent と native session id で対応付け、同じ session の
 別の出所の record を写しとして選択に加える。record 単位の対応は保存済み provenance にないので作らない。
-オーナー切替の条件はこの session 単位の bridge とする。
+オーナー切替の条件はこの session 単位の bridge とする（切り替えは 2026-10-15 に済んだ）。
 
 ### D3. preview と確認
 
@@ -173,12 +173,12 @@ remote embedding は使わず、`--yes` との併用を拒否する。
 ### D4. 本当の進捗だけ返す
 
 job は local purge と hub delivery を別に持つ。最初の slice は
-`local=pending_physical_purge` から進めず、`done` と返さない。
+「hidden; physical purge pending」から進めず、`done` と返さない。
 全ローカル段階と index merge が終わって初めて `local=done`。
 hub が未設定なら `hub=not_configured` とし、ローカル完了を妨げない。
 `forget_jobs` は本文なしの要求を保持するので、後に接続した hub へ control-first で送れる。
 設定済みなら waiting/acked を区別し、acked を hub purge 完了と表示しない。
-第一 slice は hub を調べず `hub=not_connected` と表示し、M6 の接続後にその状態を拡張する。
+第一 slice は hub を調べず、hub の状態は表示しない（M6 の接続後に加える）。
 
 ### D5. uid の forget（Slice 2）
 
@@ -830,6 +830,7 @@ Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つ
   the claims, cards and summaries made from it, and the backups, pending」。rebuild は op を読み直すので、
   その record を言い換えた claim・card・summary は 3d まで残る。restore で本文が戻った job は step 2 から
   やり直す（2b の「状態で決める」）。job ごとの本文の有無は 1 回の集約で読む（job ごとの EXISTS は #467 と同じ形）。
+  （status の文言は 3c-1 の途中の文で、最終の文は 3d-2 にある。）
   segment だけの restore（両ログを失った後）は deny を戻し job の行を戻さない（spec 6.3）: 本文を持つ忘れた
   record の deny に job の行がなければ、その job を step 0 として状態で purge する（step は記録しない）。restore は
   live の record と deny を identity で結び直す（3a の結びつけ。segment が forget の前のものなら行に無い）。
@@ -879,7 +880,7 @@ Slice 3 は PR に分け、この順に作る（2026-10-12 に 3b・3c を 2 つ
   purge が途中で止まった後の続きで書き換え、worker の `forget --continue` もこの印を見る（Codex on #469・#470）。record の job の step 5 は 3d が決める（3d が派生の uid の job を登録する
   段）。3c-2 では record の job は step 4 で止まり、`due` は本文を持つ行があるか step 4 の前の job。
 - **status（D4）**: step 4 の record の job は「purged here and in the backups; the claims, cards and
-  summaries made from it pending」。3d まで done にしない。
+  summaries made from it pending」。3d まで done にしない（3c-2 の途中の文で、最終の文は 3d-2 にある）。
 - **限界の文**: preview の「older backup segments and copies of raw.db set aside still hold its text」を
   「backup 先の segment と set aside の raw.db のコピーからも消す」に。F3（home 全体が古いコピーに戻る）で
   本文が戻るのは、その古いコピーの backup 先（purge の前のもの）から。spec 6.3 の「record backup segments
@@ -927,7 +928,7 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
 - **status（D4）**: step 3「purged from raw and its index here, with the claims made from it; the cards and
   summaries made from it, and the backups, pending」、step 4 以降「purged here and in the backups, with the
   claims made from it; the cards and summaries made from it pending」。done は 3d-2 で（card と summary の文が
-  まだ残る）。
+  まだ残る）。この文言は 3d-1 の途中の文で、最終の文は 3d-2 にある。
 - **preview**: 消える claim の数（選んだ record を引用する uid の数）。purge と同じく raw.db の op log から
   数える（knowledge.db は consumer がまだ読んでいない claim を持たず、ないこともある、CodeRabbit on #471）。limits の文: 引用する claim は uid ごと忘れ、recuration でも同じ claim は作られない。card と
   session summary は後の版まで残る。
@@ -958,7 +959,7 @@ claim を隠す。本文が残るのは raw.db の op、ops segment、raw.db の
   request の時刻と transaction の間に書かれた op のため）。これがないと、purge の後に `oboete recurate` が
   同じ span を curate した op がまた当たり、書き換え・再投入・再送を繰り返す。(b) `candidates` か
   `carried` に 3d-1 で tombstone した uid（record の job の forget op の uid）がある（#366 の 1、
-  docs/cards.md K4 の「Not covered」）。uid の forget（2b）の claim は元の span が残るので (b) に入れない。
+  docs/cards.md K4）。uid の forget（2b）の claim は元の span が残るので (b) に入れない。
 - **`carried`**: curation が prompt に持ち込んだ claim（決定済みと open item、`Request::carried_uids`）は
   今は op に残らない。新しい window op は `candidates` と同じく uid だけの `carried` を持つ。この版より前の
   op は持ち込んだ claim が分からない（限界として書く）。op の上限では gates の一覧と card を先に削り、
@@ -1278,7 +1279,8 @@ egress の gate が今の規則で伏せる）。
 - **伏せない値**（`OP_NAMES`）: oboete が付ける名前（識別子と自分の語彙）の値: `uid`、`id`、
   `supersedes`、`candidates`、`carried`、`copied`、`device`、`forgotten`、`job`、`source`、`source_id`、
   `session`、`repo`、`list`、`kind`、`type`、`status`、`speaker`、`scope`、`recipe`、`outcome`、`agent`、
-  `provider`、`dropped`、`lowered`、slice 4a の除外の op の `folder` と `level`。window の `reason` は oboete
+  `provider`、`dropped`、`lowered`、slice 4a の除外の op の `folder` と `level`、のちに加えた `about`、`entry`、`pattern`
+  （一覧の正本は `src/raw.rs` の `OP_NAMES`）。window の `reason` は oboete
   が provider に聞かずに外したとき（取り込みの `imported:<source>` と除外の `excluded`、`curate::set_aside`。
   `oboete recurate` が読む）だけ伏せない。provider の失敗の理由は文なので伏せる（Codex on #487）。それに
   record の文をそのまま写した `quote`（その record の
@@ -1304,7 +1306,7 @@ egress の gate が今の規則で伏せる）。
 - **3e-1・3e-2 の後**: 走査は 3e-1 の書換え（伏せた record から作られた op）と 3e-2 の preference の後。
   3e-1 の判定は変えない（伏せる前に書かれ伏せた record を引用する claim は、走査で引用がまた一致しても
   作り直しのために文を失う）。3e-2 が作り直した op は文が伏せた引用そのものなので変わらない。
-- **報告**: `Ops whose text the current redaction rules masked: N`。raw.db-wal を truncate できなかった
+- **報告**: `Ops whose text the current redaction rules masked in raw.db: N`。raw.db-wal を truncate できなかった
   回は 3e-1 と同じく未完了（`MASK_JOB`）。
 - **限界**: キー（作業メモの fields の名前など）と上の名前の値は伏せない（repo に当たる規則でも）。
   vector の cache は伏せる前の文から作った vector をその sha で持ち続ける（文字ではない。作り直した
@@ -1496,7 +1498,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 - A104/Transcript: canary を forget 後、同じ v1/claude-mem/transcript を再 import しても戻らない。
 - FTS5 は行を消しても三文字組を segment に残す（`raw_fts` の本文の写しの有無によらない。
   docs/spike/raw-index-copy.md）。Slice 2 の物理 purge は `raw_fts` と `imported_fts` に
-  `INSERT INTO <表>(<表>) VALUES('optimize')` をしてから VACUUM し、その後に canary を探す。
+  `INSERT INTO <表>(<表>) VALUES('optimize')` をしてから VACUUM し、その後に canary を探す
+（計画。built: `src/forget.rs` は optimize も VACUUM もせず、knowledge.db を作り直してから、その uid が knowledge.db に残っていないかを調べる）。
   `contentless_delete=1` の表は、消した行を bm25 の合計（行数・語数）からも引かない。順位の近い
   ヒットが入れ替わる程度でヒット自体は変わらず、`oboete rebuild` で knowledge.db を作り直すと戻る。
 - M22 forget: 段階 4 Task 12b の scale-home 作成器と stub を再利用し、hook writer と並行して
@@ -1511,7 +1514,7 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 - [x] Slice 1: 削除要求と raw record/span の安全な受理（#389）
 - [x] Slice 2: uid の物理 purge（D5。2a 登録と隠す・送らない、2b op 本文と knowledge.db、2c backup）（#435、#442、#444、#453、#458）
 - [ ] Slice 3: raw scope、rescan、retention
-- [ ] Slice 4: 可逆な管理と訂正
+- [ ] Slice 4: 可逆な管理と訂正（4a、4b は built）
 - [ ] Slice 5: WebUI
 - [ ] Slice 6: 安全性・測定・独立レビュー
 
@@ -1521,8 +1524,8 @@ CI/security gate は弱めない。slice ごとに PR を開き、repository の
 
 ### 第一 slice の実装・検証（2026-10-03、設計 v2）
 
-設計 v1（journal）の実装を v2（D1）に置き換えた。`forget_jobs.step` は 1 のままで、物理 purge
-完了を返す経路はない。
+設計 v1（journal）の実装を v2（D1）に置き換えた。この時点では `forget_jobs.step` は 1 のままで、物理 purge
+完了を返す経路はない（Slice 2 が置き換えた）。
 
 - 公開 CLI の主な回帰シナリオ（`tests/forget_cli.rs`）: import origin のない record の登録前の拒否、
   本文なしのログと届かない範囲の表示、失われた・古い・他 home の・壊れたログが hook を止めないこと、

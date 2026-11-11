@@ -186,4 +186,5 @@ and 16 KiB body guards before parsing or store work. Unknown fields and invalid
 selectors are refused. Responses expose only canonical identifiers, typed state
 and vetted codes; they do not expose backend error causes.
 
-Retention and the forget UI follow their milestone-5 slices.
+Forget is built since: `POST /api/forget/preview` and `/api/forget/start`
+(see docs/page-forget.md); retention is in docs/retention.md.

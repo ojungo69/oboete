@@ -1,6 +1,6 @@
 # The note on a file: claude-mem's file context on oboete's cards
 
-Unit X5 of the claude-mem parity plan ([claude-mem-parity.md](claude-mem-parity.md) row 8), built
+Row 8 of the claude-mem parity plan ([claude-mem-parity.md](claude-mem-parity.md)), built
 before the switch (spec decision 39). When the agent opens a file that past cards name, it is
 told, before the read, which cards those are, so it can fetch one instead of working the file out
 again. Since 2026-10-17 the claude-mem history oboete imported joins the cards (F10 to F15).
@@ -60,7 +60,8 @@ stays within the 9,500 UTF-16 units Claude Code's does: Grok clips a context at 
 What else that call shows is cut to fit them first, each block at a line, as Cursor's start is
 (CodeRabbit on #456).
 Codex: its `PreToolUse`, with claude-mem's matcher for its shell and MCP read tools
-(`^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$`), for the shell commands and MCP tools
+(`^Bash$|^mcp__.+__(read|view|cat)(_file|_files)?$`) and the memory lookups of
+docs/memory-lookup.md too, for the shell commands and MCP tools
 claude-mem's adapter takes (the probe, Codex 0.160.0, same day: the context reached the model as a
 developer message). The command splits as a POSIX shell splits it, where claude-mem's adapter
 differs in two ways: a redirection and its target stay out of a command's words without ending
@@ -72,8 +73,8 @@ is trusted in `config.toml`; `oboete setup` writes that row for this group as fo
 F2. **Which files.** As claude-mem: the tool's paths, at most 10, each a regular file of at least
 1,500 bytes, resolved against the payload's `cwd`.
 
-F3. **Which cards.** The checkout's repository's current cards (not replaced, K3; not forgotten,
-once milestone 5's forget is in) whose `files_read` or `files_modified` name the file. The cards
+F3. **Which cards.** The checkout's repository's current cards (not replaced, K3; not forgotten)
+whose `files_read` or `files_modified` name the file. The cards
 consumer keeps a table `card_files(device, op_seq, n, name, path, modified)`, indexed by `name`, the path's
 last part (`\\` read as `/`): the lookup takes the rows of the file's name whose path is the
 file's absolute path, its path relative to `cwd`, or its path relative to the checkout's top level
@@ -110,7 +111,7 @@ K4 and K6, never the table itself.
 
 F8. **Never.** No permission decision: `permissionDecision: "allow"` would let a read through
 without the owner's own permission rules, which is not oboete's to change. No note for a
-subagent's read or in a checkout excluded from recording (milestone 5's capture exclusion). No
+subagent's read or in a checkout excluded from recording (capture exclusion). No
 call off the machine and no model: the hook reads the knowledge store the worker keeps and the
 file's metadata, the second part of 4.1's rule. A failure is no note and a line on stderr; the
 read goes on.

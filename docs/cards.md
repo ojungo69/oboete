@@ -42,6 +42,9 @@ cards(device, op_seq, n,                 -- the window op it came in, and its pl
       replaced_by)                       -- primary key (device, op_seq, n)
 ```
 
+The table has more columns than this sketch: `goals` (JSON), `hidden` (a hidden card is left out by
+every reader that shows cards; the hide settings list the hidden ones, to bring one back) and `subagent` (X1). `cards_fts` (full text) and `card_files` are tables beside it.
+
 `facts`, `concepts`, `files_read` and `files_modified` are JSON arrays of strings. `type` is one
 of claude-mem's: bugfix, feature, refactor, change, discovery, decision, security_alert,
 security_note, sensitive; or null (K1).
@@ -99,7 +102,10 @@ follows its sentence is hidden already and one the cut would split is still whol
 session and repository a card is shown under are gated too.
 
 K7. **One way in.** Readers take cards through `cards::recent` and its siblings, which apply K3,
-K4 and K6; none reads the table itself.
+K4 and K6. This is the rule for the text shown to a person or an agent: the viewer's Timeline and
+My Work take the cards they show through `cards::page`. Other code reads the table itself, for
+other things: embedding and forget, the viewer's count of a session's cards, My Work's look-up of
+a shown card's span and files, and the hide settings' list of hidden cards (`cards::removed`).
 
 ## Is a card safe to show?
 
@@ -112,7 +118,8 @@ page, a file) can colour it.
   instructions.
 - The manifest already shows records of the same kind in the same way: the last failing command's
   output and the last reply.
-- claude-mem and oboete v1, which the owner runs today, show the same kind of text with no fence.
+- claude-mem, and oboete v1 until its files were removed on 2026-10-17, show the same kind of
+  text with no fence.
 
 So MUST-M4 holds as written.
 
@@ -170,7 +177,8 @@ and the op says how many were (`cards_dropped`).
 - A title over 300 characters, a subtitle over 500 or a narrative over 4,000 drops the card:
   nothing is cut before the gate (K6). A fact or a file over 500 characters is dropped, as is one
   past the tenth fact or the twentieth file of a list.
-- The first five cards are kept. Over the op cap, the last card goes first.
+- The first five cards are kept (fifteen for a window grown at three times its size under a backlog,
+  decision 72). Over the op cap, the last card goes first.
 
 C4. **An answer without the list is an answer.** A provider that does not hold to the schema
 may leave `observations` out: the op then has none and its summary is the card (K1). An empty

@@ -1,7 +1,8 @@
 # A hook's time: one deadline for what it injects, and a record of the slow ones
 
-Finding O1 of the 2026-11-10 audit. MUST-M16 says a hook never holds the agent up; this is how a
-hook keeps to the time its agent gives it, and how a hook that did not is found afterwards.
+Finding O1 of the 2026-11-10 audit. MUST-M16 says a write failure never holds the agent up; this
+extends that to time: how a hook keeps to the time its agent gives it, and how a hook that did
+not is found afterwards.
 
 ## What happened
 

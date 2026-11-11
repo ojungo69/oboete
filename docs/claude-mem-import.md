@@ -80,7 +80,8 @@ by that rule, as it refuses the repository's writes (docs/work-state.md L8): the
 
 I7. **Size.** The owner's database of 2026-09-24 (178,370 documents) made raw.db 323 MB and
 knowledge.db 864 MB in an evaluation home (docs/milestone-4.md); their vectors add about 930 MB,
-from the local model on this PC and from Workers AI on the iMac (decision 35's estimate).
+from the local model on this PC and from Workers AI on the iMac (size: docs/milestone-4-plan.md
+"What needs the owner" item 6; Workers AI cost: decision 35's estimate).
 
 I8. **Exclusions (parity row 14).** claude-mem's exclusion patterns, the comma-separated
 `CLAUDE_MEM_EXCLUDED_PROJECTS` of the `settings.json` beside its database, come in as patterns never

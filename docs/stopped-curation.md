@@ -48,8 +48,9 @@ person, and a saved key ending its rest.
   on time or on the owner are tried at the worker's next pass (`providers_db::key_saved`). A wait
   on a budget stays: a key lifts no cap. Before, a refused key's rest doubled up to a day, and a
   new key waited it out. The key is saved even when providers.db cannot be written.
-- **The relay**: an agent no terminal note reaches is asked to tell the user about the stop at the
-  start of its first reply: Codex, Grok, and `oboete inject` (OpenCode), and Claude Code when its
+- **The relay**: an agent no terminal note reaches is asked, while a window waits, to tell the user
+  about the stop at the start of its first reply (skipped spans alone carry no relay): Codex, Grok,
+  and `oboete inject` (OpenCode), and Claude Code when its
   terminal note is turned off. Claude Code with the note on shows the person the note itself, and
   its agent is not asked.
 - **Doctor** gives the same cause beside an entry's rest.

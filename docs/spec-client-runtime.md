@@ -12,7 +12,7 @@
 
 | client/runtime | search/get/timeline | ingest（記録） | 応答前context | correctionsの実配送 | 証拠・状態 |
 | --- | --- | --- | --- | --- | --- |
-| ローカルstdio MCPを呼べるclient | 現行toolの範囲で利用可能 | MCPには未提供 | 呼出結果をclientが使うだけ。自動hookの保証なし | MCPには未提供 | `src/mcp.rs` のtool定義。client別live確認とは別 |
+| ローカルstdio MCPを呼べるclient | 現行toolの範囲で利用可能 | 会話の取得はMCPには未提供（`save_memory` と `work_state_write` による明示のnote・作業状態の書き込みのみ） | 呼出結果をclientが使うだけ。自動hookの保証なし | MCPには未提供 | `src/mcp.rs` のtool定義。client別live確認とは別 |
 | 既存coding-agent adapter（Grok CLIを含む） | MCP接続は個別設定 | adapterごとのcapture | adapterごとのhook | adapterごとの配送点 | §4.7/MUST-M10の表・テスト・実機結果を参照。#340のtestedをlive-verifiedに昇格させない |
 | Claude app remote MCP | §5.13/milestone 6で計画 | 初期は不可 | 自動挿入の保証なし | 初期は不可 | 計画。既存Claude appのネットワーク説明はこの製品だけに適用 |
 | dot / custom MCP client | 接続できるかを製品ごとに検証 | 未確認 | 未確認 | 未確認 | runtime/version、取得API、hook、実機証拠が必要 |

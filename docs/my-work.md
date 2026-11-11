@@ -101,8 +101,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `work_state_write` as ops in raw.db with no session of their own; the agent's tool call that
   wrote one is a record of kind `tool` in its session.
 - The page (`src/view.rs`, `assets/viewer/app.js`): tabs (Timeline, Records, Context, Stats,
-  Settings), JSON routes behind the token, writes behind `save_gate` (Host, token, Origin, JSON,
-  a length cap), every string through the outbound gate, Japanese and English labels (#94), a poll
+  Settings; built since: My Work, My Rules, Sessions), JSON routes behind the token, writes behind
+  `save_gate` (Host, token, Origin, JSON, a length cap), every string through the outbound gate,
+  Japanese and English labels (#94), a poll
   every 3 s (parity row 49).
 
 ## The design
@@ -166,7 +167,7 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    generated copy: a new summary does not undo a check, a new follow-up does (for each request of
    its conversation, as in claude-mem). It is the page's file, not memory: not in raw.db, not in a
    backup or a sync, not searched. A forget that takes a session's records (`oboete forget`) drops
-   that session's entries when it commits. `POST /api/my-work/review` (through `save_gate`) takes
+   that session's entries in the forget's purge (its step 5). `POST /api/my-work/review` (through `save_gate`) takes
    `{request, version, checked}`; a version that is not the current one, or a check of a request
    not reported complete, is refused with 409, and the page reloads the request. Undo is the same
    route with `checked: false`.

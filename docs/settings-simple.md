@@ -31,8 +31,8 @@ what is shown first and how it is said.
    per name; its arrows set the name order, the only order this view shows). Each row has:
    - a label a person reads, from the catalog below, and the model in use (`effective_model`);
    - a status from the row: `key: "missing"` needs a key; `key: "not-on-path"` is not installed; a
-     name in `stopped` is stopped, with the existing resume button; `on: false` is off; otherwise it
-     is ready;
+     name in `stopped` is stopped, with the existing resume button; `on: false` is off; a name resting
+     shows "Resting until {time}"; otherwise it is ready;
    - an on/off switch and ↑ ↓, which save at once, as the current controls do;
    - when the key is missing, the existing key field and its save, inline;
    - the existing connection test (its preview, then the test);
@@ -88,7 +88,8 @@ check: any model is still set in the detailed settings.
 ## Detailed settings
 
 The current page, unchanged, under a "detailed settings" switch at the top of the tab. The browser
-remembers which of the two was open last.
+remembers which of the two was open last. (Superseded: there is no switch and no remembered view; the
+two are one page, each group closing on its More settings, see [settings-redo.md](settings-redo.md).)
 
 ## Tests
 

@@ -33,7 +33,8 @@ settings-save payload and the native capture → FTS → browser search journey,
 already selected by the accepted plan. Retain literal red/green evidence, current
 source pins, focused/full fmt/clippy/Rust/Node checks, JA/EN browser evidence and
 two independent review axes. Final-head CI, security, Sonar and actual review
-requirements apply before merge. Port/token activation remains W6 step 3; #94
+requirements apply before merge. Port/token activation remains W6 step 3
+(built since: W6 port and token, see docs/settings-coverage.md); #94
 stays open until the whole coverage contract is satisfied.
 
 Provider policy text is checked against primary sources on 2026-10-08: Anthropic's
@@ -53,4 +54,5 @@ repository-list failure and explicit Retry, retaining All and one search request
 It is not a native commit or a live-agent/model test. The source/binary/flow pins,
 private-process cleanup and final checks are recorded with the implementing PR.
 Private recovery storage on macOS/Windows still waits for #281; S5 and port/token
-activation keep their independent completion requirements.
+activation keep their independent completion requirements (port/token activation
+built since: W6 port and token).

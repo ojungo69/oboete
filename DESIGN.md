@@ -216,7 +216,7 @@ components:
 
 # Design System: oboete viewer
 
-The viewer is served by `src/view.rs` from three files compiled into the binary: `assets/viewer/index.html`, `assets/viewer/app.css` and `assets/viewer/app.js`. Every value below is read from those files. The frontmatter holds the light values; the dark values, the shadows, the motion and the breakpoints are in this text and in `.impeccable/design.json`. When this file and `app.css` disagree, `app.css` is what ships; fix whichever is wrong in the same change.
+The viewer is served by `src/view.rs` from three files compiled into the binary: `assets/viewer/index.html`, `assets/viewer/app.css` and `assets/viewer/app.js`. Every value below is read from those files. The frontmatter holds the light values; the dark values, the shadows, the motion and the breakpoints are in this text. When this file and `app.css` disagree, `app.css` is what ships; fix whichever is wrong in the same change.
 
 ## Overview
 
@@ -457,5 +457,5 @@ A 44rem dialog, Surface, 12px radius, 28px padding (20px on a phone), the overla
 - **Don't** fill a card with a tint, use a cream ground or an orange accent, or use a gradient as colour (a fade or a two-colour blend).
 - **Don't** colour links with the accent; links are underlined ink.
 - **Don't** add a web font or rely on a specific font's metrics; the stacks fall back to whatever the system has.
-- **Don't** rename or reorder classes, ids, `data-*` attributes or texts that `src/testdata/viewer-readiness/test.mjs` reads. Its small fake DOM finds elements by tag name and by class only, so a style change must be made in the CSS, not by changing markup. Some checks compare the whole `className`: `my-work-card ` must stay the first class of a My Work card, and `my-work-heading`, `my-work-stream` and `show-more` are matched exactly. It reads the `data-` attributes `action`, `field`, `focus`, `i`, `i18n-aria`, `id`, `kind`, `my-work`, `provider-name`, `session`, `simple-block`, `simple-focus` and `time`.
+- **Don't** rename or reorder classes, ids, `data-*` attributes or texts that `src/testdata/viewer-readiness/test.mjs` reads. Its small fake DOM finds elements by tag name and by class only, so a style change must be made in the CSS, not by changing markup. Some checks compare the whole `className`: `my-work-card ` must stay the first class of a My Work card, and `my-work-heading`, `my-work-stream` and `show-more` are matched exactly. It reads the `data-` attributes `action`, `field`, `focus`, `i`, `i18n`, `i18n-aria`, `i18n-vars`, `id`, `kind`, `last`, `my-work`, `provider-name`, `selector`, `session`, `simple-block`, `simple-focus`, `subagent` and `time`.
 - **Don't** add a label above a heading (an "eyebrow" or kicker), a glyph used as an icon, or a hard offset shadow. The page draws its marks with borders and SVG.

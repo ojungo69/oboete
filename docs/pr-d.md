@@ -75,7 +75,7 @@
 
 ## D1 で決めたこと
 
-1. **ベクトルの正本は普通の表 `embeddings`** (文書ごとに 1 行: 文書の id、モデル名 `bge-m3`、埋め込んだ文の SHA-256、長さ 1 にそろえた fp32 1,024 個、索引に入れたかの印)。sqlite-vec の `vec_docs` はここから作り直せる派生の索引で、fp32 ではなく符号の bit だけを持つ (上の計測: fp32 は sqlite-vec から読み戻すと遅い)。
+1. (D1 の設計。置き換え済み: 今の store は knowledge.db の `vectors`・`vector_keys`・`vec_index` にベクトルを持ち、`embeddings`・`vec_docs` は無い。作る処理は observe ではなく worker の `src/embed_phase.rs`。`docs/milestone-4.md` を見る) **ベクトルの正本は普通の表 `embeddings`** (文書ごとに 1 行: 文書の id、モデル名 `bge-m3`、埋め込んだ文の SHA-256、長さ 1 にそろえた fp32 1,024 個、索引に入れたかの印)。sqlite-vec の `vec_docs` はここから作り直せる派生の索引で、fp32 ではなく符号の bit だけを持つ (上の計測: fp32 は sqlite-vec から読み戻すと遅い)。
    - `vec_docs` は repo と種類 (知識 `k` = 観測・要約、prompt `p`) で分けて持つ (sqlite-vec の partition key)。MCP の既定の範囲は今の repo で、PR-F の自動注入は 300 ms の予算なので、repo の中だけを引けるようにする。
    - partition key は書き換えられない (sqlite-vec 0.1.9: `UPDATE on partition key columns are not supported yet`)。repo の移し替え (C1 の `rekey_paths`) は古いキーの索引の行を消し、印を戻す。次の observe が `embeddings` から索引だけを作り直す (Workers AI は呼ばない)。
    - モデル名は「どこで動かしたか」ではなく「どのモデルか」。Workers AI と手元の同じ重み (D3) は同じ空間なので作り直さない (決定 5)。
@@ -84,7 +84,7 @@
    - 1 日 200 リクエストまで (`daily_requests`)。spike の文で 1 件 0.46 neuron なので約 9,000 neuron、無料の 1 日 10,000 の内側。claude-mem を取り込んだ後の 18 万件は、`oboete reindex` を打たなければ約 9 日で埋まる。
    - 文書を消す (`delete_doc`・`delete_session`) と、そのベクトルと索引の行も同じトランザクションで消える。消した記憶のベクトルは残さない。
    - 文書を書き換える経路は今は無い。書き換えを足す PR は、そのベクトルも消す (#46)。
-3. **`oboete reindex`**: 索引を `embeddings` から作り直し、ベクトルの無い文書を 1 日の上限なしで全部ベクトルにする。
+3. **`oboete reindex`**: 索引を `embeddings` から作り直し、ベクトルの無い文書を 1 日の上限なしで全部ベクトルにする (置き換え済み: この subcommand は今は無い。ベクトルは worker の embed 局面が作る)。
 4. **鍵は Workers AI の読み取りだけの token** (`key_file`、既定 `~/CF_WORKERS_AI_KEY.md` の 2 行目)。アカウント全体の鍵は使わない (提案の 334 行目)。この権限だけでモデルを呼べることを確かめた。`account_id` は `config.toml` に書く。
 5. **sqlite-vec はバイナリに組み込み**、store を開く前に全接続へ登録する (`sqlite3_auto_extension`)。記録 hook の速さは変わらない (`oboete replay` の fixture: プロセス内 p50 51 µs、起動込み p50 9 ms / p95 12 ms)。バイナリは 10.9 MB → 11.0 MB。
 
@@ -95,7 +95,7 @@
 
 ## D2 で決めたこと
 
-1. **検索の入口 (MCP・CLI・viewer) はすべて同じ `search::find` を通る**。`provider = "workers-ai"` なら `hybrid-kf`、それ以外は今までの全文検索。問いのベクトル化は全文検索と並行に走らせる。ベクトルが作れないとき (オフライン、鍵が無い、3 秒の timeout) は、全文検索だけの結果を返し、stderr に 1 行出す。
+1. **検索の入口 (MCP・CLI・viewer) はすべて同じ `search::find` を通る**。`provider = "workers-ai"` なら `hybrid-kf`、それ以外は今までの全文検索。問いのベクトル化は全文検索と並行に走らせる。ベクトルが作れないとき (オフライン、鍵が無い、3 秒の timeout) は、全文検索だけの結果を返し、stderr に 1 行出す (D2 の時点の設計。今の問いのベクトルの予算は 1,200 ms で、MCP と viewer の検索、それに Workers AI に掛かる。埋め込みがローカルのとき、CLI は `--vectors` を付けたときだけ問いをベクトルにし (モデルの読み込みを待つので、この予算は掛からない)、付けない `oboete search` は全文検索だけ。Workers AI のときは、`--vectors` が無くても問いをベクトルにして送る)。
 2. **全文検索は 1 回だけ引き、上位 100 件を種類で分ける** (#46)。最初は知識と prompt を別々に引いていたが、それだと bm25 の順位付けを 2 回、全件に対してすることになる。17.8 万件の store で p95 1.3〜1.4 秒かかった (全文検索だけなら 0.85〜0.88 秒)。spike と同じ形 (e0 の 1 本を分ける) に戻して p95 1.03 秒。知識が先に並ぶので、全文検索側の 100 件はほぼ知識で埋まる。prompt はほぼベクトル側だけで並ぶ (spike の `hybrid-kf` と同じ)。
 3. **ベクトル側は種類ごとに、bit で 400 件を引き、fp32 で並べ直して上位 100 件**。repo を絞るときは partition key で絞る。spike で残した「MCP 検索も bit + 並べ直しにするか」は、test 分の測定がこの形そのものなので、その結果で決める。
 4. **文書 1 件の取り出し (`get`) は、元の表から id で引く**。`fts` は `doc` を索引の無い列として持つので、`WHERE doc = ?` は索引を頭から全部読む。17.8 万件の store で 1 件 119 ms かかった。hybrid はベクトルだけで見つかった文書を最大 `limit` 件取り出すので、1 回の検索が 1.0〜1.4 秒になっていた。MCP の `get` と viewer も同じ関数なので、そちらも速くなる。
@@ -154,12 +154,14 @@ uv run --with numpy --with sqlite-vec python vecbench.py <作業用の DB のパ
 
 D2 の test 分 (評価用 store の写し `<home>` で。`config.toml` に `[embedding] provider = "workers-ai"` と `account_id`):
 
+(D2 当時の手順で、今の store では動かない: `<home>/oboete.db` とその `embeddings` 表、`reindex`、`eval --method` は無い。今はベクトルを worker の埋め込み段が `vectors` と `vec_index` に作り、`eval` は `--out <dir> --arms <...>` で走る。)
+
 ```sh
 oboete --home <home> search x                     # 一度開いて表を作る
 uv run --with numpy python docs/spike/pr-d/load_vectors.py <home>/oboete.db
 oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)
 R=~/.oboete/eval/runs-test
-oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method hybrid > $R/hybrid-d2.trec
+oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method hybrid > $R/hybrid-d2.trec   # D2 の形。今の `eval` は `--out <dir> --arms <...>` で、stdout に TREC を出さず `--method` も無い
 oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method fts > $R/e0-trigram.trec
 cp -p ~/.oboete/eval/runs/claude-mem*.trec $R/     # -p: report.py は claude-mem の run の時刻を「今」にする
 cd docs/eval

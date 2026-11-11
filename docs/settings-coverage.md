@@ -10,7 +10,8 @@ Owner, 2026-10-03: the settings page is complete at the switch, and
 sync and the cloud come after it. So every row below is built before the switch, except those of
 "Sync and devices", which follow milestone 6, and the updater, which milestone 7 builds (7.3); until
 then the page shows the installed version and says the update is not built, as spec-webui.md asks
-of a feature not built yet. The switch is on the owner's WSL machine, so "at the switch" is read as
+of a feature not built yet. (The switch came on 2026-10-15; rows still marked "—" under Now or Test
+are open.) The switch is on the owner's WSL machine, so "at the switch" is read as
 "on Linux": where a row's other release targets wait for #281 (macOS and Windows), they are a row of
 their own that #94 waits for after the switch, not a reason to hold the switch.
 
@@ -76,7 +77,7 @@ left with "—" there.
 
 | Setting or operation | Spec | Now | Backend | Takes effect | OS | Test | Slice |
 |---|---|---|---|---|---|---|---|
-| First run: an unconfigured home, recommended presets | spec-webui | JA/EN guided curation tiers, existing provider/agent/diagnostic controls and record/search continuation | existing validated settings save, provider editor and native agent operations | tier choice edits the draft; separate Save, agent consent and connection tests | release targets; private native/browser acceptance on Linux; other targets retain CI-only labels | first-save/off/reload; Node four-tier/name-group/privacy and first-load/503 Retry scope controls; generated native hook and JA/EN browser journey | W6 first-run slice; S5 and real-agent acceptance remain |
+| First run: an unconfigured home, recommended presets | spec-webui | JA/EN guided curation tiers, existing provider/agent/diagnostic controls and record/search continuation | existing validated settings save, provider editor and native agent operations | Apply saves the tier at once (#803); separate Save for other edits, agent consent and connection tests | release targets; private native/browser acceptance on Linux; other targets retain CI-only labels | first-save/off/reload; Node four-tier/name-group/privacy and first-load/503 Retry scope controls; generated native hook and JA/EN browser journey | W6 first-run slice; S5 and real-agent acceptance remain |
 | Recover an invalid configuration | spec-webui | fixed preview and explicit all-settings replacement after retaining the exact original bytes | `settings/recovery`, shared config lock/stager and private-storage checks | confirmed operation; admitted work may finish | verified private Linux storage; other platforms unavailable pending #281 | `w6f_` no-write/typed/stale/alias/large/missing/valid/mode refusals, private-copy-before-write and post-copy/post-commit faults; Node loss/Unknown and JA/EN native/browser recovery | W6 first-run slice; native storage support on other targets remains |
 | Detect agents, wire and unwire their hooks | 7.2 | Passive seven-agent inventory; selected wire/unwire with preview and separate consent | shared `setup::readiness`, `setup::agents` and native `oboete setup` builders | inventory on page load/Refresh; approved file changes now, agent activation on its next start | release targets; private native/browser and lifecycle evidence on Linux, other targets retain CI-only labels | `w6_` guarded inventory; `w6a_` typed write guards, input/alias witnesses, backup and native-child failures; `tests/agent_setup.rs` seven-agent API lifecycle; private HTTP/fault and JA/EN browser checks | W6 confirmed wiring slice; first run and live-agent checks remain |
 | Readiness checks, as doctor reports them | 7.2, R13 | explicit JA/EN read-only diagnostics, with captured seven-agent inventory and independent partial results | `setup::doctor_report`, shared native queries/parsers; private CLI enrichment remains in `oboete doctor` | only an explicit Run diagnostics POST; no repair or live probe | release targets; private native/browser evidence on Linux, other targets retain CI-only labels | `w6d_` guarded empty-object, DB/WAL integrity/schema/change, cached accounting, passive locks, retained metadata/FIFO, completion and source-invalidation checks; JA/EN DOM/native/browser checks; existing CLI regressions | W6 readonly Doctor; first run remains |
@@ -248,7 +249,7 @@ cloud starts from a page view or a save.
   port/token activation is the paragraph below. #94 remains open.
 
   The guided curation tiers update only the existing draft curation switch, chain on/off and
-  paid monthly cap before explicit Save. None leaves the chain intact and stops new summaries;
+  paid monthly cap, and the page saves them at once (#803). None leaves the chain intact and stops new summaries;
   embeddings and other AI roles keep their own settings. Built-in zero-price and local entries
   are candidates, not proof of a free allowance. Custom remote zero-price entries and unsupported
   CLIs are not automatically selected. Duplicate names use the highest enabled risk, and
