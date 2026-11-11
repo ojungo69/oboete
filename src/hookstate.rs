@@ -161,7 +161,6 @@ pub fn update_all(
 
 /// The session's value `name`: none when it has none or it cannot be read.
 // The prompt point (Task 8 Step 6) reads it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn value(home: &Path, agent: &str, session: &str, name: &str) -> Option<String> {
     std::fs::read_to_string(dir(home, agent, session).join(name)).ok()
 }

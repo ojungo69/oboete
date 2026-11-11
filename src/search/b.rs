@@ -409,7 +409,6 @@ impl VectorSkip {
 /// Where the query's vector comes from.
 enum Ask<'a> {
     // Task 6's evaluation gives its own (`query_with`).
-    #[cfg_attr(not(test), allow(dead_code))]
     Given(Option<&'a [f32]>),
     Embed(Caller),
 }
@@ -440,7 +439,6 @@ pub fn query_cli(home: &Path, q: &Query, vectors: bool) -> Result<Answer> {
 
 /// `query` with a vector the caller made (Task 6's evaluation, Task 10's local model): nothing is
 /// sent out. `None` is full text alone.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn query_with(home: &Path, q: &Query, vector: Option<&[f32]>) -> Result<Answer> {
     search(home, q, Ask::Given(vector))
 }
@@ -2122,7 +2120,6 @@ fn claims_pages(
 /// by RRF, the best `depth`. It writes nothing, no schema either, so a read-only connection can
 /// ask, and reads outside every transaction: the caller writes only what it returns.
 // The shortlist phase (Step 4) and the prompt point (Step 6) call it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn delivered_ranked(
     raw: &Raw,
     k: &Connection,
