@@ -154,10 +154,12 @@ uv run --with numpy --with sqlite-vec python vecbench.py <作業用の DB のパ
 
 D2 の test 分 (評価用 store の写し `<home>` で。`config.toml` に `[embedding] provider = "workers-ai"` と `account_id`):
 
+(D2 当時の手順で、今の store では動かない: `<home>/oboete.db` とその `embeddings` 表、`reindex`、`eval --method` は無い。今はベクトルを worker の埋め込み段が `vectors` と `vec_index` に作り、`eval` は `--out <dir> --arms <...>` で走る。)
+
 ```sh
 oboete --home <home> search x                     # 一度開いて表を作る
 uv run --with numpy python docs/spike/pr-d/load_vectors.py <home>/oboete.db
-oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)。今は `reindex` は無く、ベクトルは worker の埋め込み段が作る
+oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)
 R=~/.oboete/eval/runs-test
 oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method hybrid > $R/hybrid-d2.trec   # D2 の形。今の `eval` は `--out <dir> --arms <...>` で、stdout に TREC を出さず `--method` も無い
 oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method fts > $R/e0-trigram.trec
