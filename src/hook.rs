@@ -101,6 +101,43 @@ pub(crate) fn started(home: &Path, agent: &str, session: &str, cwd: &Path) -> St
     String::from_utf8(out).unwrap()
 }
 
+/// `json` with each `\uXXXX` escape of half a surrogate pair written as `\ufffd`: JSON as
+/// JavaScript writes a string cut inside a pair, which `serde_json` refuses whole.
+fn paired(json: &str) -> String {
+    let bytes = json.as_bytes();
+    // The code unit of the `\uXXXX` escape at `i`, when one is there.
+    let unit = |i: usize| -> Option<u16> {
+        (bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'u'))
+            .then(|| json.get(i + 2..i + 6))
+            .flatten()
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+    };
+    let mut out = String::with_capacity(json.len());
+    let mut i = 0;
+    while i < json.len() {
+        if bytes[i] != b'\\' {
+            let end = json[i..].find('\\').map_or(json.len(), |n| i + n);
+            out.push_str(&json[i..end]);
+            i = end;
+            continue;
+        }
+        let taken = match unit(i) {
+            Some(0xD800..=0xDBFF) if matches!(unit(i + 6), Some(0xDC00..=0xDFFF)) => 12,
+            Some(0xD800..=0xDFFF) => {
+                out.push_str("\\ufffd");
+                i += 6;
+                continue;
+            }
+            Some(_) => 6,
+            // Any other escape, with the character it escapes: `\\u` is a backslash and a `u`.
+            None => 1 + json[i + 1..].chars().next().map_or(0, char::len_utf8),
+        };
+        out.push_str(&json[i..i + taken]);
+        i += taken;
+    }
+    out
+}
+
 fn run_clocked(
     home: &Path,
     mut agent: &str,
@@ -151,13 +188,38 @@ fn run_clocked(
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(());
         }
-        let mut raw = String::new();
-        input.read_to_string(&mut raw)?;
+        // MUST-M16: what the agent sent is read as far as it can be. Bytes that are no UTF-8 (a
+        // character cut in two) read as U+FFFD, and so does the escape of half a surrogate pair,
+        // which a JavaScript host writes for a string it cut there and `serde_json` refuses: the
+        // event is recorded with that one character replaced. A payload that still does not parse
+        // holds no event to keep: where the call would have recorded one, the marker says that
+        // recording failed.
+        let mut bytes = Vec::new();
+        input.read_to_end(&mut bytes)?;
+        let raw = String::from_utf8_lossy(&bytes);
         let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
         let mut payload: Value = if raw.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(raw)?
+            let parsed = serde_json::from_str(raw)
+                .or_else(|e| serde_json::from_str(&paired(raw)).map_err(|_| e));
+            match parsed {
+                Ok(payload) => payload,
+                Err(e) => {
+                    // Of a call that would have recorded: one that only notes a file or
+                    // acknowledges a receipt has no event, read or not, nor has an event an
+                    // agent with no adapter is not recorded for. What only the payload says of
+                    // a call (an agent's housekeeping session, a Cursor call with no workspace,
+                    // the copy of an event another agent's hook records) cannot be read from
+                    // one that does not parse: such a call marks too, as an event may have been
+                    // lost, and the next written row clears the marker.
+                    tried = (crate::setup::AGENTS.contains(&agent)
+                        || (raw_agent(agent) && RAW_EVENTS.contains(&event)))
+                        && event != "ContextInjected"
+                        && !matches!((agent, event), ("claude" | "codex", "PreToolUse"));
+                    return Err(e.into());
+                }
+            }
         };
         // The agent mark, the entry point and a call's start are oboete's own, from a rollout,
         // the environment, the hook's own state or the transcript parser (#273, O2, #692): a live
@@ -274,7 +336,15 @@ fn run_clocked(
                 // order the marker by this time (Codex on #440).
                 ended = crate::failure::now();
                 // docs/unwritten.md U2: what this call would have written, built without it.
-                match built(home, None, agent, event, &payload, db::now_ms(), &settings) {
+                match built(
+                    home,
+                    (None, false),
+                    agent,
+                    event,
+                    &payload,
+                    db::now_ms(),
+                    &settings,
+                ) {
                     Ok((built, _)) => {
                         keep(home, agent, &built, &settings, true);
                     }
@@ -1414,7 +1484,12 @@ pub(crate) fn record_if(
 ) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
     // ponytail: one recovery lock per home; use per-session locks if end hooks contend.
-    let _recovery = if agent == "cursor" && event == "SessionEnd" {
+    // Without the lock (its file cannot be made or locked) no turn is recovered, and the
+    // SessionEnd is recorded as it is otherwise, by the same list of what is never recorded and
+    // under the same session: the error used to leave the call before anything was built, so
+    // nothing of it was appended or kept (MUST-M16).
+    let ending = agent == "cursor" && event == "SessionEnd";
+    let recovery = ending.then(|| {
         let state = home.join("state");
         std::fs::create_dir_all(&state)?;
         let file = std::fs::OpenOptions::new()
@@ -1423,14 +1498,29 @@ pub(crate) fn record_if(
             .write(true)
             .open(state.join("cursor-recovery.lock"))?;
         file.lock()?;
-        Some(file)
-    } else {
-        None
+        std::io::Result::Ok(file)
+    });
+    let recovery = match recovery {
+        Some(Err(e)) => {
+            eprintln!("oboete: no turn recovered, the recovery's lock was not had: {e}");
+            None
+        }
+        Some(Ok(file)) => Some(file),
+        None => None,
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
     let back;
     (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
-    let (built, prompt) = built(home, Some(raw), agent, event, payload, ts, settings)?;
+    let recovers = !ending || recovery.is_some();
+    let (built, prompt) = built(
+        home,
+        (Some(&*raw), recovers),
+        agent,
+        event,
+        payload,
+        ts,
+        settings,
+    )?;
     let built = if built.iter().all(|b| keeps(&b.captured.event)) {
         built
     } else {
@@ -1499,7 +1589,7 @@ struct Built {
 /// SessionEnd recovers no turn.
 fn built(
     home: &Path,
-    raw: Option<&crate::raw::Raw>,
+    (raw, recovers): (Option<&crate::raw::Raw>, bool),
     agent: &str,
     event: &str,
     payload: &Value,
@@ -1517,7 +1607,15 @@ fn built(
             let now = crate::capture::never_recorded(&list, settings);
             (list, now)
         });
-    for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
+    // The store is `adapt`'s for Cursor's recovery alone.
+    for (event, payload) in adapt(
+        home,
+        raw.filter(|_| recovers),
+        agent,
+        event,
+        payload,
+        settings,
+    )? {
         if event == "UserPromptSubmit" {
             prompt = str_field(&payload, &["prompt"]).map(str::to_owned);
         }
@@ -3434,7 +3532,15 @@ fn adapt(
         {
             return Ok(vec![(event.into(), p)]);
         }
-        let counts = raw.prompt_counts(agent, &session)?;
+        // The comment's promise, for the two reads below too: an error left the call before the
+        // SessionEnd was appended or kept.
+        let counts = match raw.prompt_counts(agent, &session) {
+            Ok(counts) => counts,
+            Err(e) => {
+                eprintln!("oboete: no turn recovered, the session's prompts were not read: {e:#}");
+                return Ok(vec![(event.into(), p)]);
+            }
+        };
         // The turns as capture would store their prompts. The gate may strip private blocks,
         // redact, cap, or omit the prompt. Compare the body it stores, not transcript bytes;
         // harness envelopes are not recovered turns.
@@ -3451,7 +3557,13 @@ fn adapt(
         // which a turn is matched, is gone: that many of the transcript's first turns are passed
         // over, so none of them is recorded again (a transcript with fewer turns than that, cut
         // or another one, recovers nothing).
-        let expired = raw.expired_prompts(agent, &session)?;
+        let expired = match raw.expired_prompts(agent, &session) {
+            Ok(expired) => expired,
+            Err(e) => {
+                eprintln!("oboete: no turn recovered, the expired prompts were not read: {e:#}");
+                return Ok(vec![(event.into(), p)]);
+            }
+        };
         let mut nth = std::collections::HashMap::new();
         let mut events = Vec::new();
         for (body, mut turn, answer) in turns.into_iter().skip(expired) {
@@ -4067,6 +4179,23 @@ mod tests {
         )
         .unwrap();
         String::from_utf8(output).unwrap().trim().to_owned()
+    }
+
+    /// `hook`, of the bytes an agent sent as they came: what it printed, or the hook's error.
+    fn hook_bytes(home: &Path, agent: &str, event: &str, input: &[u8]) -> Result<String> {
+        // As `hook_clocked`: under the worker's lock, so no worker is started for the write.
+        let _contending = crate::worker::contending();
+        let _worker = crate::worker::lock(home).unwrap();
+        let mut output = Vec::new();
+        run_clocked(
+            home,
+            agent,
+            event,
+            input,
+            &mut output,
+            &Clock::starting_now(),
+        )?;
+        Ok(String::from_utf8(output).unwrap().trim().to_owned())
     }
 
     /// O2 (docs/my-work-model.md): a Claude Code prompt keeps the entry point its hook was given
@@ -10460,6 +10589,89 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// MUST-M16: a Cursor SessionEnd whose recovery cannot read the session's prompts recovers no
+    /// turn and still records the end itself, as `adapt` says of a read that fails. The read's
+    /// error used to leave the call before the end was appended or kept.
+    #[test]
+    fn a_cursor_session_end_is_recorded_though_its_recovery_cannot_read_the_prompts() {
+        let dir = tmp("cursor-recovery-read");
+        let payloads = cursor_fixture(&dir);
+        let transcript = dir.join("transcript.jsonl");
+        let line = json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}});
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        assert_eq!(
+            hook(
+                &dir,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            ),
+            "{}"
+        );
+        // The stored prompt no longer reads, so counting the session's prompts fails.
+        let conn = rusqlite::Connection::open(dir.join("raw.db")).unwrap();
+        conn.execute(
+            "UPDATE records SET enc = 'zstd', body = x'00' WHERE kind = 'prompt'",
+            [],
+        )
+        .unwrap();
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        let ended = hook_bytes(&dir, "cursor", "SessionEnd", end.to_string().as_bytes());
+        let ends: i64 = conn
+            .query_row("SELECT count(*) FROM records WHERE kind = 'end'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ends, 1, "{ended:?}");
+        drop(conn); // Windows removes no file that is open
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// MUST-M16: a Cursor SessionEnd whose recovery lock cannot be had (here its file is a
+    /// directory) recovers no turn and still records the end. The lock's error used to leave the
+    /// call before the event was built, so it was neither appended nor kept.
+    #[test]
+    fn a_cursor_session_end_is_recorded_though_its_recovery_lock_cannot_be_had() {
+        let dir = tmp("cursor-recovery-lock");
+        let payloads = cursor_fixture(&dir);
+        assert_eq!(
+            hook(
+                &dir,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            ),
+            "{}"
+        );
+        std::fs::create_dir_all(dir.join("state/cursor-recovery.lock")).unwrap();
+        let end = payloads["SessionEnd"].to_string();
+        let ended = hook_bytes(&dir, "cursor", "SessionEnd", end.as_bytes());
+        let kinds = |session: &str| -> Vec<String> {
+            (recorded(&dir, "cursor", session).into_iter())
+                .map(|e| e.kind)
+                .collect()
+        };
+        assert_eq!(kinds("cursor-session"), ["prompt", "end"], "{ended:?}");
+        // Under the same session: an end with no id is this device's own, as it is with the lock.
+        let mut idless = payloads["SessionEnd"].clone();
+        for id in ["session_id", "conversation_id"] {
+            idless.as_object_mut().unwrap().remove(id);
+        }
+        hook_bytes(&dir, "cursor", "SessionEnd", idless.to_string().as_bytes()).unwrap();
+        let device = crate::raw::open(&dir).unwrap().device().to_owned();
+        assert_eq!(kinds(&format!("unknown-{device}")), ["end"]);
+        // And by the list of what is never recorded: the end of a session in a folder excluded
+        // since is not written, lock or no lock.
+        let folder = dir.to_string_lossy().into_owned();
+        (crate::raw::open(&dir).unwrap())
+            .exclude_capture(("folder", &folder), false)
+            .unwrap();
+        hook_bytes(&dir, "cursor", "SessionEnd", end.as_bytes()).unwrap();
+        assert_eq!(kinds("cursor-session"), ["prompt", "end"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// docs/retention.md: a Cursor session whose recovered turns expired passes them over at its
     /// next SessionEnd (their text, by which a turn is matched, is gone), and recovers only a
     /// turn the transcript added since.
@@ -11447,6 +11659,80 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// MUST-M16: a string a JavaScript host cut inside a surrogate pair is written as the escape of
+    /// half the pair, which `serde_json` refuses. That lost the whole event, with nothing kept and
+    /// no marker; it is recorded with that character replaced.
+    #[test]
+    fn an_event_with_half_a_surrogate_pair_is_recorded_with_it_replaced() {
+        let dir = tmp("half-pair");
+        let input = br#"{"session_id":"s1","cwd":"/r","prompt":"half an emoji \ud83d"}"#;
+        hook_bytes(&dir, "claude", "UserPromptSubmit", input).unwrap();
+        let prompts: Vec<Value> = (recorded(&dir, "claude", "s1").into_iter())
+            .map(|e| serde_json::from_str::<Value>(&e.body).unwrap()["prompt"].clone())
+            .collect();
+        assert_eq!(prompts, [json!("half an emoji \u{fffd}")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// MUST-M16: a character cut in two is no UTF-8, and reading the payload as a string failed
+    /// before the call counted as an attempt. It is recorded with that character replaced.
+    #[test]
+    fn an_event_with_half_a_character_is_recorded_with_it_replaced() {
+        let dir = tmp("half-character");
+        let mut input = br#"{"session_id":"s1","cwd":"/r","prompt":"half a caf"#.to_vec();
+        input.extend_from_slice(b"\xc3\"}");
+        hook_bytes(&dir, "claude", "UserPromptSubmit", &input).unwrap();
+        let prompts: Vec<Value> = (recorded(&dir, "claude", "s1").into_iter())
+            .map(|e| serde_json::from_str::<Value>(&e.body).unwrap()["prompt"].clone())
+            .collect();
+        assert_eq!(prompts, [json!("half a caf\u{fffd}")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_escape_of_half_a_surrogate_pair_is_replaced() {
+        for (json, read) in [
+            (r#""a\ud83d""#, r#""a\ufffd""#),
+            (r#""\udc00b""#, r#""\ufffdb""#),
+            (r#""\ud83d\u0041""#, r#""\ufffd\u0041""#),
+            (r#""\ud83d\ude00""#, r#""\ud83d\ude00""#),
+            (r#""\\ud83d""#, r#""\\ud83d""#),
+            (r#""\n\u00e9 \ud83d""#, r#""\n\u00e9 \ufffd""#),
+            ("\"caf\u{e9} \\", "\"caf\u{e9} \\"),
+        ] {
+            assert_eq!(paired(json), read, "{json}");
+        }
+    }
+
+    /// MUST-M16: a payload that does not parse holds no event to keep. Where the call would have
+    /// recorded one it is a recording that failed, and the marker says so, where it used to say
+    /// nothing; a call that records nothing marks none: Claude Code's PreToolUse, which notes a
+    /// file, OpenCode's receipt, an event an agent with no adapter is not recorded for, and a
+    /// name that is no agent's.
+    #[test]
+    fn a_payload_that_does_not_parse_marks_the_failure_of_a_call_that_records() {
+        let cut = &b"{\"prompt\": "[..];
+        let dir = tmp("unparsed-payload");
+        std::fs::create_dir_all(&*dir).unwrap();
+        for (agent, event) in [
+            ("claude", "PreToolUse"),
+            ("opencode", "ContextInjected"),
+            ("homegrown", "Notification"),
+            ("No Agent", "UserPromptSubmit"),
+        ] {
+            assert!(hook_bytes(&dir, agent, event, cut).is_err(), "{agent}");
+            assert!(crate::failure::since(&dir).is_none(), "{agent} {event}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        for (agent, event) in [("claude", "UserPromptSubmit"), ("homegrown", "Stop")] {
+            let dir = tmp(&format!("unparsed-payload-{agent}"));
+            std::fs::create_dir_all(&*dir).unwrap();
+            assert!(hook_bytes(&dir, agent, event, cut).is_err(), "{agent}");
+            assert!(crate::failure::since(&dir).is_some(), "{agent} {event}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
