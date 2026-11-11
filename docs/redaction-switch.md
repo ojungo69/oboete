@@ -79,10 +79,12 @@ the copies of raw.db, kept through them, so a record or an op stored as typed un
 stays so. A
 search reads its exclusions again once its query is admitted, as the rules now read the caller.
 
-`Rules::default()` stays the bundled rules, on. The one place that stores text with them rather
-than with the home's settings is the claude-mem import's prompts (`hook::clip`): it keeps them, so
-its check for a key block it cuts sees every header (a user's rule that masked a header would hide
-it), and follows the switch: while it is off, a prompt is kept as typed, cut as before.
+`Rules::default()` stays the bundled rules, on. The one place that masks text with them rather
+than with the home's settings is the cut of the claude-mem import's prompts (`hook::clip`): it
+keeps them, so its check for a key block it cuts sees every header (a user's rule that masked a
+header would hide it), and follows the switch: while it is off, a prompt is kept as typed, cut as
+before. What it kept then passes the gate with the home's rules, as the import's other texts do
+(docs/claude-mem-import.md I10).
 
 ## The page, doctor, the CLI
 

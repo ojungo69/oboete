@@ -26,7 +26,8 @@ pub struct Stats {
     pub prompts: u64,
     /// Rows imported by an earlier run.
     pub seen: u64,
-    /// Rows with nothing left to store (empty, or a harness notification).
+    /// Rows with nothing left to store (empty, a harness notification, or a prompt while
+    /// `[capture] store_prompts` is off).
     pub empty: u64,
     /// Work state rows imported as work state ops (docs/claude-mem-import.md I4).
     pub work_state: u64,
@@ -44,6 +45,9 @@ pub struct Stats {
     /// Paths left out of a files op to keep it within `FILES_BYTES` (F10). An observation none of
     /// whose paths fits gets no files op, so each run tries it, and counts them, again.
     pub files_cut: u64,
+    /// Rows left out because the gate changes a label they would be stored under, the
+    /// repository's or the session's (I10): each run counts them again.
+    pub masked: u64,
 }
 
 /// The most a files op takes as stored (docs/file-note.md F10): half the op cap.
@@ -155,6 +159,7 @@ pub fn claude_mem_with(
         known: raw.import_repos(&source)?,
         known_files: raw.import_files_repos(&source)?,
         raw,
+        settings,
         source: &source,
         files_only,
         items: Vec::new(),
@@ -223,7 +228,11 @@ pub fn claude_mem_with(
             };
             let put = sink.put(row)?;
             stats.files_cut += put.cut;
-            count(&put, &mut stats.observations, &mut stats.seen);
+            count(
+                &put,
+                &mut stats.observations,
+                (&mut stats.seen, &mut stats.masked),
+            );
             Ok(())
         },
     )?;
@@ -277,7 +286,11 @@ pub fn claude_mem_with(
                 body: &body,
                 files: Default::default(),
             };
-            count(&sink.put(row)?, &mut stats.summaries, &mut stats.seen);
+            count(
+                &sink.put(row)?,
+                &mut stats.summaries,
+                (&mut stats.seen, &mut stats.masked),
+            );
             Ok(())
         },
     )?;
@@ -289,9 +302,27 @@ pub fn claude_mem_with(
         |r| {
             let (id, content, ts, text): (i64, String, i64, String) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            // The same cleaning a live prompt gets: blocks out, secrets masked, notifications dropped.
-            let body = hook::clip(&hook::strip_blocks(&text, true), &settings.rules);
-            if body.is_empty() || hook::is_envelope(&body) {
+            // What was typed is not stored while `[capture] store_prompts` is off, as a live
+            // prompt's is not. The row is left out, so a run with it on again brings it in.
+            if !settings.store_prompts {
+                stats.empty += 1;
+                return Ok(());
+            }
+            // Blocks out, secrets masked, notifications dropped, and 8,000 characters kept, where
+            // a live prompt keeps 64 KiB. `clip` masks with the bundled rules alone, so that its
+            // check for a key block it cuts sees every header.
+            let kept = hook::clip(&hook::strip_blocks(&text, true), &settings.rules);
+            // A notification is told here, before a rule of the home's can mask its tag.
+            if kept.is_empty() || hook::is_envelope(&kept) {
+                stats.empty += 1;
+                return Ok(());
+            }
+            // Then the home's rules gate what `clip` kept, as they do a title and a body.
+            // shortcut: a value only a rule of the home's finds keeps its start when the cut
+            // falls inside it; mask over `clip`'s window before the cut once a home has such a
+            // rule and prompts this long.
+            let body = redact::outbound_with(&kept, &settings.rules);
+            if body.is_empty() {
                 stats.empty += 1;
                 return Ok(());
             }
@@ -308,7 +339,11 @@ pub fn claude_mem_with(
                 body: &body,
                 files: Default::default(),
             };
-            count(&sink.put(row)?, &mut stats.prompts, &mut stats.seen);
+            count(
+                &sink.put(row)?,
+                &mut stats.prompts,
+                (&mut stats.seen, &mut stats.masked),
+            );
             Ok(())
         },
     )?;
@@ -418,6 +453,11 @@ fn work_state(
             let labelled = crate::capture::exclusion_label("repo", &named, settings);
             if never.covers_work_state(&named, true) || never.covers_work_state(&labelled, true) {
                 stats.never_recorded += 1;
+                return Ok(());
+            }
+            // I10: the op holds the name, which the gate must leave as it is.
+            if labelled != named {
+                stats.masked += 1;
                 return Ok(());
             }
             let checked =
@@ -573,6 +613,8 @@ struct Row<'a> {
 /// transaction, so a run that stops keeps what it appended.
 struct Sink<'a> {
     raw: &'a mut Raw,
+    /// The gate its labels pass (I10).
+    settings: &'a crate::capture::Settings,
     source: &'a str,
     /// The source ids imported so far, by earlier runs and this one, each with the repositories
     /// it was filed under.
@@ -587,11 +629,13 @@ struct Sink<'a> {
 }
 
 /// What `Sink::put` did with a row: whether its document is new, whether an earlier run imported
-/// it, and how many of its paths its files op left out (F10).
+/// it, how many of its paths its files op left out (F10), and whether what it had to write was
+/// left out for a label the gate changes (I10).
 struct Put {
     new: bool,
     before: bool,
     cut: u64,
+    masked: bool,
 }
 
 impl Sink<'_> {
@@ -625,6 +669,30 @@ impl Sink<'_> {
             // Moved since, under `--files`: where it was filed, as a lost project's.
             None => had.and_then(|had| had.iter().min().cloned()),
         };
+        // Where the files op this row still owes goes, if it owes one.
+        let files_under = under.clone().filter(|under| {
+            !(r.files[0].is_empty() && r.files[1].is_empty())
+                && !self
+                    .known_files
+                    .get(&r.key)
+                    .is_some_and(|had| had.contains(under))
+        });
+        // I10: the labels as they would be written, `under` also when it is one an earlier run
+        // stored, which no gate read then. A label the gate changes can neither be stored as it
+        // is nor name what it named once masked or cut: what the row would write is left out.
+        let kept = |field: &str, label: &str| {
+            crate::capture::exclusion_label(field, label, self.settings) == label
+        };
+        if (new || files_under.is_some())
+            && !(kept("session", &session) && under.as_deref().is_none_or(|at| kept("repo", at)))
+        {
+            return Ok(Put {
+                new: false,
+                before,
+                cut: 0,
+                masked: true,
+            });
+        }
         if new {
             self.known
                 .entry(r.key.clone())
@@ -644,13 +712,7 @@ impl Sink<'_> {
         }
         let mut cut = 0;
         let [read, modified] = r.files;
-        if let Some(under) = under
-            && !(read.is_empty() && modified.is_empty())
-            && !self
-                .known_files
-                .get(&r.key)
-                .is_some_and(|had| had.contains(&under))
-        {
+        if let Some(under) = files_under {
             let (files, left_out) = fitted(ImportFiles {
                 uid,
                 source: self.source.to_owned(),
@@ -679,7 +741,12 @@ impl Sink<'_> {
         if self.items.len() >= crate::raw::IMPORT_BATCH {
             self.flush()?;
         }
-        Ok(Put { new, before, cut })
+        Ok(Put {
+            new,
+            before,
+            cut,
+            masked: false,
+        })
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -955,10 +1022,13 @@ fn observation_body(narrative: &str, facts: &str) -> String {
     lines.join("\n")
 }
 
-/// A row in the import's line: added, imported by an earlier run, or neither (one claude-mem
-/// recorded since, which `--files` leaves to the plain import, F11).
-fn count(put: &Put, added: &mut u64, seen: &mut u64) {
-    if put.new {
+/// A row in the import's line: left out for a label (I10), added, imported by an earlier run, or
+/// none of them (one claude-mem recorded since, which `--files` leaves to the plain import, F11).
+fn count(put: &Put, added: &mut u64, stats: (&mut u64, &mut u64)) {
+    let (seen, masked) = stats;
+    if put.masked {
+        *masked += 1;
+    } else if put.new {
         *added += 1;
     } else if put.before {
         *seen += 1;
@@ -1463,6 +1533,258 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(found, ["claude-mem:b62f07076e19:s20"]);
+    }
+
+    /// Adds a prompt of session `agent-1` to `claude_mem_db`'s database.
+    fn prompt(path: &Path, id: i64, text: &str) {
+        Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT INTO user_prompts VALUES(?1, 'agent-1', 1200, ?2)",
+                params![id, text],
+            )
+            .unwrap();
+    }
+
+    /// A home whose config.toml is `toml`, and its capture settings.
+    fn home_with(toml: &str) -> (tempfile::TempDir, crate::capture::Settings) {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), toml).unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        (home, settings)
+    }
+
+    /// A prompt is gated with the home's rules too, as a title and a body are: `clip` masked it
+    /// with the bundled rules alone, so a value only a rule of the home's finds was stored as
+    /// typed. What is stored is what `clip` kept, with the rule's values masked in it and nothing
+    /// more: under no rule of the home's it is the text stored before, also for the key blocks,
+    /// cut short and whole about the cut, that a security review of this change tried.
+    #[test]
+    fn a_prompt_is_gated_with_the_homes_rules_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let lines = format!("{}\n", "Q9zX8mL2vB4nR7tY1wK3pS6dJ0aF5hU2".repeat(2)).repeat(100);
+        let before = "a".repeat(7_960);
+        let texts = [
+            "Deploy acme-482915 to staging".to_owned(),
+            // Longer than `clip` keeps, the value before its cut.
+            format!("ship acme-482915 {}", "a".repeat(11_000)),
+            format!("push with {key}"),
+            format!("{before} -----BEGIN RSA PRIVATE KEY-----\n{lines}"),
+            format!("{before} -----BEGIN RSA PRIVATE KEY-----\n{lines}-----END RSA PRIVA"),
+            format!(
+                "{before} -----BEGIN RSA PRIVATE KEY-----\n{lines}-----BEGIN OPENSSH PRIVATE \
+                 KEY-----\n{lines}-----END OPENSSH PRIVATE KEY-----\n"
+            ),
+            format!(
+                "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+                "a".repeat(7_000),
+                "B".repeat(6_000)
+            ),
+        ];
+        for (i, text) in texts.iter().enumerate() {
+            prompt(&src, 32 + i as i64, text);
+        }
+        let bodies = |settings: &crate::capture::Settings, home: &Path| -> Vec<String> {
+            let mut raw = crate::raw::open(home).unwrap();
+            raw.gates_with(&settings.rules);
+            claude_mem(&mut raw, &src, settings).unwrap();
+            let stored = docs(&raw);
+            (0..texts.len())
+                .map(|i| {
+                    let id = format!("p{}", 32 + i);
+                    stored
+                        .iter()
+                        .find(|d| d.source_id == id)
+                        .unwrap()
+                        .body
+                        .clone()
+                })
+                .collect()
+        };
+        // The text stored before this change: `clip`'s.
+        let (home, plain) = home_with("");
+        let was: Vec<String> = texts
+            .iter()
+            .map(|t| hook::clip(&hook::strip_blocks(t, true), &plain.rules))
+            .collect();
+        assert_eq!(was[2], "push with [REDACTED]");
+        assert!(was[1].ends_with("\n…[clipped, 11017 chars in full]"));
+        assert!(
+            was.iter()
+                .all(|w| !w.contains("Q9zX8mL2") && !w.contains("BBBB"))
+        );
+        assert_eq!(bodies(&plain, home.path()), was);
+        // Under a rule of the home's: the same, with its value masked.
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        let (home, ruled) = home_with(rule);
+        let masked: Vec<String> = was
+            .iter()
+            .map(|w| w.replace("acme-482915", "[REDACTED]"))
+            .collect();
+        assert_ne!(masked[..2], was[..2]);
+        assert_eq!(bodies(&ruled, home.path()), masked);
+        // Owner decision 43: while redaction is off, a prompt is kept as typed.
+        let (home, off) = home_with("[redaction]\nenabled = false\n");
+        let typed = bodies(&off, home.path());
+        assert_eq!(typed[0], texts[0]);
+        assert_eq!(typed[2], texts[2]);
+    }
+
+    /// A harness notification is told before the home's rules run: a rule that masks its opening
+    /// tag does not make it a prompt (a security review of this change, 2026-11-12). A prompt
+    /// the home's rules leave nothing of is none.
+    #[test]
+    fn a_notification_stays_out_under_a_rule_that_masks_its_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        prompt(
+            &src,
+            32,
+            "<task-notification>\nAccess PIN: 7391\n</task-notification>",
+        );
+        prompt(&src, 33, "<private>all of it</private>");
+        // Tags that close into a private block only at the home's gate, the third pass.
+        prompt(
+            &src,
+            34,
+            "<pri<pri<private>a</private>vate>b</private>vate>all of it</private>",
+        );
+        let rule = "[[redaction.extra_rules]]\nid = \"tag\"\nregex = 'task-notification'\n";
+        let (home, ruled) = home_with(rule);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &ruled).unwrap();
+        // The fixture's notification, this one, the two prompts that are all private, and o12.
+        assert_eq!(counts(&stats), (6, 1, 1, 0, 5));
+        let stored = op_bodies(&raw);
+        assert!(
+            stored
+                .iter()
+                .all(|op| !op.contains("7391") && !op.contains("all of it"))
+        );
+        let prompts: Vec<String> = docs(&raw)
+            .into_iter()
+            .filter(|d| d.kind == "prompt")
+            .map(|d| d.source_id)
+            .collect();
+        assert_eq!(prompts, ["p30"]);
+    }
+
+    /// While `[capture] store_prompts` is off, the import stores no prompt's text either: the
+    /// rows are left out, and come in once it is on again.
+    #[test]
+    fn prompts_stay_out_while_store_prompts_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        let (home, off) = home_with("[capture]\nstore_prompts = false\n");
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &off).unwrap();
+        assert_eq!(counts(&stats), (6, 1, 0, 0, 3));
+        assert!(docs(&raw).iter().all(|d| d.kind != "prompt"));
+        let on = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+        assert_eq!(counts(&on), (0, 0, 1, 7, 2));
+        assert!(docs(&raw).iter().any(|d| d.source_id == "p30"));
+    }
+
+    /// Every op raw holds, as stored.
+    fn op_bodies(raw: &Raw) -> Vec<String> {
+        raw.ops_after(raw.device(), 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.body.to_string())
+            .collect()
+    }
+
+    /// I10: a label is stored text too, and it names something. A row whose repository or session
+    /// the gate changes is left out and counted, document, files and work state alike: the label
+    /// was stored as claude-mem holds it, whatever the home's rules masked in it.
+    #[test]
+    fn a_row_under_a_label_the_gate_changes_is_left_out_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_v64(&src, "2025-12-14T16:09:58.769Z");
+        Connection::open(&src)
+            .unwrap()
+            .execute(
+                "INSERT INTO observations(id, memory_session_id, project, created_at_epoch, type,
+                   title, narrative, facts)
+                 VALUES(50, 'mem-9', 'other', 1800, 'change', 'Elsewhere', 'Kept.', '[]')",
+                [],
+            )
+            .unwrap();
+        with_files(
+            &src,
+            &[
+                (10, json!(["src/a.rs"]), json!([])),
+                (50, json!(["src/b.rs"]), json!([])),
+            ],
+        );
+        // The repository's name.
+        let (home, ruled) =
+            home_with("[[redaction.extra_rules]]\nid = \"fm\"\nregex = 'free-mem'\n");
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &ruled).unwrap();
+        // Out: seven observations, the summary, the prompt and the four work state rows.
+        assert_eq!((counts(&stats), stats.masked), ((1, 0, 0, 0, 2), 13));
+        assert_eq!((stats.work_state, stats.refused, stats.files), (0, 0, 1));
+        let stored = op_bodies(&raw);
+        assert!(
+            stored.iter().all(|op| !op.contains("free-mem")),
+            "{stored:?}"
+        );
+        assert_eq!(docs(&raw).len(), 1);
+        assert_eq!(files_ops(&raw)[0].repo, repo("other"));
+        let again = claude_mem(&mut raw, &src, &ruled).unwrap();
+        assert_eq!((counts(&again), again.masked), ((0, 0, 0, 1, 2), 13));
+        // The session's id.
+        let (home, ruled) =
+            home_with("[[redaction.extra_rules]]\nid = \"s\"\nregex = 'agent-[0-9]'\n");
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let stats = claude_mem(&mut raw, &src, &ruled).unwrap();
+        // Out: the session's four observations, its summary and its prompt.
+        assert_eq!((counts(&stats), stats.masked), ((4, 0, 0, 0, 2), 6));
+        let stored = op_bodies(&raw);
+        assert!(
+            stored.iter().all(|op| !op.contains("agent-1")),
+            "{stored:?}"
+        );
+        let sessions: Vec<String> = docs(&raw).into_iter().map(|d| d.session).collect();
+        assert_eq!(sessions.len(), 4, "{sessions:?}");
+    }
+
+    /// I10: the files op of a document filed before goes under the label the document was stored
+    /// under, which no gate read then: `--files`, and a row whose project claude-mem lost, leave
+    /// it out too.
+    #[test]
+    fn a_files_op_under_a_stored_label_the_gate_changes_is_left_out() {
+        let rule = "[[redaction.extra_rules]]\nid = \"fm\"\nregex = 'free-mem'\n";
+        for lost in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("claude-mem.db");
+            claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+            let (home, ruled) = home_with(rule);
+            let mut raw = crate::raw::open(home.path()).unwrap();
+            // Filed under no rule, before claude-mem kept an observation's files.
+            claude_mem(&mut raw, &src, &Default::default()).unwrap();
+            with_files(&src, &[(10, json!(["src/a.rs"]), json!([]))]);
+            if lost {
+                Connection::open(&src)
+                    .unwrap()
+                    .execute("UPDATE observations SET project = NULL WHERE id = 10", [])
+                    .unwrap();
+            }
+            let stats = claude_mem_with(&mut raw, &src, &ruled, !lost).unwrap();
+            assert_eq!((stats.files, stats.masked), (0, 1), "lost: {lost}");
+            assert!(files_ops(&raw).is_empty(), "lost: {lost}");
+            // Under no rule it comes in.
+            let plain = claude_mem_with(&mut raw, &src, &Default::default(), !lost).unwrap();
+            assert_eq!((plain.files, plain.masked), (1, 0), "lost: {lost}");
+            assert_eq!(files_ops(&raw)[0].repo, repo("free-mem"));
+        }
     }
 
     /// docs/claude-mem-import.md tests 1, 3 and 4: 13.35.0's database brings its summaries'

@@ -715,9 +715,10 @@ pub fn redact(text: &str) -> String {
     scan(text, &Rules::default()).0
 }
 
-/// The claude-mem import's prompts (`hook::clip`): the bundled rules only, so `clip`'s check for a
-/// key block it cuts sees every header (a user's rule could mask one: Codex's security review of
-/// the switch), and none while the import's `rules` are off (owner decision 43).
+/// The cut of the claude-mem import's prompts (`hook::clip`): the bundled rules only, so `clip`'s
+/// check for a key block it cuts sees every header (a user's rule could mask one: Codex's
+/// security review of the switch), and none while the import's `rules` are off (owner decision
+/// 43). The import gates what `clip` kept with its own rules after it.
 pub fn redact_unless_off(text: &str, rules: &Rules) -> String {
     if rules.off {
         return text.to_owned();
