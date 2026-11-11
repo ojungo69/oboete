@@ -142,18 +142,23 @@ pub fn prepare(home: &Path) {
 /// first failure's time, kept until a write that ends later succeeds. Nothing when a write that
 /// ended after `at` has already succeeded.
 pub fn mark(home: &Path, class: Class, at: i64) {
+    mark_with(home, class, at, || free_bytes(home));
+}
+
+/// `mark` with the free space of the disk given by `free`, asked only for a new record of an
+/// I/O error.
+fn mark_with(home: &Path, class: Class, at: i64, free: impl FnOnce() -> Option<u64>) {
     let failing = std::fs::read_to_string(marker(home))
         .ok()
         .and_then(|t| State::parse(&t))
         .is_some_and(|s| matches!(s, State::Failed { .. }));
     // SQLite reports a full disk as an I/O error while it sets up its journal (SQLITE_IOERR 4874
     // on a full tmpfs): the free space tells them apart. Only a new record needs the class.
-    let class =
-        if !failing && class == Class::Io && free_bytes(home).is_some_and(|b| b < 1024 * 1024) {
-            Class::DiskFull
-        } else {
-            class
-        };
+    let class = if !failing && class == Class::Io && free().is_some_and(|b| b < 1024 * 1024) {
+        Class::DiskFull
+    } else {
+        class
+    };
     let _ = transition(home, |s| match s {
         Some(State::Ok(ok)) if later(ok, at) => None,
         Some(State::Failed { class, first, last }) => Some(State::Failed {
@@ -304,7 +309,7 @@ pub fn free_bytes(home: &Path) -> Option<u64> {
             Err(_) => return None,
         }
     }
-    df("df".as_ref(), home)
+    df("df".as_ref(), home, DF_TIMEOUT)
 }
 
 #[cfg(windows)]
@@ -335,8 +340,10 @@ fn windows_free_bytes(home: &Path) -> Option<u64> {
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 const DF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// `program -Pk home`'s answer within `limit` (`DF_TIMEOUT`, but in the tests that are not about
+/// it: a loaded runner starts a shell slower than that).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
+fn df(program: &std::ffi::OsStr, home: &Path, limit: std::time::Duration) -> Option<u64> {
     use std::io::Read;
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
@@ -353,13 +360,14 @@ fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
         .stderr(Stdio::null());
     let child = crate::provider::own_group(&mut command).spawn().ok()?;
     drop(command); // Release the parent's configured stdout writer so EOF is observable.
-    df_bounded_child(child, |chunk| stdout.read(chunk))
+    df_bounded_child(child, |chunk| stdout.read(chunk), limit)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn df_bounded_child(
     mut child: std::process::Child,
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+    limit: std::time::Duration,
 ) -> Option<u64> {
     use std::io::ErrorKind;
     use std::time::{Duration, Instant};
@@ -369,7 +377,7 @@ fn df_bounded_child(
     // milliseconds, so the work keeps most of the half second.
     const CLEANUP_RESERVE: Duration = Duration::from_millis(200);
     const POLL: Duration = Duration::from_millis(5);
-    let deadline = Instant::now() + DF_TIMEOUT;
+    let deadline = Instant::now() + limit;
     let work_deadline = deadline - CLEANUP_RESERVE;
     let mut bytes = Vec::new();
     let mut eof = false;
@@ -485,7 +493,7 @@ fn df_read_available(
 }
 
 #[cfg(windows)]
-fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
+fn df(program: &std::ffi::OsStr, home: &Path, limit: std::time::Duration) -> Option<u64> {
     use std::process::{Command, Stdio};
     let mut command = Command::new(program);
     command
@@ -497,19 +505,25 @@ fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
     let mut child = command.spawn().ok()?;
     drop(command);
     let Some(mut stdout) = child.stdout.take() else {
-        return df_bounded_child(child, |_| Err(std::io::ErrorKind::Other.into()));
+        return df_bounded_child(child, |_| Err(std::io::ErrorKind::Other.into()), limit);
     };
-    df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk))
+    df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk), limit)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn df(_program: &std::ffi::OsStr, _home: &Path) -> Option<u64> {
+fn df(_program: &std::ffi::OsStr, _home: &Path, _limit: std::time::Duration) -> Option<u64> {
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a df test that is not about `DF_TIMEOUT` gives it: a loaded runner can take longer
+    /// than that to start a shell, and the answer then read as none (the coverage run of
+    /// 2026-11-11).
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    const PATIENT: std::time::Duration = std::time::Duration::from_secs(30);
 
     #[cfg(windows)]
     #[test]
@@ -518,16 +532,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let system = std::env::var_os("SystemRoot").unwrap();
         let exe = PathBuf::from(&system).join("System32").join("cmd.exe");
-        for (body, expected) in [
+        for (body, limit, expected) in [
             (
                 "echo Filesystem 1024-blocks Used Available Capacity Mounted & echo fake 100 10 4 capacity /",
+                PATIENT,
                 Some(4096),
             ),
             (
                 "echo Filesystem 1024-blocks Used Available Capacity Mounted & echo fake 100 10 4 capacity / & exit /b 7",
+                PATIENT,
                 None,
             ),
-            ("for /L %i in (1,1,2147483647) do @rem", None),
+            // The one about the limit: it never ends.
+            ("for /L %i in (1,1,2147483647) do @rem", DF_TIMEOUT, None),
         ] {
             let mut child = Command::new(&exe)
                 .env_clear()
@@ -543,7 +560,7 @@ mod tests {
                 .unwrap();
             let mut stdout = child.stdout.take().unwrap();
             assert_eq!(
-                df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk)),
+                df_bounded_child(child, |chunk| df_read_available(&mut stdout, chunk), limit),
                 expected
             );
         }
@@ -562,8 +579,13 @@ mod tests {
         ] {
             std::fs::write(&program,format!("#!/bin/sh\nprintf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 {available} 1% /'\nexit {status}\n")).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert_eq!(df(program.as_os_str(), dir.path()), expected);
+            assert_eq!(df(program.as_os_str(), dir.path(), PATIENT), expected);
         }
+        // One slower than `DF_TIMEOUT`, as a shell on a loaded runner is: the limit given is the
+        // one kept.
+        std::fs::write(&program, "#!/bin/sh\nsleep 1\nprintf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 4 1% /'\n").unwrap();
+        assert_eq!(df(program.as_os_str(), dir.path(), PATIENT), Some(4096));
+        assert_eq!(df(program.as_os_str(), dir.path(), DF_TIMEOUT), None);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -572,14 +594,37 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("df");
-        for script in [
-            "#!/bin/sh\nprintf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 4 1% /'\nsleep 2 &\nexit 0\n",
-            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 200 ]; do printf '%s\\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done\n",
+        let table = "printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted' 'fake 100 10 4 1% /'";
+        let lines = |n: u32| {
+            format!(
+                "i=0\nwhile [ \"$i\" -lt {n} ]; do printf '%s\\n' '{}'; i=$((i+1)); done",
+                "x".repeat(64)
+            )
+        };
+        for (script, limit, expected) in [
+            // Its output never ends: a child of its own holds it open, and the limit ends the wait.
+            (
+                format!("#!/bin/sh\n{table}\nsleep 2 &\nexit 0\n"),
+                DF_TIMEOUT,
+                None,
+            ),
+            // A table that reads, then more than the output's cap: only the cap makes it none,
+            // as the same table under the cap shows.
+            (
+                format!("#!/bin/sh\n{table}\n{}\n", lines(200)),
+                PATIENT,
+                None,
+            ),
+            (
+                format!("#!/bin/sh\n{table}\n{}\n", lines(20)),
+                PATIENT,
+                Some(4096),
+            ),
         ] {
             std::fs::write(&program, script).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             let started = std::time::Instant::now();
-            assert_eq!(df(program.as_os_str(), dir.path()), None);
+            assert_eq!(df(program.as_os_str(), dir.path(), limit), expected);
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(5),
                 "bounded df did not return"
@@ -599,7 +644,10 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(df(program.as_os_str(), dir.path()), None);
+        // Long enough for the shell to have written its id on a loaded runner; the wait ends
+        // at the limit all the same, the child never ending.
+        let limit = std::time::Duration::from_secs(3);
+        assert_eq!(df(program.as_os_str(), dir.path(), limit), None);
         let pid = std::fs::read_to_string(dir.path().join("df.pid"))
             .unwrap()
             .trim()
@@ -635,22 +683,39 @@ mod tests {
         assert_eq!(since(home), None);
     }
 
+    /// The system's own `df -Pk`, given the time a loaded runner needs: its table is the one read.
+    /// (A df that never ends is the reap test's, above.)
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_df_that_hangs_is_given_up_on() {
-        use std::os::unix::fs::PermissionsExt;
+    fn the_systems_df_is_read() {
         let dir = tempfile::tempdir().unwrap();
-        let stuck = dir.path().join("df");
-        std::fs::write(&stuck, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let t = std::time::Instant::now();
-        assert_eq!(df(stuck.as_os_str(), dir.path()), None);
-        assert!(
-            t.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            t.elapsed()
-        );
-        assert!(free_bytes(dir.path()).is_some()); // the real one answers
+        assert!(df("df".as_ref(), dir.path(), PATIENT).is_some());
+    }
+
+    /// SQLite reports a full disk as an I/O error while it sets up its journal: a new record of
+    /// one is a full disk's when under 1 MiB is free, and the disk is asked for a new record of
+    /// an I/O error alone.
+    #[test]
+    fn an_io_error_on_a_full_disk_is_recorded_as_a_full_disk() {
+        const MIB: u64 = 1024 * 1024;
+        for (class, free, recorded) in [
+            (Class::Io, Some(0), Class::DiskFull),
+            (Class::Io, Some(MIB - 1), Class::DiskFull),
+            (Class::Io, Some(MIB), Class::Io),
+            (Class::Io, None, Class::Io),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            mark_with(home.path(), class, 10, || free);
+            assert_eq!(since(home.path()), Some((recorded, 10)), "{free:?}");
+            // A record already there keeps its class, and the disk is not asked again.
+            mark_with(home.path(), Class::Io, 20, || panic!("asked again"));
+            assert_eq!(since(home.path()), Some((recorded, 10)));
+        }
+        let home = tempfile::tempdir().unwrap();
+        mark_with(home.path(), Class::Busy, 10, || {
+            panic!("asked for a busy store")
+        });
+        assert_eq!(since(home.path()), Some((Class::Busy, 10)));
     }
 
     fn sqlite(code: i32) -> anyhow::Error {
@@ -750,8 +815,8 @@ mod tests {
         let minute = 60_000_000_000;
         prepare(home);
         clear(home, 10 * minute);
-        mark(home, Class::Io, 9 * minute); // the clock stepped back a minute
-        assert_eq!(since(home), Some((Class::Io, 9 * minute)));
+        mark(home, Class::Busy, 9 * minute); // the clock stepped back a minute
+        assert_eq!(since(home), Some((Class::Busy, 9 * minute)));
         clear(home, 8 * minute); // and back again: a later success still clears it
         assert_eq!(since(home), None);
     }
@@ -775,10 +840,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let home = home.path().join("never-prepared");
         clear(&home, 20); // a success that ended later reached the marker first
-        mark(&home, Class::Io, 10);
+        mark(&home, Class::Busy, 10);
         assert_eq!(since(&home), None);
-        mark(&home, Class::Io, 30);
-        assert_eq!(since(&home), Some((Class::Io, 30)));
+        mark(&home, Class::Busy, 30);
+        assert_eq!(since(&home), Some((Class::Busy, 30)));
     }
 
     #[test]
