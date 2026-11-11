@@ -208,7 +208,11 @@ fn run_clocked(
                 Err(e) => {
                     // Of a call that would have recorded: one that only notes a file or
                     // acknowledges a receipt has no event, read or not, nor has an event an
-                    // agent with no adapter is not recorded for.
+                    // agent with no adapter is not recorded for. What only the payload says of
+                    // a call (an agent's housekeeping session, a Cursor call with no workspace,
+                    // the copy of an event another agent's hook records) cannot be read from
+                    // one that does not parse: such a call marks too, as an event may have been
+                    // lost, and the next written row clears the marker.
                     tried = (crate::setup::AGENTS.contains(&agent)
                         || (raw_agent(agent) && RAW_EVENTS.contains(&event)))
                         && event != "ContextInjected"
