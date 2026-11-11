@@ -974,8 +974,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             };
             let mut raw = raw::open(&home)?;
             let repo = match repo {
-                // An entry stored as typed is taken back as typed (`capture_exclude`).
-                Some(r) if undo && raw.exclusions()?.contains(&r) => r,
+                // An entry this command stored as typed is taken back as typed (`capture_exclude`);
+                // one that is never recorded under that name is `capture exclude`'s to take back.
+                Some(r) if undo && raw.sent_exclusions()?.contains(&r) => r,
                 // A directory names the repository there.
                 Some(r) if std::path::Path::new(&r).is_dir() => labelled(std::path::Path::new(&r))?,
                 Some(r) => r,
@@ -1122,6 +1123,8 @@ fn capture_exclude(
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
     let settings = capture::Settings::load(home)?;
+    // Before the store is opened: a pattern that is refused leaves nothing behind.
+    let pattern = pattern.as_deref().map(capture::pattern).transpose()?;
     let mut raw = raw::open(home)?;
     let was = raw.capture_exclusions()?;
     // Stored as given, unmasked, so it holds whatever the rules become (owner, 2026-10-13).
@@ -1129,7 +1132,7 @@ fn capture_exclude(
         // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
         // `canonicalize` gives on Windows.
         (Some(folder), _) => ("folder", capture::folder_path(&folder.to_string_lossy())),
-        (None, Some(pattern)) => ("pattern", capture::pattern(&pattern)?),
+        (None, Some(pattern)) => ("pattern", pattern),
         (None, None) => {
             let named = match repo {
                 // An entry stored as typed is taken back as typed, whatever it names now: a path

@@ -6316,6 +6316,12 @@ impl Raw {
         exclusions_in(&self.conn)
     }
 
+    /// The repositories `exclude` itself put on that list, which its undo takes back: without
+    /// those that are on it for being never recorded.
+    pub fn sent_exclusions(&self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(exclusion_sets(&self.conn)?.0)
+    }
+
     /// Slice 4a: what is never recorded now (`CaptureExclusions`).
     pub fn capture_exclusions(&self) -> Result<CaptureExclusions> {
         capture_exclusions_in(&self.conn)
