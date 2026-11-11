@@ -10772,6 +10772,12 @@ mod tests {
         let once = masked("aé日b", 2, 2);
         assert_eq!(masked(&once, 2, 2), once);
         assert_eq!(once.len(), "aé日b".len());
+        // Ranges that overlap star their union and move nothing, in a read and in a purge's
+        // rewrite of the row (#932: a rule that takes a secret whole finds it over the tombstone
+        // an earlier rescan wrote inside it).
+        assert_eq!(masked(&masked("abcdefgh", 2, 2), 1, 5), "a*****gh");
+        let row = masked_row(b"abcdefgh".to_vec(), "plain", &[(2, 2), (1, 5)]).unwrap();
+        assert_eq!(row, Some((b"a*****gh".to_vec(), "plain")));
     }
 
     /// Whether `e` is SQLite's "database is locked".

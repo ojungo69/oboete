@@ -2292,10 +2292,23 @@ mod tests {
             let body = as_tool_output(&stored);
             let found = field_ranges(&body, &rules);
             assert_eq!(found.len(), 1, "{body}");
-            let found = &body[found[0].0..found[0].1];
+            let (start, end) = found[0];
+            let found = &body[start..end];
             assert!(
                 found.contains(second) && found.ends_with(third) && !found.contains("kubectl"),
                 "{found}"
+            );
+            // The range starts at a line break's escape and takes all of it: with the range
+            // starred, as a tombstone reads, the body is still JSON, and so is the tool's in it.
+            let starred = crate::raw::masked(&body, start as i64, (end - start) as i64);
+            let outer: serde_json::Value = serde_json::from_str(&starred).unwrap();
+            let inner = outer["output"].as_str().unwrap();
+            let inner: serde_json::Value = serde_json::from_str(inner).unwrap();
+            let stdout = inner["stdout"].as_str().unwrap();
+            assert!(
+                stdout.starts_with(&format!("base64 prints\n{head}**"))
+                    && stdout.ends_with("**\nkubectl get secret"),
+                "{stdout}"
             );
             // Nothing is left of a token that was on one line.
             for whole in [
@@ -2327,6 +2340,49 @@ mod tests {
                 vec![],
                 "{masked}"
             );
+        }
+    }
+
+    /// A Teams workflow webhook, which replaces the incoming webhooks above, is the URL of an Azure
+    /// Logic Apps or Power Automate HTTP trigger, and its `sig` parameter is its only credential.
+    /// No bundled rule takes it: the signature alone is masked, on both hosts such a URL has.
+    #[test]
+    fn a_trigger_urls_signature_is_masked() {
+        let rules = Rules::default();
+        // split: scanners
+        let sig = format!("{}{}", "Zx8vN3kL7pW2qR5tY9uB1c", "D4eF6gH0jK2mP4sT6vX8z-_");
+        let id = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+        let query = "api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0";
+        let environment = "0123456789abcdef0123456789abcd.ef.environment.api.powerplatform.com";
+        for host in [
+            "prod-12.westus.logic.azure.com:443".to_owned(),
+            format!("{environment}:443/powerautomate/automations/direct"),
+        ] {
+            let url = format!("https://{host}/workflows/{id}/triggers/manual/paths/invoke?{query}");
+            for (text, masked) in [
+                (
+                    format!("curl -d @card.json '{url}&sig={sig}' -v"),
+                    format!("curl -d @card.json '{url}&sig={MASK}' -v"),
+                ),
+                (
+                    format!("POST {url}&amp;sig={sig}&amp;x=1 sent"),
+                    format!("POST {url}&amp;sig={MASK}&amp;x=1 sent"),
+                ),
+            ] {
+                let (stored, found) = scan(&text, &rules);
+                assert!(!found.is_empty(), "{text}");
+                assert_eq!(stored, masked);
+                assert_eq!(ranges(&stored, &rules), vec![], "{stored}");
+            }
+        }
+        // A placeholder is no signature, and another URL's `sig` is not this rule's.
+        let trigger =
+            format!("https://prod-12.westus.logic.azure.com:443/workflows/{id}/triggers/manual");
+        for text in [
+            format!("{trigger}/paths/invoke?sv=1.0&sig={}", "X".repeat(43)),
+            format!("https://files.example.test/download?name=a.txt&sig={sig}"),
+        ] {
+            assert_eq!(scan(&text, &rules).0, text);
         }
     }
 

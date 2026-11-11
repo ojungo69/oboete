@@ -132,6 +132,15 @@ keywords = ["webhook.office.com"]
 # rule alone reads (`…-[REDACTED][REDACTED]@…`), and a rescan has to find the rest of its path.
 
 [[rules]]
+id = "workflow-trigger-signature"
+description = "The signature of an Azure Logic Apps or Power Automate HTTP trigger URL, which a Teams workflow webhook is (they replace the incoming webhooks above): the `sig` parameter is the URL's only credential, and gitleaks has no rule for it"
+regex = '''(?i)/workflows/[0-9a-f]{32}/triggers/[^\s"'`<>]+?[?&](?:amp;)?sig=([a-z0-9_%+/=-]{20,})'''
+entropy = 3
+keywords = ["/triggers/"]
+# Both hosts: `prod-NN.<region>.logic.azure.com` and `<environment>.environment.api.powerplatform.com`
+# have `/workflows/<32 hex>/triggers/` in the path. A placeholder (`sig=XXXX…`) is below the entropy.
+
+[[rules]]
 id = "jwt-base64-whole"
 description = "A Base64-encoded JSON Web Token, whole: gitleaks' rule names its header markers as groups, so the marker that took part was masked (ten characters), masked-remainder took the rest of its line, and a token wrapped over lines kept every line after the first"
 regex = '''\b(?:(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}(?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$)|(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}={0,2})|ZXlK\[REDACTED\](?:\[REDACTED\]|\*+)?((?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$))'''
