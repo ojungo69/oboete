@@ -1009,6 +1009,10 @@ fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
         .then(|| crate::migrate::preview(home, &path))
         .transpose()?;
     let mut files = bound_files(roots)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_BOUND.with_borrow_mut(Option::take) {
+        hook();
+    }
     let mut candidates = ImportStats::default();
     import_files(
         home,
@@ -1116,8 +1120,18 @@ fn import_files(
                     .iter_mut()
                     .find(|file| file.agent == *agent && file.path == path)
             });
-            if let Some(bound) = bound.as_deref() {
-                check_bound(bound)?;
+            // A file that is not the one the preview bound (a session at work has written to it
+            // since): a confirm stops, since what it was shown is not what is there. A preview
+            // counts the file as waiting, as one that changes while it is read, and leaves it
+            // bound as it was with nothing parsed: it authorizes no later version of the file.
+            let changed = |bound: &Option<&mut BoundFile>| {
+                bound.as_deref().is_some_and(|b| check_bound(b).is_err())
+            };
+            if changed(&bound) {
+                anyhow::ensure!(!yes, FailureCode::Stale);
+                stats.files += 1;
+                stats.waiting += 1;
+                continue;
             }
             stats.files += 1;
             if yes && bound.as_deref().is_some_and(|file| file.parsed.is_empty()) {
@@ -1131,8 +1145,12 @@ fn import_files(
                 stats.waiting += 1;
                 continue;
             };
+            if changed(&bound) {
+                anyhow::ensure!(!yes, FailureCode::Stale);
+                stats.waiting += 1;
+                continue;
+            }
             if let Some(bound) = bound.as_deref_mut() {
-                check_bound(bound)?;
                 let parsed = parsed_digest(&lines)?;
                 if bound.parsed.is_empty() {
                     bound.parsed = parsed;
@@ -1453,6 +1471,10 @@ fn stable_lines(path: &Path, agent: &str) -> Result<Option<Vec<Line>>> {
 #[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    /// After a preview has bound its files, before it reads the first.
+    static AFTER_BOUND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
         std::cell::RefCell::new(None)
     };
 }
@@ -1914,6 +1936,64 @@ mod tests {
         .unwrap_err();
         assert_eq!(failed.code, FailureCode::Stale);
         assert!(!raw::path(&home).exists());
+    }
+
+    /// A transcript a session at work wrote to after the preview bound it, before the preview
+    /// came to it: counted as waiting, as one that changes while it is read. The preview is shown,
+    /// and a confirm of it stops at the file: it was shown none of that version.
+    #[test]
+    fn a_preview_counts_a_transcript_that_grew_before_its_turn_as_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let changed = root.join("2026/09/02/rollout-basic.jsonl");
+        AFTER_BOUND.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(changed)
+                    .unwrap()
+                    .write_all(b"\n")
+                    .unwrap();
+            }))
+        });
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview(&home, &roots).unwrap();
+        let codex = &shown.candidates.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(!home.exists());
+        let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
+            panic!("no commits")
+        })
+        .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert!(!raw::path(&home).exists());
+    }
+
+    /// The same for a file another took the place of while it was read, of the same size and
+    /// time: its lines read as stable, and it is not the file the preview bound.
+    #[test]
+    fn a_preview_counts_a_transcript_replaced_while_it_was_read_as_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let replaced = root.join("2026/09/02/rollout-basic.jsonl");
+        AFTER_PARSE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                let copy = replaced.with_extension("copy");
+                std::fs::copy(&replaced, &copy).unwrap();
+                let written = std::fs::metadata(&replaced).unwrap().modified().unwrap();
+                let file = std::fs::File::options().write(true).open(&copy).unwrap();
+                file.set_modified(written).unwrap();
+                drop(file);
+                std::fs::rename(&copy, &replaced).unwrap();
+            }))
+        });
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview(&home, &roots).unwrap();
+        let codex = &shown.candidates.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(!home.exists());
     }
 
     /// A line whose transcript named no directory gets no repository: "." is the importing
