@@ -2172,6 +2172,242 @@ mod tests {
         assert!(stored.ends_with("\" https://x.invalid/"), "{stored}");
     }
 
+    /// A JWT (header, payload, signature) encoded once more: 192 characters, three lines at the 76
+    /// columns `base64` wraps at.
+    fn base64_jwt() -> String {
+        [
+            "ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5",
+            "LmV5SnpkV0lpT2lJeE1qTTBOVFkzT0Rrd0lpd2libUZ0WlNJ",
+            "NklrRWdRaUlzSW1saGRDSTZNVFV4TmpJek9UQXlNbjAuYzJs",
+            "bmJtRjBkWEpsTFhOcFoyNWhkSFZ5WlMxemFXZHVZWFIxY21V",
+        ]
+        .concat()
+    }
+
+    /// gitleaks takes a rule's secret from its first group, and two of its rules have a first group
+    /// that is not the secret: a repeat inside a Teams webhook's first GUID, and the header marker
+    /// of a Base64-encoded JWT. Five and ten characters were masked and the rest was stored and
+    /// sent. oboete's own rules take each whole.
+    #[test]
+    fn a_teams_webhook_and_a_base64_jwt_are_masked_whole() {
+        let guid = |first: &str| format!("{first}-4e5f-6a7b-8c9d-{}", "0e1f2a3b4c5d");
+        let (tenant, user, last) = (guid("1a2b3c4d"), guid("9f8e7d6c"), guid("0a9b8c7d"));
+        let key = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+        let teams = format!(
+            "curl -d @card.json https://contoso.webhook.office.com/webhookb2/{tenant}@{user}/IncomingWebhook/{key}/{last} -v"
+        );
+        let (stored, found) = scan(&teams, &Rules::default());
+        assert!(!found.is_empty(), "{stored}");
+        for part in [&tenant[9..], user.as_str(), key.as_str(), last.as_str()] {
+            assert!(!stored.contains(part), "{part} is left in {stored}");
+        }
+        assert!(
+            stored.starts_with("curl -d @card.json https://contoso.webhook.office.com/webhookb2/")
+                && stored.ends_with(" -v"),
+            "{stored}"
+        );
+        let token = base64_jwt();
+        // Wrapped at 76 columns, as `base64` prints one.
+        let wrapped = [&token[..76], &token[76..152], &token[152..]].join("\n");
+        let cases = [
+            // On one line: masked whole, and what follows stays, on its line and on the next.
+            (
+                format!("the secret holds {token} there"),
+                format!("the secret holds {MASK} there"),
+            ),
+            (
+                format!("it prints {token}\nkubectl get secret"),
+                format!("it prints {MASK}\nkubectl get secret"),
+            ),
+            // Wrapped: every line of it (past the marker, `masked-remainder` took the first line's
+            // rest and left the lines after it), and nothing of the line after.
+            (
+                format!("base64 prints\n{wrapped}\nkubectl get secret"),
+                format!("base64 prints\n{MASK}\nkubectl get secret"),
+            ),
+            (
+                format!(
+                    "base64 prints\r\n{}\r\ndone\r\n",
+                    wrapped.replace('\n', "\r\n")
+                ),
+                format!("base64 prints\r\n{MASK}\r\ndone\r\n"),
+            ),
+            (
+                format!("base64 prints\n{wrapped}"),
+                format!("base64 prints\n{MASK}"),
+            ),
+            // Two of them, a line each, stay two lines.
+            (format!("{token}\n{token}"), format!("{MASK}\n{MASK}")),
+        ];
+        for (text, masked) in cases {
+            let (stored, found) = scan(&text, &Rules::default());
+            assert!(!found.is_empty(), "{text}");
+            assert_eq!(stored, masked);
+        }
+    }
+
+    /// A record stored before those two rules holds what gitleaks' rules left of each: a Teams path
+    /// with five characters of its first GUID masked, and the lines after a wrapped token's first.
+    /// `masked-remainder` took what was glued to the mask, at capture (a second mask) or in a
+    /// rescan (a tombstone, read as stars). The rescan a change of the rules starts reads a record
+    /// as it is stored, so the two rules find those forms too, and nothing in what is whole.
+    #[test]
+    fn what_was_stored_of_a_teams_webhook_and_a_base64_jwt_is_found_again() {
+        let rules = Rules::default();
+        // As a tool's output is stored: JSON in a JSON string, read field by field.
+        let as_tool_output = |stdout: &str| {
+            serde_json::json!({ "output": serde_json::json!({ "stdout": stdout }).to_string() })
+                .to_string()
+        };
+        let guid = |first: &str| format!("{first}-4e5f-6a7b-8c9d-{}", "0e1f2a3b4c5d");
+        let (user, last) = (guid("9f8e7d6c"), guid("0a9b8c7d"));
+        let key = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+        let url = "curl -d @card.json https://contoso.webhook.office.com/webhookb2/";
+        let path = format!("@{user}/IncomingWebhook/{key}/{last}");
+        for rest in [MASK.to_owned(), "*".repeat(12)] {
+            let stored = format!("{url}1a2b3c4d-4e5f-6a7b-{MASK}{rest}{path} -v");
+            assert_eq!(
+                ranges(&stored, &rules),
+                vec![(url.len(), stored.len() - " -v".len())],
+                "{stored}"
+            );
+            assert_eq!(scan(&stored, &rules).0, format!("{url}{MASK} -v"));
+            let body = as_tool_output(&stored);
+            let found = field_ranges(&body, &rules);
+            assert_eq!(found.len(), 1, "{body}");
+            let found = &body[found[0].0..found[0].1];
+            assert!(found.contains(&key) && found.ends_with(&last), "{found}");
+        }
+        let token = base64_jwt();
+        let (second, third) = (&token[76..152], &token[152..]);
+        for rest in [MASK.to_owned(), "*".repeat(62)] {
+            let head = format!("ZXlK{MASK}{rest}");
+            // The lines after the head, and nothing of the line after the token.
+            let stored = format!("base64 prints\n{head}\n{second}\n{third}\nkubectl get secret");
+            assert_eq!(ranges(&stored, &rules).len(), 1, "{stored}");
+            assert_eq!(
+                scan(&stored, &rules).0,
+                format!("base64 prints\n{head}{MASK}\nkubectl get secret")
+            );
+            let body = as_tool_output(&stored);
+            let found = field_ranges(&body, &rules);
+            assert_eq!(found.len(), 1, "{body}");
+            let found = &body[found[0].0..found[0].1];
+            assert!(
+                found.contains(second) && found.ends_with(third) && !found.contains("kubectl"),
+                "{found}"
+            );
+            // Nothing is left of a token that was on one line.
+            for whole in [
+                format!("the secret holds {head} there"),
+                format!("it prints {head}\nkubectl get secret"),
+            ] {
+                assert_eq!(ranges(&whole, &rules), vec![], "{whole}");
+                assert_eq!(
+                    field_ranges(&as_tool_output(&whole), &rules),
+                    vec![],
+                    "{whole}"
+                );
+            }
+        }
+        // What the two rules masked themselves gives a rescan nothing new, as stars either.
+        let wrapped = [&token[..76], second, third].join("\n");
+        for text in [
+            format!("{url}{}{path} -v", guid("1a2b3c4d")),
+            format!("the secret holds {token} there"),
+            format!("base64 prints\n{wrapped}\nkubectl get secret"),
+        ] {
+            let (masked, found) = scan(&text, &rules);
+            assert!(!found.is_empty(), "{text}");
+            assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+            let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
+            assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
+            assert_eq!(
+                field_ranges(&as_tool_output(&masked), &rules),
+                vec![],
+                "{masked}"
+            );
+        }
+    }
+
+    /// The shape behind that: a bundled rule with no `secretGroup` whose first group cannot hold the
+    /// secret (it is repeated, so it holds one repetition, or it is a short marker). A copy of
+    /// gitleaks.toml taken again from upstream that brings another such rule fails here, until a
+    /// rule of oboete's own takes that secret whole.
+    #[test]
+    fn every_bundled_rule_whose_first_group_is_not_the_secret_has_a_rule_that_takes_it_whole() {
+        /// The first capturing group of `regex`: its body, and the character after it.
+        fn first_group(regex: &str) -> Option<(&str, Option<char>)> {
+            let bytes = regex.as_bytes();
+            let (mut i, mut class) = (0, false);
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 1,
+                    b']' if class => class = false,
+                    b'[' if !class => class = true,
+                    b'(' if !class => {
+                        let named = regex[i..].starts_with("(?P<")
+                            || (regex[i..].starts_with("(?<")
+                                && !regex[i..].starts_with("(?<=")
+                                && !regex[i..].starts_with("(?<!"));
+                        if !regex[i..].starts_with("(?") || named {
+                            let (mut depth, mut j, mut inner) = (0, i, false);
+                            while j < bytes.len() {
+                                match bytes[j] {
+                                    b'\\' => j += 1,
+                                    b']' if inner => inner = false,
+                                    b'[' if !inner => inner = true,
+                                    b'(' if !inner => depth += 1,
+                                    b')' if !inner => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            return Some((
+                                                &regex[i + 1..j],
+                                                regex[j + 1..].chars().next(),
+                                            ));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                j += 1;
+                            }
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        /// Whether `body` can hold a secret: something in it repeats eight times or more, or
+        /// without a bound.
+        fn long(body: &str) -> bool {
+            let counts = Regex::new(r"\{(\d+)(?:,(\d*))?\}").unwrap();
+            body.contains(['+', '*'])
+                || counts.captures_iter(body).any(|c| {
+                    let at_most = c.get(2).map_or(c[1].to_owned(), |m| m.as_str().to_owned());
+                    at_most.is_empty() || at_most.parse::<u32>().is_ok_and(|n| n >= 8)
+                })
+        }
+        let file: File = toml::from_str(RULES_TOML).unwrap();
+        let mut short: Vec<&str> = (file.rules.iter())
+            .filter(|r| r.secret_group.is_none())
+            .filter(|r| {
+                (r.regex.as_deref().and_then(first_group)).is_some_and(|(body, after)| {
+                    !long(body) || after.is_some_and(|c| "{+*?".contains(c))
+                })
+            })
+            .map(|r| r.id.as_str())
+            .collect();
+        short.sort_unstable();
+        assert_eq!(short, ["jwt-base64", "microsoft-teams-webhook"]);
+        let own: File = toml::from_str(EXTRA_TOML).unwrap();
+        for id in ["jwt-base64-whole", "microsoft-teams-webhook-secret"] {
+            assert!(own.rules.iter().any(|r| r.id == id), "{id}");
+        }
+    }
+
     /// The forms claude-mem 15.5 to 15.9 masks that the bundled rules left (decision 70): a Slack
     /// token of any length, a Slack webhook's whole secret, a Discord webhook's token, a Stripe
     /// webhook secret, a Docker Hub token, a test.pypi.org token, a `_PWD` value and a flag's value
