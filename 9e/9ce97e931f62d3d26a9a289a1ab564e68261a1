@@ -1,0 +1,26 @@
+config/oboete-rules.toml
+  s_b837d726e3a0bf::t_0751d5b8bccc5a 135-142
+  s_b837d726e3a0bf::t_db80ded6c2f42e 134
+src/raw.rs
+  s_b837d726e3a0bf::t_6399246520135a 10775-10780
+src/consumer/rescan.rs
+  s_b837d726e3a0bf::t_b87f6aa50b084c 447-492
+src/redact.rs
+  s_b837d726e3a0bf::t_42ac4c8b3e9c10 2295-2296,2301-2312,2346-2388
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e9ce97e931f62d3d26a9a289a1ab564e68261a1",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
