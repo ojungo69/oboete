@@ -1,0 +1,48 @@
+docs/cards.md
+  s_b837d726e3a0bf::t_49e3ffa2f9c030 107
+  s_b837d726e3a0bf::t_be84b5b4872430 46,105-106,108
+DESIGN.md
+  s_b837d726e3a0bf::t_6fd16ea109e826 460
+docs/claude-mem-import.md
+  s_b837d726e3a0bf::t_c96d0c05c8b362 84
+docs/claude-mem-parity.md
+  s_b837d726e3a0bf::t_45b91a2910ac0d 199,205
+docs/m1.md
+  s_b837d726e3a0bf::t_2e3131564cb149 61
+docs/milestone-4-plan.md
+  s_b837d726e3a0bf::t_ecd6cae081e0df 26
+docs/milestone-4.md
+  s_b837d726e3a0bf::t_5e9bd3287db00e 45
+docs/my-work.md
+  s_b837d726e3a0bf::t_b134d02530b431 170
+docs/page.md
+  s_b837d726e3a0bf::t_5a3194d64ce4cc 25
+docs/plan.md
+  s_b837d726e3a0bf::t_cd66046851a2dd 3-5
+docs/pr-a.md
+  s_b837d726e3a0bf::t_cee7a3f279cf1d 14
+docs/pr-d.md
+  s_b837d726e3a0bf::t_0c1a51bf921c94 160
+docs/provenance.md
+  s_b837d726e3a0bf::t_c72e810d25d682 23
+docs/redaction-switch.md
+  s_b837d726e3a0bf::t_1718c255bf7f41 82-85
+docs/settings-coverage.md
+  s_b837d726e3a0bf::t_389c79300b458b 80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "555cb997223592ad68eb331661bb3f9a52a90b79",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
