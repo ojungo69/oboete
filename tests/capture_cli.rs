@@ -62,6 +62,127 @@ fn capture_exclude_lists_stops_recording_and_takes_it_back() {
     assert!(!oboete(&["doctor"]).contains("nothing in this directory is recorded"));
 }
 
+/// A repository named by a directory is the one capture labels there, as `oboete forget --repo`
+/// reads a directory. Stored as typed, a checkout's path matched no record: the command said
+/// "never recorded from now on" and the repository went on being recorded and sent.
+#[test]
+fn a_repository_named_by_a_directory_is_excluded_by_its_label() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::create_dir(checkout.path().join(".git")).unwrap();
+    std::fs::write(
+        checkout.path().join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+    )
+    .unwrap();
+    std::fs::create_dir(checkout.path().join("sub")).unwrap();
+    let path = checkout.path().to_string_lossy().into_owned();
+    let out = run(
+        home.path(),
+        elsewhere.path(),
+        &["capture", "exclude", &path],
+    );
+    assert!(
+        out.contains("never recorded from now on: github.com/o/secret")
+            && out.contains("never recorded: github.com/o/secret"),
+        "{out}"
+    );
+    let out = run(home.path(), checkout.path(), &["doctor"]);
+    assert!(
+        out.contains("nothing in this directory is recorded: its repository github.com/o/secret"),
+        "{out}"
+    );
+    // A folder inside it names the same repository, `.` among them.
+    let out = run(
+        home.path(),
+        &checkout.path().join("sub"),
+        &["capture", "exclude", "--undo", "."],
+    );
+    assert!(
+        out.contains("recorded again from now on: github.com/o/secret"),
+        "{out}"
+    );
+    // `oboete exclude` reads a directory the same way.
+    let out = run(home.path(), elsewhere.path(), &["exclude", &path]);
+    assert!(out.contains("excluded: github.com/o/secret"), "{out}");
+    let out = run(home.path(), elsewhere.path(), &["exclude", "--undo", &path]);
+    assert!(
+        out.contains("no longer excluded: github.com/o/secret"),
+        "{out}"
+    );
+}
+
+/// An entry stored as typed is taken back as typed, though it names a directory now: a path
+/// that was stored before a directory was read as its repository (`.`, a checkout's path) would
+/// otherwise stay on the list for good, the undo looking for the repository's label.
+#[test]
+fn an_entry_stored_as_typed_is_taken_back_as_typed_though_it_names_a_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    std::fs::write(
+        cwd.path().join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+    )
+    .unwrap();
+    let oboete = |args: &[&str]| run(home.path(), cwd.path(), args);
+    // No directory yet: a label, stored as given.
+    let out = oboete(&["capture", "exclude", "typed"]);
+    assert!(out.contains("never recorded from now on: typed"), "{out}");
+    let out = oboete(&["exclude", "typed"]);
+    assert!(out.contains("excluded: typed"), "{out}");
+    std::fs::create_dir(cwd.path().join("typed")).unwrap();
+    let out = oboete(&["capture", "exclude", "--undo", "typed"]);
+    assert!(out.contains("recorded again from now on: typed"), "{out}");
+    let out = oboete(&["exclude", "--undo", "typed"]);
+    assert!(out.contains("no longer excluded: typed"), "{out}");
+    assert!(out.contains("no repository is excluded"), "{out}");
+}
+
+/// `oboete exclude --undo <directory>` takes back the repository there, though a never-recorded
+/// entry holds the directory's name as typed: that entry is `capture exclude`'s, and reading it
+/// as this command's left the repository excluded from sending under its label (cubic on #929).
+#[test]
+fn an_undo_of_sending_reads_a_directory_though_a_never_recorded_entry_has_its_name() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    std::fs::write(
+        cwd.path().join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:o/secret.git\n",
+    )
+    .unwrap();
+    let oboete = |args: &[&str]| run(home.path(), cwd.path(), args);
+    oboete(&["capture", "exclude", "typed"]);
+    let out = oboete(&["exclude"]);
+    assert!(out.contains("excluded: github.com/o/secret"), "{out}");
+    std::fs::create_dir(cwd.path().join("typed")).unwrap();
+    let out = oboete(&["exclude", "--undo", "typed"]);
+    assert!(
+        out.contains("no longer excluded: github.com/o/secret")
+            && out.contains("excluded repositories: typed"),
+        "{out}"
+    );
+}
+
+/// A pattern that is refused leaves no store behind (cubic on #929).
+#[test]
+fn a_refused_pattern_opens_no_store() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (out, err) = run_both(
+        home.path(),
+        cwd.path(),
+        &["capture", "exclude", "--pattern", " "],
+    );
+    assert!(
+        out.is_empty() && err.contains("a pattern is"),
+        "{out} {err}"
+    );
+    assert!(!home.path().join("raw.db").exists());
+}
+
 /// Codex on #489: an undo after a rule that masks part of a folder's path was added takes the
 /// folder back out of the list as it was stored.
 #[test]

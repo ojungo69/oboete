@@ -123,7 +123,8 @@ enum CaptureCmd {
     /// device: nothing there is written from now on. The repository in the current directory
     /// unless one is named
     Exclude {
-        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
+        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path), or a
+        /// directory in its checkout
         #[arg(conflicts_with_all = ["folder", "pattern"])]
         repo: Option<String>,
         /// A folder of this device instead: nothing in it or below it is recorded
@@ -248,7 +249,8 @@ enum Cmd {
     /// touched it is sent out from now on (what was sent before stays sent). The repository in
     /// the current directory unless one is named
     Exclude {
-        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path)
+        /// The repository as oboete labels it (github.com/<owner>/<name>, or its path), or a
+        /// directory in its checkout
         repo: Option<String>,
         /// Take it back out of the list: its new records can be sent again
         #[arg(long)]
@@ -961,17 +963,22 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             Ok(())
         }
         Cmd::Exclude { repo, undo } => {
-            let repo = match repo {
-                Some(r) => r,
-                None => {
-                    // The label as capture stores it on the records, as `claims` finds it.
-                    let settings = capture::Settings::load(&home)?;
-                    let cwd = std::env::current_dir()?;
-                    let cwd = cwd.to_string_lossy();
-                    capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings).1
-                }
+            // The label as capture stores it on the records, as `claims` finds it.
+            let labelled = |dir: &std::path::Path| -> Result<String> {
+                let settings = capture::Settings::load(&home)?;
+                let cwd = dir.to_string_lossy();
+                Ok(capture::checkout(&serde_json::json!({ "cwd": cwd }), &settings).1)
             };
             let mut raw = raw::open(&home)?;
+            let repo = match repo {
+                // An entry this command stored as typed is taken back as typed (`capture_exclude`);
+                // one that is never recorded under that name is `capture exclude`'s to take back.
+                Some(r) if undo && raw.sent_exclusions()?.contains(&r) => r,
+                // A directory names the repository there.
+                Some(r) if std::path::Path::new(&r).is_dir() => labelled(std::path::Path::new(&r))?,
+                Some(r) => r,
+                None => labelled(&std::env::current_dir()?)?,
+            };
             let was = raw.exclusions()?.contains(&repo);
             raw.exclude(&repo, undo)?;
             let list = raw.exclusions()?;
@@ -1113,19 +1120,32 @@ fn capture_exclude(
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
     let settings = capture::Settings::load(home)?;
+    // Before the store is opened: a pattern that is refused leaves nothing behind.
+    let pattern = pattern.as_deref().map(capture::pattern).transpose()?;
+    let mut raw = raw::open(home)?;
+    let was = raw.capture_exclusions()?;
     // Stored as given, unmasked, so it holds whatever the rules become (owner, 2026-10-13).
     let (key, given) = match (folder, pattern) {
         // As an agent's `cwd` is labelled (`capture::folder_path`), with no `\\?\` that
         // `canonicalize` gives on Windows.
         (Some(folder), _) => ("folder", capture::folder_path(&folder.to_string_lossy())),
-        (None, Some(pattern)) => ("pattern", capture::pattern(&pattern)?),
-        (None, None) => match repo {
-            Some(r) => ("repo", r),
-            None => ("repo", repo::key(&std::env::current_dir()?)),
-        },
+        (None, Some(pattern)) => ("pattern", pattern),
+        (None, None) => {
+            let named = match repo {
+                // An entry stored as typed is taken back as typed, whatever it names now: a path
+                // stored before a directory was read as its repository stays removable.
+                Some(r) if undo && was.repos.contains(&r) => r,
+                // A directory names the repository capture labels there, as `forget --repo`
+                // reads one (`forget::repo_target`): a checkout's path is no label a record
+                // carries.
+                Some(r) if std::path::Path::new(&r).is_dir() => repo::key(std::path::Path::new(&r)),
+                // Anything else is a label, as given.
+                Some(r) => r,
+                None => repo::key(&std::env::current_dir()?),
+            };
+            ("repo", named)
+        }
     };
-    let mut raw = raw::open(home)?;
-    let was = raw.capture_exclusions()?;
     let (field, stored) = match key {
         "folder" => ("cwd", &was.folders),
         "pattern" => ("cwd", &was.patterns),
