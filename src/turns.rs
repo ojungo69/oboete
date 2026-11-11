@@ -2159,6 +2159,8 @@ mod tests {
             "completed": "", "next_steps": "", "notes": "Only a note."});
         assert_eq!(check(&notes, &rules), None);
         assert_eq!(check(&json!("text"), &rules), Some("shape"));
+        // An answer to another question, which a CLI whose output is the answer hands on whole.
+        assert_eq!(check(&json!({"ok": true}), &rules), Some("empty"));
         let home = home(
             &[said("s1", "prompt", "ok?"), said("s1", "reply", "Yes.")],
             &[window(1, 2, "Asked.", &[])],

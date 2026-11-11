@@ -3646,19 +3646,17 @@ fn cli_headless_at(
             }
             use std::io::Read;
             let mut text = String::new();
-            let is_probe = *schema == probe_schema();
+            // One byte over the limit is read, so that a message over it is seen as one: cut at
+            // the limit, a valid start with nothing but spaces after it would pass.
             std::fs::File::open(&last)
-                .and_then(|f| {
-                    f.take(MAX_RESPONSE_BYTES + u64::from(is_probe))
-                        .read_to_string(&mut text)
-                })
+                .and_then(|f| f.take(MAX_RESPONSE_BYTES + 1).read_to_string(&mut text))
                 .map_err(|_| {
                     CallError::other("invalid output: codex wrote no last message")
                         .with_usage(usage)
                 })?;
-            if is_probe && text.len() as u64 > MAX_RESPONSE_BYTES {
+            if text.len() as u64 > MAX_RESPONSE_BYTES {
                 return Err(CallError::other(
-                    "invalid output: probe response exceeds the byte limit",
+                    "invalid output: codex's last message exceeds the byte limit",
                 )
                 .with_usage(usage));
             }
@@ -3667,11 +3665,12 @@ fn cli_headless_at(
         "agy" => agy_result(&stdout).map_err(|e| e.with_usage(usage))?,
         _ => stdout.into_owned(),
     };
-    let answer = if cli == "codex" && *schema == probe_schema() {
-        // last.json is model output, not a CLI envelope. Only the fixed connection probe uses
-        // this raw shape; normal curation retains its existing envelope/claims/summary parser.
+    let answer = if cli == "codex" {
+        // last.json is the model's answer under `--output-schema`, not a CLI envelope: it is the
+        // answer whole, whatever was asked, and the chain's check refuses one that is not the
+        // schema's.
         serde_json::from_str(text.trim())
-            .map_err(|_| CallError::other("invalid output: probe answer is not JSON"))
+            .map_err(|_| CallError::other("invalid output: codex's last message is not JSON"))
     } else {
         extract_structured(cli, &text)
     }
@@ -3871,8 +3870,6 @@ fn codex_searched(stdout: &str) -> bool {
         .any(|v| v["item"]["type"] == "web_search")
 }
 
-/// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
-/// `structuredOutput` (grok), or the answer text itself when the envelope is the answer (codex).
 /// Most a provider may send (HTTP body or CLI output) before its answer is dropped: a broken or
 /// hijacked provider must not fill memory (the summaries it returns are capped much lower anyway).
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 1 << 20;
@@ -4199,14 +4196,14 @@ fn agy_result(stdout: &str) -> Result<String, CallError> {
         .ok_or_else(|| CallError::other("invalid output: agy printed no result event"))
 }
 
+/// The answer out of a CLI's JSON envelope: the schema-validated object under `structured_output`
+/// (claude, agy) or `structuredOutput` (grok), or else the envelope's answer text, as JSON when
+/// it is JSON. Codex has no envelope: its last message is the answer.
 fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
     let v: Value = serde_json::from_str(text.trim())
         .map_err(|e| CallError::other(format!("invalid output: {cli} output is not JSON ({e})")))?;
     if let Some(s) = v.get("structured_output").or(v.get("structuredOutput")) {
         return Ok(s.clone());
-    }
-    if v.get("claims").is_some() || v.get("summary").is_some() {
-        return Ok(v);
     }
     let inner = ["result", "text", "response"]
         .iter()
@@ -5335,20 +5332,22 @@ pub(crate) mod tests {
     }
 
     /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
-    /// subscription CLI answers under S8's environment and claude's spec 6.5 flags.
+    /// subscription CLI answers under S8's environment and claude's spec 6.5 flags. The schema is
+    /// the summary role's, which has neither of the curator's `claims` and `summary`: a schema
+    /// with `summary` in it passed here while codex's answers to that role were all dropped.
     #[test]
     #[ignore]
     fn live_subscription_curators_answer_under_the_curator_environment() {
-        let schema = json!({"type": "object", "properties": {"summary": {"type": "string"}},
-            "required": ["summary"], "additionalProperties": false});
-        let prompt = "Summarize this session in one sentence.\n--- SESSION ---\n\
+        let schema = crate::turns::answer_schema();
+        let prompt = "Summarize this session: fill every field, in a sentence at most.\n\
+            --- SESSION ---\n\
             [user] fix the date parser in src/ingest/csv_reader.py\n\
             [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
         for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
             cli_preflight(cli, false).unwrap_or_else(|e| panic!("{cli}: {}", e.message));
             let a = cli_headless(cli, Some(model), 180, CURATOR_SYSTEM, prompt, &schema, None)
                 .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
-            assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
+            assert!(fits(&a.value, &schema), "{cli}: {}", a.value);
             eprintln!("{cli}: {:?}, rest until {:?}", a.usage, a.cool_until);
         }
     }
@@ -6509,69 +6508,99 @@ print(json.dumps({"type":"result","result":'{"ok":true}',"is_error":"error" in p
         }
     }
 
-    #[test]
+    /// A codex in `dir` whose last message is the bytes of the file `answer` beside it, and what
+    /// it answers when asked for `schema`.
     #[cfg(unix)]
-    fn probe_codex_rejects_an_oversized_last_message_with_a_valid_prefix() {
+    fn synthetic_codex(dir: &Path) -> impl Fn(&Value, &[u8]) -> Result<Answer, CallError> {
         use std::os::unix::fs::PermissionsExt;
-        let home = tempfile::tempdir().unwrap();
-        let executable = home.path().join("synthetic-codex");
-        std::fs::write(&executable, r#"#!/usr/bin/env python3
-import pathlib, sys
-args = sys.argv[1:]
-sys.stdin.read()
-prefix = b'{"ok":true}'
-pathlib.Path(args[args.index('-o') + 1]).write_bytes(prefix + b' ' * (1048576-len(prefix)) + b'private-overflow-canary')
-"#).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let result = cli_headless_at(
-            "codex",
-            None,
-            2,
-            CURATOR_SYSTEM,
-            PROBE_PROMPT,
-            &probe_schema(),
-            None,
-            Some(&executable),
-        );
-        let error = result.expect_err("a valid prefix does not make an oversized result valid");
-        assert!(error.invalid());
-        assert!(!error.message.contains("canary"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn probe_codex_last_message_uses_the_probe_schema_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let home = tempfile::tempdir().unwrap();
-        let executable = home.path().join("synthetic-codex");
+        let executable = dir.join("synthetic-codex");
         std::fs::write(
             &executable,
             r#"#!/usr/bin/env python3
 import json, pathlib, sys
 args = sys.argv[1:]
 sys.stdin.read()
-pathlib.Path(args[args.index('-o') + 1]).write_text('{"ok":true}')
+pathlib.Path(args[args.index('-o') + 1]).write_bytes(pathlib.Path(__file__).with_name('answer').read_bytes())
 print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":4}}))
 "#,
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for (schema, accepted) in [(probe_schema(), true), (crate::curate::schema(), false)] {
-            let result = cli_headless_at(
+        move |schema, answer| {
+            std::fs::write(executable.with_file_name("answer"), answer).unwrap();
+            cli_headless_at(
                 "codex",
                 None,
                 2,
                 CURATOR_SYSTEM,
                 PROBE_PROMPT,
-                &schema,
+                schema,
                 None,
                 Some(&executable),
-            );
-            assert_eq!(result.is_ok(), accepted, "{result:?}");
-            if let Ok(answer) = result {
-                assert_eq!(answer.value, json!({"ok": true}));
-            }
+            )
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn codex_rejects_an_oversized_last_message_with_a_valid_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let ask = synthetic_codex(home.path());
+        for (schema, prefix) in [
+            (probe_schema(), json!({"ok": true})),
+            (
+                crate::curate::schema(),
+                json!({"claims": [], "summary": "s", "observations": []}),
+            ),
+        ] {
+            let mut answer = prefix.to_string().into_bytes();
+            answer.resize(MAX_RESPONSE_BYTES as usize, b' ');
+            answer.extend_from_slice(b"private-overflow-canary");
+            let error = ask(&schema, &answer)
+                .expect_err("a valid prefix does not make an oversized result valid");
+            assert!(error.invalid(), "{prefix}: {}", error.message);
+            assert!(!error.message.contains("canary"));
+        }
+    }
+
+    /// Codex's last message is the model's answer under `--output-schema`, not an envelope (four
+    /// of four calls on 2026-11-12), so it is the answer whole, whatever was asked. It was taken
+    /// whole only with the curator's `claims` or `summary` in it, and every answer of codex's to
+    /// the summary role and to the My Work jobs that ask for neither was dropped as
+    /// `no structured_output in codex response`.
+    #[test]
+    #[cfg(unix)]
+    fn codex_last_message_is_the_answer_whatever_was_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let ask = synthetic_codex(home.path());
+        let summary = json!({"skip": false, "request": "r", "investigated": "", "learned": "l",
+            "completed": "", "next_steps": "", "notes": ""});
+        for (schema, answer) in [
+            (probe_schema(), json!({"ok": true})),
+            (crate::turns::answer_schema(), summary),
+            (
+                json!({"type": "object", "required": ["groups", "ignored"]}),
+                json!({"groups": [], "ignored": []}),
+            ),
+            (
+                crate::curate::schema(),
+                json!({"claims": [], "summary": "s", "observations": []}),
+            ),
+        ] {
+            let got = ask(&schema, answer.to_string().as_bytes())
+                .unwrap_or_else(|e| panic!("{answer}: {}", e.message));
+            assert_eq!(got.value, answer);
+            assert!(fits(&got.value, &schema), "{answer}");
+        }
+        // An answer to another question comes back as it is: the chain's check refuses it, the
+        // schema here and the summary role's own in `turns`.
+        let other = ask(&crate::curate::schema(), br#"{"ok":true}"#).unwrap();
+        assert_eq!(other.value, json!({"ok": true}));
+        assert!(!fits(&other.value, &crate::curate::schema()));
+        // What is no JSON is invalid output, and none of it is in the message.
+        let prose = ask(&crate::turns::answer_schema(), b"private-prose-canary").unwrap_err();
+        assert!(prose.invalid(), "{}", prose.message);
+        assert!(!prose.message.contains("canary"), "{}", prose.message);
     }
 
     #[test]
@@ -8646,13 +8675,11 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 .to_string();
         let grok = json!({"text": "x", "structuredOutput": want}).to_string();
         let agy = json!({"response": "{\"observations\":[],\"summary\":\"s\"}", "structured_output": want}).to_string();
-        let codex = want.to_string();
         let text_only = json!({"result": "{\"observations\":[],\"summary\":\"s\"}"}).to_string();
         for (cli, text) in [
             ("claude", claude),
             ("grok", grok),
             ("agy", agy),
-            ("codex", codex),
             ("claude", text_only),
         ] {
             assert_eq!(extract_structured(cli, &text).unwrap(), want, "{cli}");
