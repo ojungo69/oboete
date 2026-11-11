@@ -1,0 +1,23 @@
+src/main.rs
+  s_b837d726e3a0bf::t_c65b0d4bdb13c3 977-979,1126-1127,1135
+src/raw.rs
+  s_b837d726e3a0bf::t_55d013bfdd3432 6319-6324
+tests/capture_cli.rs
+  s_b837d726e3a0bf::t_423e2f104c45bd 143-185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "55fead8678edff71916d08ecc58c7be289989d16",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
