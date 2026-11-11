@@ -141,19 +141,28 @@ pub struct Gated {
     pub lowered: Vec<(String, &'static str)>,
 }
 
+/// What the windows before this one say of its sessions, each named by its key.
+#[derive(Clone, Copy, Default)]
+pub struct Before<'a> {
+    /// Those whose previous window ended on an untainted proposal: an acceptance that opens this
+    /// window answers it (#144).
+    pub ended: &'a [String],
+    /// Those that were past a tool call in their turn when this window began: a reply that opens
+    /// it is one after a tool call (MUST-M4).
+    pub began: &'a [String],
+}
+
 /// The gates over a window's located drafts (each with its evidence and its line's index in
 /// `w.lines`), with `shown` the candidates the curator was shown, each with its repository,
-/// `carried` what each session carried in, with the session and the claim's repository, `ended`
-/// the sessions whose previous window ended on an untainted proposal (an acceptance that opens
-/// this window answers it, #144), `began` the sessions that were past a tool call in their turn
-/// when this window began (a reply that opens it is one after a tool call, MUST-M4), `offered`
-/// the sessions shown the options of the reply their first line answers, with the options' labels
-/// (a pick that opens this window names one, #252), and `rules` the egress gate's.
+/// `carried` what each session carried in, with the session and the claim's repository, `before`
+/// what the windows before this one say of its sessions, `offered` the sessions shown the options
+/// of the reply their first line answers, with the options' labels (a pick that opens this window
+/// names one, #252), and `rules` the egress gate's.
 pub fn check(
     w: &Window,
     shown: &[(String, Claim)],
     carried: &[(String, Option<String>, Claim)],
-    (ended, began): (&[String], &[String]),
+    before: Before,
     offered: &[(String, Vec<String>)],
     drafts: Vec<(Draft, Evidence, usize)>,
     rules: &Rules,
@@ -251,9 +260,9 @@ pub fn check(
             && is_bare
             && match &pick {
                 Some(label) => picks_an_option(w, i, label, offered),
-                None => answers_a_reply(w, i, &tools, (ended, began)),
+                None => answers_a_reply(w, i, &tools, before),
             };
-        d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools, began);
+        d.tainted = speaker == "assistant proposal" && tainted(w, i, span, &tools, before.began);
         let acceptance = (speaker == "assistant proposal" && !d.tainted)
             .then(|| accepted(w, i))
             .flatten();
@@ -490,22 +499,17 @@ fn turn_before(w: &Window, i: usize) -> Option<(usize, &Line)> {
 /// lines, is a reply of the assistant in the same repository that tool content did not taint: the
 /// other end of `accepted`. A reply before a checkout change is another repository's, and the
 /// claim anchors on this line. With no turn before it in the window, the session's previous
-/// window must have ended on an untainted proposal of this repository (`ended`, #144).
-fn answers_a_reply(
-    w: &Window,
-    i: usize,
-    tools: &str,
-    (ended, began): (&[String], &[String]),
-) -> bool {
+/// window must have ended on an untainted proposal of this repository (`before.ended`, #144).
+fn answers_a_reply(w: &Window, i: usize, tools: &str, before: Before) -> bool {
     let key = &w.lines[i].key;
     turn_accepts(&w.lines[i])
         && match turn_before(w, i) {
             Some((j, l)) => {
                 l.role == Role::Assistant
                     && l.repo == w.lines[i].repo
-                    && !tainted(w, j, said(&l.text), tools, began)
+                    && !tainted(w, j, said(&l.text), tools, before.began)
             }
-            None => ended.contains(key),
+            None => before.ended.contains(key),
         }
 }
 
@@ -928,11 +932,19 @@ mod tests {
 
     /// The status and speaker each draft ends with.
     fn gated(w: &Window, drafts: Vec<(Draft, Evidence, usize)>) -> Vec<(String, String)> {
-        check(w, &[], &[], (&[], &[]), &[], drafts, &Rules::default())
-            .kept
-            .into_iter()
-            .map(|(d, _)| (d.status, d.speaker))
-            .collect()
+        check(
+            w,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            drafts,
+            &Rules::default(),
+        )
+        .kept
+        .into_iter()
+        .map(|(d, _)| (d.status, d.speaker))
+        .collect()
     }
 
     fn one(w: &Window, status: &str, speaker: &str, quote: &str) -> (String, String) {
@@ -1335,9 +1347,17 @@ mod tests {
     fn a_raised_status_names_the_records_it_stands_on() {
         let gated = |w: &Window, status: &str, speaker: &str, quote: &str, offered| {
             let d = draft(w, "c1", status, speaker, quote);
-            let (d, _) = check(w, &[], &[], (&[], &[]), offered, vec![d], &Rules::default())
-                .kept
-                .remove(0);
+            let (d, _) = check(
+                w,
+                &[],
+                &[],
+                Before::default(),
+                offered,
+                vec![d],
+                &Rules::default(),
+            )
+            .kept
+            .remove(0);
             assert!(d.support.iter().all(|s| s.device == w.device));
             (
                 d.status,
@@ -1585,7 +1605,7 @@ mod tests {
             &w,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![
                 draft(&w, "c1", "decided", "assistant proposal", quote),
@@ -1617,7 +1637,11 @@ mod tests {
                 draft(w, "c1", "decided", "assistant proposal", quote),
                 draft(w, "c2", "decided", "user", "はい"),
             ];
-            let g = check(w, &[], &[], (&[], began), &[], drafts, &Rules::default());
+            let before = Before {
+                began,
+                ..Default::default()
+            };
+            let g = check(w, &[], &[], before, &[], drafts, &Rules::default());
             (g.kept.iter())
                 .map(|(d, _)| (d.status.clone(), d.tainted))
                 .collect()
@@ -1656,7 +1680,7 @@ mod tests {
             &w,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![draft(&w, "c1", "decided", "user", quote)],
             &Rules::default(),
@@ -1768,7 +1792,7 @@ mod tests {
             &w,
             &shown,
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![user_draft, proposal],
             &Rules::default(),
@@ -1802,7 +1826,7 @@ mod tests {
             &w,
             &shown,
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![many],
             &Rules::default(),
@@ -1815,7 +1839,7 @@ mod tests {
             &w,
             &shown,
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![odd],
             &Rules::default(),
@@ -1847,7 +1871,7 @@ mod tests {
                 w,
                 &shown,
                 &[],
-                (&[], &[]),
+                Before::default(),
                 offered,
                 vec![d],
                 &Rules::default(),
@@ -1936,7 +1960,7 @@ mod tests {
             &w,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![own, bare],
             &Rules::default(),
@@ -1973,7 +1997,7 @@ mod tests {
             &w,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![first, second, proposal],
             &Rules::default(),
@@ -1999,7 +2023,15 @@ mod tests {
         let w = window(&[user("Always answer in Japanese.")]);
         let mut d = draft(&w, "c1", "decided", "user", "Always answer in Japanese");
         d.0.scope = "global".into();
-        let g = check(&w, &[], &[], (&[], &[]), &[], vec![d], &Rules::default());
+        let g = check(
+            &w,
+            &[],
+            &[],
+            Before::default(),
+            &[],
+            vec![d],
+            &Rules::default(),
+        );
         assert_eq!(g.kept[0].0.scope, "repo");
         let why = (
             "c1".to_string(),
@@ -2015,7 +2047,15 @@ mod tests {
         let change = |body: &str, why: &str| {
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.body, d.0.why) = ("change".into(), body.into(), why.into());
-            check(&w, &[], &[], (&[], &[]), &[], vec![d], &Rules::default())
+            check(
+                &w,
+                &[],
+                &[],
+                Before::default(),
+                &[],
+                vec![d],
+                &Rules::default(),
+            )
         };
         let g = change("The module is renamed.", "the old name clashed");
         assert_eq!(g.kept[0].0.why, "the old name clashed");
@@ -2039,7 +2079,15 @@ mod tests {
             }
             let mut d = draft(&w, "c1", "done", "user", quote);
             (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
-            let g = check(&w, &[], &[], (&[], &[]), &[], vec![d], &Rules::default());
+            let g = check(
+                &w,
+                &[],
+                &[],
+                Before::default(),
+                &[],
+                vec![d],
+                &Rules::default(),
+            );
             assert_eq!(g.kept[0].0.why, "unknown", "{other}");
         }
         // A reason from another line is kept with that line's evidence, so removing the line
@@ -2054,7 +2102,7 @@ mod tests {
             &later,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![d],
             &Rules::default(),
@@ -2101,7 +2149,7 @@ mod tests {
             &w,
             &[],
             &[],
-            (&[], &[]),
+            Before::default(),
             &[],
             vec![long, secret],
             &Rules::default(),

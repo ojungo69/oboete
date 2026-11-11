@@ -1998,7 +1998,10 @@ fn answered(
                     w,
                     &req.shown_in,
                     &req.carried_uids,
-                    (&ended, &began),
+                    crate::gates::Before {
+                        ended: &ended,
+                        began: &began,
+                    },
                     &req.offered,
                     found,
                     rules,
