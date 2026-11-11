@@ -1142,6 +1142,7 @@ mod tests {
             fn name(&self) -> &'static str {
                 "group"
             }
+            fn reread(&self) {}
             fn due(&self, _: &Stores, _: i64) -> Result<Vec<crate::my_work_run::Due>> {
                 Ok(Vec::new())
             }
@@ -1224,6 +1225,9 @@ mod tests {
             fn name(&self) -> &'static str {
                 self.0.name()
             }
+            fn reread(&self) {
+                self.0.reread()
+            }
             fn due(&self, s: &Stores, now: i64) -> Result<Vec<crate::my_work_run::Due>> {
                 self.0.due(s, now)
             }
@@ -1292,6 +1296,9 @@ mod tests {
             fn name(&self) -> &'static str {
                 self.0.name()
             }
+            fn reread(&self) {
+                self.0.reread()
+            }
             fn due(&self, s: &Stores, now: i64) -> Result<Vec<crate::my_work_run::Due>> {
                 self.0.due(s, now)
             }
@@ -1348,6 +1355,9 @@ mod tests {
         impl Job for Off {
             fn name(&self) -> &'static str {
                 self.0.name()
+            }
+            fn reread(&self) {
+                self.0.reread()
             }
             fn due(&self, s: &Stores, now: i64) -> Result<Vec<crate::my_work_run::Due>> {
                 self.0.due(s, now)

@@ -452,6 +452,10 @@ impl Job for Suggestions {
         NAME
     }
 
+    fn reread(&self) {
+        self.read.take();
+    }
+
     fn due(&self, s: &Stores, _now: i64) -> Result<Vec<Due>> {
         let round = self.read(s)?;
         Ok((since(&round).into_iter())
@@ -1100,6 +1104,22 @@ mod tests {
             sent[0]
         );
         assert!(h.due().is_empty());
+    }
+
+    /// A5: what the job read is kept for the round, and `Job::reread` drops it. Here
+    /// a preference a review kept since is in its next read, and not while the first is
+    /// kept. The runner tells every job so when the list changed between a round's two passes
+    /// (`my_work_run`).
+    #[test]
+    fn the_job_keeps_its_read_until_it_is_told_to_read_again() {
+        let mut h = Home::new();
+        let job = Suggestions::default();
+        let due = |h: &Home| h.with(|s| job.due(s, crate::db::now_ms()).unwrap().len());
+        assert_eq!(due(&h), 0);
+        h.reviewed("g:1", &[("Tests come first.", "tests first")]);
+        assert_eq!(due(&h), 0, "kept for the round");
+        job.reread();
+        assert_eq!(due(&h), 1, "read again");
     }
 
     /// R1, P7: a review adding preferences after a run makes the suggestions due three hours after
