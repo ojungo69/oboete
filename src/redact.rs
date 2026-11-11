@@ -2381,14 +2381,42 @@ mod tests {
             None
         }
         /// Whether `body` can hold a secret: something in it repeats eight times or more, or
-        /// without a bound.
+        /// without a bound. A quantifier alone counts: an escaped `+` or `*`, or one in a
+        /// character class, repeats nothing (cubic on #932).
         fn long(body: &str) -> bool {
+            let bytes = body.as_bytes();
+            // The body without its escapes and its classes' contents: what is left of a `+`, a
+            // `*` or a `{n,m}` is a quantifier.
+            let (mut i, mut class, mut bare) = (0, false, String::new());
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 1,
+                    b']' if class => class = false,
+                    b'[' if !class => class = true,
+                    b if !class && b.is_ascii() => bare.push(char::from(b)),
+                    _ => {}
+                }
+                i += 1;
+            }
             let counts = Regex::new(r"\{(\d+)(?:,(\d*))?\}").unwrap();
-            body.contains(['+', '*'])
-                || counts.captures_iter(body).any(|c| {
+            bare.contains(['+', '*'])
+                || counts.captures_iter(&bare).any(|c| {
                     let at_most = c.get(2).map_or(c[1].to_owned(), |m| m.as_str().to_owned());
                     at_most.is_empty() || at_most.parse::<u32>().is_ok_and(|n| n >= 8)
                 })
+        }
+        for (body, holds) in [
+            (r"[a-z0-9]{32}", true),
+            (r"[a-z0-9]+", true),
+            (r"\w{4,}", true),
+            (r"x{2,8}", true),
+            (r"[a-z0-9]{4}-", false),
+            (r"[a-z]{2,6}", false),
+            (r"[A-Za-z0-9+/*]", false),
+            (r"\+\d\*", false),
+            (r"aGJHY2lPaU", false),
+        ] {
+            assert_eq!(long(body), holds, "{body}");
         }
         let file: File = toml::from_str(RULES_TOML).unwrap();
         let mut short: Vec<&str> = (file.rules.iter())
@@ -2402,9 +2430,14 @@ mod tests {
             .collect();
         short.sort_unstable();
         assert_eq!(short, ["jwt-base64", "microsoft-teams-webhook"]);
+        // Each has a rule of oboete's own, which names no group either: its first group is the
+        // whole secret, and `a_teams_webhook_and_a_base64_jwt_are_masked_whole` holds a sample of
+        // each to that (a rule that names a fragment under the same id fails here: cubic on
+        // #932).
         let own: File = toml::from_str(EXTRA_TOML).unwrap();
         for id in ["jwt-base64-whole", "microsoft-teams-webhook-secret"] {
-            assert!(own.rules.iter().any(|r| r.id == id), "{id}");
+            let rule = own.rules.iter().find(|r| r.id == id);
+            assert!(rule.is_some_and(|r| r.secret_group.is_none()), "{id}");
         }
     }
 
