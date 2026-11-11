@@ -111,6 +111,22 @@ observation none of whose paths fits gets no files op, so each run counts its pa
 `--files`, `seen` counts the observations imported before; those claude-mem recorded since are
 left to the plain import and not counted.
 
+I10. **The gate (2026-11-12).** The documents, the files ops and the work state the import stores
+pass the gate with the home's rules (the exclusion patterns of I8 come in as claude-mem holds
+them). A prompt keeps its first 8,000 characters (a live prompt keeps 64 KiB): `hook::clip` masks
+it with the bundled rules, so that its check for a key block the cut leaves open sees every
+header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
+prompt was masked with the bundled rules alone. A value only a rule of the home's finds keeps its
+start when the cut falls inside it. While `[capture] store_prompts` is off no prompt's text is
+stored, as a live prompt's is not: the rows are counted with the empty ones (`empty`) and come in
+once the setting is on again. A label names something, so the gate must leave it as it is: a row
+whose repository (`claude-mem:<project>`) or session id the gate changes, by a mask or by its
+cap, is left out, its document, its files op and its work state alike, and the line counts it
+(`masked`) at each run. So is the files op of a document filed before under such a label. A
+document whose op is over the op's cap (an observation's or a summary's long body) is cut to fit,
+and what that cut leaves is scanned once more with the same rules, as it is stored. What an
+earlier import stored stays as it was stored.
+
 ## Tests
 
 1. A database with 13.28.0's tables and one with 13.35.0's (`notes`, `merged_into_project`,
@@ -128,3 +144,13 @@ left to the plain import and not counted.
    device's clock lifts no write's clock, and a write made after it still comes last. A native
    entry under a key shaped like a worktree project's is read by that key alone.
 6. The default home takes the import without `--eval-store` and refuses it with it.
+7. A prompt is gated with the home's rules too: a value only the home's rule finds is masked, in
+   a short prompt and in one longer than is kept; under no rule of the home's the text stored is
+   the one stored before, also for key blocks cut short and whole about the cut; while redaction
+   is off the prompt is kept as typed. What a cut to the op's cap leaves is scanned again: a
+   value a line-scoped allowlist passed over for the line's ending is masked once the ending is
+   cut.
+8. While `store_prompts` is off no prompt comes in; a run with it on brings them.
+9. A row whose repository or session the gate changes is left out and counted, with its files op
+   and its work state, and nothing stored holds the label; the files op of a document filed before
+   under such a label is left out too, under `--files` and for a row whose project is lost.

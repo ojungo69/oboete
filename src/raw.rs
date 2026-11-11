@@ -730,12 +730,24 @@ const TITLE_BYTES: usize = 1 << 10;
 
 /// `doc` with its body clipped so that its op fits `MAX_OP_BYTES`, and a title over
 /// `TITLE_BYTES` too, each with a marker saying how long it was, as a clipped tool output's does.
+/// What a cut leaves is scanned once more with `rules` (the bundled ones when none are given),
+/// as it is stored: a line-scoped allowlist judged the line whole, and the cut can take away
+/// what it passed the value over for (`redact::scan_capped` scans what it keeps for the same).
 /// An error when the other fields alone are over the cap (cubic on the Task 3 PR).
-fn within_op_cap(mut doc: ImportDoc) -> Result<ImportDoc> {
+fn within_op_cap(mut doc: ImportDoc, rules: Option<&crate::redact::Rules>) -> Result<ImportDoc> {
     let size = |d: &ImportDoc| serde_json::to_string(d).map(|s| s.len());
     if size(&doc)? <= MAX_OP_BYTES {
         return Ok(doc);
     }
+    let bundled;
+    let rules = match rules {
+        Some(rules) => rules,
+        None => {
+            bundled = crate::redact::Rules::default();
+            &bundled
+        }
+    };
+    let clipped = |text: &str, keep: usize| crate::redact::scan(&clipped(text, keep), rules).0;
     if doc.title.len() > TITLE_BYTES {
         doc.title = clipped(&doc.title, TITLE_BYTES);
     }
@@ -875,6 +887,9 @@ pub struct Raw {
     /// Owner decision 43: the text of the ops this handle appends was gated with the redaction
     /// rules turned off (`gates_with`), so each append owes the op text scan in its transaction.
     gated_off: bool,
+    /// The rules `gates_with` named, if it was called: what a cut made to fit an op's cap leaves
+    /// is scanned with them once more (`within_op_cap`).
+    gate: Option<crate::redact::Rules>,
 }
 
 /// The raw store file, including a stopped restore's file when raw.db has not been renamed in.
@@ -1805,6 +1820,7 @@ fn open_within_report(
         home_id,
         _swap: swap,
         gated_off: false,
+        gate: None,
     })
 }
 
@@ -3232,6 +3248,7 @@ impl Raw {
     /// (`owe_op_text_scan`). Each writer of op text calls it with its rules before it appends.
     pub(crate) fn gates_with(&mut self, rules: &crate::redact::Rules) {
         self.gated_off = rules.is_off();
+        self.gate = Some(rules.clone());
     }
 
     /// Slice 3e-4: a scan of the op text begun in this raw.db, which `ops_text_scanned` records
@@ -6864,7 +6881,7 @@ impl Raw {
                 continue;
             }
             let body = match item {
-                Import::Doc(doc) => serde_json::to_value(within_op_cap(doc)?)?,
+                Import::Doc(doc) => serde_json::to_value(within_op_cap(doc, self.gate.as_ref())?)?,
                 Import::Files(files) => serde_json::to_value(files)?,
             };
             let size = body.to_string().len();
@@ -11885,6 +11902,51 @@ mod tests {
             &kept.body[kept.body.len() - 80..]
         );
         assert!(kept.body.starts_with("a \"quoted\" line\n"));
+    }
+
+    /// What a cut made to fit the cap leaves is scanned once more, as it is stored: a line-scoped
+    /// allowlist judged the line whole, and the cut takes away what it allowed the value for
+    /// (Codex's security review of the import's gate, 2026-11-12). With the rules the handle was
+    /// told (`gates_with`): the bundled ones when it was told none, a home's kept value kept, and
+    /// nothing masked while they are off.
+    #[test]
+    fn what_a_cut_to_the_op_cap_leaves_is_scanned_again() {
+        use sha2::Digest;
+        let value = format!("q9Zx8mL2vB4nR7tY1wK3{}", "pS6dJ0aF5hU2cE8g");
+        // One line, which the bundled generic-api-key rule passes over for its ending.
+        let line = format!(
+            "auth = \"{value}\" {}--mount=type=secret,id=x",
+            "lorem ".repeat(12_000)
+        );
+        let bundled = crate::redact::Rules::default();
+        assert!(
+            crate::redact::outbound_with(&line, &bundled).contains(&value),
+            "the line whole is passed over"
+        );
+        let rules = |toml: &str| {
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(toml)).unwrap().redaction)
+                .unwrap()
+        };
+        let keeps = rules(&format!(
+            "[redaction]\nallowlist = [\"{:x}\"]\n",
+            sha2::Sha256::digest(value.as_bytes())
+        ));
+        let off = rules("[redaction]\nenabled = false\n");
+        for (told, masked) in [(None, true), (Some(&keeps), false), (Some(&off), false)] {
+            let home = tempfile::tempdir().unwrap();
+            let mut raw = open(home.path()).unwrap();
+            if let Some(rules) = told {
+                raw.gates_with(rules);
+            }
+            raw.append_imports(vec![import_doc(1, line.clone())])
+                .unwrap();
+            let op = raw.ops_after(raw.device(), 0, 1).unwrap().remove(0);
+            assert!(op.body.to_string().len() <= MAX_OP_BYTES);
+            let kept: ImportDoc = serde_json::from_value(op.body).unwrap();
+            assert!(kept.body.contains("…[clipped, "), "cut to fit");
+            assert_eq!(!kept.body.contains(&value), masked, "{}", &kept.body[..60]);
+            assert_eq!(kept.body.starts_with("auth = \"[REDACTED]\""), masked);
+        }
     }
 
     /// cubic on the Task 3 PR: a title as long as a body is cut too, and a document whose other
