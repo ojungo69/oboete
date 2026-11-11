@@ -11,7 +11,7 @@ PR は 2 つに分ける: **A1 = 関門 (出荷するコード)**、**A2 = 計�
 
 1. **関門は `redact::outbound(text)` の 1 つの関数**。`<private>` などのブロックを外し (`strip_blocks`)、gitleaks 規則で伏せ字にする。要約の入力も、後の PR の埋め込み・同期・判定も、この関数を通してから外へ出す。
 2. **関門の `strip_blocks` は閉じたブロックだけを外す**。閉じていない `<private>` で以降を全部消すのは、今までどおり記録時の prompt だけにする (`docs/m1.md` 決定 15)。理由: 道具の出力や要約には `<private>` という語がそのまま出てくる (この repo の `hook.rs` の説明文、`<private>` について話したセッションの要約)。関門で閉じていないタグの後ろを全部消すと、そのセッションの残りが要約器に渡らなくなる。
-3. **要約の入力では、関門をイベントの欄ごとに通す** (`observe::render`。built since: `observe` は無く、`src/curate.rs` の `render`)。transcript 全体にまとめて通すと、ある道具の出力の `<private>` と、ずっと後の返答の `</private>` の間が丸ごと消える。`build_prompt` の伏せ字は関門に置き換える (二重に通さない)。
+3. **要約の入力では、関門をイベントの欄ごとに通す** (`observe::render`。built since: `observe` は無く、`src/curate.rs` の `window_at` が呼ぶ `Prepared::new`)。transcript 全体にまとめて通すと、ある道具の出力の `<private>` と、ずっと後の返答の `</private>` の間が丸ごと消える。`build_prompt` の伏せ字は関門に置き換える (二重に通さない)。
 4. **応答の読み取りに上限 (1 MiB)**。無料 API の本文、CLI の stdout、codex の `last.json` のどれも、上限なしで読んでいた。壊れた provider や乗っ取られた provider が巨大な応答を返しても、メモリを食い尽くさないようにする。CLI 側は #32 で入れた (stdout を読まずに終了を待っていたので、64 KB を超える応答で子が止まる不具合も一緒に直した)。無料 API の本文はこの PR。
 5. **同期除外の判定は A1 に入れない** (§4.8 の 3)。判定に使う情報 (session が触れた repo の集合、`.oboete.toml` の `sync = false`、`oboete sync exclude`) はどれも PR-C で入る。何も渡さない引数を先に作っても、テストが自分の実装をなぞるだけになる。A2 の実験は決定 11 の「除外が無ければ全部送ってよい」に当たる (今は除外の設定が 1 つも無い)。PR-C で除外の判定を関門に足し、「除外した repo の文書・問い合わせは外への要求が 0 件」の回帰テストもそこで付ける (issue #30 に移す)。
 

@@ -43,7 +43,7 @@ cards(device, op_seq, n,                 -- the window op it came in, and its pl
 ```
 
 The table has more columns than this sketch: `goals` (JSON), `hidden` (a hidden card is left out by
-every reader) and `subagent` (X1). `cards_fts` (full text) and `card_files` are tables beside it.
+every reader that shows cards; the hide settings list the hidden ones, to bring one back) and `subagent` (X1). `cards_fts` (full text) and `card_files` are tables beside it.
 
 `facts`, `concepts`, `files_read` and `files_modified` are JSON arrays of strings. `type` is one
 of claude-mem's: bugfix, feature, refactor, change, discovery, decision, security_alert,
@@ -102,8 +102,10 @@ follows its sentence is hidden already and one the cut would split is still whol
 session and repository a card is shown under are gated too.
 
 K7. **One way in.** Readers take cards through `cards::recent` and its siblings, which apply K3,
-K4 and K6. This is the rule for the text shown to a person or an agent; embedding, forget, the
-viewer, My Work and the hide settings read the table themselves.
+K4 and K6. This is the rule for the text shown to a person or an agent: the viewer's Timeline and
+My Work take the cards they show through `cards::page`. Other code reads the table itself, for
+other things: embedding and forget, the viewer's count of a session's cards, My Work's look-up of
+a shown card's span and files, and the hide settings' list of hidden cards (`cards::removed`).
 
 ## Is a card safe to show?
 

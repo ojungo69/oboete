@@ -22,7 +22,7 @@ P1. **Where.** `Timeline` is the feed, after My Work and My Rules, My Work being
 slice 2 of X10 (decision 55, docs/my-work.md). The list it replaced (claims, imported history and
 records, with the search box and its filters) stays as it is under a tab of its own, `Records`,
 after it.
-Sessions, Context, Stats and Settings follow as now (built since: `Sessions`, after Timeline).
+Context, Stats and Settings follow as now (built since: `Sessions` sits between Timeline and Records).
 
 P2. **What.** Four kinds of item, each read through its one reader, so each is shown only as the
 rest of oboete may show it:

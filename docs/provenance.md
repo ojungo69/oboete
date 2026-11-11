@@ -20,7 +20,7 @@ the working notes, not in the repository; its findings that matter are below.
 
 ## What is per kind today
 
-(The state before slice 1 and slice 2a; see "As built" for what has changed.)
+(The state before slices 1, 2a and 3; see "As built" for what has changed.)
 
 1. **Shapes.** A window op names its records as `from_seq`/`from_offset`/`to_seq`/`to_offset`,
    `goals`, `removed` (left out when empty or over 500) and the claims it was shown

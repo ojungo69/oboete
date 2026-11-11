@@ -157,7 +157,7 @@ D2 の test 分 (評価用 store の写し `<home>` で。`config.toml` に `[em
 ```sh
 oboete --home <home> search x                     # 一度開いて表を作る
 uv run --with numpy python docs/spike/pr-d/load_vectors.py <home>/oboete.db
-oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)
+oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)。今は `reindex` は無く、ベクトルは worker の埋め込み段が作る
 R=~/.oboete/eval/runs-test
 oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method hybrid > $R/hybrid-d2.trec   # D2 の形。今の `eval` は `--out <dir> --arms <...>` で、stdout に TREC を出さず `--method` も無い
 oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method fts > $R/e0-trigram.trec
