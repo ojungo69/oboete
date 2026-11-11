@@ -2484,10 +2484,12 @@ fn drain_holding_report(
     result
 }
 
-/// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
-/// return at once: a worker a hook started holds it only while it drains, and a lock just
-/// released can still be held for a moment by a child another thread forked (it keeps the open
-/// file until it execs), which made hook tests run nothing under a parallel suite.
+/// One run now, for a command that has written ops and waits for the consumers to read them (a
+/// claim's correction or mute, `oboete recurate` once it lets the lock go) and for tests. It waits
+/// up to 2 s for the lock rather than return at once: a worker a hook started holds it only while
+/// it drains, and a lock just released can still be held for a moment by a child another thread
+/// forked (it keeps the open file until it execs), which made hook tests run nothing under a
+/// parallel suite.
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut held = lock(home)?;
@@ -5946,6 +5948,12 @@ mod tests {
         assert!(
             kind == "rebuild" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
         );
+        // The rebuild has let its lock go, but a child that another test's thread forked holds the
+        // open file until it execs (`run_once`): the pause ends once that child has.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while curation_pause(p).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(curation_pause(p), None);
     }
 
