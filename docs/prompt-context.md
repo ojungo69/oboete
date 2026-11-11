@@ -23,7 +23,7 @@ settles when and how.
 Spec 4.2 and 4.6: with `[inject] per_prompt` on (off by default), the prompt hook matches the
 prompt's words (trigrams) against the session's shortlist of about 50 delivered claims, which the
 worker builds ahead (with vectors where it has them), and injects the claims whose share of the
-prompt's words reaches 0.53 (`shortlist::THRESHOLD`), under "Decisions that may bear on this
+prompt's words reaches 0.53 (`shortlist::THRESHOLD`), under "Memory that may bear on this
 prompt". Claims only; imported history is never injected (4.5); the hook never embeds a query and
 never waits on the network (4.1, decision 38's "Not now" for asking the resident worker).
 
@@ -188,7 +188,7 @@ a document it cannot map stays search-only.
   each session's first row there as it reads records, an older record read later included, and
   works it out again from `raw_docs` for a session whose first record a forget or a rewind takes
   away. A store from before this slice fills it from `raw_docs` once, with the indexes
-  `raw_docs(session, ts, device, seq)` and `imported(session, repo)`, made by the first process
+  `raw_docs(session, ts, device, seq)` and `imported(session, repo, kind)`, made by the first process
   that opens the store with this version: on this PC's store (575,931 records, 5,787 sessions) the
   fill takes 0.5 s and the indexes 2.3 s and 3.5 s. Until the consumers have made the table, a
   prompt gets no imported history.

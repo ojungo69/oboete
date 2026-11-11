@@ -18,10 +18,11 @@ like to them.
 
 ## The feed (slice 1)
 
-P1. **Where.** `Timeline` is the feed, after My Work, which is the first tab since slice 2 of
-X10 (decision 55, docs/my-work.md). The list it replaced (claims, imported history and records,
-with the search box and its filters) stays as it is under a tab of its own, `Records`, after it.
-Context, Stats and Settings follow as now.
+P1. **Where.** `Timeline` is the feed, after My Work and My Rules, My Work being the first tab since
+slice 2 of X10 (decision 55, docs/my-work.md). The list it replaced (claims, imported history and
+records, with the search box and its filters) stays as it is under a tab of its own, `Records`,
+after it.
+Sessions, Context, Stats and Settings follow as now (built since: `Sessions`, after Timeline).
 
 P2. **What.** Four kinds of item, each read through its one reader, so each is shown only as the
 rest of oboete may show it:
@@ -110,7 +111,7 @@ does); the page writes text with text nodes, never as HTML. Nothing is written t
 
 | claude-mem | oboete | Why |
 |---|---|---|
-| Delete buttons on observations and summaries | none yet | Forgetting is milestone 5's (spec 5.8), with its fence and its log; the page gets it in M5 slice 5 |
+| Delete buttons on observations and summaries | forget on a session, prompt, note or claim; hide on a card or summary | Forgetting is milestone 5's (spec 5.8), with its fence and its log (built since: docs/page-forget.md, docs/card-hide.md) |
 | Live rows over SSE | polling every 3 seconds | the viewer answers each request and closes; a new record is seen within seconds either way |
 | Pages by offset per kind | one cursor over the three kinds | no skipped row after a removal |
 | Header links to its site, X, Discord, GitHub stars and a paid trial | none | they are claude-mem's own |
@@ -121,7 +122,7 @@ does); the page writes text with text nodes, never as HTML. Nothing is written t
 | The first visit's help shown again by `?` | the same | — |
 | A session's title: its custom title, else the project | its first prompt, else the repository | oboete records no custom title; the first prompt says what the session was for |
 | Sessions paged by offset, 200 at a time | by the last one's place, 50 at a time | as the feed (P3): none skipped or repeated when a session begins between pages |
-| A session's menu deletes it | none | forgetting is the CLI's (parity row 3) |
+| A session's menu deletes it | "Forget this session" on its page | docs/page-forget.md (parity row 3) |
 
 ## Sessions (slice 2)
 
@@ -177,8 +178,8 @@ S7. **Safety.** As P12: the token, Host and method checks, each reader's gate an
 answer, text nodes only, nothing written. The session id and the agent are gated as a card's
 labels are (K6). A session's key in a request is compared, never used as a path.
 
-S8. **Not built.** claude-mem's session menu deletes a session and everything captured in it;
-oboete forgets from the CLI (row 3).
+S8. **Built since.** claude-mem's session menu deletes a session and everything captured in it;
+oboete's session page has "Forget this session" (docs/page-forget.md, row 3).
 
 ## Tests of slice 2
 

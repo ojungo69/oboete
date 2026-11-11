@@ -67,7 +67,7 @@ note (docs/file-note.md).
 | The worker's process holds its vectors in memory (Chroma, 6.4 GB on this PC on 2026-11-03) | the resident viewer reads what a lookup reads through every five minutes while the hooks record, so the system keeps it in its page cache, and less often when the system keeps dropping it | the page cache, which the system takes back when it needs it, does what a held copy would without holding it (decision 71) |
 | Search with its vectors (Chroma) | the resident viewer searches with its own query vector, made within the prompt's wait; the hook's own search, with no viewer, the words side alone | a hook embeds nothing itself (decision 38); the viewer holds the model, as for the prompt's block (G23) |
 | `<claude-mem-retrieved-data>`, its text cut at 10,000 characters and the sentence and tags added | oboete's fence, the whole within 9,500 UTF-16 units | Grok and Claude Code clip a context at 10,000 (docs/file-note.md F1) |
-| Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not yet | claude-mem's folder watcher is parity row 44, after the switch |
+| Folders of `CLAUDE_MEM_MEMORY_WATCH_ROOTS` too | not built | claude-mem's folder watcher is parity row 44 (missing, rare: the owner uses none of them) |
 
 ## Cost
 

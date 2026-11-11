@@ -6,7 +6,7 @@ The plan is docs/milestone-2-plan.md. The spec is docs/spec.md sections 1-2, 4.9
 
 - `v1` was branched from `main` at 431bafc. Its `src/`, `Cargo.toml` and `Cargo.lock` are the same as at b95b827, the commit of the owner's last install (#71): `git diff --stat b95b827 431bafc -- src Cargo.toml Cargo.lock` prints nothing.
 - `v1` is protected by the same ruleset as `main`: no deletion or force push, changes by pull request, linear history, required checks.
-- Until the cut-over after milestone 5 (spec 7.5), the owner's binary is built from `v1`. A v1 fix (real loss or safety only) is a PR into `v1`. `main` is Design B from Task 1 on.
+- Until the cut-over after milestone 5 (spec 7.5), the owner's binary is built from `v1` (built since: the cut-over was made on 2026-10-15 and `v1` is history). A v1 fix (real loss or safety only) is a PR into `v1`. `main` is Design B from Task 1 on.
 - Design B's hooks in the dogfood user (Task 0 step 4) are set up once Task 2 gives `main` a hook path of its own. Until then `main` builds the same binary as `v1`.
 
 ## Compression (Task 10, 2026-09-27)
@@ -90,7 +90,7 @@ The in-process numbers move by 25% between identical runs on this machine (load 
 - A damaged knowledge.db (and its `-wal`, `-shm`) is moved aside the same way and started empty; every consumer rebuilds from seq 0. raw.db and the segments are not touched. The worker's check of knowledge.db is the whole `quick_check` on a connection with no virtual table modules, which leaves out the virtual tables' own checks: FTS5 answers any `quick_check` with its whole-index check, which takes 10 s on a 70,000-record home, so the search indexes are checked against their text by doctor only.
 - doctor: the backup directory, how many segments and through which seq of raw's highest, each segment whose checksum does not match or is missing, a warning when the data or backup directory is inside OneDrive, iCloud Drive, Dropbox or Google Drive, the last restore, raw.db's full `integrity_check` (doctor only, never on an automatic path), and knowledge.db's whole `quick_check`, which names `oboete rebuild` when it fails. A bad segment or a failed check turns doctor red.
 - A hook starts the worker after a written row, and also after a write that failed because raw.db is damaged (SQLITE_CORRUPT or SQLITE_NOTADB): the failure is marked (MUST-M16) and the worker restores the file. Other write failures (a full disk, busy) start none. A worker already running opened raw.db before the damage and may not see it, so the hook also leaves `<home>/state/restore-wanted`: the worker checks for it while it waits and again after it releases the lock, and then closes its stores and opens them again, which restores raw.db. A read of its own that finds raw.db damaged does the same, twice at most per run. Tests: `tests/damaged_raw.rs`, through the binary.
-- Not yet: the rescan rewriting sealed segments (#83) follows Task 7's part b.
+- Not yet: the rescan rewriting sealed segments (#83) follows Task 7's part b (built since: `backup::purge_ops` and `backup::purge_record_segments`, called from forget).
 
 ## The manifest (Task 9, 2026-09-27)
 
@@ -152,7 +152,7 @@ Every agent now records to raw.db. Pi and OpenCode send Claude Code's hook field
 - **agy:** each PreInvocation, PostToolUse and Stop reads one bounded tail of its transcript. The prompt is the newest explicit user step (only its `<USER_REQUEST>`), recorded once per step: a `step-N` flag (below) claims it, and is released if the write fails so a later hook records it. A tool's output is its step's content or error; the call failed when agy says so or the step's status is `ERROR`. Stop records only this turn's answer.
 - **Cursor:** Stop's text is `text`, a failed tool's output `error_message`. SessionEnd recovers the turns `cursor-agent -p` never sent through hooks from its transcript: the n-th turn with a given prompt is new only when raw holds fewer than n prompts of the session with the same stored body (the prompt passed through capture, so stripping and redaction compare alike; `Raw::prompt_counts` scans by label, once per SessionEnd). Concurrent SessionEnds of one home take a file lock, so a turn is recovered once. Known gap: when the prompt is written and the answer's write fails, a retry finds the prompt and skips the turn, answer and all.
 - **A failing injection point warns.** Whether a call is the agent's injection point is decided before its write, so a point whose own write fails still shows the recording-failure line. Grok's and agy's point is then taken: the line is shown once per session, not at every tool call. Cursor's compaction flag is put back, so its next prompt shows the manifest once recording works again.
-- v1's write path is removed (`hook::handle`, the hook-state columns' functions in `db.rs`, and the `observe` run hooks started): no hook writes oboete.db. `oboete import claude-mem` still writes it, with the bundled rules (`hook::clip`), and v1's readers (MCP, viewer, observe) read what it holds until milestones 3 and 4 replace them. v1's tests of `handle` were ported to raw.db where Design B had no test of the same behavior (private blocks across the cap, typed prompts and envelopes, Codex's answer from its transcript, a compaction's SessionStart), and dropped where it had one or where they checked v1's tables.
+- v1's write path is removed (`hook::handle`, the hook-state columns' functions in `db.rs`, and the `observe` run hooks started): no hook writes oboete.db. `oboete import claude-mem` still writes it, with the bundled rules (`hook::clip`), and v1's readers (MCP, viewer, observe) read what it holds until milestones 3 and 4 replace them (built since: milestone 4 moved the viewer and MCP off oboete.db). v1's tests of `handle` were ported to raw.db where Design B had no test of the same behavior (private blocks across the cap, typed prompts and envelopes, Codex's answer from its transcript, a compaction's SessionStart), and dropped where it had one or where they checked v1's tables.
 
 Decisions (Claude; overrulable):
 
@@ -186,7 +186,7 @@ In the dogfood user: Design B's binary (main 0434bd1 with #119's fix) as `~/.loc
   - The todo list part: Claude Code 2.1.278 in `-p` mode offers no TodoWrite, and codex-cli 0.155.1's `exec` has no `update_plan`. The owner's 150 newest Claude Code transcripts call neither TodoWrite nor a Task* tool. The part is tested with recorded inputs; #120 tracks the agents' current task tools.
   - Other active sessions: both sessions had ended. Tests cover the part.
   - Files touched: both agents wrote their files through shell commands, not through edit tools.
-- doctor's `db 0 KB` is v1's oboete.db. No hook writes it since #118. It stays until the viewer and MCP move to raw.db (milestone 4).
+- doctor's `db 0 KB` is v1's oboete.db. No hook writes it since #118. It stays until the viewer and MCP move to raw.db (milestone 4) (built since: they moved, and doctor still prints the oboete.db size, `src/setup.rs` `doctor`).
 
 ## Milestone 2 as it stands (2026-09-27)
 
@@ -202,6 +202,6 @@ In the dogfood user: Design B's binary (main 0434bd1 with #119's fix) as `~/.loc
 - **What milestone 3 inherits**:
   - Curation starts from seq 0 with its own checkpoint (D10). Until then the manifest counts every record as not yet curated.
   - The manifest's "Current decisions" part stays empty until claims exist.
-  - The provider layer: the fixes and Gemini that the owner's binary runs (#96 to #101, #116) are on `v1` only. Milestone 3 rebuilds the chain with curator isolation and S8's environment allow-list.
-  - v1's readers (MCP, viewer, observe) still read oboete.db until milestone 4 moves them.
+  - The provider layer: the fixes and Gemini that the owner's binary runs (#96 to #101, #116) are on `v1` only (as of 2026-09-27; the cut-over of 2026-10-15 made `main` the owner's binary). Milestone 3 rebuilds the chain with curator isolation and S8's environment allow-list.
+  - v1's readers (MCP, viewer, observe) still read oboete.db until milestone 4 moves them (built since: milestone 4 moved them to raw.db and knowledge.db).
   - Open acceptance tests: #83 (carried from this milestone's reviews) and #120 (the todo list).

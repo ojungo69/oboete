@@ -77,7 +77,7 @@ back, because forget and retention already rewrite the segments.
   export drops the points past raw's end (raw lost commits, MUST-M14) before it sets aside the
   segments past it, so a stop or a failure between the two is retried by the next export.
 - B7. **doctor** prints the newest point's time and how many records and ops came after it. When
-  that point is more than two days old and raw.db holds records or ops past it, the line is a
+  that point is two days old or more and raw.db holds records or ops past it, the line is a
   warning naming `oboete backup run`, and doctor turns red. The age is measured from the export's
   own time, never from a record's.
 - B8. **The settings page** (History and recovery) gets the list and the go-back, with its preview,
@@ -103,7 +103,7 @@ back, because forget and retention already rewrite the segments.
    the cut part again.
 8. A restore of a damaged store that loses its newest record segment keeps the exclusion ops after
    its first lost record.
-9. doctor warns when the newest point is more than two days old and records came after it.
+9. doctor warns when the newest point is two days old or more and records came after it.
 10. `oboete backup run` exports under the worker's lock and adds a point.
 11. An exclusion that raw.db holds and no export backed up yet survives a restore to a point and a
     restore of the whole backup, and the same op is not appended twice.

@@ -1,8 +1,8 @@
 # OpenCodeReview in GitHub Actions
 
 `.github/workflows/open-code-review.yml` runs the official
-[Alibaba OpenCodeReview action](https://github.com/alibaba/open-code-review/blob/486022daaf14f7142275eddb9b3cacc3cc5dadfa/action.yml).
-The action is pinned to a commit, and its CLI is pinned to version 1.12.9.
+[Alibaba OpenCodeReview action](https://github.com/alibaba/open-code-review/blob/375f64cd6f67a48a135da83cfcf59c52669a09cb/action.yml).
+The action is pinned to a commit (v1.13.3), and its CLI is pinned to version 1.12.9.
 The job sets `OCR_NO_UPDATE=1`: otherwise the CLI's first call starts a background
 `npm i -g` of the newest release, which replaced the pinned one while the action was
 still calling it ("Cannot find module"): 4 of the 9 runs that failed up to 2026-09-28.

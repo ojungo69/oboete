@@ -20,6 +20,8 @@ the working notes, not in the repository; its findings that matter are below.
 
 ## What is per kind today
 
+(The state before slice 1 and slice 2a; see "As built" for what has changed.)
+
 1. **Shapes.** A window op names its records as `from_seq`/`from_offset`/`to_seq`/`to_offset`,
    `goals`, `removed` (left out when empty or over 500) and the claims it was shown
    (`candidates`, `carried`); a turn op as `from`/`through`, `read` pairs, `goals` and `removed`; a
@@ -43,6 +45,8 @@ the working notes, not in the repository; its findings that matter are below.
    keys for four other routes. Each was added after a finding.
 
 ## Possible faults the map found (each to be confirmed by a failing test before it is fixed)
+
+(F1 is fixed by slice 2a; see "As built".)
 
 - F1. A restore keeps a turn op whose `through`, or a My Work op whose `read` spans, pass the
   restored records: only window and migration ops are cut.
@@ -117,6 +121,16 @@ rule): what is left goes into an issue as acceptance tests for slice 1, and the 
 further commit.
 
 ## As built
+
+### Slice 1: one reading of provenance (built)
+
+- `src/provenance.rs` holds `Provenance` and `provenance::of(kind, body)`, which forget's judge,
+  backup's purge and the restore cut call in place of the per-kind cases.
+
+### Slice 3: S6 for every My Work job (built)
+
+- An op built on an excluded op is left out through `read.ops`, in `my_work_ops::hidden`
+  (`src/my_work_ops.rs`), which `src/my_work_group.rs` calls.
 
 ### Slice 2a: a restore's cut for every kind (2026-10-27)
 

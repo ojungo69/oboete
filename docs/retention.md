@@ -41,7 +41,8 @@ column, `expired`, holds the time it expired. `Raw::after` reads such a row as
 
 An older binary reads an expired row as an event whose text is empty: it would curate it again
 as nothing and drop the claims anchored on it in a rebuild. So the home's format moves to 3
-(docs/store-format.md), but only with the first expiry batch: this binary reads up to 3, stamps 2
+(docs/store-format.md), but only with the first expiry batch: this binary reads up to 3 (built since:
+later slices raised the readable maximum, `FORMAT` in `raw.rs`, and expiry stamps `EXPIRED_FORMAT`), stamps 2
 on open as before (`FORMAT` is split into the readable maximum and the open's stamp; a stamp is
 never lowered), and raises raw.db to 3 in the transaction that commits the first expiry batch
 (step 1 below), before any backup or copy holds an expired line; a restore that brings back an
@@ -301,7 +302,7 @@ the backups, and knowledge.db, which is built again. R2 holds nothing until mile
    (claims, Anchors, search, recuration and the queues, FTS and `reindex`, embedding and the
    carries, gaps, manifest, `hide`, Cursor's recovery, forget's copy finding and its segment
    rewrite), the `expired` backup line and its restore. Nothing writes an expired row yet but the
-   tests.
+   tests (built since: the pass in `src/retention.rs` writes them; see "As built").
 2. **The pass**: the setting, the windows and their eligibility (rule 8's scan of every claim
    op's quotes among them), `expiry_owed`, its file and the
    five steps, restore's application of the owed file, the copies' sweep, the worker's look,

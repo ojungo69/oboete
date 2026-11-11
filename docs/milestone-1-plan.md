@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **History:** milestone 1 is built (results in `docs/milestone-1.md`). The code blocks below are first versions and the boxes stay open; the committed files under `docs/eval/`, `docs/spike/` and `src/` are the reference.
+
 **Goal:** Freeze every input the later milestones are judged on, build the tools the owner labels with, pass or fail the judge-trust gate (B3), and run the two spikes that need no labels, so milestones 2-5 are measured against inputs nobody can move.
 
 **Architecture:** Evaluation data never enters the repository (docs/pr-b.md decision 1): it lives in owner-only files under `~/.oboete/eval`, and the repository holds only the scripts, synthetic fixtures and the numbers. The scripts are small stdlib Python files in `docs/eval/` sharing one `common.py`; `freeze.json` records the sha256 of every frozen file. One Rust piece ships in the binary: `oboete transcript`, which turns a Claude Code or Codex transcript into the replay fixture format that `oboete replay` already reads, so the same file replays through today's code (baselines) and through design B later (spec 7.4 transcript import).
@@ -29,7 +31,7 @@
 1. **Transcript text rendered in the labelling page**: transcripts and memories contain HTML, `<script>` and markdown. Expect them shown as plain text, never interpreted. Pinned in Task 5 (`test_item_text_is_never_html`).
 2. **A second browser tab or a replayed POST on the labelling page**: expect the latest label per item to win and the page to skip labelled items; no label is lost or duplicated in the results. Pinned in Task 5 (`test_latest_label_wins_and_next_skips_labelled`).
 3. **A transcript line that is not JSON, or a record type the parser has never seen** (Claude Code adds types often: `atis-latch`, `bridge-session`, `pr-link` in the last month): expect a broken line skipped and counted, every record type the parser does not read counted by type on stderr (so schema drift is visible), and the rest of the session still parsed. Pinned in Task 4 (`unknown_and_broken_lines_are_skipped`, and the `ignored` assertion of the Codex test).
-4. **A tool call whose result never arrives** (the session was killed mid-tool): expect a `PostToolUse` with an empty `tool_response` at the end of the session rather than a lost call or a crash. Pinned in Task 4 (`a_tool_call_without_result_is_emitted_at_the_end`).
+4. **A tool call whose result never arrives** (the session was killed mid-tool): expect a `PostToolUse` with an empty `tool_response` at the end of the session rather than a lost call or a crash. Pinned in Task 4 (`a_tool_call_without_result_is_emitted_at_the_end`). (Built since: a main-session call is emitted at the developer's interruption, `[Request interrupted`, when there is one, otherwise at the end of the file.)
 5. **A frozen input edited by a later script** (for example the claude-mem copy opened read-write by mistake): expect `freeze.py check` to fail loudly, and every later script to run it first. Pinned in Task 1 (`test_add_check_and_refuse`) and in the first step of Tasks 6, 8 and 9.
 
 ---
@@ -767,7 +769,7 @@ Delegated to Codex (project CLAUDE.md: parsers are an independent piece; spec 8.
 
 Decisions (Claude; overrulable, recorded in the note):
 - **Output**: the replay fixture format `oboete replay` already reads (`{seq, agent, event, session, payload}`, `src/replay.rs:1-3`), plus `ts` (the transcript entry's timestamp, which today's replay ignores and the transcript import will use). Payloads are shaped like each agent's hook payloads, so the hook path stores them as it stores live events.
-- **Agents**: Claude Code and Codex only, the replay set's two agents. agy and Cursor transcript tails are read by today's hooks (`src/hook.rs:243-368`); their full parsers come with the transcript import at milestone 4.
+- **Agents**: Claude Code and Codex only, the replay set's two agents. agy and Cursor transcript tails are read by today's hooks (`src/hook.rs` `agy_workspace` and `cursor_turns`); their full parsers come with the transcript import at milestone 4.
 - **No redaction or stripping in the parser**: the hook path redacts and strips `<private>`, and that cost is part of what a replay measures.
 - **Claude Code subagents**: files in `<session>/subagents/*.jsonl` are the same session (their hooks carry the parent's session id). Only their tool calls are emitted, with `agent_id`, after the main file's events; consumers that need time order sort by `ts`. Older Claude Code wrote subagent turns inline in the main file with `isSidechain: true` (the replay pool reaches back to June): those records are handled the same way, with `agent_id` from their `agentId`.
 - **Streaming**: files are read line by line (the longest sessions are hundreds of MB); a line that is not JSON is skipped and counted on stderr.
@@ -777,7 +779,7 @@ Decisions (Claude; overrulable, recorded in the note):
 - Modify: `src/main.rs` (module and hidden subcommand)
 
 **Interfaces:**
-- Consumes: `crate::db::open(home) -> Result<Connection>`, `crate::hook::handle(conn, agent, event, payload) -> Result<Option<String>>` (tests only).
+- Consumes: `crate::db::open(home) -> Result<Connection>`, `crate::hook::handle(conn, agent, event, payload) -> Result<Option<String>>` (tests only; built since: `crate::raw::open` and `crate::hook::record`, and no `handle` or `src/observe.rs`).
 - Produces: `transcript::convert(path: &Path, agent: &str, out: impl Write) -> anyhow::Result<transcript::Stats>`, `Stats { lines: u64, skipped: u64, events: u64, ignored: BTreeMap<String, u64> }` (`skipped` = lines that are not JSON; `ignored` = record types not read, by type); CLI `oboete transcript <path> --agent claude|codex` (hidden) writing the fixture to stdout and `oboete transcript: <lines> lines, <skipped> skipped, <events> events; not read: <type> <n>, …` to stderr.
 
 Event mapping:
@@ -799,14 +801,14 @@ Event mapping:
 | Codex `response_item` `message` `role: assistant` | remembered as the turn's last text | |
 | Codex `event_msg` `task_complete` | `Stop` | `last_assistant_message` (`last_agent_message`, else the remembered text) |
 | Codex `compacted` | `PostCompact` | `trigger: "auto"`, `compact_summary` (`payload.message`) |
-| a tool call with no result at the end of a file | `PostToolUse` | `tool_response: null`, `interrupted: true` |
+| a tool call with no result at the end of a file (or at an interruption, built since) | `PostToolUse` | `tool_response: null`, `interrupted: true` |
 | end of the main file | `Stop` for a remembered text | |
 | end of everything | `SessionEnd` | `reason: "transcript_end"` |
 | any other record type | nothing; counted in `Stats.ignored` by type (Codex: `<type>:<payload.type>`) | |
 
 - [ ] **Step 1: Write the fixtures**
 
-`src/testdata/transcripts/claude-basic.jsonl` (20 lines; line 7 is deliberately not JSON; lines 16-18 are an inline subagent, as older Claude Code wrote them; line 19 is command output, line 20 a slash command):
+`src/testdata/transcripts/claude-basic.jsonl` (20 lines when planned, 30 now, and the tests' counts have grown with it; line 7 is deliberately not JSON; lines 16-18 are an inline subagent, as older Claude Code wrote them; line 19 is command output, line 20 a slash command):
 
 ```
 {"type":"permission-mode","permissionMode":"default","sessionId":"claude-basic"}
@@ -1526,7 +1528,7 @@ def test_latest_label_wins_and_next_skips_labelled():
 Run: `cd docs/eval && uv run --with pytest pytest -q test_label.py`
 Expected: FAIL with `ModuleNotFoundError: No module named 'label'`.
 
-- [ ] **Step 3: Write `label.py`**
+- [ ] **Step 3: Write `label.py`** (the listing is the first version: `docs/eval/label.py` adds a `busy` guard, an `RLock` and a single-snapshot `back()`, and is the current file)
 
 ```python
 """Milestone 1, Task 5: the owner's labelling page (docs/milestone-1-plan.md).
@@ -1747,7 +1749,7 @@ git add docs/eval/label.py docs/eval/test_label.py && git commit -m "eval: the o
 
 ## Task 6: B3, the judge-trust gate
 
-Rewritten 2026-09-26 (owner decision 29, spec 8.1). The owner does not grade these English, technical memories. A panel of judges from six model makers grades them instead, and the judge under test (`claude-sonnet-5`, whose pool grades D2 used) is trusted by its agreement with the others. The first version of this task (owner against judge) is in git history (PR #64); its draw and key are kept.
+Rewritten 2026-09-26 (owner decision 29, spec 8.1). The owner does not grade these English, technical memories. A panel of judges from six model makers grades them instead, and the judge under test (`claude-sonnet-5`, whose pool grades D2 used) is trusted by its agreement with the others. The first version of this task (owner against judge) is in git history (PR #64); its draw and key are kept. Built since: the panel is `PANEL` in `docs/eval/calib.py` (`gpt-6-sol`, `gpt-6-astra` and `grok-4.7` through CLIs run as the dogfood user, and four OpenCode Go models, not the six listed below), a 429 is retried up to four times, and the files are `calib-50.panel-4` and `calib-50.result-4`; the text below is the first form of the rewrite.
 
 Rule (spec 8.1; Claude; overrulable, in the note):
 - Pairs: the 50 already drawn by `calib.py draw` (`labels/tasks/calib-50.jsonl`, key `labels/calib-50.key.jsonl`): dev questions only, 25 graded relevant (2-3), 12 graded 1 and 13 graded 0, one pair per question, each shown as the judge saw it (4,000 characters, 1,200 for older grades).
@@ -2054,7 +2056,7 @@ What the owner sees, per item: one plain-Japanese sentence of the decision (for 
    - `panel` sends only `unknown` items, and a judge's answer outside the owner's choices is refused.
 7. Step 5's hand-over note to the owner becomes: 「候補は Claude が作りました。あなたの決めたことでなければ『いいえ』、わからなければ『判断できない』を選んでください。判断できないものは AI の判定に回します。」 Step 6 counts yes / no / unknown and overturns / compatible / unknown.
 
-Spec 8.4 item 1: "Claude drafts every candidate, so the owner only confirms, rejects or grades (owner decision 22)". Before the curator spike the owner labels about 50 dev decisions and 20 overturned pairs with 20 control pairs. Drafting uses the judge's model and isolation (`claude-sonnet-5`), on dev transcripts only, after `oboete gate`; every quote must appear verbatim in the gated line it cites, so a candidate the model invented is dropped in code. Up to 55 decisions and 25 pairs of each relation are drafted, so rejections still leave the target counts.
+Spec 8.4 item 1: "Claude drafts every candidate, so the owner only confirms, rejects or grades (owner decision 22)". Before the curator spike the owner labels about 50 dev decisions and 20 overturned pairs with 20 control pairs. Drafting uses the judge's model and isolation (`claude-sonnet-5`), on dev transcripts only, after `oboete gate`; every quote must appear verbatim in the gated line it cites, so a candidate the model invented is dropped in code. Up to 55 decisions and 25 pairs of each relation are drafted, so rejections still leave the target counts (built since: `docs/eval/draft_candidates.py` drafts 50 decisions and 20 pairs, and its docstring and commands, not the code below, are current).
 
 **Files:**
 - Create: `docs/eval/draft_candidates.py`, `docs/eval/test_draft_candidates.py`
@@ -2420,7 +2422,7 @@ Spec 8.1 "Baselines, all on the same inputs": no memory; the current oboete at c
 
 **Interfaces:**
 - Consumes: `common.*`, `freeze.check`, `oboete transcript` (Task 4), `oboete replay`, `oboete --home <h> observe`, the frozen claude-mem copy, Task 7's fixtures, `report.py` and `judge.py` (existing).
-- Produces: `baseline.config(home) -> None` (writes `<home>/config.toml`), `~/.oboete/eval/baseline/fixtures/<session>.jsonl`, `~/.oboete/eval/baseline/oboete-<sha>/` (a replayed home with `version.txt` and one `replay-<session>.json` per session), `~/.oboete/eval/baseline/claude-mem-dev.jsonl` (`{"session", "agent", "observations": [...], "summaries": [...]}`).
+- Produces: `baseline.config(home) -> None` (writes `<home>/config.toml`), `~/.oboete/eval/baseline/fixtures/<session>.jsonl`, `~/.oboete/eval/baseline/oboete-<sha>/` (`<sha>` is built since the first 12 hex of the `oboete` executable's sha256, not the git HEAD; a replayed home with `version.txt` and one `replay-<session>.json` per session), `~/.oboete/eval/baseline/claude-mem-dev.jsonl` (`{"session", "agent", "observations": [...], "summaries": [...]}`).
 
 - [ ] **Step 1: Write `baseline.py`**
 
@@ -2441,7 +2443,7 @@ from common import E, clean_env, owner_only, read_jsonl, write_jsonl
 B = f'{E}/baseline'
 HOME = os.path.expanduser('~')
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Today's default chain (src/config.rs default_providers) without the subscription CLIs, so a
+# The default chain of 2026-09-26 (src/config.rs default_providers; it has changed since) without the subscription CLIs, so a
 # baseline spends no Claude or Codex allowance; 100 calls a day per provider leaves most of each
 # free tier to the owner's own oboete.
 PROVIDERS = [
@@ -2573,7 +2575,7 @@ Run outside the owner's working hours (the replay shares the owner's free tiers)
 cargo install --path . --locked && cd docs/eval && python3 baseline.py oboete && python3 baseline.py claude-mem && python3 baseline.py summary
 ```
 
-Expected: `30 sessions replayed into …/baseline/oboete-<sha>` (fewer on a rerun), `30 sessions, … observations`, then the two tables. When `provider_calls` shows `budget` outcomes, finish the next day with `oboete --home <that home> observe --settle-ms 0` and run `summary` again. Paste both tables into `docs/milestone-1.md` under "Dev baselines".
+Expected: `30 sessions replayed into …/baseline/oboete-<sha>` (fewer on a rerun), `30 sessions, … observations`, then the two tables. When `provider_calls` shows `budget` outcomes, finish the next day with `oboete --home <that home> observe --settle-ms 0` and run `summary` again (built since: no `observe` command; the worker does the deferred curation). Paste both tables into `docs/milestone-1.md` under "Dev baselines".
 
 - [ ] **Step 4: Retrieval baselines on dev (only after B3 passed)**
 
@@ -2588,7 +2590,7 @@ Expected: judge.py grades only the new dev pairs (rerun on later days until it r
 
 - [ ] **Step 5: Today's code on two fixtures (the "today" row)**
 
-Task 7's fixtures through today's binary, in a temporary home with the same API-only config:
+Task 7's fixtures through today's binary, in a temporary home with the same API-only config (the two `oboete.db` queries below were written for the v1 store; a replay now writes `raw.db` and `knowledge.db`, and `baseline.py`'s `summary()` also reads `oboete.db`):
 
 ```bash
 H=$(mktemp -d) && python3 docs/eval/baseline.py config "$H" && \
@@ -2734,7 +2736,7 @@ if __name__ == '__main__':
 - [ ] **Step 2: Run it and check against known counts**
 
 Run: `cd docs/eval && python3 corpus_count.py`
-Expected: `eval_store` equal to Task 1's counts in the note (152,136 observations, 13,169 summaries, 13,197 prompts on 2026-09-26); `live_store` shows a few thousand documents at most; the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` runs `oboete transcript` over every transcript of the last 90 days (about 2,000 files): minutes, not seconds; run it in the background.
+Expected: `eval_store` equal to Task 1's counts in the note (152,136 observations, 13,169 summaries, 13,197 prompts on 2026-09-26); `live_store` shows a few thousand documents at most (run once on 2026-09-26, its counts in `docs/milestone-1.md` are the record: v1's live store was removed on 2026-10-17 and the eval store on 2026-11-10, so a rerun finds no `~/.oboete/oboete.db`); the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` runs `oboete transcript` over every transcript of the last 90 days (about 2,000 files): minutes, not seconds; run it in the background.
 
 - [ ] **Step 3: Record and commit**
 
@@ -2752,7 +2754,7 @@ Open PR E (Tasks 8-10).
 
 Throwaway (spec 8.3), documented in `docs/spike/hook-m14.md`. Question: what one hook write costs as a spawned process under `synchronous=FULL` (and `fullfsync` on macOS), with 1, 64 and 256 KB outputs, with and without a full redaction scan and per-record zstd, on WSL, Windows native and the M1 iMac. It gives milestone 2 a direction; milestone 2 sets the write-hook line (spec 8.2 M14, provisional 20 ms p95). The harness reuses the shipped redaction code through `#[path]`, so what is timed is what ships.
 
-- [ ] **Step 1: Write the harness**
+- [ ] **Step 1: Write the harness** (built and run 2026-09-26, the note `docs/spike/hook-m14.md` is the record; the files below are the first version: the shipped `docs/spike/hook-m14/src/main.rs` adds the `HOOK_M14_NO_FULLFSYNC` control, and a rerun's `hook` stub must also export `STRIP_BLOCKS`, `memory_context_blocks` and `tag_blocks`)
 
 `docs/spike/hook-m14/Cargo.toml`:
 
@@ -2931,7 +2933,7 @@ Throwaway, documented in `docs/spike/curator-isolation.md`. Runs in the dogfood 
 **Files:**
 - Create: `docs/spike/curator-isolation/canary.py`, `docs/spike/curator-isolation.md`
 
-- [ ] **Step 1: Write the canary harness**
+- [ ] **Step 1: Write the canary harness** (built and run 2026-09-26; the listing is the first version: the shipped file has more variants and a capability-based pass rule, see `docs/spike/curator-isolation/canary.py` and the note `docs/spike/curator-isolation.md`)
 
 `docs/spike/curator-isolation/canary.py`:
 
@@ -3123,5 +3125,5 @@ git add docs/spike/curator-isolation docs/spike/curator-isolation.md && git comm
 
 - `python3 docs/eval/freeze.py check` prints `ok` with every frozen file listed.
 - `docs/milestone-1.md` has: frozen inputs, seeds, the final-set rule, the replay set, the parser smoke totals, B3's verdict, the dev label counts, the dev baselines, the fixtures' "today" row, M22's counts, and links to both spike notes.
-- Next: the curator spike's gate-quality part (spec 8.3; needs the dev labels) and milestone 2's plan.
+- Next: the curator spike's gate-quality part (spec 8.3; needs the dev labels) and milestone 2's plan (built since: `docs/milestone-2-plan.md`, `docs/milestone-2.md`).
 - Not in this plan: the test-side labels (before milestone 3's deciding run, same labelling page), and the hub platform and donor self-host spikes (any time before milestone 6, spec 8.4 after PR #62).

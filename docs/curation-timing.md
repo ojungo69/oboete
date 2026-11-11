@@ -56,7 +56,8 @@ one curator call (median 6.8 s) plus any queue.
 - The queue of windows closed by their size (median 1,051 s, p95 3,776 s behind earlier windows
   and provider holds) is measured before anything is changed for it; any change that spends money
   goes to the owner with its numbers first.
-- After release, the lag from a reply to its window op is measured again on this PC.
+- After release, the lag from a reply to its window op is measured again on this PC (done on
+  2026-11-11: see "Measured again on 2026-11-11" below).
 
 ## Decision 56: a window per step (2026-10-25)
 
@@ -99,8 +100,9 @@ The p90 is the queue behind earlier windows on the busiest days (2026-10-21: 7,3
 2026-10-24 the curator answered 530 windows, and the replay gives that day 1,787, about 3.4 times.
 
 Next: the Anthropic entry's prompt caching, as the instructions are the same bytes for every window
-(G09); after release, cards a day against claude-mem's observations (about 1,300 a day on
-2026-10-23 and 2026-10-24) and the lag from a tool call to its window op, measured again on this PC.
+(G09; built since: decision 86, docs/prompt-cache.md); after release, cards a day against
+claude-mem's observations (about 1,300 a day on 2026-10-23 and 2026-10-24) and the lag from a tool
+call to its window op, measured again on this PC.
 
 ## Decision 72: larger windows under a backlog (2026-11-04)
 

@@ -422,8 +422,8 @@ left as a setting to add before a public release.
   distribution once the shortcut's command has returned, the shortcut holds its session open in a
   minimised window (`wsl.exe -- sh -c 'oboete view --open; exec sleep infinity'`): no new flag.
 - The local HTTP API for other clients and the bot adapter (after the switch, decision 33).
-- A local model kept in the worker: when the local embedder is built it is loaded on demand and
-  dropped after an idle time, so idle memory stays the worker's own.
+- A local model kept in the worker (built since, `local-embed` feature): it is loaded while
+  documents wait for it and dropped when none do, so idle memory stays the worker's own.
 - Windows native and macOS.
 - A signal handler, and killing a worker by its process id: R14's watchdog ends a stuck worker
   from inside, and `oboete worker stop` (R15) asks as a command does (R12).
@@ -456,8 +456,8 @@ left as a setting to add before a public release.
   rename that fails just after another succeeded) leaves the page on the old port with that new
   token, which no open page holds: the page says the settings were not saved, and `oboete view`
   prints the address.
-- Under choice (a), whoever knows the token can change settings and replace keys from this machine
-  until `--new-token`; what they changed is not put back by it.
+- Under the owner decision above, whoever knows the token can change settings and replace keys from
+  this machine until `--new-token`; what they changed is not put back by it.
 - The page opens only while WSL runs; right after a boot it opens once the first hook, `oboete view`
   or the shortcut has started it.
 - A config.toml broken by hand at a restart: not resident, and the bookmark does not open, until it

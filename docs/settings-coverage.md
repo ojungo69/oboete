@@ -10,7 +10,8 @@ Owner, 2026-10-03: the settings page is complete at the switch, and
 sync and the cloud come after it. So every row below is built before the switch, except those of
 "Sync and devices", which follow milestone 6, and the updater, which milestone 7 builds (7.3); until
 then the page shows the installed version and says the update is not built, as spec-webui.md asks
-of a feature not built yet. The switch is on the owner's WSL machine, so "at the switch" is read as
+of a feature not built yet. (The switch came on 2026-10-15; rows still marked "—" under Now or Test
+are open.) The switch is on the owner's WSL machine, so "at the switch" is read as
 "on Linux": where a row's other release targets wait for #281 (macOS and Windows), they are a row of
 their own that #94 waits for after the switch, not a reason to hold the switch.
 
@@ -248,7 +249,7 @@ cloud starts from a page view or a save.
   port/token activation is the paragraph below. #94 remains open.
 
   The guided curation tiers update only the existing draft curation switch, chain on/off and
-  paid monthly cap before explicit Save. None leaves the chain intact and stops new summaries;
+  paid monthly cap, and the page saves them at once (#803). None leaves the chain intact and stops new summaries;
   embeddings and other AI roles keep their own settings. Built-in zero-price and local entries
   are candidates, not proof of a free allowance. Custom remote zero-price entries and unsupported
   CLIs are not automatically selected. Duplicate names use the highest enabled risk, and

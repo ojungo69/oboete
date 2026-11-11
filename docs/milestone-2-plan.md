@@ -40,13 +40,13 @@
 
 Each decision is Claude's unless marked otherwise, and the owner can overrule it. They settle what the spec leaves to milestone 2 or leaves open.
 
-**D1. v1 is frozen on a branch before the first code PR.** Before Task 1 merges, branch `v1` from the main commit the owner's binary is built from. The owner's reinstalls come from `v1` from then on. A v1 fix (real loss or safety only, CLAUDE.md) is a PR into `v1`. `main` is Design B from Task 1 on. Reason: spec 7.5 assumes the old binary stays at the hooks' path until the cut-over, and today the owner's binary is rebuilt from `main`.
+**D1. v1 is frozen on a branch before the first code PR.** Before Task 1 merges, branch `v1` from the main commit the owner's binary is built from. The owner's reinstalls come from `v1` from then on. A v1 fix (real loss or safety only, CLAUDE.md) is a PR into `v1`. `main` is Design B from Task 1 on. Reason: spec 7.5 assumes the old binary stays at the hooks' path until the cut-over, and today the owner's binary is rebuilt from `main`. (Past: this PC switched to Design B on 2026-10-15 and `CLAUDE.md` now calls the `v1` branch history.)
 
 **D2. Two files beside v1's.** `raw.db` (synchronous=FULL; `fullfsync` on macOS) and `knowledge.db` (synchronous=NORMAL) live in the oboete home next to v1's `oboete.db`, which Design B never opens before milestone 4's import (spec 7.5: "The new version never writes the old store"). Both use WAL and a 2 s busy timeout (today's `src/db.rs:103`).
 
 **D3. macOS keeps fullfsync.** Spike 1 measured the iMac at 23-27 ms p95 with `F_FULLFSYNC` even at 1 KB, and 3-13 ms without it (docs/spike/hook-m14.md:65). FULL exists to close a durability hole; dropping fullfsync would reopen it on Apple SSDs. So the write-hook line is set from measurement with fullfsync on (Task 12), expected near 25-27 ms instead of the provisional 20 ms. A hook of that length is not felt at a prompt.
 
-**D4. Oversized outputs: a head-and-tail cap set by measurement.** `capture.max_output_bytes` is a config constant. Task 12 sets its default: the largest of 64, 128 and 256 KB at which the slowest machine's hook p95 stays within the line (spec 2.2; hook-m14.md:70 found Windows at 41 ms p95 for 256 KB). Above the cap, the stored text keeps the first and last half of the cap, with a marker giving the original size. The whole output is scanned before the cut (spec 2.2: "redacted in full"): a rule can need context far from its secret (curl-auth-user reads a whole line), so a margin around each cut is not enough (Codex security review of #88). A secret across a cut is kept whole in its mask.
+**D4. Oversized outputs: a head-and-tail cap set by measurement.** `capture.max_output_bytes` is a config constant (built as the code constant `capture::MAX_FIELD_BYTES`, 64 KB, not a setting). Task 12 sets its default: the largest of 64, 128 and 256 KB at which the slowest machine's hook p95 stays within the line (spec 2.2; hook-m14.md:70 found Windows at 41 ms p95 for 256 KB). Above the cap, the stored text keeps the first and last half of the cap, with a marker giving the original size. The whole output is scanned before the cut (spec 2.2: "redacted in full"): a rule can need context far from its secret (curl-auth-user reads a whole line), so a margin around each cut is not enough (Codex security review of #88). A secret across a cut is kept whole in its mask.
 
 **D5. Compression in the worker.** The hook stores records uncompressed: Spike 1 found zstd at write time pays only at 256 KB and only on Windows (hook-m14.md:68-69). The worker's compression consumer rewrites a record's body as zstd once its other consumers have passed it (`enc` column: `plain` or `zstd`). A zstd dictionary is decided after a week of dogfooding, as spec 2.4 says (A9).
 
@@ -81,7 +81,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 | 0 | `v1` branch; Design B's setup in the dogfood user | Claude | — | branch `v1`; `oboete setup` registers B's hooks in a temp or dogfood home |
 | 1 | `raw.db`: schema, open (FULL, fullfsync), append with seq | Claude | 0 | `raw::open`, `Raw::{append, max_seq, after}`, `Event`, `Record`, `Item`, `Target` |
 | 2 | Capture: full events, envelopes, binary markers, `<private>`, git fields | Claude; adapter ports by Grok | 1 | `capture::events(agent, event, &Value, ts) -> Vec<Event>`; `hook::record` |
-| 3 | Redaction: full scan, head-and-tail cap, ledger, extra rules and allowlist; security review | Claude | 2 | `redact::{Rules, Finding, scan}`; `capture::cut_and_redact`; ledger rows |
+| 3 | Redaction: full scan, head-and-tail cap, ledger, extra rules and allowlist; security review | Claude | 2 | `redact::{Rules, Finding, scan}`; `capture::cut_and_redact` (built as `capture::Gate` over `redact::scan_capped`); ledger rows |
 | 4 | Write-failure classification, marker, doctor, injection line (MUST-M16) | Claude | 2 | `failure::{classify, mark, since}` |
 | 5 | Worker: lock, spawn, idle exit, lost-wakeup rule, checkpoints, rewind (MUST-M14) | Claude | 1 | `worker::{lock, drain, run_with, run, run_once}`, `checkpoint::{get, set, rewind}` |
 | 6 | Raw FTS consumer and `oboete search` | Claude | 5 | `consumer::Fts`, `search::raw` |
@@ -93,11 +93,13 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 | 12 | Replay on Design B and M14 on three machines; set the line, the cap and the backup segment cap | Claude | 1-11 | numbers in `docs/milestone-2.md` |
 | 13 | None tier end to end in the dogfood user; the milestone note | Claude | 12 | `docs/milestone-2.md` |
 
-Task bodies follow, one per section, each with its interfaces and its failing test first.
+Task bodies follow, one per section, each with its interfaces and its failing test first. All 13 tasks are built; the interfaces below are the original design, and where they differ the code and `docs/milestone-2.md` are right.
 
 ---
 
 ## Task 0: `v1` branch and Design B in the dogfood user
+
+(Past: built; the `v1` branch and its `CLAUDE.md` rule are history since the switch of 2026-10-15.)
 
 **Files:**
 - Create: `docs/milestone-2.md` (the milestone note; its first section records the `v1` branch point)
@@ -160,6 +162,8 @@ CREATE TABLE IF NOT EXISTS ledger (   -- spec 2.2: never the value
 );
 ```
 
+(Built since: `type` also takes 'removed'; `records` gains `deny_origin` and `expired`; `ledger` gains a `field` column and an index on (device, seq).)
+
 No index on session, repo or branch: a schema review should find none (spec 1.6).
 
 - [ ] **Step 1: Write the failing tests.**
@@ -208,7 +212,7 @@ fn device_id_stays_with_the_file_and_changes_on_a_copy() { /* port of the db.rs 
 
 **Files:**
 - Create: `src/capture.rs`
-- Modify: `src/hook.rs` (`hook::record`: `capture::events` then `Raw::append`; `run_io` sends the agents in `capture::PORTED` there and the others to v1's `handle` until their port lands, 2b; a ported agent's SessionStart prints nothing until Task 9)
+- Modify: `src/hook.rs` (`hook::record`: `capture::events` then `Raw::append`; `run_io` sends the agents in `capture::PORTED` there and the others to v1's `handle` until their port lands, 2b (built since: every agent is ported, and neither `capture::PORTED` nor v1's `handle` exists); a ported agent's SessionStart prints nothing until Task 9)
 - Modify: `src/replay.rs` (ported agents replay into `raw.db`), `src/transcript.rs` (its replay test reads `raw.db`), `src/repo.rs` (`gitdir`, `common_dir` shared with `capture::git`)
 - Test: `src/capture.rs`, `src/hook.rs`
 
@@ -222,7 +226,7 @@ Rules (spec 2.1-2.4, D9, D15):
 - Envelopes are not typed prompts: today's list plus the teammate message (`Another Claude session sent a message:`).
 - Images and binary content become `{kind, mime, bytes, sha256}`.
 - The curator's sessions are skipped (`SKIP_ENV`, the environment marker set on curator CLIs, `src/hook.rs:20`).
-- Repo labels keep today's rules and tests: one key for every way to clone, no userinfo (`one_key_for_every_way_to_clone_and_no_secrets`, #30 row 3); an alias only from the owner's settings (#30 row 4); the repos a session touches are recorded from tool working directories and file paths (`sessions_record_every_repo_and_idless_events_stay_on_this_device`, #30 rows 5 and 20), as a `session_repos` table in `knowledge.db` kept by the FTS consumer (Task 6).
+- Repo labels keep today's rules and tests: one key for every way to clone, no userinfo (`one_key_for_every_way_to_clone_and_no_secrets`, #30 row 3); an alias only from the owner's settings (#30 row 4); the repos a session touches are recorded from tool working directories and file paths (`sessions_record_every_repo_and_idless_events_stay_on_this_device`, #30 rows 5 and 20; no test of that name exists now), as a `session_repos` table in `knowledge.db` kept by the FTS consumer (Task 6).
 - Git fields from files (D9): `.git` may be a file (`gitdir: …`) in a worktree.
 
 - [ ] **Step 1: Failing tests** (in `src/capture.rs`): a 100,000-character tool output is kept whole and a token past today's 12,000-character window is masked; `<private>` blocks go and an unclosed one hides the rest; envelopes, the teammate message among them, are recorded as `envelope`, never `prompt`; images become markers in each shape agents send; replies come from the payload or Codex's transcript; git fields come from files in a main checkout, a linked worktree, after `pack-refs`, and detached.
@@ -244,8 +248,8 @@ Rules (spec 2.1-2.4, D9, D15):
 **Interfaces** (in two PRs: **3a** the full scan, the ledger and the cap on the built-in rules; **3b** the settings):
 - Produces (3a):
   - `pub struct Finding { pub rule: String, pub offset: usize, pub length: usize }`: the rule, where its mask starts in the stored text, and the secret's own length, in bytes; never the value. Two rules on one token share one mask and give two findings.
-  - `pub fn scan(text: &str) -> (String, Vec<Finding>)`; `redact(text)` stays, as `scan(text).0`, for v1's `clip` and `outbound`.
-  - `pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>)`: the whole text scanned, then head and tail kept above `cap` (D4); a key block cut in half (any case) is dropped from the part holding it; then a second pass over what is kept; the third value is the full size when it was cut. `redact::ruleset()` names the rules' version.
+  - `pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>)`; `redact(text)` stays, as `scan(text).0`, for v1's `clip` and `outbound`.
+  - `pub fn scan_capped(text: &str, cap: usize, rules: &Rules) -> (String, Vec<Finding>, Option<usize>)`: the whole text scanned, then head and tail kept above `cap` (D4); a key block cut in half (any case) is dropped from the part holding it; then a second pass over what is kept; the third value is the full size when it was cut. `redact::ruleset()` names the rules' version.
   - `capture::Captured { event, ledger: Vec<(String, Finding)> }` and `capture::MAX_FIELD_BYTES` (256 KB until Task 12): every stored string passes `capture::Gate`, which applies `scan_capped` and records each finding with its field (a JSON pointer into the body, `#key` for an object's key, or a label column).
   - `raw::Raw::append_with_ledger(&mut self, e: &Event, ledger: &[(String, Finding)]) -> Result<i64>`: the event and its ledger rows in one transaction; the ledger gains a `field` column.
 - Produces (3b): `Rules` with the settings' extra rules and allowlist (`[redaction] extra_rules`, `allowlist`), its version in the ledger, `outbound` using them too; `[capture] store_prompts` and `tool_output = "full" | "head-tail"`.
@@ -296,7 +300,7 @@ fn an_allowlisted_false_positive_is_kept_and_an_extra_rule_masks() { /* config-d
 - Test: `src/failure.rs`; `tests/disk_full.rs` (Linux only)
 
 **Interfaces:**
-- Produces: `pub enum Class { DiskFull, Io, Busy, Other }`; `pub fn classify(e: &anyhow::Error) -> Class` (SQLITE_FULL / ENOSPC, SQLITE_IOERR, SQLITE_BUSY; A10); `pub fn prepare(home: &Path)` (after a successful append: creates `<home>/state/recording-failed` at a fixed 64 bytes if it is missing); `pub fn mark(home: &Path, class: Class)` (rewrites that file in place with the class and the first failure's time, never overwriting that time: an in-place write needs no new disk blocks, so it works on a full disk; on copy-on-write filesystems such as APFS or btrfs it can still fail, and doctor's free-space check covers that); `pub fn since(home: &Path) -> Option<(Class, i64)>`; `pub fn clear(home: &Path)` (after a successful append, in place).
+- Produces: `pub enum Class { DiskFull, Io, Busy, Other }`; `pub fn classify(e: &anyhow::Error) -> Class` (SQLITE_FULL / ENOSPC, SQLITE_IOERR, SQLITE_BUSY; A10); `pub fn prepare(home: &Path)` (after a successful append: creates `<home>/state/recording-failed` at a fixed 64 bytes if it is missing); `pub fn mark(home: &Path, class: Class)` (built with an `at: i64` argument, as `clear`) (rewrites that file in place with the class and the first failure's time, never overwriting that time: an in-place write needs no new disk blocks, so it works on a full disk; on copy-on-write filesystems such as APFS or btrfs it can still fail, and doctor's free-space check covers that); `pub fn since(home: &Path) -> Option<(Class, i64)>`; `pub fn clear(home: &Path)` (after a successful append, in place).
 
 - [ ] **Step 1: Failing tests.** Unit tests for `classify` on constructed `rusqlite::Error`s (`SQLITE_FULL`, `SQLITE_IOERR`, `SQLITE_BUSY`, an `io::Error` with `ENOSPC`), and the MUST-M16 fixture:
 
@@ -351,9 +355,9 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
 - Produces:
   - `knowledge::open(home) -> Result<Connection>`: WAL, `synchronous=NORMAL`, table `checkpoints(consumer TEXT, device TEXT, seq INTEGER NOT NULL, PRIMARY KEY (consumer, device))`.
   - `checkpoint::get(k: &Connection, consumer: &str, device: &str) -> Result<i64>` (0 when absent); `checkpoint::set(k, consumer, device, seq) -> Result<()>`.
-  - `pub trait Consumer { fn name(&self) -> &'static str; fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> /* new checkpoint */; fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> /* delete this consumer's output above `to` */; }`
-  - `checkpoint::rewind(raw: &Raw, k: &Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<Vec<(String, i64, i64)>>` (consumer, was, now) for this device: for each checkpoint above raw's highest seq, the consumer's `rewind` and the checkpoint move share one transaction, so no output of a lost seq survives to collide with the event that reuses it. Also written to `<home>/state/rewound` for doctor.
-  - `worker::consumers() -> Vec<Box<dyn Consumer>>`: this milestone's consumers in order. It starts empty; each later task adds its own.
+  - `pub trait Consumer { fn name(&self) -> &'static str; fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> /* new checkpoint */; fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> /* delete this consumer's output above `to` */; }` (built in `src/worker.rs` with a `device: &str` argument on `step` and `rewind`, and more methods, such as `reads_ops`, `devices` and `step_report`)
+  - `checkpoint::rewind(raw: &Raw, k: &Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<Vec<(String, i64, i64)>>` (consumer, was, now) for this device: for each checkpoint above raw's highest seq, the consumer's `rewind` and the checkpoint move share one transaction, so no output of a lost seq survives to collide with the event that reuses it. Also written to `<home>/state/rewound` for doctor. (Built as `rewind` in `src/knowledge.rs`.)
+  - `worker::consumers() -> Vec<Box<dyn Consumer>>` (built as `consumers(home: &Path)`): this milestone's consumers in order. It starts empty; each later task adds its own.
   - `worker::drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()>`: runs each consumer from its checkpoint until none advances. Each step and its checkpoint move share one knowledge.db transaction (D10).
   - `worker::lock(home) -> Result<Option<Lock>>`: std's `File::try_lock` on `<home>/state/worker.lock`; `None` when another process holds it. The hook uses it too.
   - `worker::run_with(home, idle_ms, consumers, before_exit: impl FnMut()) -> Result<()>`: take the lock (return at once without it), `quick_check` both files (a failure stops the worker with an error until Task 8), `checkpoint::rewind`, `drain`; wait for new records or `idle_ms`; when idle, release the lock, call `before_exit` (a test seam), check for records above the checkpoints, and if there are any, take the lock again and go on (D6).
@@ -453,7 +457,7 @@ fn a_second_worker_exits_at_once() {
 - Test: `src/search.rs`
 
 **Interfaces:**
-- Produces: `knowledge.db` table `raw_fts USING fts5(text, tokenize='trigram')` with `raw_docs(rowid INTEGER PRIMARY KEY, device, seq, kind, ts, repo, session)`; `consumer::Fts`; `search::raw(home, query) -> Result<Vec<RawHit>>` with `pub struct RawHit { device, seq, kind, ts, repo, snippet }` (today's `search::Hit` stays v1's) (this repository unless `--all`, as today).
+- Produces: `knowledge.db` table `raw_fts USING fts5(text, tokenize='trigram')` (built contentless, `content='', contentless_delete=1`; the text is raw.db's) with `raw_docs(rowid INTEGER PRIMARY KEY, device, seq, kind, ts, repo, session)` (and a `session_repos` view over it); `consumer::Fts`; `search::raw(home, query) -> Result<Vec<RawHit>>` (built as `search::raw(home, query, repo, limit)`) with `pub struct RawHit { device, seq, kind, ts, repo, snippet }` (today's `search::Hit` stays v1's) (this repository unless `--all`, as today).
 
 - [ ] **Step 1: Failing tests:** an event is found by a Japanese two-character query and by an English word; a tombstoned record is not found (after Task 7, the test is added there); results carry (device, seq).
 - [ ] **Step 2: Run, expect failure.**
@@ -515,15 +519,15 @@ fn a_new_rule_tombstones_old_records_once() {
 
 **Files:**
 - Create: `src/backup.rs`
-- Modify: `Cargo.toml` (`zstd`), `src/config.rs` (`[backup] dir`, default `<home>/backups`), `src/worker.rs` (the backup step at idle exit and on `next_attempt_at`; a failed `quick_check` now restores), `src/setup.rs` (`doctor`: `integrity_check`, segment checksums, a cloud-folder warning, the last restore), `src/main.rs` (`oboete restore`)
+- Modify: `Cargo.toml` (`zstd`), `src/config.rs` (`[backup] dir`, default `<home>/backups`; built as an ignored table), `src/worker.rs` (the backup step at idle exit and on `next_attempt_at`; a failed `quick_check` now restores), `src/setup.rs` (`doctor`: `integrity_check`, segment checksums, a cloud-folder warning, the last restore), `src/main.rs` (`oboete restore`)
 - Test: `src/backup.rs`
 
 **Interfaces:**
 - Produces:
   - Segment files `<backup dir>/<device>-<first seq>-<last seq>.seg.zst`: the records (events and tombstones) as JSON lines, bodies as `Raw::after` returns them (masked, D8), zstd-compressed, each with a `.sha256` beside it.
   - `backup::export(home) -> Result<Option<PathBuf>>`: the records above the last backed-up seq; `None` when there are none.
-  - `backup::verify(dir) -> Vec<Problem>`.
-  - `backup::restore(home, dir) -> Result<()>`: quarantine the damaged `raw.db` as `raw.db.quarantined-<time>`, rebuild it from the segments in seq order, keep each record's (device, seq) and the file's device id (the segments are this device's own history).
+  - `backup::verify(dir) -> Vec<Problem>` (built as `Result<Vec<Problem>>`).
+  - `backup::restore(home, dir) -> Result<()>` (built as `restore(home) -> Result<String>`): quarantine the damaged `raw.db` as `raw.db.quarantined-<time>`, rebuild it from the segments in seq order, keep each record's (device, seq) and the file's device id (the segments are this device's own history).
   - `Raw::hashes(&self) -> Result<BTreeMap<(String, i64), String>>`: sha256 of each record's content (labels and body as `Raw::after` returns it, so compression does not change it; `sha2` is already a dependency).
   - `worker::run_with`: a failed `quick_check` of `raw.db`, or `SQLITE_CORRUPT`/`SQLITE_NOTADB` on opening it, calls `backup::restore` and writes `<home>/state/restored` for doctor. A failed check of `knowledge.db` only quarantines it as `knowledge.db.quarantined-<time>` and starts an empty one: every consumer rebuilds from seq 0 (spec 1.7), and `raw.db` and the segments are not touched.
 
@@ -607,7 +611,7 @@ fn fields_drop_in_the_fixed_order_under_the_cap() { /* git state and failing com
 - Test: `src/consumer/compress.rs`
 
 **Interfaces:**
-- Produces: `consumer::Compress`, which calls `Raw::compress_through(&mut self, device: &str, seq: i64)`: inside `raw.rs`, it rewrites `body` as zstd (level 3) and `enc='zstd'` for records every other consumer has passed; `Raw::after` decompresses transparently, so no reader sees `enc`.
+- Produces: `consumer::Compress`, which calls `Raw::compress_through(&mut self, device: &str, seq: i64)` (built as `(device, after, through)`, `#[cfg(test)]`): inside `raw.rs`, it rewrites `body` as zstd (level 3) and `enc='zstd'` for records every other consumer has passed; `Raw::after` decompresses transparently, so no reader sees `enc`.
 
 - [ ] **Step 1: Failing test:** after the worker runs, a record's `enc` is `zstd`, its text reads back identical, and search still finds it.
 - [ ] **Step 2: Run, expect failure.**
@@ -625,8 +629,8 @@ fn fields_drop_in_the_fixed_order_under_the_cap() { /* git state and failing com
 - Test: `src/consumer/gaps.rs`
 
 **Interfaces:**
-- Consumes: `transcript::events(path, agent)` (milestone 1's parsers, `src/transcript.rs`); `raw::Raw::session_count(session, kind) -> i64` (a scan by label; no index, spec 1.6).
-- Produces: `knowledge.db` table `gaps(agent, session, transcript_turns, raw_turns, checked_at)`; doctor prints one row per adapter with sessions short of their transcript.
+- Consumes: `transcript::events(path, agent)` (milestone 1's parsers, `src/transcript.rs`; built as `transcript::convert(path, agent, out)`); `raw::Raw::session_count(session, kind) -> i64` (a scan by label; no index, spec 1.6; no such function was built).
+- Produces: `knowledge.db` table `gaps(agent, session, transcript_turns, raw_turns, checked_at)` (built with `device` and `seq` columns, primary key (device, agent, session), `transcript_turns` NULL for not checked); doctor prints one row per adapter with sessions short of their transcript.
 
 - [ ] **Step 1: Failing test:** a transcript fixture with 5 typed prompts, raw holding 4 of them: `gaps` records 5 against 4, and doctor names the adapter. Backfilling stays LATER (spec 2.3).
 - [ ] **Step 2: Run, expect failure.**

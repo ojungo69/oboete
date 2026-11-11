@@ -5,8 +5,8 @@ an index, the context around entries it chooses, and the details of entries it c
 taking a short continuation from the one before. Decision 45 puts it before the switch. The
 behaviour of record is claude-mem's `src/shared/progressive-search.ts` at v13.39.0 (Apache-2.0;
 NOTICE), unchanged in 13.36 to 13.39; its texts are kept word for word. Nothing of its code is
-taken. The readers are oboete's: `search::query` (the index), `search::near` (the context, a
-timeline's entries around an anchor) and `search::get` (the details), each with its gate, its
+taken. The readers are oboete's: `search::b::query` (the index), `search::b::near` (the context, a
+timeline's entries around an anchor) and `search::b::get` (the details), each with its gate, its
 forget fence and its hiding rules. The code is `src/mem_search.rs`.
 
 ## The contract

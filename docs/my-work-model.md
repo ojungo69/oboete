@@ -66,7 +66,7 @@ has a note of its own (card-hide.md, slice 9).
     runs past 400 characters.
 - Prompts of excluded projects drop out (`index.ts:103-104,142`). The reader ignores
   `CLAUDE_CONFIG_DIR` (`readers.ts:151`), up to 15.12; since 15.12.1 it follows it, as oboete's
-  transcript import does (`src/main.rs:756`, `src/setup.rs:1284-1289`).
+  transcript import does (`src/setup.rs` `claude_dir`).
 - Grouping and reviews skip only the prompt ids the setup scan saved as an agent's. A prompt the
   hooks record after the scan is not tested (`request-groups.mjs:30-31,88-91`).
 
@@ -258,9 +258,10 @@ Read at tag v15.4.0 (2026-10-28); paths under `src/services/work-view/` unless n
   are per entry, shared by every role; the USD cap is one monthly pool for every role but
   embedding (`src/budget.rs`, `src/providers_db.rs`). The chain gates nothing: each caller gates
   what it sends.
-- **Two roles today**, both from the resident worker: `curator` (a window) and `summary` (a turn,
-  `src/turns.rs`). A worker round sends one call: the oldest due summary first, else a window
-  ([summaries.md](summaries.md) T1). Hooks, view routes and capture never call a provider.
+- **Roles today**, all from the resident worker: `curator` (a window), `summary` (a turn,
+  `src/turns.rs`), `my_work` (A1, built since) and `judge` (J3, built since). A worker round sends
+  one call, in A3's order ([summaries.md](summaries.md) T1). Hooks, view
+  routes and capture never call a provider.
 - **The op log.** raw.db's `ops` table holds what must survive a rebuild (window, claim,
   correction, turn, work_state and other kinds; a body is at most 64 KB). Consumers read it into
   knowledge.db; `oboete rebuild` replays it with no provider call (spec 1.7). Forget rewrites an op
@@ -268,7 +269,8 @@ Read at tag v15.4.0 (2026-10-28); paths under `src/services/work-view/` unless n
 - **Typed prompts.** A prompt record is `prompt`; harness traffic with a known opening is
   `envelope` (`src/hook.rs`). Codex prompts another program sent carry `agent_sent`: an exec run,
   Codex as an MCP server, a session Claude Code's Codex plugin started, or a subagent's thread
-  (`transcript::codex_agent_sent`). Nothing marks Claude Code's or Grok's.
+  (`transcript::codex_agent_sent`). Claude Code's carry its entrypoint (O2, built since); nothing
+  marks Grok's.
 - **The owner's words at session start**: the "Owner's directives" lines taken from typed prompts
   by marker words (D13, `src/manifest.rs`), and the global preferences only `oboete pref add` and
   the viewer make (spec 3.3), fenced as data (spec 6.5). `oboete mute` and `oboete correct` act on
@@ -294,7 +296,8 @@ of its batch, `story <week>`, `rules`, `goals <day>`). The jobs run only while `
 
 A2. **Never on a hook's path.** Only the resident worker calls. Hooks, MCP and the viewer read
 what the worker kept. There is no refresh button: the viewer is a separate process, and claude-mem
-has none either. The page shows a status line instead (V1).
+has none either. The page shows a status line instead (V1). (Built since: "Refresh now", slice 12,
+decision 70; the viewer then makes one write, a request the worker answers.)
 
 A3. **One call a round, and its place.** A due check is a read of knowledge.db and providers.db,
 no call. A round sends one call, in this order: the oldest due turn summary; then a My Work job
@@ -762,13 +765,15 @@ strength: times seen over one plus the weeks since the newest quote), each with 
 then approve, and reject. Your rules by scope, each with edit, an on/off switch and its quotes.
 Add rule. One line on where rules go (R4).
 
-V4. **My Work's card and page** gain P5's progress, the goal chip (L3) and the build story (P5);
+V4. **My Work's card and page** gain P5's progress, the goal chip (L3, replaced by the area chip,
+F7) and the build story (P5);
 the list gains `shipped`. Labels in Japanese and English, as the page's.
 
 V5. **New data** arrives as the page's other data does: the store's version moves, and the page
 reads again behind "Show updates" while a person reads (my-work.md slice 2).
 
-V6. **No call from the page.** Every route reads; each write is one of R3's actions.
+V6. **No call from the page.** Every route reads; each write is one of R3's actions. (Built since:
+Refresh now, slice 12, and the focus and judge actions, F6 and J4, are writes too.)
 
 ### Cost on this PC's volume
 
@@ -879,7 +884,8 @@ goals' window is the last 31 days, rolling, and each finished calendar month is 
 5. **Goals** (M1 to M7, V2). The goals job, the kept months, the My Goals tab. It needs slices 1
    and 2.
 6. **Goal links** (L1 to L3). The links job, the goal chip, the priorities' requests and status
-   words. It needs slices 4 and 5.
+   words. It needs slices 4 and 5. (Retired in slice 10c-3b: the links job; the area chip, F7,
+   replaces the goal chip.)
 7. **The story and suggestions** (P6, P7, R1). The story's chapters and recap on My Work, the rules
    job. It needs slice 4.
 8. **My Rules** (R2 to R5, V3). The page, the actions, delivery. It needs slice 7; decision 60
@@ -894,9 +900,13 @@ goals' window is the last 31 days, rolling, and each finished calendar month is 
     Not this. 11c: the focus judge's hint. 11d: where the judges send (J7). It needs slice 3 and,
     for 11c, slice 10.
 
-After slice 11, the side by side with claude-mem that decision 50 asks for.
+After slice 11, the side by side with claude-mem that decision 50 asks for (slices 12 and 13 were
+added since; see "As built").
 
 ## Tests
+
+These are the planned names. Some were built under another name or not built (a grep of `fn <name>`
+finds many of them in no test), so read "As built" for what exists.
 
 ### Slice 1
 
@@ -987,6 +997,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 - `an_op_built_on_a_hidden_op_is_hidden_and_the_exclusion_taken_back_shows_both` (S6)
 
 ### Slice 6
+
+The links job and its tests were retired with it in slice 10c-3b; no test of these names exists now.
+`the_label_uses_the_local_date` (slice 5) has no test of that name either.
 
 - `a_link_names_a_goal_id_so_a_retitle_keeps_it` (L3)
 - `a_request_gets_at_most_three_links` (L2)
@@ -1098,8 +1111,9 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   the op seqs it was shown), `removed`, and the fields kept or `skipped`. `my_work_ops::fitted`
   keeps an op within the op cap: whole, else without its removals, else as a skip of its labels,
   else not at all; a job that drops quotes first does so before it.
-- **The format** (S3): `raw::FORMAT` is 5; the first `my_work` op raises the home to 5 in the
-  transaction that appends it, and a rebuild that brings one back stamps it too
+- **The format** (S3): `raw::MY_WORK_FORMAT` is 5; the first `my_work` op raises the home to it
+  (`raw::FORMAT` is now 6) in the transaction that appends it, and a rebuild that brings one
+  back stamps it too
   (docs/store-format.md).
 - **Masking** (S6): `about` and `entry` join the op names no redaction rule masks (`job` was one);
   the fields are text, masked as any op's.
@@ -1223,7 +1237,8 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
 
 - **The settings page** has a My Work section after the summaries', and the simple page a block
   after its AI list: the estimate first, then the switch (`[my_work] curate`) and, on the full
-  page, the daily bound (`calls_a_day`, 1 to 10,000). Both say it runs only while summaries are on.
+  page, the daily bound (`calls_a_day`, 1 to 10,000, or no cap since decision 64: 4294967295, the
+  runner then counts no limit). Both say it runs only while summaries are on.
   An older page that sends no `my_work` leaves both as the file has them; a bound out of range is
   refused (`range`, `my_work.calls_a_day`), on the page before it is sent.
 - **The estimate** (`my_work_run::estimate`, A6), from this home's last 7 days: a repository's new
@@ -1457,7 +1472,7 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   built then.
 - **Then**: the page itself (V2's tabs and panels), and V1's line on My Work.
 
-### Slice 5b, the page (2026-10-28)
+### Slice 5b, the page (2026-10-28; retired in slice 10c-3b)
 
 - **My Goals** (V2), a tab after My Work, as claude-mem's page without slice 6's links:
   - **Two inner tabs**: "This month · 31 days to <local date>" and "Month by month".
@@ -1488,7 +1503,7 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   month's disclosure, "more", the status line's button.
 - **Then**: slice 6.
 
-### Slice 6a: the links job (2026-10-28)
+### Slice 6a: the links job (2026-10-28; retired in slice 10c-3b)
 
 - **The job** (L1, S1): `my_work_links::Links`, op job `links`, its subject the request (S2's
   key), as the review job's. Its units are the requests the review job reads (P1: activity in 14
@@ -1518,7 +1533,7 @@ After slice 11, the side by side with claude-mem that decision 50 asks for.
   again and drops one empty or over 160 characters, keeping its link (A5).
 - **Then**: slice 6b, the reads and the page.
 
-### Slice 6b: the reads and the page (2026-10-28)
+### Slice 6b: the reads and the page (2026-10-28; retired in slice 10c-3b)
 
 - **Joined in the page**, as claude-mem's My Goals reads its goals' requests from the work model
   (`my-goals.tsx` `useGoalRequests`, v15.3.0): the tab reads `/api/my-work` beside
@@ -2338,4 +2353,5 @@ and remembers the list's view, filter and sort between visits (`create-store.ts`
 This PR merges when the review of its final head adds no finding that changes an owner decision or
 a rule here. After two consecutive rounds whose findings are mechanism only, the rest moves into an
 issue as acceptance tests for the implementing PRs, each finding is answered and resolved, and the
-PR merges without a further commit (CLAUDE.md, "Design-doc PRs").
+PR merges without a further commit (CLAUDE.md, "Design-doc PRs"). This was the rule of the
+document's first PR, which has merged; later slices extended the document.
