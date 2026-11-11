@@ -1,0 +1,23 @@
+docs/milestone-3-plan.md
+  s_b837d726e3a0bf::t_63d8c36170f411 307-308
+src/curate.rs
+  s_b837d726e3a0bf::t_b3033774552b88 2001-2004
+src/gates.rs
+  s_b837d726e3a0bf::t_87eedff844cfb0 144-154,157-160,165,263,265,502-503,510,512,935-947,1350-1360,1608,1640-1644,1683,1795,1829,1842,1874,1963,2000,2026-2034,2050-2058,2082-2090,2105,2152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fa43e795ceeb623a693b5559a650fa57fe524e7d",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
