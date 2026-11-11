@@ -2247,6 +2247,170 @@ mod tests {
         }
     }
 
+    /// One line of a key's base64, 64 characters.
+    fn key_line() -> String {
+        format!(
+            "{}{}",
+            "Q9zX8mL2vB4nR7tY1wK3pS6dJ0aF5hU2", "cE8gI4kM7oQ1sV3xZ6bDq9Zx8mL2vB4n"
+        )
+    }
+
+    /// `n` lines of a key's base64 and a shorter last one, joined by `by`.
+    fn key_lines(n: usize, by: &str) -> String {
+        let mut lines = vec![key_line(); n];
+        lines.push("mL2vB4nR7tY1w==".into());
+        lines.join(by)
+    }
+
+    /// #938: the bundled private-key rule needs a block's footer, so a block that is not whole was
+    /// stored as typed: the head of a key file (`head -n 20`), its tail, a paste short of its last
+    /// line. The lines of base64 after a private key's header, or before its footer, are masked,
+    /// and what stands around them is left.
+    #[test]
+    fn the_lines_of_a_private_key_block_that_is_not_whole_are_masked() {
+        let rules = Rules::default();
+        let masked = |text: &str| scan(text, &rules).0;
+        let lines = key_lines(19, "\n");
+        let begin = "-----BEGIN RSA PRIVATE KEY-----";
+        let end = "-----END RSA PRIVATE KEY-----";
+        // Its head, its tail, a footer cut short, one short of a hyphen.
+        assert_eq!(
+            masked(&format!("$ head -n 20 id_rsa\n{begin}\n{lines}\n$ ls")),
+            format!("$ head -n 20 id_rsa\n{begin}\n{MASK}\n$ ls")
+        );
+        assert_eq!(
+            masked(&format!("$ tail -n 21 id_rsa\n{lines}\n{end}\n$ ls")),
+            format!("$ tail -n 21 id_rsa\n{MASK}\n{end}\n$ ls")
+        );
+        for footer in ["-----END RSA PRIVA", "-----END RSA PRIVATE KEY----"] {
+            assert_eq!(
+                masked(&format!("{begin}\n{lines}\n{footer}")),
+                format!("{begin}\n{MASK}\n{footer}")
+            );
+        }
+        // One with no footer before a whole one: the bundled rule takes the first header to the
+        // second, and the second block's lines were left.
+        let two = format!(
+            "x {begin}\n{lines}\n-----BEGIN OPENSSH PRIVATE KEY-----\n{lines}\n-----END OPENSSH PRIVATE KEY-----\ny"
+        );
+        let stored = masked(&two);
+        assert!(!stored.contains(&key_line()), "{stored}");
+        assert!(stored.starts_with(&format!("x {MASK}")) && stored.ends_with("KEY-----\ny"));
+        // An encrypted key's own lines between the header and the base64 stay.
+        let encrypted = format!(
+            "{begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{}\n\n{lines}",
+            "0123456789ABCDEF".repeat(2)
+        );
+        assert_eq!(
+            masked(&encrypted),
+            format!(
+                "{begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{}\n\n{MASK}",
+                "0123456789ABCDEF".repeat(2)
+            )
+        );
+        // As a tool's output holds it, its line breaks written out.
+        let flat = format!("{begin}\\n{}\\n$ ls", key_lines(19, "\\n"));
+        assert_eq!(masked(&flat), format!("{begin}\\n{MASK}\\n$ ls"));
+        // Line breaks as Windows writes them, and a command on the line after the block.
+        let crlf = key_lines(3, "\r\n");
+        assert_eq!(
+            masked(&format!("{begin}\r\n{crlf}\r\n$ ls")),
+            format!("{begin}\r\n{MASK}\r\n$ ls")
+        );
+        assert_eq!(
+            masked(&format!("{begin}\n{lines}\nkubectl get secret -o yaml")),
+            format!("{begin}\n{MASK}\nkubectl get secret -o yaml")
+        );
+        // A whole block is one mask, as before.
+        assert_eq!(
+            masked(&format!("x {begin}\n{lines}\n{end} y")),
+            format!("x {MASK} y")
+        );
+        // Left as they are: a header quoted with no base64 after it, a certificate, a public key,
+        // and a placeholder's lines.
+        let cert = format!("-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----");
+        let public = format!("-----BEGIN PUBLIC KEY-----\n{lines}\n-----END PUBLIC KEY-----");
+        let placeholder = format!("{begin}\n{}\n", vec!["A".repeat(64); 4].join("\n"));
+        for text in [
+            format!("grep -rn -- '{begin}' src tests"),
+            format!("let pem = format!(\"{begin}\\n{{}}\\n{end}\", body);"),
+            format!("the {end} line is missing"),
+            cert,
+            public,
+            placeholder,
+        ] {
+            assert_eq!(masked(&text), text);
+        }
+    }
+
+    /// #938: what is stored of such a block is found again by the rescan a change of the rules
+    /// starts, in the forms it is stored in: as typed in a tool's output (JSON in a JSON string),
+    /// and after the bundled rule's mask of a block before it, as a mask or as a tombstone's stars.
+    /// A range starred leaves the body JSON, and the tool's in it.
+    #[test]
+    fn what_was_stored_of_a_private_key_block_that_is_not_whole_is_found_again() {
+        let rules = Rules::default();
+        let as_tool_output = |stdout: &str| {
+            serde_json::json!({ "output": serde_json::json!({ "stdout": stdout }).to_string() })
+                .to_string()
+        };
+        let lines = key_lines(19, "\n");
+        let begin = "-----BEGIN RSA PRIVATE KEY-----";
+        let footer = "-----END OPENSSH PRIVATE KEY-----";
+        for stored in [
+            format!("$ head -n 20 id_rsa\n{begin}\n{lines}\n$ ls"),
+            format!("x {MASK}\n{lines}\n{footer}\ny"),
+            format!("x {}\n{lines}\n{footer}\ny", "*".repeat(40)),
+        ] {
+            assert_eq!(ranges(&stored, &rules).len(), 1, "{stored}");
+            assert!(!scan(&stored, &rules).0.contains(&key_line()));
+            let body = as_tool_output(&stored);
+            let found = field_ranges(&body, &rules);
+            assert_eq!(found.len(), 1, "{body}");
+            let (start, end) = found[0];
+            let found = &body[start..end];
+            assert!(
+                found.starts_with(&key_line()) && found.ends_with("mL2vB4nR7tY1w=="),
+                "{found}"
+            );
+            let starred = crate::raw::masked(&body, start as i64, (end - start) as i64);
+            let outer: serde_json::Value = serde_json::from_str(&starred).unwrap();
+            let inner: serde_json::Value =
+                serde_json::from_str(outer["output"].as_str().unwrap()).unwrap();
+            let stdout = inner["stdout"].as_str().unwrap();
+            assert!(!stdout.contains(&key_line()), "{stdout}");
+            // The lines around the block are as they were.
+            let (first, last) = (
+                stored.lines().next().unwrap(),
+                stored.lines().last().unwrap(),
+            );
+            assert!(
+                stdout.starts_with(first) && stdout.ends_with(last),
+                "{stdout}"
+            );
+        }
+    }
+
+    /// #938: a block the cap's cut splits is not stored, whatever a rule of the home's masks in
+    /// its header: its lines are masked before the cut, where the check for a block the cut left
+    /// open read the header after the home's rules had run.
+    #[test]
+    fn a_key_block_the_cap_splits_is_not_stored_under_a_rule_over_its_header() {
+        let ruled =
+            user("[[redaction.extra_rules]]\nid = \"pk\"\nregex = 'RSA PRIVATE'\n").unwrap();
+        let text = format!(
+            "{}-----BEGIN RSA PRIVATE KEY-----\n{}\n{}",
+            "a".repeat(3_000),
+            key_lines(40, "\n"),
+            "z".repeat(8_000)
+        );
+        for rules in [Rules::default(), ruled] {
+            let (stored, _, cut) = scan_capped(&text, 8 * 1024, &rules);
+            assert!(cut.is_some());
+            assert!(!stored.contains(&key_line()), "{}", &stored[2_990..3_200]);
+        }
+    }
+
     /// A record stored before those two rules holds what gitleaks' rules left of each: a Teams path
     /// with five characters of its first GUID masked, and the lines after a wrapped token's first.
     /// `masked-remainder` took what was glued to the mask, at capture (a second mask) or in a
@@ -2381,6 +2545,60 @@ mod tests {
             format!("https://prod-12.westus.logic.azure.com:443/workflows/{id}/triggers/manual");
         for text in [
             format!("{trigger}/paths/invoke?sv=1.0&sig={}", "X".repeat(43)),
+            format!("https://files.example.test/download?name=a.txt&sig={sig}"),
+        ] {
+            assert_eq!(scan(&text, &rules).0, text);
+        }
+    }
+
+    /// #931: an Azure Storage shared access signature (a URL's query, or a token, with `sv=`, the
+    /// service version's date, and `sig=`) had no rule. Its signature is masked, whichever of the
+    /// two comes first; a `sig` beside no such `sv`, a short one and a placeholder are left.
+    #[test]
+    fn a_shared_access_signature_is_masked() {
+        let rules = Rules::default();
+        // split: scanners
+        let sig = format!(
+            "{}{}",
+            "p4Xw7ZcT1mQ9vB3nR6yK8sD0", "fG2hJ5lU7aE9iO1uY3tW%2Bx%3D"
+        );
+        let blob = "https://acct.blob.core.windows.net/logs/app.txt";
+        let rest = "ss=b&srt=sco&sp=rl&se=2026-12-31T00:00:00Z&spr=https";
+        for (text, masked) in [
+            (
+                format!("azcopy copy '{blob}?sv=2022-11-02&{rest}&sig={sig}' ./"),
+                format!("azcopy copy '{blob}?sv=2022-11-02&{rest}&sig={MASK}' ./"),
+            ),
+            (
+                format!("GET {blob}?sig={sig}&{rest}&sv=2022-11-02 200"),
+                format!("GET {blob}?sig={MASK}&{rest}&sv=2022-11-02 200"),
+            ),
+            (
+                format!("href=\"{blob}?sv=2022-11-02&amp;sp=r&amp;sig={sig}\""),
+                format!("href=\"{blob}?sv=2022-11-02&amp;sp=r&amp;sig={MASK}\""),
+            ),
+            (
+                format!("SharedAccessSignature=sv=2022-11-02&sp=rl&sig={sig};"),
+                format!("SharedAccessSignature=sv=2022-11-02&sp=rl&sig={MASK};"),
+            ),
+            // A request's own parameter between the two.
+            (
+                format!("PUT {blob}?sv=2022-11-02&api-version=2022-11-02&sig={sig}"),
+                format!("PUT {blob}?sv=2022-11-02&api-version=2022-11-02&sig={MASK}"),
+            ),
+            (
+                format!("PUT {blob}?sig={sig}&api-version=2022-11-02&sv=2022-11-02"),
+                format!("PUT {blob}?sig={MASK}&api-version=2022-11-02&sv=2022-11-02"),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &rules);
+            assert!(!found.is_empty(), "{text}");
+            assert_eq!(stored, masked);
+            assert_eq!(ranges(&stored, &rules), vec![], "{stored}");
+        }
+        for text in [
+            format!("{blob}?sv=2022-11-02&{rest}&sig={}", "X".repeat(43)),
+            format!("{blob}?sv=2022-11-02&sig=short"),
             format!("https://files.example.test/download?name=a.txt&sig={sig}"),
         ] {
             assert_eq!(scan(&text, &rules).0, text);

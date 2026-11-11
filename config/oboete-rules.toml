@@ -141,6 +141,17 @@ keywords = ["/triggers/"]
 # have `/workflows/<32 hex>/triggers/` in the path. A placeholder (`sig=XXXX…`) is below the entropy.
 
 [[rules]]
+id = "azure-sas-signature"
+description = "The signature of an Azure Storage shared access signature: a URL's query, or a token, with `sv=` (the service version, a date) and `sig=`, whichever comes first (#931)"
+regex = '''(?i)\bsv=\d{4}-\d{2}-\d{2}(?:&(?:amp;)?[a-z][a-z0-9_-]{0,24}=[^\s"'`<>&;]*)*?&(?:amp;)?sig=([a-z0-9%+/=_-]{20,})|\bsig=([a-z0-9%+/=_-]{20,})(?:&(?:amp;)?[a-z][a-z0-9_-]{0,24}=[^\s"'`<>&;]*)*?&(?:amp;)?sv=\d{4}-\d{2}-\d{2}'''
+entropy = 3
+keywords = ["sig="]
+# The parameters between the two are the same query's or token's (`ss`, `srt`, `sp`, `se`, `st`,
+# `spr`, `sr`, `sip`, `skoid`, a request's `api-version`), joined by `&` or by `&amp;` as HTML writes it. A `sig`
+# beside no such `sv` is another URL's (the rule above takes a workflow trigger's), and a short one
+# or a placeholder is none.
+
+[[rules]]
 id = "jwt-base64-whole"
 description = "A Base64-encoded JSON Web Token, whole: gitleaks' rule names its header markers as groups, so the marker that took part was masked (ten characters), masked-remainder took the rest of its line, and a token wrapped over lines kept every line after the first"
 regex = '''\b(?:(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}(?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$)|(ZXlK(?:aGJHY2lPaU|aGNIVWlPaU|aGNIWWlPaU|aGRXUWlPaU|aU5qUWlP|amNtbDBJanBi|amRIa2lPaU|bGNHc2lPbn|bGJtTWlPaU|cWEzVWlPaU|cWQyc2lPb|cGMzTWlPaU|cGRpSTZJ|cmFXUWlP|clpYbGZiM0J6SWpwY|cmRIa2lPaUp|dWIyNWpaU0k2|d01tTWlP|d01uTWlPaU|d2NIUWlPaU|emRXSWlPaU|emRuUWlP|MFlXY2lPaU|MGVYQWlPaUp|MWNtd2l|MWMyVWlPaUp|MlpYSWlPaU|MlpYSnphVzl1SWpv|NElqb2|NE5XTWlP|NE5YUWlPaU|NE5YUWpVekkxTmlJNkl|NE5YVWlPaU|NmFYQWlPaU)[A-Za-z0-9+/_-]{40,}={0,2})|ZXlK\[REDACTED\](?:\[REDACTED\]|\*+)?((?:\r?\n[A-Za-z0-9+/]{60,80})+(?:\r?\n[A-Za-z0-9+/]{1,80})?={0,2})(?:\r?\n|["'`]|$))'''
@@ -155,6 +166,22 @@ keywords = ["zxlk"]
 # Last, what a record stored under gitleaks' rule alone holds of a wrapped token: its head masked
 # (`ZXlK[REDACTED]`, then the mask or the stars of the line's rest) and the lines after it, which a
 # rescan has to find. The head stays as it is; the lines after it are the secret.
+
+[[rules]]
+id = "private-key-lines"
+description = "The lines of a private key block that is not whole: gitleaks' rule needs a block's header and its footer, so the head of a key file, its tail, or a paste short of its last line was stored as typed (#938)"
+regex = '''(?i)(?:-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:\\[rn]|\s)+(?:[A-Za-z-]{2,30}: [^\r\n\\]{0,200}(?:\\[rn]|\s)+){0,6}([A-Za-z0-9+/=]{16,}(?:(?:\\[rn]|\s)+[A-Za-z0-9+/=]{16,})*(?:(?:\\[rn]|\s)+[A-Za-z0-9+/=]{1,15})?)(?:\\[rn]|[\r\n]|["'`]|$)|(?:^|\\[rn]|[^A-Za-z0-9+/=\\])([A-Za-z0-9+/=]{16,}(?:(?:\\[rn]|\s)+[A-Za-z0-9+/=]{16,})*(?:(?:\\[rn]|\s)+[A-Za-z0-9+/=]{1,15})?)(?:\\[rn]|\s)+-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----)'''
+entropy = 3.5
+keywords = ["private key"]
+# Two forms. After a header: the block's lines of Base64, 16 characters or more each and at most one
+# shorter last line alone on its line, with an encrypted key's own lines (`Proc-Type:`, `DEK-Info:`,
+# at most six) left between the header and them. Before a footer: the same lines, from the text's
+# start, a line break, or a character that is neither Base64 nor a backslash (never from the `n` of
+# a line break written out, which would leave half an escape when the range is starred). A line break is one as typed or as a tool's output holds it, written out (`\n`). The header and the footer stay,
+# as do the lines of a certificate or a public key, a header or a footer quoted with no Base64 beside
+# it, and a placeholder's lines (the entropy). A whole block is gitleaks' rule's, as before; one with
+# no footer before a whole one, which that rule takes from the first header to the second, has both
+# blocks' lines masked here.
 
 [[rules]]
 id = "masked-remainder"
