@@ -565,10 +565,15 @@ pub fn drained(home: &Path, ask: bool) -> Result<Option<Lock>> {
     let Some(held) = held else {
         return Ok(None);
     };
-    let raw = crate::backup::open_raw(home)?;
+    let mut raw = crate::backup::open_raw(home)?;
     let mut k = crate::backup::open_knowledge(home)?;
     let mut consumers = consumers(home);
     checkpoint::rewind(&raw, &k, &mut consumers)?;
+    // As a worker's start (milestone 5 D1 rule 7): the segments checked, then the forget request
+    // logs, before any consumer runs. A raw.db put back from an older copy holds none of a forget
+    // the logs hold, and the command would plan from, and send, what was forgotten.
+    report_backup(home, &raw, &mut None, true);
+    crate::forget::reconcile_or_say(home, &mut raw)?;
     drain(&raw, &mut k, &mut consumers)?;
     Ok(Some(held))
 }
@@ -4593,6 +4598,121 @@ mod tests {
             })
             .count();
         assert_eq!(stale, 0, "the scheduled backup exported the replaced file");
+    }
+
+    /// M5 F2, D1 rule 7: the lock `oboete recurate` plans and sends under reconciles the forget
+    /// request logs before its consumers run, as a worker's start does. A raw.db put back from an
+    /// older copy holds none of a forget the logs hold, and the command would plan from, and send,
+    /// what was forgotten. The consumers run after the request is applied.
+    #[test]
+    fn a_drained_lock_reconciles_the_forget_logs_first() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
+        let target = crate::forget::Target::Record {
+            device: raw.device().to_owned(),
+            seq,
+        };
+        drop(raw);
+        // The copy holds the record: what the WAL kept is written into the file first.
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let old = p.join("raw-before-forget.db");
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+        crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        crate::forget::reconcile(p, &mut raw).unwrap();
+        assert_eq!(raw.forget_requests().unwrap().len(), 1);
+        drop(raw);
+        // The old copy takes raw.db's place, as a restore by hand would put it.
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(file));
+        }
+        let staged = p.join("raw.db.copy");
+        std::fs::copy(&old, &staged).unwrap();
+        std::fs::rename(staged, p.join("raw.db")).unwrap();
+        assert!(raw::open(p).unwrap().forget_requests().unwrap().is_empty());
+        drop(
+            drained(p, false)
+                .unwrap()
+                .expect("no other process holds the lock"),
+        );
+        let raw = raw::open(p).unwrap();
+        assert_eq!(raw.forget_requests().unwrap().len(), 1);
+        // The request left a tombstone under the device the copy became, and the consumers ran
+        // after it: the full-text index has read up to it.
+        let k = knowledge::open(p).unwrap();
+        let read = checkpoint::get(&k, "fts", raw.device()).unwrap();
+        assert_eq!((raw.max_seq().unwrap(), read), (1, 1));
+    }
+
+    /// MUST-M14, D1 rule 7: and it checks the backup segments before that, as a worker's start
+    /// does. raw.db lost commits its backups hold, a forget's among them. The request's tombstone
+    /// takes the first seq raw lost: a check after it would find raw as long as its backups, and
+    /// leave in place a segment that holds another record under that seq.
+    #[test]
+    fn a_drained_lock_checks_the_backups_before_it_reconciles() {
+        let _contending = contending();
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
+        let device = raw.device().to_owned();
+        drop(raw);
+        // What the WAL kept is written into the file first: these bytes hold the record.
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let before = std::fs::read(p.join("raw.db")).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("lost"))
+            .unwrap();
+        crate::backup::export(p).unwrap().expect("a segment");
+        let target = crate::forget::Target::Record {
+            device: device.clone(),
+            seq,
+        };
+        crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        crate::forget::reconcile(p, &mut raw).unwrap();
+        drop(raw);
+        // raw.db as it was before the second record and the forget, in the same file: the device
+        // is the same one, and its backups reach past its end.
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(file));
+        }
+        std::fs::write(p.join("raw.db"), before).unwrap();
+        let raw = raw::open(p).unwrap();
+        let held = (
+            raw.device().to_owned(),
+            raw.max_seq().unwrap(),
+            raw.forget_requests().unwrap().len(),
+        );
+        assert_eq!(held, (device, 1, 0));
+        drop(raw);
+        let aside = || {
+            std::fs::read_dir(p.join("backups"))
+                .unwrap()
+                .filter(|e| {
+                    let name = e.as_ref().unwrap().file_name();
+                    name.to_string_lossy().contains(".quarantined-")
+                })
+                .count()
+        };
+        assert_eq!(aside(), 0);
+        drop(
+            drained(p, false)
+                .unwrap()
+                .expect("no other process holds the lock"),
+        );
+        assert!(aside() > 0, "the segment past raw's end is still in place");
+        assert_eq!(raw::open(p).unwrap().forget_requests().unwrap().len(), 1);
     }
 
     /// M5 F2: an embedding reply starts another round even when curation is idle. The next
