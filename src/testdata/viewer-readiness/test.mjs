@@ -1035,6 +1035,17 @@ console.log('PASS: the retention period');
   answers=[json(settings('resident',{version:'v3',embedding:searchAt(first32),ranges:searchRanges}))];
   typeIn(field('embedding.account_id'),first32);leave(field('embedding.account_id'));await settle();
   assert.equal(sent().at(-1).embedding?.account_id,first32,'the account typed back is sent');
+  // A7-07: every key field is masked, wherever it is mounted. The judge's and Workers AI's are in
+  // no `.provider-key`, which alone the rule named: a key typed there was shown as typed.
+  f=w6.formOf(settings('resident',{key_input:true,judge:judgeAt('jev'),embedding:searchAt(first32),ranges:searchRanges}));ctx.ui.setForm(f);ctx.ui.drawSettings();
+  for(const name of ['judge.key','embedding.key']){
+    assert(field(name),`${name} is drawn`);
+    assert(field(name).closest('.key-input')&&!field(name).closest('.provider-key'),`${name} is a key field in no .provider-key`);
+  }
+  const masking=fs.readFileSync(sourcePath.replace(/app\.js$/,'app.css'),'utf8').split('}')
+    .filter(rule=>rule.includes('-webkit-text-security: disc')).flatMap(rule=>rule.split('{')[0].split(',')).map(selector=>selector.split('*/').pop().trim());
+  for(const selector of ['.key-input input','.provider-key input'])
+    assert(masking.includes(selector),`the masking rule names ${selector}: ${masking.join(' | ')}`);
   // A masking rule added and typed while a save is on its way stays (Codex), as do a place not yet
   // added to those never recorded and the guide's phrase (CodeRabbit).
   f=w6.formOf(settings('resident',{redaction:{enabled:true,extra_rules:[],allowlist:[]}}));ctx.ui.setForm(f);ctx.ui.drawSettings();posted.length=0;

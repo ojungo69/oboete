@@ -605,8 +605,10 @@ input.invalid:focus-visible, select.invalid:focus-visible, textarea.invalid:focu
 .provider-editor input[type="text"] { width: 100%; min-width: 0; }
 .provider-key { margin: 12px 0; }
 .provider-key .key-input { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-/* A masked text field avoids browser password-save prompts; secrets never enter form state. */
-.provider-key input { -webkit-text-security: disc; max-width: 100%; min-width: 0; }
+/* A masked text field avoids browser password-save prompts; secrets never enter form state. Every
+   key field is one, wherever it is mounted: the judge's and Workers AI's are in no .provider-key. */
+.provider-key input, .key-input input { -webkit-text-security: disc; }
+.provider-key input { max-width: 100%; min-width: 0; }
 .provider-test { margin-top: 12px; }
 .provider-test > button { margin-top: 6px; }
 /* Decision 79: what a line changes less often, in one fold, nothing folded within it. */
