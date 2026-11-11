@@ -2956,6 +2956,8 @@ pub(crate) fn scratch_dir() -> Result<Scratch, CallError> {
     let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let prefix = if cfg!(unix) { HELD_PREFIX } else { AGED_PREFIX };
     let dir = std::env::temp_dir().join(format!("{prefix}{name}"));
+    // Its mode is set on Unix alone.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

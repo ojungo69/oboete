@@ -402,6 +402,8 @@ impl Canary {
         getrandom::fill(&mut raw).map_err(std::io::Error::other)?;
         let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         let dir = home.join(format!(".oboete-isolation-{token}"));
+        // Its mode is set on Unix alone.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

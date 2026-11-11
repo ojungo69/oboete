@@ -1068,6 +1068,8 @@ fn copy_first_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
         .parent()
         .ok_or(std::io::ErrorKind::InvalidInput)?;
     let directory = parent.join(format!(".oboete-backup-{name}"));
+    // Its mode is set on Unix alone.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -3322,7 +3324,8 @@ struct DiagnosticDirectory {
 
 impl DiagnosticDirectory {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[allow(clippy::useless_conversion)] // statvfs integer widths vary by platform.
+    // statvfs integer widths vary by platform: `f_bavail` is 64 bits on Linux and 32 on macOS.
+    #[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
     fn available_bytes(&self) -> std::io::Result<u64> {
         use std::os::fd::AsRawFd;
         let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -3764,8 +3767,10 @@ pub(crate) fn diagnostic_directory_names(
             let name: Vec<u16> = rest
                 .get(start..end)
                 .ok_or(std::io::ErrorKind::InvalidData)?
-                .chunks_exact(2)
-                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_ne_bytes(*pair))
                 .collect();
             // Entry offsets are documented as aligned; byte parsing does not assume that.
             let name = std::ffi::OsString::from_wide(&name);

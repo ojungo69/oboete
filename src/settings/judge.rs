@@ -200,6 +200,7 @@ mod tests {
         home
     }
 
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn file(home: &Path) -> String {
         std::fs::read_to_string(home.join("config.toml")).unwrap()
     }

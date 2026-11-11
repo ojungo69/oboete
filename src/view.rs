@@ -9693,6 +9693,7 @@ curate = false
     /// the first of a block of 16, so the next free ports a move takes (`rotate`) stay in its
     /// block; blocks in turn from where this process's id starts them, so test processes running
     /// together seldom meet.
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn free_port() -> u16 {
         const FIRST: u32 = 20_000;
         const BLOCK: u32 = 16;
@@ -9724,6 +9725,7 @@ curate = false
     }
 
     /// A home whose config.toml names `port` as the resident viewer's.
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn resident_home(port: u16) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -9734,6 +9736,7 @@ curate = false
         home
     }
 
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn view_outcome(home: &Path) -> String {
         std::fs::read_to_string(home.join("state/view-outcome")).unwrap()
     }
@@ -10463,6 +10466,7 @@ curate = false
 
     /// One request to `port` as the page sends it, over a socket: the status and the JSON answer
     /// (`Null` when there is none).
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn w6p_call(
         port: u16,
         method: &str,
@@ -10514,6 +10518,7 @@ curate = false
     }
 
     /// Whether nothing answers on `port` any more, looked at for up to 2 s.
+    #[cfg(target_os = "linux")] // Its tests run on Linux alone.
     fn w6p_closed(port: u16) -> bool {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
