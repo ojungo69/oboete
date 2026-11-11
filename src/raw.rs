@@ -6977,6 +6977,34 @@ impl Raw {
         })
     }
 
+    /// Back from `before` over this device's events of `agent`'s `session`, the newest first, of a
+    /// source `read` takes: the first answer `step` gives, none when the session's events end
+    /// before it gives one.
+    pub fn back_from<T>(
+        &self,
+        agent: &str,
+        session: &str,
+        before: i64,
+        read: impl Fn(&str) -> bool,
+        mut step: impl FnMut(&Event) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let mut latest = self.conn.prepare_cached(SESSION_LATEST)?;
+        let mut rows = latest.query(params![self.device, before, agent, session])?;
+        while let Some(r) = rows.next()? {
+            let seq: i64 = r.get(0)?;
+            if !read(&r.get::<_, String>(1)?) {
+                continue;
+            }
+            let record = self.after(&self.device, seq - 1, 1)?.into_iter().next();
+            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item)
+                && let Some(answer) = step(&e)
+            {
+                return Ok(Some(answer));
+            }
+        }
+        Ok(None)
+    }
+
     /// The claim ops of the session's previous window, whose proposals its next window carries
     /// (milestone 3 Task 7, D12): the last window the worker cut that covered this device's latest
     /// event of `agent`'s `session` before the window starting at `from` (seq and offset) that has
