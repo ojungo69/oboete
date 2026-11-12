@@ -18,8 +18,13 @@ and the tag is `v0.1.0-trial.1`. The binary reports
 `oboete 0.1.0-trial.1+<first 8 commit digits>`. The chosen commit must contain
 the trial scripts and the build-version code.
 
-Each target runs `cargo test --locked --features local-embed` before a clean
-`cargo build --release --locked --features local-embed`, with the same environment.
+The macOS and Windows builds run `cargo test --locked --features local-embed`
+before a clean `cargo build --release --locked --features local-embed`, with the
+same environment. The Linux build runs in a container as root, on an overlay
+filesystem with OpenSSL 1.1.1, where 25 of the tests fail for those reasons
+(unreadable files, the key file's filesystem, TLS). It does not run the suite:
+on Linux the suite is CI's run on the commit, which the workflow requires to
+have passed, and the smoke test checks the version the build says.
 There is no build cache. The three targets and floors are:
 
 | Target | Floor |
