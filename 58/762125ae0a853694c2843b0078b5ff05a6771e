@@ -1,0 +1,23 @@
+SECURITY.md
+  s_b837d726e3a0bf::t_f1a8f89bce6e92 1-32
+docs/claude-mem-import.md
+  s_b837d726e3a0bf::t_963ea9c59a4372 116-117
+docs/spec.md
+  s_b837d726e3a0bf::t_df886621b2bd53 131-133,1221,1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "58762125ae0a853694c2843b0078b5ff05a6771e",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
