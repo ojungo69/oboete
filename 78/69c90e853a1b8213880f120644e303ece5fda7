@@ -1,0 +1,40 @@
+docs/prompt-context.md
+  s_b837d726e3a0bf::t_e0b60c02fbd20c 471-473
+  s_b837d726e3a0bf::t_da2d182c8ffaa5 74-76
+  s_b837d726e3a0bf::t_852e6243857582 468-470
+  s_b837d726e3a0bf::t_db71052027d6c6 474-476
+  s_b837d726e3a0bf::t_1e8b02c2ff2d05 399-467,477-494
+docs/hook-time.md
+  s_b837d726e3a0bf::t_dd1beba7042228 135-136
+  s_b837d726e3a0bf::t_cbbdc723d6efca 116-117,120,123-134,137-148,161-162
+src/search/b.rs
+  s_b837d726e3a0bf::t_899afdc6c41757 723-726
+  s_b837d726e3a0bf::t_fff9d273bcdee0 2648,6792-6793,6800-6823,6832-6833,6837,6847,6850
+  s_b837d726e3a0bf::t_c9085f9b9d9a92 6786-6787,6824-6831
+  s_b837d726e3a0bf::t_09657e2cf4b5d7 728-732,738,748-750,759-768,2583,2625-2626,2632,2641,2646-2647,2649,6782-6785,6788-6791,6794-6795,6834-6836,6838-6846,6848-6849,6851-6853
+src/hook.rs
+  s_b837d726e3a0bf::t_6a7a5d715d6372 2300
+  s_b837d726e3a0bf::t_1adc62c11d0c43 2477
+  s_b837d726e3a0bf::t_13542aa6d007f0 2554
+  s_b837d726e3a0bf::t_5ba3f7aafbb6a4 2427-2428
+  s_b837d726e3a0bf::t_c4f2846f908fc4 6146,6148-6159,6170-6189
+  s_b837d726e3a0bf::t_0cb3c5620ae8fd 2355,2543-2546,2559-2560,2563,6124-6126,6130-6131,6133-6145,6147
+docs/spec.md
+  s_b837d726e3a0bf::t_50583df12d8735 408
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7869c90e853a1b8213880f120644e303ece5fda7",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
