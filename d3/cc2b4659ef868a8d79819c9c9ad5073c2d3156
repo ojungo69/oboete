@@ -1,0 +1,21 @@
+docs/cards.md
+  s_b837d726e3a0bf::t_7f8fd42edbf2a1 207-211
+src/curate.rs
+  s_b837d726e3a0bf::t_b3090dcf5f0c6b 1411,4594-4596,4620-4635,6042-6075
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d3cc2b4659ef868a8d79819c9c9ad5073c2d3156",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
