@@ -1,11 +1,11 @@
 # oboete design spec
 
-oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26, and decisions 30-102 later, up to 2026-11-12. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance. [spec-client-runtime.md](spec-client-runtime.md) records the direction for future external clients and conversation runtimes as a review draft; it does not claim those integrations are implemented.
+oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26, and decisions 30-103 later, up to 2026-11-12. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance. [spec-client-runtime.md](spec-client-runtime.md) records the direction for future external clients and conversation runtimes as a review draft; it does not claim those integrations are implemented.
 
 ## 読み方 (Reading guide)
 
 - この文書は oboete の設計の正本です。実装するときの参照先なので、本文は英語で書いています。
-- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜102 は 0.1 にまとめてあります。
+- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜103 は 0.1 にまとめてあります。
 - 1 章は全体の形です(端末ごとの処理の流れ、AI の使い方の段階、あなたが変えられる設定)。
 - 2 章は記録です(フック=エージェントが動くたびに呼ばれる仕組み、伏せ字、何を保存するか、バックアップ)。
 - 3 章は知識づくりです。記録を区切り(window)ごとに AI(curator)が読み、決定・好み・教訓などの claim(知識 1 件)にします。
@@ -23,7 +23,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 
 ### 0.1 Owner decisions
 
-A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-102 up to 2026-11-12; they are recorded here.
+A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-103 up to 2026-11-12; they are recorded here.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
@@ -127,6 +127,7 @@ A later decision wins over an earlier one and over any section text. Decisions 1
 100. (2026-11-12) An import from the viewer leaves a transcript that is being written for a later import and imports the rest ([#947](https://github.com/ojungo69/oboete/issues/947)).
 101. (2026-11-12) After oboete is complete, Antigravity (agy) is taken up. What that covers is decided then.
 102. (2026-11-12) After oboete is complete, oboete is set against claude-mem and Hindsight: where it is ahead, where it is behind, and what to change where it is behind.
+103. (2026-11-12) The work on distribution starts now, beside the fixes of the audit of 2026-11-11 and not after them: the trial builds of decision 92 ([#916](https://github.com/ojungo69/oboete/issues/916)) and what makes them easy to install ([#962](https://github.com/ojungo69/oboete/issues/962)). What is published, and when, is decided each time (7.7).
 
 **Later owner direction on decision 38 (2026-10-06, [#336](https://github.com/ojungo69/oboete/issues/336)).** Both A, selection before summarization, and B, relevance/evidence selection after retrieval, are adopted. This adopts the two feature goals, not a model, backend, default, threshold or implementation date. The earlier §3.5(b) veto on `decided/supersedes` is separate and is not adopted by this direction. Decision 38 remains the record of the earlier Clef-specific assessment; its then-current conclusion does not permanently reject the later A/B request. Decision 34's finish-first, held-evaluation and cost-disclosure rules remain in force. The #336 direction does not assign A/B to a phase or to either side of cutover; the approved build order remains unchanged.
 
@@ -172,7 +173,7 @@ Earlier decisions that still hold (RD/owner-decisions.md:16). Where the 2026-09-
 
 ### 0.3 Sources
 
-- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-102 are in 0.1).
+- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-103 are in 0.1).
 - The settled sections this spec compiles: `RD/sections-1-4.md` and `RD/section-5-revised.md` … `RD/section-8-revised.md`. Their text is sections 1-8 here.
 - Other RD/ files the sections cite: `RD/options-draft.md`, `RD/improvements-synthesis.md`, `RD/constraints-synthesis.md`, `RD/issue50.md`, `RD/hub-platform.md`, `RD/phase0.md`, `RD/critique.md`, and `RD/improvements-result.json` (workflow output, not committed).
 - `docs/research/curator-providers-2026-09-25.md`: the research behind decisions 23, 25 and 26 and Claude decision C1 (cited by §).
@@ -1228,6 +1229,9 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - the release promoted from pre-release after the dogfood run (7.3);
   - the evaluation lines of section 8 (evaluation and build order) of this spec met.
 - **Trial builds** (owner decision 92): built binaries published as GitHub pre-releases before this gate passes, so that trying oboete needs no Rust toolchain. A trial build is not the release: plain `oboete update` never installs one (7.3), and it becomes a release only by passing the gate above. Which of this section's items a trial build carries is settled in [#916](https://github.com/ojungo69/oboete/issues/916).
+  - A trial build's version is Cargo.toml's with `-trial.<N>` after it (`0.1.0-trial.1` comes before `0.1.0`), and the binary says which one it is: a build given `OBOETE_VERSION`, the version with the commit's first 8 hex digits after a `+`, prints it as `oboete --version`, doctor's first line and the MCP server's version (`VERSION`, src/main.rs), and the workflow that builds trial builds ([#916](https://github.com/ojungo69/oboete/issues/916)) is to give it. A build without it says Cargo.toml's version. (Claude; overrulable)
+  - That workflow is to make a draft: making a trial build public is a step by hand, each time. (Claude; overrulable)
+  - On top of the trial builds, so that an install needs no download by hand: packages on the npm registry that carry them, a one-line installer, and a fixed place for the binary the hooks call ([#962](https://github.com/ojungo69/oboete/issues/962)). Publishing a package there is not one of decision 92's pre-releases: it is decided when one is ready. (Claude; overrulable)
 
 ## 8. Evaluation and build order
 

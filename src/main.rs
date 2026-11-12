@@ -83,8 +83,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// What this build says it is: a trial build's own version (`OBOETE_VERSION`, given by the
+/// workflow that builds it: docs/spec.md 7.7), else Cargo.toml's.
+pub(crate) const VERSION: &str = match option_env!("OBOETE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 #[derive(Parser)]
-#[command(name = "oboete", version, about = "Memory for coding agents")]
+#[command(name = "oboete", version = VERSION, about = "Memory for coding agents")]
 struct Cli {
     /// Data directory (default: ~/.oboete)
     #[arg(long, global = true, env = "OBOETE_HOME")]
@@ -1263,6 +1269,60 @@ fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether `version` is `base`, or a trial of it: `<base>-trial.<N>+<its commit's first 8 hex
+    /// digits>`, N from 1 and written without a leading zero (docs/spec.md 7.7).
+    fn base_or_its_trial(version: &str, base: &str) -> bool {
+        version == base
+            || version
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix("-trial."))
+                .and_then(|trial| trial.split_once('+'))
+                .is_some_and(|(number, commit)| {
+                    !number.starts_with('0')
+                        && number.parse::<u32>().is_ok()
+                        && commit.len() == 8
+                        && commit
+                            .bytes()
+                            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                })
+    }
+
+    /// A trial build's version is Cargo.toml's with its trial and its commit after it
+    /// (docs/spec.md 7.7): whatever this build was given is Cargo.toml's or a trial of it, and
+    /// `--version` prints it. The workflow that builds a trial runs this with its version set, so
+    /// one of another shape, or of another version than Cargo.toml's, stops there.
+    #[test]
+    fn a_build_says_the_crates_version_or_a_trial_of_it() {
+        use clap::CommandFactory;
+        assert!(
+            base_or_its_trial(VERSION, env!("CARGO_PKG_VERSION")),
+            "{VERSION}"
+        );
+        assert_eq!(
+            Cli::command().render_version().trim(),
+            format!("oboete {VERSION}")
+        );
+        for version in ["1.2.3", "1.2.3-trial.1+0123abcd", "1.2.3-trial.12+89abcdef"] {
+            assert!(base_or_its_trial(version, "1.2.3"), "{version}");
+        }
+        for version in [
+            "1.2.4",
+            "1.2.4-trial.1+0123abcd",
+            "1.2.3-trial.0+0123abcd",
+            "1.2.3-trial.01+0123abcd",
+            "1.2.3-trial.1",
+            "1.2.3-trial.1+0123abc",
+            "1.2.3-trial.1+0123abcde",
+            "1.2.3-trial.1+0123abcg",
+            "1.2.3-trial.1+0123ABCD",
+            "1.2.3-trial.+0123abcd",
+            "1.2.3-beta.1+0123abcd",
+            "1.2.3+0123abcd",
+        ] {
+            assert!(!base_or_its_trial(version, "1.2.3"), "{version}");
+        }
+    }
 
     thread_local! {
         /// Run after `oboete claims` built its listing (#439).

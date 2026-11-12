@@ -2584,7 +2584,7 @@ const UNMANAGED_IDLE: &str = "no hook starts one ([worker] autostart = false); i
 
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
-    println!("oboete {} at {}", env!("CARGO_PKG_VERSION"), exe.display());
+    println!("oboete {} at {}", crate::VERSION, exe.display());
     let db_path = home.join("oboete.db");
     let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     println!("home {} (db {} KB)", home.display(), size / 1024);
