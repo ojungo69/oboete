@@ -1,11 +1,11 @@
 # oboete design spec
 
-oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26, and decisions 30-97 later, up to 2026-11-10. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance. [spec-client-runtime.md](spec-client-runtime.md) records the direction for future external clients and conversation runtimes as a review draft; it does not claim those integrations are implemented.
+oboete is a lightweight single-binary memory for coding agents. This spec is the design of the redesign ("design B"): what is recorded, how knowledge is made from it, how it is delivered and searched, how devices sync, how content is deleted and kept safe, how oboete is installed, run and released, and how it is evaluated and built. Status: settled 2026-09-25/26. Sections 1-8 were settled on 2026-09-24/25 (owner decisions 17-22); owner decisions 23-28 and the resolutions of the compile's open points were added on 2026-09-25/26, and decisions 30-102 later, up to 2026-11-12. This file is the spec of record. It replaces the design parts of docs/plan.md, and milestones and PRs cite it for acceptance. [spec-client-runtime.md](spec-client-runtime.md) records the direction for future external clients and conversation runtimes as a review draft; it does not claim those integrations are implemented.
 
 ## 読み方 (Reading guide)
 
 - この文書は oboete の設計の正本です。実装するときの参照先なので、本文は英語で書いています。
-- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜97 は 0.1 にまとめてあります。
+- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜102 は 0.1 にまとめてあります。
 - 1 章は全体の形です(端末ごとの処理の流れ、AI の使い方の段階、あなたが変えられる設定)。
 - 2 章は記録です(フック=エージェントが動くたびに呼ばれる仕組み、伏せ字、何を保存するか、バックアップ)。
 - 3 章は知識づくりです。記録を区切り(window)ごとに AI(curator)が読み、決定・好み・教訓などの claim(知識 1 件)にします。
@@ -23,7 +23,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 
 ### 0.1 Owner decisions
 
-A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-97 up to 2026-11-10; they are recorded here.
+A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-102 up to 2026-11-12; they are recorded here.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
@@ -172,7 +172,7 @@ Earlier decisions that still hold (RD/owner-decisions.md:16). Where the 2026-09-
 
 ### 0.3 Sources
 
-- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-97 are in 0.1).
+- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-102 are in 0.1).
 - The settled sections this spec compiles: `RD/sections-1-4.md` and `RD/section-5-revised.md` … `RD/section-8-revised.md`. Their text is sections 1-8 here.
 - Other RD/ files the sections cite: `RD/options-draft.md`, `RD/improvements-synthesis.md`, `RD/constraints-synthesis.md`, `RD/issue50.md`, `RD/hub-platform.md`, `RD/phase0.md`, `RD/critique.md`, and `RD/improvements-result.json` (workflow output, not committed).
 - `docs/research/curator-providers-2026-09-25.md`: the research behind decisions 23, 25 and 26 and Claude decision C1 (cited by §).
