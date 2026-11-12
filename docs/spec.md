@@ -128,6 +128,9 @@ A later decision wins over an earlier one and over any section text. Decisions 1
 101. (2026-11-12) After oboete is complete, Antigravity (agy) is taken up. What that covers is decided then.
 102. (2026-11-12) After oboete is complete, oboete is set against claude-mem and Hindsight: where it is ahead, where it is behind, and what to change where it is behind.
 103. (2026-11-12) The work on distribution starts now, beside the fixes of the audit of 2026-11-11 and not after them: the trial builds of decision 92 ([#916](https://github.com/ojungo69/oboete/issues/916)) and what makes them easy to install ([#962](https://github.com/ojungo69/oboete/issues/962)). What is published, and when, is decided each time (7.7).
+104. (2026-11-13) A vulnerability is reported in private through GitHub's private vulnerability reporting, which is on for the repository, and SECURITY.md says how (7.7). No e-mail address is published for it.
+105. (2026-11-13) A prompt imported from claude-mem keeps its first 8,000 characters, as built (docs/claude-mem-import.md I10): the cut is not lengthened.
+106. (2026-11-13) Whether a trial build's draft is made public is Claude's to judge, each time, once the draft is checked (its archives, their checksums and their provenance); it is reported when done. This is for decision 92's trial builds only: an npm package and a release are still decided each time (decision 103).
 
 **Later owner direction on decision 38 (2026-10-06, [#336](https://github.com/ojungo69/oboete/issues/336)).** Both A, selection before summarization, and B, relevance/evidence selection after retrieval, are adopted. This adopts the two feature goals, not a model, backend, default, threshold or implementation date. The earlier §3.5(b) veto on `decided/supersedes` is separate and is not adopted by this direction. Decision 38 remains the record of the earlier Clef-specific assessment; its then-current conclusion does not permanently reject the later A/B request. Decision 34's finish-first, held-evaluation and cost-disclosure rules remain in force. The #336 direction does not assign A/B to a phase or to either side of cutover; the approved build order remains unchanged.
 
@@ -1215,7 +1218,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
     - what forget purges, and its limits;
     - setup for each agent, with its MUST-M10 status;
   - docs/hub-protocol.md (section 5);
-  - SECURITY.md with a private reporting address;
+  - SECURITY.md with a private reporting address: GitHub's private vulnerability reporting (decision 104);
   - security fixes published as GitHub Security Advisories and marked in the release notes, so `update --check` and a watch on the repo's releases both show them;
   - a CHANGELOG, and semver.
 - **CI**: `cargo audit` now, non-blocking (not yet in `.github/workflows`). cargo-deny and an SBOM at release (LATER r2-security-6).
@@ -1230,7 +1233,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - the evaluation lines of section 8 (evaluation and build order) of this spec met.
 - **Trial builds** (owner decision 92): built binaries published as GitHub pre-releases before this gate passes, so that trying oboete needs no Rust toolchain. A trial build is not the release: plain `oboete update` never installs one (7.3), and it becomes a release only by passing the gate above. Which of this section's items a trial build carries is settled in [#916](https://github.com/ojungo69/oboete/issues/916).
   - A trial build's version is Cargo.toml's with `-trial.<N>` after it (`0.1.0-trial.1` comes before `0.1.0`), and the binary says which one it is: a build given `OBOETE_VERSION`, the version with the commit's first 8 hex digits after a `+`, prints it as `oboete --version`, doctor's first line and the MCP server's version (`VERSION`, src/main.rs), and the workflow that builds trial builds ([#916](https://github.com/ojungo69/oboete/issues/916)) is to give it. A build without it says Cargo.toml's version. (Claude; overrulable)
-  - That workflow is to make a draft: making a trial build public is a step by hand, each time. (Claude; overrulable)
+  - That workflow is to make a draft: making a trial build public is a step by hand, each time, taken once the draft is checked (decision 106). (Claude; overrulable)
   - On top of the trial builds, so that an install needs no download by hand: packages on the npm registry that carry them, a one-line installer, and a fixed place for the binary the hooks call ([#962](https://github.com/ojungo69/oboete/issues/962)). Publishing a package there is not one of decision 92's pre-releases: it is decided when one is ready. (Claude; overrulable)
 
 ## 8. Evaluation and build order
