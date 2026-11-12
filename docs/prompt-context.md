@@ -71,7 +71,9 @@ never waits on the network (4.1, decision 38's "Not now" for asking the resident
    leaves a block that is already built. The wait also ends with the hook's own time, its
    agent's timeout less a margin (docs/hook-time.md), where that comes first, and a prompt whose
    hook has no time left before the read fence gets nothing. The hook's own reads are local and not cut at the
-   deadline, as the prompt point's reads were not before; they are measured (As built). The default
+   deadline, as the prompt point's reads were not before; they are measured (As built). (Since
+   2026-11-13 the words side reads a pool of its matches, and no document once the hook's time is
+   over: "The words side reads the best of its matches", below.) The default
    comes from measurement, before the code merges: the prompt point's time (the fence, the viewer's
    answer with its query vector within 1.2 s, the search, the lines) on this PC's WSL with the
    local model, set so that its 95th percentile fits, and not above claude-mem's 2 s for Codex
@@ -393,6 +395,102 @@ words matched, an imported observation by its first sentence or cut at its facts
 its whole body, the title check as a plain prefix, without the cut or without the sentence's end,
 the query once a document again, the query without the newest row), each failed by one of these
 tests.
+
+## The words side reads the best of its matches (2026-11-13, #897)
+
+**What was wrong.** Claude Code ended oboete's prompt hook at its 5 s, and Codex and Grok theirs:
+in the first 2.1 days of the slow hooks' record on this PC, 39 prompt hooks never ended, all of
+them in the prompt point (docs/hook-time.md, "What the record showed"). The words side offered its
+reader every card and every session summary of the repository whose stored text holds one of the
+prompt's trigrams, in bm25 order, until 10 of a kind passed the threshold. Few prompts have 10, and
+most have none, so every match was read: a document through its reader takes about 0.45 ms, and
+the repository of this PC's store holds 28,974 cards and 1,396 session summaries.
+
+On a copy of this PC's store, 156 prompts of this repository's Claude Code transcripts were each
+given to the installed build's hook (6ad0340f): 112 took 4 s or more and 102 took 5 s or more;
+6.98 s at the median, 14.0 s at the 90th percentile, 15.0 s at most. The hook read 15,177
+documents for a prompt at the median and 30,094 at most, and 29 of the 156 prompts got a block.
+
+| Prompt's length | Prompts | Median | 4 s or more | Cards read, median |
+|---|---|---|---|---|
+| 20 to 49 characters | 63 | 4.06 s | 32 | 6,682 |
+| 50 to 99 | 43 | 6.60 s | 32 | 13,925 |
+| 100 to 299 | 14 | 8.07 s | 12 | 16,919 |
+| 300 to 999 | 16 | 14.09 s | 16 | 28,461 |
+| 1,000 or more | 20 | 13.73 s | 20 | 28,602 |
+
+The statement was not the cost: for the cards of a prompt without a short word its first row
+came after 48 ms at the median (70 ms for a prompt of 64 trigrams, the most a query holds). With a
+short word it took 176 ms at the median and 1,116 ms at most: it read each match's text for the
+short words. A document that passed the threshold was never far down by its trigrams: for the 112
+prompts without a short word, the 22 cards kept were among the first 14 of the order and the 12
+summaries among the first 2. A short word changed that: the documents that hold it came first,
+and the cards kept were as far down as 3,061.
+
+**What changed:**
+
+- **A pool.** Of each kind the words side reads the best `search::b::WORDS_POOL` (100) by the
+  prompt's trigrams and no more, and keeps `DOC_DEPTH` (10) of them as before
+  (`search::b::curated_words`). A document its reader hides, one the session was shown, and one
+  under the threshold still take no place in the depth; they take one in the pool.
+- **By the trigrams alone.** A search puts the hits that hold more of a query's short words
+  (two characters between separators: `42`, 同期) before the others. The threshold counts
+  trigrams only, so for the pool that order would put every card holding a prompt's short word
+  before the card that bears on the prompt. The words side's statement orders by `rank` alone;
+  it also no longer reads each match's text for the short words.
+- **The hook's time.** Once the hook's time for what it injects is over, no document is read and
+  no statement of the words side is started (docs/hook-time.md): the documents kept by then are
+  shown. The pool is what keeps a warm store's prompt short; this is for a cold one.
+- **What a block may lose.** A card or summary that passes the threshold but is not among the
+  best 100 of its kind by the prompt's trigrams is no longer found by its words; the meaning side
+  may still find it. None was lost in the measurement below: 154 of the 156 prompts got the same
+  answer byte for byte (127 no block, 27 the same block). The other two still got five lines:
+  one had six cards over the threshold for the block's five places and the other ten or more,
+  and which of them a block shows now follows the trigrams' order where their shares are equal.
+  Every card either build showed them was among the first 31 by the prompt's trigrams.
+
+With the change, the same 156 prompts on the same copy took 283 ms at the median and 444 ms at
+the 90th percentile; but for the first prompt of the run (below), none took 1 s.
+
+| Prompt's length | Prompts | Median | Most |
+|---|---|---|---|
+| 20 to 49 characters | 63 | 0.20 s | 0.44 s |
+| 50 to 99 | 42 | 0.29 s | 0.52 s |
+| 100 to 299 | 14 | 0.36 s | 0.68 s |
+| 300 to 999 | 16 | 0.43 s | 0.54 s |
+| 1,000 or more | 20 | 0.43 s | 0.57 s |
+
+(The run's first prompt, of 84 characters, is left out of the table.)
+
+**A cold store is not solved.** The first prompt of each of the two runs with the change, which
+followed minutes of building that had pushed the copy out of the page cache, took 3.8 s and
+4.8 s. With the copy's files dropped from the page cache before each prompt (`posix_fadvise`),
+six prompts took 1.4 to 3.9 s (the installed build: 2.4 s and 16.3 s for two of them). The time
+is in two statements and not in the documents read: the claims' full-text ranking for a session
+that has no shortlist yet (0.7 s and 1.7 s in the two prompts timed, on the installed build), and
+the cards' ranking (0.5 s for a prompt without a short word). A statement is not interrupted
+(docs/hook-time.md); what the slow hooks' record shows after the install decides whether more is
+needed (#897).
+
+The measurement is a script on a copy of this PC's store (SQLite's backup, its identity kept, no
+viewer, so the words side alone): 156 prompts of this repository's Claude Code transcripts on this
+PC, every distinct one of 20 to 999 characters (136) and 20 of the longer ones. The installed
+build's run printed where each kept document stood in its order, and the two builds' answers were
+compared byte for byte. Each prompt ran in a session of its own, so no shown set of an earlier run
+changed what a later one kept.
+
+Tests: `search::b::tests::the_words_side_offers_no_more_than_its_pool` (more matches than the
+pool: the pool is offered and no more; the depth still ends it first; once told to stop, nothing
+more of either kind is offered),
+`hook::tests::a_prompts_short_word_keeps_no_card_out_of_the_words_pool` (more cards holding the
+prompt's short word than the pool holds: the card that bears on the prompt is shown),
+`the_words_side_reads_no_document_once_the_hooks_time_is_over`, and
+`a_card_short_of_the_threshold_takes_no_place_in_the_depth`, whose ten cards now come first by
+their trigrams (in their later sentences) and no longer by a short word.
+Mutation check: 8 mutants (the pool as every match, or in a search's order; the depth ending
+nothing; a refusal taking a place in the depth; the stop ending no offers; the short words'
+arguments left with the trigrams' order; a card under the threshold taking a place; the hook's
+clock stopping nothing), each failed by one of these tests.
 
 ## Where it does not reach yet
 

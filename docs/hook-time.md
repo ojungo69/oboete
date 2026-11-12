@@ -113,11 +113,38 @@ newest are counted.
 - A start later than the margin is not fixed by a deadline: an agent that starts the hook late,
   or a binary that takes seconds to page in. `before_ms` and a late `ts` show the second; the
   first shows only against the transcript.
-- One local read that takes seconds is not cut: SQLite reads are not interrupted, and a hook past
-  its deadline that finishes them still injects. Throwing the result away then would save no
+- One statement that takes seconds is not cut: SQLite reads are not interrupted, and a hook past
+  its deadline that finishes one still injects. Throwing the result away then would save no
   time and lose what may still arrive inside the agent's timeout. The record says whether that
   is where the time goes, in `manifest`, `prompt` or `note`; cutting those reads is #897's.
+  A loop of reads is another matter, and the one the record found is cut (below).
 - O1 is closed on what the record shows after the install, not on the deadline alone (#897).
+
+## What the record showed (2026-11-13)
+
+The record's first 2.1 days on this PC, 2026-11-10 13:56 to 2026-11-12 15:41 UTC: 205 hooks
+still ran at 2 s, and 41 of them never ended.
+
+| Never ended | Hooks |
+|---|---|
+| a prompt's hook, in `prompt` | 39 (Codex 30, Claude Code 7, Grok 2) |
+| `PostToolUse`, in `record` | 1 |
+| `PreToolUse`, in `note` | 1 |
+
+Their `before_ms` was 30 at most: none started late. Of the 164 that ended, 98 spent longest in
+`record` (such a hook took 2.5 s at the median; 97 of them in two hours of 2026-11-11, 09:00 to
+10:59 UTC), 52 were memory lookups that waited their 3 s out (one to four an hour, through the
+two days), 7 were in `note`, and 7 elsewhere. Those are not looked into here (#897).
+
+The 39 were one loop and no single read: the prompt point's words side read every card and
+session summary that matched the prompt, thousands of them, each in under a millisecond
+(docs/prompt-context.md, "The words side reads the best of its matches"). Since 2026-11-13 it
+reads the best 100 of each by the prompt's trigrams, and once the hook's time for what it injects
+is over it reads no document and starts no statement. The documents it kept by then are shown
+with the rest of the block, where #897 proposed to inject nothing: each passed the threshold by
+itself, and the claims' side is not behind this clock. A statement running at that moment still
+ends by itself, as above: on a cold store the prompt point's statements took seconds (the same
+section).
 
 ## Tests
 
@@ -131,5 +158,6 @@ newest are counted.
   `the_read_fence_is_waited_for_within_the_hooks_time`,
   `the_prompt_points_wait_ends_with_the_hooks_time`,
   `a_read_whose_hook_has_no_time_left_gets_no_note`,
-  `a_memory_lookup_waits_within_the_hooks_time`.
+  `a_memory_lookup_waits_within_the_hooks_time`,
+  `the_words_side_reads_no_document_once_the_hooks_time_is_over`.
 - `setup::tests::a_hooks_timeout_is_the_one_setup_writes`.
