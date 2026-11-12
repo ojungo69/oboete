@@ -113,7 +113,8 @@ left to the plain import and not counted.
 
 I10. **The gate (2026-11-12).** The documents, the files ops and the work state the import stores
 pass the gate with the home's rules (the exclusion patterns of I8 come in as claude-mem holds
-them). A prompt keeps its first 8,000 characters (a live prompt keeps 64 KiB): `hook::clip` masks
+them). A prompt keeps its first 8,000 characters (a live prompt keeps 64 KiB; decision 105 keeps
+the cut as it is): `hook::clip` masks
 it with the bundled rules, so that its check for a key block the cut leaves open sees every
 header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
 prompt was masked with the bundled rules alone. A value only a rule of the home's finds keeps its
