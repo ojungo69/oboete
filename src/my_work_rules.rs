@@ -512,6 +512,9 @@ impl Job for Suggestions {
             return Ok(None);
         }
         let mut ops: BTreeSet<i64> = taken.iter().map(|p| p.review).collect();
+        // S2: through the last call's op every call before is read. `keep` matches a new
+        // statement against every suggestion, so a call may carry one its prompt did not show,
+        // whose op is not listed below: a forget of what that one came from reaches it by this.
         ops.extend(round.seqs.get(THROUGH));
         let state = |sg: &Suggestion| round.decided.get(&sg.id).map(|d| d.state);
         let rank = |sg: &Suggestion| match state(sg) {
@@ -897,10 +900,22 @@ mod tests {
         }
 
         fn pass(&mut self, answer: &dyn Fn(&str) -> Value) -> (Phase, Vec<String>) {
+            self.pass_within(Summary::default().window_tokens, answer)
+        }
+
+        fn pass_within(
+            &mut self,
+            window_tokens: u32,
+            answer: &dyn Fn(&str) -> Value,
+        ) -> (Phase, Vec<String>) {
             self.s.run();
             let k = crate::knowledge::open(self.s.home.path()).unwrap();
             let db = crate::providers_db::open(self.s.home.path()).unwrap();
-            let (rules, summary) = (Rules::load(self.s.home.path()).unwrap(), Summary::default());
+            let rules = Rules::load(self.s.home.path()).unwrap();
+            let summary = Summary {
+                window_tokens,
+                ..Summary::default()
+            };
             let sent = RefCell::new(Vec::new());
             let call = |_: &str,
                         prompt: &str,
@@ -1923,6 +1938,54 @@ mod tests {
         assert!(!ask.prompt.contains("- s1 "), "{}", ask.prompt);
     }
 
+    /// S2: a new statement worded as a suggestion the window left out of the prompt joins it and
+    /// carries its quotes into a new op, which lists no op of that suggestion. Every call reads
+    /// the last call's `through` op, though, and through it each call before: a forget of what
+    /// a quote came from takes it out of My Rules, however many calls carried it since. A
+    /// suggestion made before the quote was kept stays.
+    #[test]
+    fn a_forget_reaches_a_quote_carried_into_a_suggestion_not_shown() {
+        let mut h = Home::new();
+        h.reviewed("g:0", &[("Plain names.", "name things plainly")]);
+        h.pass(&|_| answer(&[("", "Name things plainly.")]));
+        let x = h.s.said("s1", "repo", 1_000, "no spaces to indent, ever");
+        let read = Read {
+            spans: vec![(x, x)],
+            ops: vec![],
+        };
+        h.reviewed_reading("g:1", &[("Tabs.", "no spaces to indent")], read);
+        h.age(4 * 60);
+        h.pass(&|_| answer(&[("", "Indent with tabs.")]));
+        let long = "y".repeat(QUOTE);
+        for (seen, request) in [(2, "g:2"), (3, "g:3")] {
+            h.reviewed(request, &[("Tabs again.", long.as_str())]);
+            h.age(4 * 60);
+            let (_, sent) = h.pass_within(20, &|_| answer(&[("", "Indent with tabs.")]));
+            assert!(!sent[0].contains("- s2 "), "left out: {}", sent[0]);
+            let kept = h.suggestions();
+            assert_eq!(
+                (kept.len(), kept[1].seen),
+                (2, seen),
+                "joined, though not shown"
+            );
+        }
+        let carried = "no spaces to indent";
+        let kept = h.suggestions();
+        assert!(kept[1].quotes.iter().any(|q| q.text == carried));
+        assert!(h.page().to_string().contains(carried));
+        let device = h.s.raw.device().to_owned();
+        let h = h.closed(|home| {
+            let target = crate::forget::Target::Record { device, seq: x };
+            crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            crate::forget::purge(home).unwrap();
+        });
+        let page = h.page().to_string();
+        assert!(!page.contains(carried), "{page}");
+        assert!(
+            page.contains("Name things plainly."),
+            "made before the quote was kept: {page}"
+        );
+    }
     /// #739: while a decision is recorded but not applied, the suggestion takes no other action,
     /// so an approve is not sent twice.
     #[test]
