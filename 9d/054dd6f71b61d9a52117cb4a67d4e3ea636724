@@ -1,0 +1,29 @@
+assets/viewer/app.js
+  s_b837d726e3a0bf::t_07fee8767675ed 2486,3321-3324,3332,3442
+docs/settings-import.md
+  s_b837d726e3a0bf::t_dd8f596bdfd9d0 16,21-37
+src/migrate.rs
+  s_b837d726e3a0bf::t_085c5339c984df 2497-2500,2512,2640-2641
+src/settings/maintenance.rs
+  s_b837d726e3a0bf::t_18b4cae4e5364b 81-82,222-225,227-235,390,425-434,453,475,542-547,550,1086-1087,1089,1110-1116,1118,1123-1248,1290-1292
+src/testdata/viewer-readiness/test.mjs
+  s_b837d726e3a0bf::t_a7dd1c11c74e4b 7646-7663
+src/transcript.rs
+  s_b837d726e3a0bf::t_307f874f89624f 803-808,870-872,876,879,885,896-900,902-906,1009,1057-1059,1133-1139,1169-1172,1270-1271,1306-1312,1348-1355,1988-1990,1992-1996,2001,2019-2020,2023-2026,2030-2031,2050-2051,2054-2057,2085-2086,2096-2097,2101-2108,2112-2114,2116,2122-2131,2136-2174,2461-2480,2482-2567,2570-2571,2573,2583-2584,2593-2595,2597-2598,2600
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9d054dd6f71b61d9a52117cb4a67d4e3ea636724",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
