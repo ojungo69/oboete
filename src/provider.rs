@@ -358,6 +358,21 @@ impl Cause {
 /// under (the curation phase's `curate::check`, milestone 3 Task 7).
 pub type AnswerCheck<'a> = dyn Fn(&Value) -> Option<&'static str> + 'a;
 
+thread_local! {
+    static REFUSAL_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What a check says, in numbers and never in text, of the answer it is refusing: the chain puts
+/// it in the call's detail.
+pub(crate) fn note_refusal(note: String) {
+    REFUSAL_NOTE.with(|n| *n.borrow_mut() = Some(note));
+}
+
+/// The note of the last refusal on this thread, taken.
+pub(crate) fn refusal_note() -> Option<String> {
+    REFUSAL_NOTE.with(|n| n.borrow_mut().take())
+}
+
 /// The egress gate (spec 5.5): asked before each call that sends the prompt out, a retry too. An
 /// error stops the run there, with no further call.
 pub type Gate<'a> = dyn Fn() -> Result<Option<crate::dispatch::Guard>> + 'a;
@@ -1222,7 +1237,11 @@ impl<'a> Chain<'a> {
             // than the window failing later.
             let (mut refused, mut kept) = (None, None);
             let result = result.and_then(|a| {
+                // A note an earlier check left on this thread is not this answer's.
+                refusal_note();
                 refused = self.check.and_then(|check| check(&a.value));
+                // What the check says of the answer it refused, in numbers (#368).
+                let note = refusal_note().map_or(String::new(), |n| format!("; {n}"));
                 if refused == Some("unanchored") {
                     kept = Some(a.value.clone());
                 }
@@ -1235,7 +1254,7 @@ impl<'a> Chain<'a> {
                             .and_then(|t| serde_json::from_str::<Value>(unfence(t)).err());
                         let not_json = not_json.map_or(String::new(), |e| format!(": {e}"));
                         format!(
-                            "invalid output: the answer gave nothing to keep ({outcome}){not_json}"
+                            "invalid output: the answer gave nothing to keep ({outcome}{note}){not_json}"
                         )
                     }
                     // What the caller's check accepts is usable, whatever the schema says (a line
@@ -8103,22 +8122,29 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 }
                 p
             }];
+            // A note an earlier check left on the thread is not this answer's.
+            note_refusal("claims: 9".into());
             let r = Chain::new(&providers, &conn)
                 .check(&check)
                 .run("curator", "s", "p", &crate::curate::schema())
                 .unwrap();
             assert_eq!(r.provider, "next", "{outcome}");
             assert_eq!(outcomes(&conn), [outcome, "ok"]);
+            let detail: String = conn
+                .query_row("SELECT detail FROM provider_calls ORDER BY id", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
             if outcome == "prose" {
                 // Why it is not JSON, never the answer's text.
-                let detail: String = conn
-                    .query_row("SELECT detail FROM provider_calls ORDER BY id", [], |r| {
-                        r.get(0)
-                    })
-                    .unwrap();
                 assert!(detail.contains("expected value"), "{detail}");
                 assert!(!detail.contains("Sure"), "{detail}");
             }
+            // #368: what an unanchored answer's claims missed, in numbers; no other outcome has
+            // a note, one left by an earlier check on the thread either.
+            let note = "(unanchored; claims: 1, no such line: 1, quote in another line: 0)";
+            assert_eq!(detail.contains(note), outcome == "unanchored", "{detail}");
+            assert_eq!(detail.contains("; "), outcome == "unanchored", "{detail}");
             // Alone, it is a provider that failed (D11 counts it); one whose answer only did not
             // anchor answered, and is not counted toward its breaker (#330).
             let before = crate::providers_db::state(&conn, "stub").unwrap().fails;

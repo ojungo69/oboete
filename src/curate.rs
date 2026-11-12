@@ -4599,7 +4599,7 @@ fn located(
 ) -> std::result::Result<(String, Vec<Located>, Vec<String>), AnswerFailure> {
     let (summary, drafts) = parse(answer, most_claims(w))?;
     let any = !drafts.is_empty();
-    let (mut found, mut lost) = (Vec::new(), Vec::new());
+    let (mut found, mut lost, mut missed) = (Vec::new(), Vec::new(), Vec::new());
     for mut d in drafts {
         match line_index(w, &d.line).zip(locate(w, &d.line, &d.quote)) {
             // As the line shows it, which the gates read its sentence from.
@@ -4607,10 +4607,25 @@ fn located(
                 d.quote = e.quote.clone();
                 found.push((d, e, i));
             }
-            None => lost.push(d.id),
+            None => {
+                lost.push(d.id);
+                missed.push((d.line, d.quote));
+            }
         }
     }
     if any && found.is_empty() {
+        // #368: what the claims missed, in numbers, for the call's detail. A quote found in a
+        // line is in another one than its claim named, or the claim would have anchored.
+        let no_line = (missed.iter())
+            .filter(|(line, _)| line_index(w, line).is_none())
+            .count();
+        let elsewhere = (missed.iter())
+            .filter(|(_, quote)| w.lines.iter().any(|l| locate(w, &l.id, quote).is_some()))
+            .count();
+        crate::provider::note_refusal(format!(
+            "claims: {}, no such line: {no_line}, quote in another line: {elsewhere}",
+            missed.len()
+        ));
         return Err(AnswerFailure::Unanchored);
     }
     Ok((summary, found, lost))
@@ -5975,6 +5990,41 @@ mod tests {
         let (_, found, lost) = located(&w, &answer).unwrap();
         assert!(lost.is_empty());
         assert_eq!(found[0].0.quote, "tabs\nin every  file");
+    }
+
+    /// #368: an answer refused as unanchored says what its claims missed, in numbers and never in
+    /// text: how many it had, how many named a line the window has not, and how many quoted what
+    /// another line of the window holds. An answer with a claim that anchors leaves no note.
+    #[test]
+    fn an_unanchored_answer_says_in_numbers_what_its_claims_missed() {
+        let (_h, mut raw, dev) = store();
+        raw.append(&prompt("Use tabs in every file of the importer."))
+            .unwrap();
+        raw.append(&prompt("Keep the cache for one hour.")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let claim = |id: &str, line: &str, quote: &str| {
+            json!({"id": id, "kind": "decision", "status": "decided", "speaker": "user",
+                "scope": "repo", "body": "b", "quote": quote, "line": line, "supersedes": []})
+        };
+        let missed = json!({"claims": [
+            claim("c1", "L9", "Use tabs in every file"),
+            claim("c2", "L1", "Keep the cache for one hour"),
+            claim("c3", "L2", "said nowhere in the window"),
+        ], "summary": "s"});
+        crate::provider::refusal_note();
+        assert_eq!(check(&w, &missed), Some("unanchored"));
+        assert_eq!(
+            crate::provider::refusal_note().as_deref(),
+            Some("claims: 3, no such line: 1, quote in another line: 2")
+        );
+        let anchored = json!({"claims": [
+            claim("c1", "L1", "Use tabs in every file"),
+            claim("c2", "L1", "Keep the cache for one hour"),
+        ], "summary": "s"});
+        assert_eq!(check(&w, &anchored), None);
+        assert_eq!(crate::provider::refusal_note(), None);
     }
 
     #[test]
