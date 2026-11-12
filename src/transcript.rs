@@ -1387,18 +1387,25 @@ fn forget_refusal(e: anyhow::Error) -> Result<anyhow::Error> {
 }
 
 fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
-    // A copied transcript keeps its event contents; its file path is not its identity. Nor are the
-    // marks read from a Claude Code line (O2), nor a call's start (#692): a transcript imported
-    // before they were read keeps its checkpoint and its records' identities (Codex on #659). A
-    // Codex rollout's mark (#273) was always part of them.
+    // A line's identity is the bytes it had when transcripts were first imported: a checkpoint's
+    // prefix is made of them, and so is what a forget's denial holds of an imported record. What
+    // is read of a line since is no part of it: the marks of a Claude Code line (O2; Codex on
+    // #659) and a call's start (#692). A Codex rollout's mark (#273) was always part of it.
+    //
+    // Those fields stand in the middle of a payload, or after its last field, and `Map::remove`
+    // puts the last field in the place of the one it takes out: taken out so, they left the
+    // others in another order, and a line that had one lost the identity it was imported with.
+    // They go with `shift_remove`, which leaves the others as they were. `transcript_path` went
+    // with `remove` from the first import on, after them: that order is the identity.
     let mut payload = line.payload.clone();
     if let Some(fields) = payload.as_object_mut() {
-        fields.remove("transcript_path");
-        fields.remove(crate::capture::ENTRYPOINT);
-        fields.remove(crate::capture::STARTED);
+        fields.shift_remove(crate::capture::ENTRYPOINT);
+        fields.shift_remove(crate::capture::STARTED);
         if line.agent == "claude" {
-            fields.remove(crate::capture::AGENT_SENT);
+            fields.shift_remove(crate::capture::AGENT_SENT);
         }
+        // A copied transcript keeps its event contents; its file path is not its identity.
+        fields.remove("transcript_path");
     }
     prefix.update(serde_json::to_vec(&(
         line.agent,
@@ -3169,9 +3176,112 @@ mod tests {
         }
     }
 
+    /// A line's identity is made of the bytes it had when transcripts were first imported: no
+    /// entry point, no mark of who sent it, no call's start, and `transcript_path` taken out as
+    /// it always was (the last field in its place). Spelled out here for lines as the parser
+    /// reads them now, with what it has read of them since in the middle of their fields, or
+    /// after them.
+    #[test]
+    fn a_parsed_line_has_the_identity_it_was_imported_with() {
+        let record = |kind: &str, at: u32, more: Value, content: Value| {
+            let mut v = json!({"type": kind, "sessionId": "then", "cwd": "/work/app",
+                "timestamp": format!("2026-09-01T00:00:{at:02}.000Z"),
+                "message": {"role": kind, "content": content}});
+            for (field, value) in more.as_object().unwrap() {
+                v[field] = value.clone();
+            }
+            format!("{v}\n")
+        };
+        let prompt = |at: u32, more: Value, text: &str| record("user", at, more, json!(text));
+        let call = json!([{"type": "tool_use", "id": "fast", "name": "Bash",
+            "input": {"command": "true"}}]);
+        let result = json!([{"type": "tool_result", "tool_use_id": "fast", "content": "done"}]);
+        let queued = record(
+            "queue-operation",
+            3,
+            json!({"operation": "enqueue", "content": "Queued prompt."}),
+            json!(null),
+        );
+        let then = |event: &str, at: u32, fields: &str| {
+            let tail =
+                format!(r#""session_id":"then","hook_event_name":"{event}","cwd":"/work/app""#);
+            format!(
+                r#"["claude","{event}","then","2026-09-01T00:00:{at:02}.000Z",{{{fields},{tail}}}]"#
+            )
+        };
+        let start = then("SessionStart", 0, r#""source":"startup""#);
+        let asked =
+            |at: u32, text: &str| then("UserPromptSubmit", at, &format!(r#""prompt":"{text}""#));
+        let done = r#""tool_name":"Bash","tool_input":{"command":"true"},"tool_response":"done""#;
+        let cases = [
+            // A prompt with an entry point and a call with a result: each read since stands in
+            // the middle of its line's fields.
+            (
+                format!(
+                    "{}{}{}",
+                    prompt(0, json!({"entrypoint": "cli"}), "Run it."),
+                    record("assistant", 1, json!({}), call),
+                    record("user", 2, json!({}), result)
+                ),
+                vec![
+                    start.clone(),
+                    asked(0, "Run it."),
+                    then("PostToolUse", 2, done),
+                ],
+            ),
+            // A queued prompt: its delivery says who sent it, after every other field.
+            (
+                format!(
+                    "{}{queued}{}",
+                    prompt(0, json!({}), "Run it."),
+                    prompt(5, json!({"turnOrigin": "scheduled"}), "Queued prompt.")
+                ),
+                vec![
+                    start.clone(),
+                    asked(0, "Run it."),
+                    asked(3, "Queued prompt."),
+                ],
+            ),
+        ];
+        for (n, (transcript, then)) in cases.into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("then.jsonl");
+            std::fs::write(&file, transcript).unwrap();
+            let mut lines = stable_lines(&file, "claude").unwrap().unwrap();
+            lines.retain(|line| !line.synthetic && line.event != "SessionEnd");
+            let read: Vec<String> = (lines.iter())
+                .map(|line| format!("{} {} {}", line.event, line.ts, line.payload))
+                .collect();
+            // Read since the first imports, and still in the lines.
+            let since = [
+                crate::capture::ENTRYPOINT,
+                crate::capture::STARTED,
+                crate::capture::AGENT_SENT,
+            ];
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| since.iter().any(|f| line.payload.get(*f).is_some())),
+                "case {n}: {read:#?}"
+            );
+            let now: Vec<String> = (lines.iter())
+                .map(|line| {
+                    let mut identity = Sha256::new();
+                    hash_line(&mut identity, line).unwrap();
+                    format!("{:x}", identity.finalize())
+                })
+                .collect();
+            let then: Vec<String> = (then.iter())
+                .map(|bytes| format!("{:x}", Sha256::digest(format!("{bytes}\n"))))
+                .collect();
+            assert_eq!(now, then, "case {n}: {read:#?}");
+        }
+    }
+
     /// Codex on #659: a Claude Code line's marks (O2) are not part of its identity, so a transcript
     /// imported before they were read still matches its checkpoint and its records; a Codex
-    /// rollout's mark (#273) still is part of it.
+    /// rollout's mark (#273) still is part of it. The marks stand where the parser puts them,
+    /// before the fields every line gets: taken out, they leave those in the order they had.
     #[test]
     fn a_claude_lines_marks_leave_its_identity_as_it_was() {
         let line = |agent: &'static str, payload: Value| Line {
@@ -3189,24 +3299,31 @@ mod tests {
             hash_line(&mut h, l).unwrap();
             format!("{:x}", h.finalize())
         };
-        let before = json!({"prompt": "Fix it.", "session_id": "s", "cwd": "/w"});
-        let mut marked = before.clone();
-        marked[crate::capture::ENTRYPOINT] = json!("cli");
-        marked[crate::capture::AGENT_SENT] = json!(true);
-        assert_eq!(
-            hash(&line("claude", marked)),
-            hash(&line("claude", before.clone()))
-        );
-        let mut codex = before.clone();
-        codex[crate::capture::AGENT_SENT] = json!(true);
+        let before = json!({"prompt": "Fix it.", "session_id": "s", "transcript_path": "/t",
+            "cwd": "/w", "hook_event_name": "UserPromptSubmit"});
+        let with = |field: &str, value: Value| {
+            json!({"prompt": "Fix it.", field: value, "session_id": "s", "transcript_path": "/t",
+                "cwd": "/w", "hook_event_name": "UserPromptSubmit"})
+        };
+        for mark in [
+            with(crate::capture::ENTRYPOINT, json!("cli")),
+            with(crate::capture::AGENT_SENT, json!(true)),
+        ] {
+            assert_eq!(
+                hash(&line("claude", mark)),
+                hash(&line("claude", before.clone()))
+            );
+        }
         assert_ne!(
-            hash(&line("codex", codex)),
+            hash(&line(
+                "codex",
+                with(crate::capture::AGENT_SENT, json!(true))
+            )),
             hash(&line("codex", before.clone()))
         );
         // Nor does a call's start (#692), whatever the agent.
         for agent in ["claude", "codex"] {
-            let mut started = before.clone();
-            started[crate::capture::STARTED] = json!("2026-09-02T00:00:00.500Z");
+            let started = with(crate::capture::STARTED, json!("2026-09-02T00:00:00.500Z"));
             assert_eq!(
                 hash(&line(agent, started)),
                 hash(&line(agent, before.clone()))
