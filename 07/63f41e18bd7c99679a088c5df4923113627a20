@@ -1,0 +1,25 @@
+docs/spec.md
+  s_b837d726e3a0bf::t_9c022b58b184df 3,8,26,130,176,1232-1234
+src/main.rs
+  s_b837d726e3a0bf::t_e5a3f06b05a3be 86-91,93,1273-1297
+src/mcp.rs
+  s_b837d726e3a0bf::t_a4ef8a560aecbf 872
+src/setup.rs
+  s_b837d726e3a0bf::t_f9d2fc91ac8a54 2587
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0763f41e18bd7c99679a088c5df4923113627a20",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
