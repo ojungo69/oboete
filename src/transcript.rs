@@ -78,7 +78,8 @@ type Pending = (
 
 #[derive(serde::Serialize)]
 // The fields in the order `convert` printed them before this struct (`json!` keeps its keys'
-// order here: serde_json's `preserve_order`), so a fixture converted again keeps its bytes.
+// order here: serde_json's `preserve_order`), so a line converted again keeps its bytes. Where
+// an interrupted call's line stands among the others is another matter (`interrupt`, #950).
 struct Line {
     seq: u64,
     agent: &'static str,
@@ -116,8 +117,10 @@ struct Emitter {
     last_text: Option<String>,
     turn_cwd: Option<String>,
     last_ts: String,
-    /// Lines without their `seq`, keyed by time: subagent files are read after the main file,
-    /// and `oboete replay` takes the lines in order, so they are sorted before they are written.
+    /// Lines without their `seq`, keyed by the place each sorts at: its time, or for a call the
+    /// session's interruption ended, that interruption's (`interrupt`). Subagent files are read
+    /// after the main file, and `oboete replay` takes the lines in order, so they are sorted
+    /// before they are written.
     lines: Vec<(String, Line)>,
 }
 
@@ -132,10 +135,11 @@ impl Emitter {
         payload["transcript_path"] = json!(self.path);
         payload["cwd"] = json!(self.cwd.as_deref().unwrap_or("."));
         payload["hook_event_name"] = json!(event);
-        // A record without a time keeps the place of the one before it.
-        let ts = match (ts, self.lines.last()) {
-            ("", Some((prev, _))) => prev.clone(),
-            _ => ts.to_string(),
+        // A record without a time keeps the time and the place of the one before it. They are
+        // two things for a call the session's interruption ended (`interrupt`).
+        let (ts, place) = match (ts, self.lines.last()) {
+            ("", Some((place, before))) => (before.ts.clone(), place.clone()),
+            _ => (ts.to_string(), ts.to_string()),
         };
         let line = Line {
             seq: 0,
@@ -151,14 +155,14 @@ impl Emitter {
         let key = if event == "SessionStart" {
             String::new()
         } else {
-            ts
+            place
         };
         self.lines.push((key, line));
         Ok(())
     }
 
-    /// Every line in time order (a stable sort: equal times keep the order they were read in),
-    /// numbered, then SessionEnd.
+    /// Every line in the order of its place (a stable sort: equal places keep the order they
+    /// were read in), numbered, then SessionEnd.
     fn flush(mut self) -> Result<(Vec<Line>, Stats)> {
         if self.started {
             let ts = self.last_ts.clone();
@@ -264,12 +268,18 @@ impl Emitter {
         }
     }
 
-    /// Calls that never got a result, as interrupted, at their own time. `main_only`: at an
-    /// interruption of the session, only its own calls; subagent calls wait for their file's end.
-    fn interrupt(&mut self, main_only: bool) -> Result<()> {
+    /// Calls that never got a result, as interrupted, each a line with the time its call was
+    /// made. At an interruption of the session (`at`, the time of the record that stopped the
+    /// turn) only its own calls end, and each one's line takes that record's place among the
+    /// others: a transcript imported while the call had no result yet has the lines up to there
+    /// behind its checkpoint, and the call's line comes after them, not among them (#950). Its
+    /// time and its bytes are what they were, so it is the line it was to a checkpoint and to a
+    /// forget's denial. Subagent calls wait for their file's end (`None`), where every call left
+    /// ends at its own time: those lines are synthetic, and an import leaves them out.
+    fn interrupt(&mut self, at: Option<&str>) -> Result<()> {
         let (gone, kept) = std::mem::take(&mut self.pending)
             .into_iter()
-            .partition(|p| !main_only || p.4.is_none());
+            .partition(|p| at.is_none() || p.4.is_none());
         self.pending = kept;
         for (_, name, input, ts, agent_id, cwd) in gone {
             let mut p = json!({"tool_name": name, "tool_input": input, "tool_response": Value::Null, "interrupted": true});
@@ -281,6 +291,13 @@ impl Emitter {
             let result = self.emit("PostToolUse", &ts, p);
             self.cwd = now;
             result?;
+            // Never before its own time: an interruption with no time of its own, or an earlier
+            // one, leaves the line where it was.
+            if let (Some(at), Some((place, _))) = (at, self.lines.last_mut())
+                && at > place.as_str()
+            {
+                *place = at.to_owned();
+            }
         }
         Ok(())
     }
@@ -288,7 +305,7 @@ impl Emitter {
     /// End of one file: calls that never got a result, then the turn's last text.
     fn finish(&mut self) -> Result<()> {
         let first = self.lines.len();
-        self.interrupt(false)?;
+        self.interrupt(None)?;
         let ts = self.last_ts.clone();
         self.stop(&ts)?;
         for (_, line) in &mut self.lines[first..] {
@@ -401,7 +418,7 @@ fn claude_record(e: &mut Emitter, v: &Value, agent_id: Option<&str>) -> Result<(
             let t = text.trim_start();
             // The developer stopped the turn: its unanswered calls end here, not at the file's end.
             if agent_id.is_none() && t.starts_with("[Request interrupted") {
-                e.interrupt(true)?;
+                e.interrupt(Some(&ts))?;
             }
             if agent_id.is_some()
                 || t.is_empty()
@@ -615,7 +632,7 @@ fn codex_line(e: &mut Emitter, v: &Value) -> Result<()> {
         // An aborted turn sends no Stop, and its unanswered calls end here.
         (Some("event_msg"), Some("turn_aborted")) => {
             e.last_text = None;
-            e.interrupt(true)
+            e.interrupt(Some(&ts))
         }
         (Some("compacted"), _) => match p["message"].as_str().filter(|s| !s.trim().is_empty()) {
             Some(s) => e.emit(
@@ -2407,6 +2424,168 @@ mod tests {
         assert_eq!(records(&home), before);
     }
 
+    fn appended(file: &Path, lines: &str) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+        file.write_all(lines.as_bytes()).unwrap();
+    }
+
+    /// One agent's import of the files under `root`, with what the run said when it fails.
+    fn imports(home: &Path, agent: &str, root: &Path) -> AgentStats {
+        let mut out = Vec::new();
+        let done = import(home, &[(agent, root)], true, &mut out);
+        let said = String::from_utf8(out).unwrap();
+        let done = done.unwrap_or_else(|e| panic!("{e:#}\n{said}"));
+        done.agents[agent].clone()
+    }
+
+    /// A Claude Code transcript's record at `second` of 2026-09-01T00:00, or with no time.
+    fn claude_wrote(kind: &str, second: Option<u32>, content: Value) -> String {
+        let mut v = json!({"type": kind, "sessionId": "pending", "cwd": "/work/app",
+            "message": {"role": kind, "content": content}});
+        if let Some(second) = second {
+            v["timestamp"] = json!(format!("2026-09-01T00:00:{second:02}.000Z"));
+        }
+        format!("{v}\n")
+    }
+
+    /// A turn's two calls, made in one record: `slow` gets no result.
+    fn two_calls(second: Option<u32>) -> String {
+        let calls = json!([
+            {"type": "tool_use", "id": "slow", "name": "Bash", "input": {"command": "sleep 60"}},
+            {"type": "tool_use", "id": "fast", "name": "Bash", "input": {"command": "true"}}]);
+        claude_wrote("assistant", second, calls)
+    }
+
+    fn fast_result(second: u32) -> String {
+        let result = json!([{"type": "tool_result", "tool_use_id": "fast", "content": "done"}]);
+        claude_wrote("user", Some(second), result)
+    }
+
+    const STOPPED: &str = "[Request interrupted by user]";
+
+    /// The one record the second run stored: the call that got no result, as interrupted, at
+    /// `at`, the time the call was made.
+    fn the_interrupted_call(before: &[Event], after: &[Event], at: i64) {
+        assert_eq!(after[..before.len()], before[..]);
+        let [slow] = &after[before.len()..] else {
+            panic!("{:#?}", &after[before.len()..]);
+        };
+        assert_eq!((slow.kind.as_str(), slow.ts), ("tool", at), "{slow:#?}");
+        assert!(slow.body.contains("sleep 60"), "{}", slow.body);
+        let body: Value = serde_json::from_str(&slow.body).unwrap();
+        assert_eq!(body["interrupted"], true, "{body}");
+    }
+
+    /// #950: a call with no result yet when an import ran (a call made beside it had its result
+    /// by then), and interrupted after it. Its line has the time the call was made, and stands
+    /// where the record that stopped the turn is: the next import takes it after the lines
+    /// imported before, and the file is not refused.
+    #[test]
+    fn a_call_interrupted_after_an_import_comes_after_the_imported_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, root) = (dir.path().join("home"), dir.path().join("projects"));
+        std::fs::create_dir_all(root.join("p")).unwrap();
+        let file = root.join("p/pending.jsonl");
+        let turn = claude_wrote("user", Some(0), json!("Run both."))
+            + &two_calls(Some(1))
+            + &fast_result(2);
+        std::fs::write(&file, turn).unwrap();
+        assert!(imports(&home, "claude", &root).events > 0);
+        let imported = records(&home);
+        // The developer stops the turn: the call with no result ends there.
+        appended(&file, &claude_wrote("user", Some(9), json!(STOPPED)));
+        assert_eq!(imports(&home, "claude", &root).events, 1);
+        let after = records(&home);
+        the_interrupted_call(&imported, &after, CLAUDE_MS + 1_000);
+        assert_eq!(imports(&home, "claude", &root).events, 0);
+        assert_eq!(records(&home), after);
+    }
+
+    /// The same for a Codex rollout, whose `turn_aborted` ends the calls of its turn.
+    #[test]
+    fn a_codex_call_aborted_after_an_import_comes_after_the_imported_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, root) = (dir.path().join("home"), dir.path().join("sessions"));
+        std::fs::create_dir(&root).unwrap();
+        let line = |second: u32, kind: &str, payload: Value| {
+            let at = format!("2026-09-02T00:00:{second:02}.000Z");
+            format!(
+                "{}\n",
+                json!({"timestamp": at, "type": kind, "payload": payload})
+            )
+        };
+        let call = |id: &str, cmd: &str| {
+            let arguments = json!({"cmd": cmd}).to_string();
+            let call = json!({"type": "function_call", "name": "exec_command",
+                "arguments": arguments, "call_id": id});
+            line(2, "response_item", call)
+        };
+        let meta = json!({"id": CODEX_SESSION, "cwd": "/work/svc", "cli_version": "0.200.0"});
+        let prompt = json!({"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "Run both."}]});
+        let result = json!({"type": "function_call_output", "call_id": "fast", "output": "done"});
+        let file = root.join("rollout-pending.jsonl");
+        let turn = [
+            line(0, "session_meta", meta),
+            line(1, "response_item", prompt),
+            call("slow", "sleep 60"),
+            call("fast", "true"),
+            line(3, "response_item", result),
+        ];
+        std::fs::write(&file, turn.concat()).unwrap();
+        assert!(imports(&home, "codex", &root).events > 0);
+        let imported = records(&home);
+        let aborted = json!({"type": "turn_aborted", "reason": "interrupted"});
+        appended(&file, &line(9, "event_msg", aborted));
+        assert_eq!(imports(&home, "codex", &root).events, 1);
+        let after = records(&home);
+        the_interrupted_call(&imported, &after, CODEX_MS + 2_000);
+        assert_eq!(imports(&home, "codex", &root).events, 0);
+        assert_eq!(records(&home), after);
+    }
+
+    /// The import's time cut reads the time a call was made (#950): a call made before the
+    /// session's first record from a hook and interrupted after it is imported, with the lines
+    /// before that record.
+    #[test]
+    fn a_call_made_before_the_cut_and_interrupted_after_it_is_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, root) = (dir.path().join("home"), dir.path().join("projects"));
+        std::fs::create_dir_all(root.join("p")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut raw = raw::open(&home).unwrap();
+        let live = capture::events(
+            "claude",
+            "UserPromptSubmit",
+            &json!({"session_id": "pending", "cwd": "/work/app", "prompt": "Already captured"}),
+            CLAUDE_MS + 5_000,
+            &Settings::default(),
+        );
+        raw.append_with_ledger(&live[0].event, &live[0].ledger, "test")
+            .unwrap();
+        drop(raw);
+        let turn = claude_wrote("user", Some(0), json!("Run both."))
+            + &two_calls(Some(1))
+            + &fast_result(2)
+            + &claude_wrote("user", Some(9), json!(STOPPED))
+            + &claude_wrote("user", Some(12), json!("Go on."));
+        std::fs::write(root.join("p/pending.jsonl"), turn).unwrap();
+        let stats = imports(&home, "claude", &root);
+        let got = records(&home);
+        let imported: Vec<&Event> = got.iter().filter(|e| e.source == "transcript").collect();
+        assert!(
+            imported.iter().all(|e| e.ts < CLAUDE_MS + 5_000),
+            "{imported:#?}"
+        );
+        let slow: Vec<&&Event> = (imported.iter())
+            .filter(|e| e.kind == "tool" && e.body.contains("sleep 60"))
+            .collect();
+        assert_eq!(slow.len(), 1, "{imported:#?}");
+        assert_eq!(slow[0].ts, CLAUDE_MS + 1_000);
+        // The prompt after the interruption is behind the cut.
+        assert_eq!(stats.cut, 1, "{stats:?}");
+    }
+
     #[test]
     fn rewritten_or_truncated_imported_prefixes_are_refused() {
         for truncate in [false, true] {
@@ -3022,7 +3201,8 @@ mod tests {
     #[test]
     fn claude_prompts_tools_answers_compaction_and_stops() {
         let (v, _) = events(CLAUDE, "claude");
-        // In time order: subagent files are read last but sorted into place.
+        // In time order: subagent files are read last but sorted into place. The two calls the
+        // interruption at 00:00:23 ended stand there (#950).
         assert_eq!(
             names(&v),
             [
@@ -3037,11 +3217,11 @@ mod tests {
                 "PostToolUseFailure",
                 "PostCompact",
                 "PostToolUse",
-                "PostToolUse",
                 "Stop",
                 "UserPromptSubmit",
                 "UserPromptSubmit",
                 "UserPromptSubmit",
+                "PostToolUse",
                 "PostToolUse",
                 "UserPromptSubmit",
                 "SessionEnd"
@@ -3056,7 +3236,11 @@ mod tests {
             assert_eq!(e["payload"]["cwd"], cwd, "{i}");
             assert_eq!(e["payload"]["hook_event_name"], e["event"]);
         }
-        let ts: Vec<&str> = v[1..].iter().map(|e| e["ts"].as_str().unwrap()).collect();
+        // An interrupted call's line has the time its call was made; the others' times rise.
+        let ts: Vec<&str> = (v[1..].iter())
+            .filter(|e| e["payload"]["interrupted"] != true)
+            .map(|e| e["ts"].as_str().unwrap())
+            .collect();
         assert!(ts.windows(2).all(|w| w[0] <= w[1]), "{ts:?}");
         assert_eq!(v[1]["payload"]["prompt"], "キャッシュの方針を決めたい");
         assert_eq!(v[1]["ts"], "2026-09-01T00:00:00.000Z");
@@ -3088,18 +3272,18 @@ mod tests {
                 .contains("SQLite")
         );
         // The inline subagent: its tool call only, never its task as a prompt or its text as a Stop.
-        assert_eq!(v[11]["payload"]["tool_name"], "Glob");
-        assert_eq!(v[11]["payload"]["agent_id"], "b2");
+        assert_eq!(v[10]["payload"]["tool_name"], "Glob");
+        assert_eq!(v[10]["payload"]["agent_id"], "b2");
         assert_eq!(
-            v[12]["payload"]["last_assistant_message"],
+            v[11]["payload"]["last_assistant_message"],
             "テストを直します。"
         );
         // Command output and a local command are no prompt; a skill command is, as typed.
-        assert_eq!(v[13]["payload"]["prompt"], "/graphify src");
-        assert_eq!(v[14]["payload"]["prompt"], "/goal finish the cache");
+        assert_eq!(v[12]["payload"]["prompt"], "/graphify src");
+        assert_eq!(v[13]["payload"]["prompt"], "/goal finish the cache");
         // A plain-text local command is no prompt; a queued prompt is sent once, when queued.
-        assert_eq!(v[15]["payload"]["prompt"], "テストも直して");
-        assert_eq!(v[15]["ts"], "2026-09-01T00:00:20.000Z");
+        assert_eq!(v[14]["payload"]["prompt"], "テストも直して");
+        assert_eq!(v[14]["ts"], "2026-09-01T00:00:20.000Z");
         // A queued prompt that starts with markup is still a prompt.
         assert_eq!(v[17]["payload"]["prompt"], "<div>見出し</div> を直して");
         // SessionEnd takes the main file's last time, not a subagent file's.
@@ -3109,12 +3293,17 @@ mod tests {
     #[test]
     fn calls_without_result_end_at_the_interruption() {
         let (v, _) = events(CLAUDE, "claude");
-        // Ended by the interruption at 00:00:23, placed at the time each call was made.
-        assert_eq!(v[10]["payload"]["tool_name"], "Edit");
-        assert_eq!(v[10]["payload"]["interrupted"], true);
-        assert!(v[10]["payload"]["tool_response"].is_null());
+        // Ended by the interruption at 00:00:23: each stands there, after the prompts before it,
+        // with the time its call was made.
+        assert_eq!(v[14]["ts"], "2026-09-01T00:00:20.000Z");
+        assert_eq!(v[15]["payload"]["tool_name"], "Edit");
+        assert_eq!(v[15]["payload"]["interrupted"], true);
+        assert!(v[15]["payload"]["tool_response"].is_null());
+        assert_eq!(v[15]["ts"], "2026-09-01T00:00:11.000Z");
         assert_eq!(v[16]["payload"]["tool_name"], "Bash");
+        assert_eq!(v[16]["payload"]["interrupted"], true);
         assert_eq!(v[16]["ts"], "2026-09-01T00:00:22.000Z");
+        assert_eq!(v[17]["ts"], "2026-09-01T00:00:24.000Z");
     }
 
     #[test]
@@ -3525,6 +3714,136 @@ mod tests {
                 .collect();
             assert_eq!(now, then, "case {n}: {read:#?}");
         }
+    }
+
+    /// #950: a call the developer's stop ended is the line it was: its time is the time the call
+    /// was made, and nothing is added to it. A call with no time of its own has, as it had, the
+    /// time of the line written before its own, which is the last one before the stop and not
+    /// the one before the call. Only the line's place is the stop's, and only when that is
+    /// later. Spelled out as the bytes each line's identity is made of, in the order the lines
+    /// stand in: a checkpoint's prefix is both.
+    #[test]
+    fn an_interrupted_calls_line_keeps_its_bytes_and_stands_where_its_turn_was_stopped() {
+        let then = |event: &str, second: u32, fields: &str| {
+            let tail =
+                format!(r#""session_id":"pending","hook_event_name":"{event}","cwd":"/work/app""#);
+            format!(
+                r#"["claude","{event}","pending","2026-09-01T00:00:{second:02}.000Z",{{{fields},{tail}}}]"#
+            )
+        };
+        let start = |second: u32| then("SessionStart", second, r#""source":"startup""#);
+        let asked = |second: u32, text: &str| {
+            then("UserPromptSubmit", second, &format!(r#""prompt":"{text}""#))
+        };
+        let slow = |second: u32| {
+            let call = r#""tool_name":"Bash","tool_input":{"command":"sleep 60"}"#;
+            let ended = r#""tool_response":null,"interrupted":true"#;
+            then("PostToolUse", second, &format!("{call},{ended}"))
+        };
+        let fast = |second: u32| {
+            let call = r#""tool_name":"Bash","tool_input":{"command":"true"}"#;
+            then(
+                "PostToolUse",
+                second,
+                &format!(r#"{call},"tool_response":"done""#),
+            )
+        };
+        let prompt = |second: Option<u32>, text: &str| claude_wrote("user", second, json!(text));
+        let slow_call = |second: Option<u32>| {
+            let call = json!([{"type": "tool_use", "id": "slow", "name": "Bash",
+                "input": {"command": "sleep 60"}}]);
+            claude_wrote("assistant", second, call)
+        };
+        let cases = [
+            // A call made beside it got its result before the stop: the interrupted call's
+            // line comes after that result's, with the time the call was made.
+            (
+                prompt(Some(0), "Run both.")
+                    + &two_calls(Some(1))
+                    + &fast_result(2)
+                    + &prompt(Some(9), STOPPED),
+                vec![start(0), asked(0, "Run both."), fast(2), slow(1)],
+            ),
+            // Nothing between the call and the stop: the order a transcript imported before
+            // has.
+            (
+                prompt(Some(0), "Run it.")
+                    + &slow_call(Some(1))
+                    + &prompt(Some(9), STOPPED)
+                    + &prompt(Some(12), "Go on."),
+                vec![start(0), asked(0, "Run it."), slow(1), asked(12, "Go on.")],
+            ),
+            // The interrupted call is the session's first event: the session starts at the time
+            // the call was made.
+            (
+                slow_call(Some(1)) + &prompt(Some(9), STOPPED),
+                vec![start(1), slow(1)],
+            ),
+            // A call with no time of its own has the time of the line written before its own.
+            (
+                prompt(Some(0), "Run it.") + &slow_call(None) + &prompt(Some(9), STOPPED),
+                vec![start(0), asked(0, "Run it."), slow(0)],
+            ),
+            // With a result between that call and the stop, that line is the result's: the
+            // time the call's line had before #950, and not the time of the line before the
+            // call (CodeRabbit on #969).
+            (
+                prompt(Some(0), "Run both.")
+                    + &two_calls(None)
+                    + &fast_result(2)
+                    + &prompt(Some(9), STOPPED),
+                vec![start(0), asked(0, "Run both."), fast(2), slow(2)],
+            ),
+            // A prompt with no time of its own after the stop has the time the call was made,
+            // as it had, and comes after the call's line.
+            (
+                prompt(Some(0), "Run both.")
+                    + &two_calls(Some(1))
+                    + &fast_result(2)
+                    + &prompt(Some(9), STOPPED)
+                    + &prompt(None, "Go on."),
+                vec![
+                    start(0),
+                    asked(0, "Run both."),
+                    fast(2),
+                    slow(1),
+                    asked(1, "Go on."),
+                ],
+            ),
+            // A stop with no time of its own leaves the call's line where it was.
+            (
+                prompt(Some(0), "Run both.")
+                    + &two_calls(Some(1))
+                    + &fast_result(2)
+                    + &prompt(None, STOPPED),
+                vec![start(0), asked(0, "Run both."), slow(1), fast(2)],
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (n, (transcript, then)) in cases.into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("pending.jsonl");
+            std::fs::write(&file, transcript).unwrap();
+            let mut lines = stable_lines(&file, "claude").unwrap().unwrap();
+            lines.retain(|line| !line.synthetic && line.event != "SessionEnd");
+            let read: Vec<String> = (lines.iter())
+                .map(|line| format!("{} {} {}", line.event, line.ts, line.payload))
+                .collect();
+            let now: Vec<String> = (lines.iter())
+                .map(|line| {
+                    let mut identity = Sha256::new();
+                    hash_line(&mut identity, line).unwrap();
+                    format!("{:x}", identity.finalize())
+                })
+                .collect();
+            let then: Vec<String> = (then.iter())
+                .map(|bytes| format!("{:x}", Sha256::digest(format!("{bytes}\n"))))
+                .collect();
+            if now != then {
+                wrong.push(format!("case {n}: {read:#?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// Codex on #659: a Claude Code line's marks (O2) are not part of its identity, so a transcript
