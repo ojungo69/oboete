@@ -1408,12 +1408,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
 /// `None` when no span is found in both, or only where the gate hid something (a quote with a
 /// mask in it, or text a mask stands for).
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
-    locate_at(window, line_index(window, line)?, quote)
-}
-
-/// `locate` for the `at`-th of the window's lines: a caller that walks them has no id to look up.
-fn locate_at(window: &Window, at: usize, quote: &str) -> Option<crate::claims::Evidence> {
-    let line = &window.lines[at];
+    let line = &window.lines[line_index(window, line)?];
     let source = line.source.as_ref()?;
     if quote.is_empty() {
         return None;
@@ -4596,6 +4591,9 @@ pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
 /// A draft with its evidence and its line's index in `w.lines`.
 type Located = (Draft, crate::claims::Evidence, usize);
 
+/// The longest quote, in bytes, an unanchored answer's count looks for in the other lines.
+const LOOKED_FOR: usize = 2_000;
+
 /// The summary, each draft whose quote is found in the window with its evidence and line, and
 /// the ids of the drafts whose quote is not (not claims: the window op counts them).
 fn located(
@@ -4619,13 +4617,22 @@ fn located(
         }
     }
     if any && found.is_empty() {
-        // #368: what the claims missed, in numbers, for the call's detail. A quote found in a
-        // line is in another one than its claim named, or the claim would have anchored.
-        let no_line = (missed.iter())
-            .filter(|(line, _)| line_index(w, line).is_none())
-            .count();
-        let elsewhere = (missed.iter())
-            .filter(|(_, quote)| (0..w.lines.len()).any(|at| locate_at(w, at, quote).is_some()))
+        // #368: what the claims missed, in numbers, for the call's detail. A provider wrote the
+        // quotes, so the search for them is a plain one with a bound (Codex on #968): each quote
+        // to the letter, in the lines other than the one its claim named, as the window shows
+        // them, and no quote longer than `LOOKED_FOR`. `locate` would build a matcher for each
+        // quote and line.
+        let named: Vec<Option<usize>> = (missed.iter())
+            .map(|(line, _)| line_index(w, line))
+            .collect();
+        let no_line = named.iter().filter(|at| at.is_none()).count();
+        let elsewhere = (missed.iter().zip(&named))
+            .filter(|((_, quote), named)| {
+                let other = |(at, l): (usize, &Line)| Some(at) != **named && l.text.contains(quote);
+                !quote.is_empty()
+                    && quote.len() <= LOOKED_FOR
+                    && w.lines.iter().enumerate().any(other)
+            })
             .count();
         crate::provider::note_refusal(format!(
             "claims: {}, no such line: {no_line}, quote in another line: {elsewhere}",
@@ -6030,6 +6037,40 @@ mod tests {
         ], "summary": "s"});
         assert_eq!(check(&w, &anchored), None);
         assert_eq!(crate::provider::refusal_note(), None);
+    }
+
+    /// Codex on #968: a provider wrote the quotes an unanchored answer's count looks for, so the
+    /// search is a plain one with a bound. A quote longer than `LOOKED_FOR` is not looked for,
+    /// and a quote its own line shows without holding it as evidence (the line's head is no part
+    /// of the event) is in no other line.
+    #[test]
+    fn an_unanchored_answers_count_looks_for_short_quotes_in_the_other_lines() {
+        let (_h, mut raw, dev) = store();
+        let long = "tabs ".repeat(LOOKED_FOR / 5 + 1);
+        let long = long.trim_end();
+        raw.append(&prompt(long)).unwrap();
+        raw.append(&prompt("Keep the cache for one hour.")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let note = |quote: &str| {
+            let claim = json!({"id": "c1", "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": "b", "quote": quote, "line": "L2",
+                "supersedes": []});
+            crate::provider::refusal_note();
+            let answer = json!({"claims": [claim], "summary": "s"});
+            assert_eq!(check(&w, &answer), Some("unanchored"));
+            crate::provider::refusal_note().unwrap()
+        };
+        let counts = |elsewhere: usize| {
+            format!("claims: 1, no such line: 0, quote in another line: {elsewhere}")
+        };
+        // The first line's words, quoted from the second: as long as the bound, and longer.
+        assert_eq!(note(&long[..LOOKED_FOR]), counts(1));
+        assert!(long.len() > LOOKED_FOR);
+        assert_eq!(note(long), counts(0));
+        // The second line as the window shows it, its head included.
+        assert_eq!(note(&w.lines[1].text), counts(0));
     }
 
     #[test]

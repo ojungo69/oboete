@@ -204,7 +204,11 @@ What such an answer's claims missed is recorded in numbers, never in text (2026-
 call's detail in `provider_calls` reads `invalid output: the answer gave nothing to keep
 (unanchored; claims: 3, no such line: 1, quote in another line: 2)`, how many claims the answer
 had, how many named a line the window does not have, and how many quoted what a line of the
-window holds, another one than they named. On this PC's store the `anthropic` entry's answers
+window holds, another one than they named. That last count is a plain search with a bound, since
+a provider wrote the quotes: each quote to the letter, in the lines as the window shows them, and
+no quote longer than 2,000 bytes. A quote that differs from a line by whitespace, compatibility
+forms or JSON escapes, which `locate` would find, is not counted, so the number is a lower bound
+of the claims another line could anchor. On this PC's store the `anthropic` entry's answers
 were refused so for 7 to 22% of a day's windows from 2026-11-05 to 2026-11-12, and the next entry,
 the same model through the CLI, accepted 1,501 of those 1,567 windows: the numbers are to say
 what the refused answers get wrong before `locate` or the prompt is changed.
