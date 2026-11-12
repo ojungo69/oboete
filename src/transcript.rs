@@ -3717,10 +3717,11 @@ mod tests {
     }
 
     /// #950: a call the developer's stop ended is the line it was: its time is the time the call
-    /// was made (the time of the line before it when it has none), and nothing is added to it.
-    /// Only its place is the stop's, and only when that is later. Spelled out as the bytes each
-    /// line's identity is made of, in the order the lines stand in: a checkpoint's prefix is
-    /// both.
+    /// was made, and nothing is added to it. A call with no time of its own has, as it had, the
+    /// time of the line written before its own, which is the last one before the stop and not
+    /// the one before the call. Only the line's place is the stop's, and only when that is
+    /// later. Spelled out as the bytes each line's identity is made of, in the order the lines
+    /// stand in: a checkpoint's prefix is both.
     #[test]
     fn an_interrupted_calls_line_keeps_its_bytes_and_stands_where_its_turn_was_stopped() {
         let then = |event: &str, second: u32, fields: &str| {
@@ -3778,10 +3779,20 @@ mod tests {
                 slow_call(Some(1)) + &prompt(Some(9), STOPPED),
                 vec![start(1), slow(1)],
             ),
-            // A call with no time of its own has the time of the line before it.
+            // A call with no time of its own has the time of the line written before its own.
             (
                 prompt(Some(0), "Run it.") + &slow_call(None) + &prompt(Some(9), STOPPED),
                 vec![start(0), asked(0, "Run it."), slow(0)],
+            ),
+            // With a result between that call and the stop, that line is the result's: the
+            // time the call's line had before #950, and not the time of the line before the
+            // call (CodeRabbit on #969).
+            (
+                prompt(Some(0), "Run both.")
+                    + &two_calls(None)
+                    + &fast_result(2)
+                    + &prompt(Some(9), STOPPED),
+                vec![start(0), asked(0, "Run both."), fast(2), slow(2)],
             ),
             // A prompt with no time of its own after the stop has the time the call was made,
             // as it had, and comes after the call's line.
