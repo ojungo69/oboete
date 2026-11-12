@@ -2297,6 +2297,7 @@ fn prompt_point(
                     started
                         + Duration::from_millis(inject.per_prompt_wait_ms.try_into().unwrap_or(0)),
                 ),
+                clock,
             };
             prompt_picks(&asking, prompt, sendable, &not_shown, &was_shown)?
         }
@@ -2351,7 +2352,7 @@ fn prompt_point(
 const ASKS_FROM: usize = 20;
 /// The places of a prompt's block, a claim's unit taking one (claude-mem's 5).
 const PROMPT_PLACES: usize = 5;
-/// The cards and the summaries the full-text side reads, of each.
+/// The cards and the summaries the full-text side keeps, of each.
 const DOC_DEPTH: usize = 10;
 /// The most the viewer's answer may be.
 const MAX_ANSWER: usize = 1 << 20;
@@ -2423,6 +2424,8 @@ struct Asking<'a> {
     settings: &'a crate::capture::Settings,
     /// When the prompt point gives up on the resident viewer (`[inject] per_prompt_wait_ms`).
     deadline: std::time::Instant,
+    /// The hook's clock: its time for what it injects ends the words side's reads of documents.
+    clock: &'a Clock,
 }
 
 /// Spec 4.2, 4.6 and G23 (docs/prompt-context.md): a prompt's places. The resident viewer is asked
@@ -2471,7 +2474,7 @@ fn prompt_picks(
     };
     let mut candidates: Vec<String> = candidates.into_iter().filter(|u| not_shown(u)).collect();
     let docs = if long {
-        docs_by_words(a.raw, a.k, &repo, &text, rules, not_shown)?
+        docs_by_words(a.raw, a.k, &repo, &text, rules, not_shown, a.clock)?
     } else {
         Vec::new()
     };
@@ -2537,7 +2540,10 @@ fn prompt_picks(
 
 /// G23's full-text side over cards and session summaries: `repo`'s documents whose stored text
 /// matches `text`, as search ranks them by words, each kept when its line holds
-/// `shortlist::THRESHOLD` of the prompt's trigrams, the most first.
+/// `shortlist::THRESHOLD` of the prompt's trigrams, the most first. Of each kind the best
+/// `search::b::WORDS_POOL` by the prompt's trigrams are read and `DOC_DEPTH` kept, and none is
+/// read once the hook's time for what it injects is over: the ones kept by then stand
+/// (docs/hook-time.md).
 fn docs_by_words(
     raw: &crate::raw::Raw,
     k: &rusqlite::Connection,
@@ -2545,13 +2551,16 @@ fn docs_by_words(
     text: &str,
     rules: &redact::Rules,
     not_shown: &dyn Fn(&String) -> bool,
+    clock: &Clock,
 ) -> Result<Vec<Doc>> {
     use crate::search::b::Class;
     let words = crate::shortlist::Words::of(&[text]);
     let mut kept = Vec::new();
+    // docs/hook-time.md: once the hook's time for what it injects is over, the rest is not read.
+    let over = || clock.over();
     // Only a document its reader shows, not shown yet, whose line holds the threshold's share of
     // the prompt takes one of the `DOC_DEPTH` places (Codex on #521).
-    crate::search::b::curated_words(k, repo, text, DOC_DEPTH, &mut |key, class| {
+    crate::search::b::curated_words(k, repo, text, DOC_DEPTH, &over, &mut |key, class| {
         let kind = match class {
             Class::Card => Kind::Card,
             Class::Summary => Kind::Summary,
@@ -6112,13 +6121,42 @@ mod tests {
     }
 
     /// G23 (Codex on #521): a card whose line falls short of the threshold takes no place in the
-    /// words side's depth: `DOC_DEPTH` cards that come first (they hold the prompt's short word)
-    /// but bear too little on it leave the place to the one that bears on it.
+    /// words side's depth: `DOC_DEPTH` cards that come first (their later sentences, which the
+    /// line is not matched on, hold more of the prompt's trigrams than the other card's text, a
+    /// longer one) but bear too little on it leave the place to the one that bears on it.
     #[test]
     fn a_card_short_of_the_threshold_takes_no_place_in_the_depth() {
         let mut p = Prompts::new(true);
+        let later = "Notes on a run. Where do parser errors go, stderr? Where do parser errors \
+                     go, stderr?";
         for i in 0..DOC_DEPTH {
-            work(&mut p, 2, &format!("Step {i}: 42 parse notes"), "", "");
+            work(&mut p, 2, &format!("Step {i}: 42 parse notes"), later, "");
+        }
+        let long = "The log held them before. It took a long while to find out which module \
+                    wrote into which file, and nobody had kept a list of the places that did; the \
+                    table of modules and files was drawn by hand in two days and checked twice \
+                    before anything was changed.";
+        let (card, _) = work(&mut p, 1, "Parser errors go to stderr", long, "");
+        let text = p.prompt("s1", "where do parser errors go, stderr or 42");
+        assert!(
+            text.contains(&format!("bugfix card {card}: Parser errors go to stderr")),
+            "{text}"
+        );
+        assert!(!text.contains("parse notes"), "{text}");
+    }
+
+    /// docs/prompt-context.md (2026-11-13): the words side's pool is the best by the prompt's
+    /// trigrams alone. A prompt's short word (`42`) is no trigram of the threshold, so the cards
+    /// that hold it do not come first: more of them than the pool holds leave the card that bears
+    /// on the prompt in it.
+    #[test]
+    fn a_prompts_short_word_keeps_no_card_out_of_the_words_pool() {
+        let mut p = Prompts::new(true);
+        let repo = p.repo.clone();
+        for i in 0..crate::search::b::WORDS_POOL + 5 {
+            let seq = p.s.said("s0", &repo, 2 * 86_400_000, "Work on the parser.");
+            let title = format!("Step {i}: 42 parse notes");
+            p.s.cards(seq, seq, json!([{"type": "bugfix", "title": title}]), false);
         }
         let (card, _) = work(&mut p, 1, "Parser errors go to stderr", "", "");
         let text = p.prompt("s1", "where do parser errors go, stderr or 42");
@@ -6127,6 +6165,26 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("parse notes"), "{text}");
+    }
+
+    /// docs/hook-time.md: once the hook's time for what it injects is over, the words side reads
+    /// no document more, where a hook with time left reads the card its prompt bears on.
+    #[test]
+    fn the_words_side_reads_no_document_once_the_hooks_time_is_over() {
+        let mut p = Prompts::new(true);
+        let (card, _) = work(&mut p, 1, "Parser errors go to stderr", "", "");
+        let k = crate::knowledge::open(p.s.home.path()).unwrap();
+        let rules = redact::Rules::default();
+        let read = |clock: &Clock| -> Vec<String> {
+            let prompt = "where do parser errors go, stderr";
+            docs_by_words(&p.s.raw, &k, &p.repo, prompt, &rules, &|_| true, clock)
+                .unwrap()
+                .into_iter()
+                .map(|d| d.key)
+                .collect()
+        };
+        assert_eq!(read(&prompt_clock(Duration::from_secs(3))), [card]);
+        assert!(read(&prompt_clock(Duration::ZERO)).is_empty());
     }
 
     /// G23 (docs/prompt-context.md): with no resident viewer, the words side takes the cards and

@@ -720,15 +720,22 @@ fn imported_projects(k: &Connection, repo: &str, names: &[String]) -> Result<Vec
     Ok(projects)
 }
 
+/// The most cards, and the most session summaries, the prompt hook's full-text side offers its
+/// reader: the best by the prompt's trigrams (docs/prompt-context.md, 2026-11-13).
+pub(crate) const WORDS_POOL: usize = 100;
+
 /// The prompt hook's full-text side over cards and session summaries (G23): the IDs of `repo`'s
-/// current ones whose stored text matches `text`, best first by words alone, at most `depth` of
-/// each, read by no reader (the hook reads what it keeps). A store whose consumers have not made
-/// a leg's index yet gives none of it.
+/// current ones whose stored text matches `text`, best first by its trigrams alone (a short word
+/// is no trigram of the hook's threshold, and reorders nothing here), each offered to `take`
+/// until it took `depth` of its kind, the best `WORDS_POOL` of a kind at most; read by no reader
+/// (the hook reads what it keeps). Once `stop` says so, nothing more is offered and no statement
+/// is started. A store whose consumers have not made a leg's index yet gives none of it.
 pub(crate) fn curated_words(
     k: &Connection,
     repo: &str,
     text: &str,
     depth: usize,
+    stop: &dyn Fn() -> bool,
     take: &mut dyn FnMut(&str, Class) -> Result<bool>,
 ) -> Result<()> {
     let q = Query {
@@ -738,6 +745,9 @@ pub(crate) fn curated_words(
         ..Default::default()
     };
     for (summaries, fts) in [(false, "cards_fts"), (true, "turns_fts")] {
+        if stop() {
+            break;
+        }
         if !crate::consumer::manifest::exists(k, "table", fts)? {
             continue;
         }
@@ -746,7 +756,16 @@ pub(crate) fn curated_words(
         } else {
             Class::Card
         };
-        curated_fts(k, &q, summaries, depth, &mut |id| take(id, class.clone()))?;
+        // The pool first, with no reader: the statement ends at `WORDS_POOL` rows, however many
+        // of them `take` refuses.
+        let pool = curated_fts(k, &q, summaries, WORDS_POOL, false, &mut |_| Ok(true))?;
+        let mut taken = 0;
+        for id in pool {
+            if taken == depth || stop() {
+                break;
+            }
+            taken += usize::from(take(&id, class.clone())?);
+        }
     }
     Ok(())
 }
@@ -2561,7 +2580,7 @@ fn curated_leg(
 ) -> Result<Vec<Hit>> {
     let read = |id: &str| curated_hit(raw, k, rules, terms, summaries, id);
     let mut hits = HashMap::new();
-    let mut order = curated_fts(k, q, summaries, depth, &mut |id| {
+    let mut order = curated_fts(k, q, summaries, depth, true, &mut |id| {
         Ok(match read(id)? {
             Some(hit) => {
                 hits.insert(id.to_owned(), hit);
@@ -2603,11 +2622,14 @@ fn curated_leg(
 
 /// A curated leg's full-text side: `q`'s current cards, or session summaries, in bm25 order, each
 /// ID offered to `take` until `depth` of them were taken (one its reader hides takes no place).
+/// With `short_first`, a search's order: the hits that hold more of a mixed query's short words
+/// come before the others (`query_clauses`). Without it the trigrams alone order them.
 fn curated_fts(
     k: &Connection,
     q: &Query,
     summaries: bool,
     depth: usize,
+    short_first: bool,
     take: &mut dyn FnMut(&str) -> Result<bool>,
 ) -> Result<Vec<String>> {
     let (table, fts, current, number) = if summaries {
@@ -2616,11 +2638,15 @@ fn curated_fts(
         ("cards", "cards_fts", "d.replaced_by IS NULL", "d.n")
     };
     let mut order = Vec::new();
-    let Some((mut clauses, mut args, by, by_args)) =
+    let Some((mut clauses, mut args, mut by, mut by_args)) =
         super::query_clauses(&q.text, fts, &["f.text"])
     else {
         return Ok(order);
     };
+    // Only a query of trigrams and short words has arguments in its order: the short words'.
+    if !short_first && !by_args.is_empty() {
+        (by, by_args) = ("rank, ".into(), Vec::new());
+    }
     clauses.push(current.into());
     type_clause(
         q,
@@ -6753,15 +6779,76 @@ mod tests {
         let k = crate::knowledge::open(&home).unwrap();
         let rules = redact::Rules::default();
         let mut taken = Vec::new();
-        curated_words(&k, R, "Parser errors go to stderr", 1, &mut |id, _| {
-            let readable = crate::cards::get(&k, &s.raw, id, &rules)?.is_some();
-            if readable {
-                taken.push(id.to_owned());
-            }
-            Ok(readable)
-        })
+        curated_words(
+            &k,
+            R,
+            "Parser errors go to stderr",
+            1,
+            &|| false,
+            &mut |id, _| {
+                let readable = crate::cards::get(&k, &s.raw, id, &rules)?.is_some();
+                if readable {
+                    taken.push(id.to_owned());
+                }
+                Ok(readable)
+            },
+        )
         .unwrap();
         assert!(taken.iter().any(|id| id.ends_with(&shown)), "{taken:?}");
+    }
+
+    /// docs/prompt-context.md (2026-11-13): the prompt hook's words side offers the best
+    /// `WORDS_POOL` cards by the prompt's trigrams and no more, however many match and however few
+    /// are taken: each offer is a document read, and a prompt's trigrams match most of a store.
+    /// The depth still ends it first, and once the caller says to stop nothing more is offered,
+    /// of either kind.
+    #[test]
+    fn the_words_side_offers_no_more_than_its_pool() {
+        let mut s = Store::new();
+        for i in 0..WORDS_POOL + 5 {
+            let seq = s.said("s", R, 2_000, "Parser work.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": format!("Parser errors, part {i}")}]),
+                false,
+            );
+        }
+        let seq = s.said("s", R, 2_000, "Parser work.");
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Make the parser errors go to stderr"}, "skipped": false}),
+        );
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let offered = std::cell::RefCell::new(Vec::new());
+        let offers = |depth: usize, stop: &dyn Fn() -> bool, takes: bool| {
+            offered.borrow_mut().clear();
+            curated_words(
+                &k,
+                R,
+                "Parser errors go to stderr",
+                depth,
+                stop,
+                &mut |_, class| {
+                    offered.borrow_mut().push(class);
+                    Ok(takes)
+                },
+            )
+            .unwrap();
+            let cards = offered
+                .borrow()
+                .iter()
+                .filter(|c| **c == Class::Card)
+                .count();
+            (cards, offered.borrow().len() - cards)
+        };
+        assert_eq!(offers(1, &|| false, false), (WORDS_POOL, 1));
+        // The third card taken is the last card offered.
+        assert_eq!(offers(3, &|| false, true), (3, 1));
+        assert_eq!(offers(1, &|| offered.borrow().len() >= 3, false), (3, 0));
+        assert_eq!(offers(1, &|| true, false), (0, 0));
     }
 
     /// G23 (Codex on #521): the viewer counts a session summary only when it has a request, by
