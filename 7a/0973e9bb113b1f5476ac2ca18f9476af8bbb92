@@ -1,0 +1,25 @@
+.github/scripts/trial-package.sh
+  s_b837d726e3a0bf::t_e4d6fc71b2366c 1-63
+.github/scripts/trial-smoke.sh
+  s_b837d726e3a0bf::t_4b10687334a4f4 1-71
+.github/workflows/trial-build.yml
+  s_b837d726e3a0bf::t_bcdf57eb3f6d94 1-275
+docs/trial-builds.md
+  s_b837d726e3a0bf::t_59bf0ba0d35deb 1-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a0973e9bb113b1f5476ac2ca18f9476af8bbb92",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
