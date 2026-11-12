@@ -4071,10 +4071,16 @@ mod tests {
             .chain(GROK_EVENTS.iter().map(|e| e.1))
             .min()
             .unwrap();
-        let needed = crate::hook::STORE_WAIT
-            + crate::unwritten::KEEP_WAIT
-            + std::time::Duration::from_millis(500);
+        let needed = failed_write_and_keep();
         assert!(needed <= std::time::Duration::from_secs(shortest.into()));
+    }
+
+    /// What a hook whose store does not open takes to its end: the store's wait, a keep in
+    /// progress, and its own file and marker.
+    fn failed_write_and_keep() -> std::time::Duration {
+        crate::hook::STORE_WAIT
+            + crate::unwritten::KEEP_WAIT
+            + std::time::Duration::from_millis(500)
     }
 
     #[test]
@@ -4557,13 +4563,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A plugin that kills its capture hook leaves it the store's wait and the hook's own end
-    /// after that (docs/unwritten.md U2, U3). Killed sooner, a hook whose store is held dies
-    /// before it keeps what it could not write, and nothing says an event was lost. The two
-    /// numbers are in two languages: this holds them together.
+    /// A plugin that kills its capture hook lets it live through the store's wait, a keep in
+    /// progress and its own file and marker (docs/unwritten.md U2, U5), as the shortest timeout
+    /// `setup` writes does. Killed sooner, a hook whose store is held dies before it keeps what
+    /// it could not write, and nothing says an event was lost. The numbers are in two
+    /// languages: this holds them together.
     #[test]
     fn a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write() {
-        let least = crate::hook::STORE_WAIT + crate::hook_time::MARGIN;
+        let least = failed_write_and_keep();
         let ms_after = |text: &str, mark: &str| {
             let at = text
                 .find(mark)

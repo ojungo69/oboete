@@ -16,11 +16,12 @@ export default function (pi) {
   const textParts = (parts) => (Array.isArray(parts) ? parts : [])
     .filter((p) => p?.type === "text").map((p) => p.text).join("\n");
 
-  // A capture call's child gets 3 s. Nothing waits for it, and a hook whose store is held waits
-  // 2 s for the store, then keeps what it could not write and marks the failure
-  // (docs/unwritten.md U2): killed at 2 s it died before either, and its event was lost with
-  // nothing to say so. A call Pi waits for keeps Pi's 2 s: what its hook prints after Pi went on
-  // must not come to count as shown (#955: on a held store those calls' events are lost still).
+  // A capture call's child gets 3 s. Nothing waits for its answer (a session's end waits up to
+  // 2 s for the queue and goes on), and a hook whose store is held waits 2 s for the store, then
+  // keeps what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it
+  // died before either, and its event was lost with nothing to say so. A call whose answer Pi
+  // waits for keeps Pi's 2 s: what its hook prints after Pi went on must not come to count as
+  // shown (#955: on a held store those calls' events are lost still).
   const CAPTURE_KILL_MS = 3000;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
     const remaining = deadline === undefined ? CAPTURE_KILL_MS : Math.min(2000, deadline - Date.now());
