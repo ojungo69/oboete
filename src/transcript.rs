@@ -1124,6 +1124,8 @@ fn import_files(
             // since): a confirm stops, since what it was shown is not what is there. A preview
             // counts the file as waiting, as one that changes while it is read, and leaves it
             // bound as it was with nothing parsed: it authorizes no later version of the file.
+            // Once its lines are read and it is still the file that was bound, a preview does not
+            // look at it again: what it counts is what it bound.
             let changed = |bound: &Option<&mut BoundFile>| {
                 bound.as_deref().is_some_and(|b| check_bound(b).is_err())
             };
@@ -1149,6 +1151,10 @@ fn import_files(
                 anyhow::ensure!(!yes, FailureCode::Stale);
                 stats.waiting += 1;
                 continue;
+            }
+            #[cfg(test)]
+            if let Some(hook) = AFTER_READ.with_borrow_mut(Option::take) {
+                hook();
             }
             if let Some(bound) = bound.as_deref_mut() {
                 let parsed = parsed_digest(&lines)?;
@@ -1250,6 +1256,9 @@ fn import_files(
             let mut occurrences = HashMap::<String, u64>::new();
             let mut batch = Vec::<(Captured, raw::ImportIdentity)>::new();
             let mut bytes = 0;
+            // A batch the store did not take for a forget's sake: the file is refused where it
+            // stands, as one `transcript_cut` refuses, and the files after it are still read.
+            let mut refused = None;
             for (mut line, event_hash) in lines.into_iter().zip(&fingerprints) {
                 let occurrence = occurrences.entry(event_hash.clone()).or_default();
                 let identity = format!("{event_hash}:{occurrence}");
@@ -1284,10 +1293,16 @@ fn import_files(
                     capture::imported(agent, &line.event, &line.payload, ts, &repo, cwd, &settings);
                 let size: usize = captured.iter().map(|c| c.event.body.len()).sum();
                 if batch.len() + captured.len() > IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
-                    if let Some(bound) = bound.as_deref() {
+                    // A confirm stops when the file is no longer the one it was shown. A preview
+                    // writes nothing and has the lines it read from the file it bound: it reads
+                    // on, and a confirm of it finds the file changed.
+                    if yes && let Some(bound) = bound.as_deref() {
                         check_bound(bound)?;
                     }
-                    append_batch(raw, &mut batch, &checkpoint, &settings, stats)?;
+                    if let Err(e) = append_batch(raw, &mut batch, &checkpoint, &settings, stats) {
+                        refused = Some(forget_refusal(e)?);
+                        break;
+                    }
                     if raw.is_some() {
                         committed(&Committed::Transcripts {
                             agent: (*agent).to_owned(),
@@ -1318,19 +1333,31 @@ fn import_files(
                 checkpoint.through = through;
                 checkpoint.prefix = fingerprint;
             }
-            if checkpoint.through > seen {
-                if let Some(bound) = bound.as_deref() {
+            if refused.is_none() && checkpoint.through > seen {
+                if yes && let Some(bound) = bound.as_deref() {
                     check_bound(bound)?;
                 }
-                append_batch(raw, &mut batch, &checkpoint, &settings, stats)?;
-                if raw.is_some() {
-                    committed(&Committed::Transcripts {
-                        agent: (*agent).to_owned(),
-                        events: stats.events,
-                        bytes: stats.bytes,
-                    });
+                match append_batch(raw, &mut batch, &checkpoint, &settings, stats) {
+                    Ok(()) => {
+                        if raw.is_some() {
+                            committed(&Committed::Transcripts {
+                                agent: (*agent).to_owned(),
+                                events: stats.events,
+                                bytes: stats.bytes,
+                            });
+                        }
+                        checkpoints.insert(key, checkpoint);
+                    }
+                    Err(e) => refused = Some(forget_refusal(e)?),
                 }
-                checkpoints.insert(key, checkpoint);
+            }
+            if let Some(e) = refused {
+                stats.refused += 1;
+                writeln!(
+                    out,
+                    "refused {}: {e:#}",
+                    crate::redact::outbound_with(&path.display().to_string(), &settings.rules)
+                )?;
             }
         }
     }
@@ -1344,10 +1371,19 @@ fn import_files(
     let refused: u64 = stats.agents.values().map(|agent| agent.refused).sum();
     if refused != 0 {
         return Err(anyhow::anyhow!(FailureCode::Refused)).with_context(|| format!(
-            "{refused} transcript file(s) refused: imported prefixes or cross-source forget identities cannot be verified; \
-             review the refusal reasons above; those files were not imported"));
+            "{refused} transcript file(s) refused: an imported prefix, or what a forget covers, cannot be verified; \
+             review the refusal reasons above; nothing more of those files was imported"));
     }
     Ok(())
+}
+
+/// `e` when it is a batch the store refused for a forget's sake: its file is refused, and the
+/// run goes on. Any other error of an append ends the run.
+fn forget_refusal(e: anyhow::Error) -> Result<anyhow::Error> {
+    match e.downcast_ref::<raw::ForgetRefusal>() {
+        Some(_) => Ok(e),
+        None => Err(e),
+    }
 }
 
 fn hash_line(prefix: &mut Sha256, line: &Line) -> Result<()> {
@@ -1475,6 +1511,11 @@ thread_local! {
     };
     /// After a preview has bound its files, before it reads the first.
     static AFTER_BOUND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    /// After a file was read and found to be the one that was bound, before its lines are counted
+    /// or written.
+    static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
         std::cell::RefCell::new(None)
     };
 }
@@ -1994,6 +2035,82 @@ mod tests {
         let codex = &shown.candidates.agents["codex"];
         assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
         assert!(!home.exists());
+    }
+
+    /// A Claude Code transcript of `prompts` prompts, one session, under `dir`: its root and file.
+    fn prompts_transcript(dir: &Path, prompts: usize) -> (PathBuf, PathBuf) {
+        let root = dir.join("claude/projects");
+        let project = root.join("-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let lines: String = (0..prompts)
+            .map(|i| {
+                let at = format!("2026-09-01T{:02}:{:02}:{:02}Z", i / 3600, i / 60 % 60, i % 60);
+                let line = json!({"type": "user", "timestamp": at, "sessionId": "grows",
+                    "cwd": "/work/app", "message": {"role": "user", "content": format!("Prompt {i}.")}});
+                format!("{line}\n")
+            })
+            .collect();
+        let file = project.join("grows.jsonl");
+        std::fs::write(&file, lines).unwrap();
+        (root, file)
+    }
+
+    fn grow(file: &Path) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+
+    /// A transcript a session at work wrote to after the preview read it: the preview has its
+    /// lines, read from the file it bound, and writes nothing, so it reads on and is shown with
+    /// the file's events counted. A confirm of it stops: the file is not the one it was shown.
+    /// With one batch (the check at the file's end) and with two (the check before a batch).
+    #[test]
+    fn a_preview_reads_on_when_a_transcript_grows_after_it_was_read() {
+        for prompts in [3, raw::IMPORT_BATCH + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, file) = prompts_transcript(dir.path(), prompts);
+            let grown = file.clone();
+            AFTER_READ.with_borrow_mut(|hook| *hook = Some(Box::new(move || grow(&grown))));
+            let home = dir.path().join("home");
+            let roots = [("claude", root.as_path())];
+            let shown = preview(&home, &roots).unwrap();
+            let claude = &shown.candidates.agents["claude"];
+            assert_eq!((claude.files, claude.waiting), (1, 0), "{prompts}");
+            assert!(claude.events >= prompts as u64, "{prompts}: {claude:?}");
+            assert!(!home.exists());
+            let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
+                panic!("no commits")
+            })
+            .unwrap_err();
+            assert_eq!(failed.code, FailureCode::Stale, "{prompts}");
+            assert!(!raw::path(&home).exists());
+        }
+    }
+
+    /// A confirm still stops when the file grows after it was read, before a batch of it is
+    /// written: none of the file is imported. With one batch and with two.
+    #[test]
+    fn a_confirm_stops_when_a_transcript_grows_after_it_was_read() {
+        for prompts in [3, raw::IMPORT_BATCH + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, file) = prompts_transcript(dir.path(), prompts);
+            let home = dir.path().join("home");
+            let roots = [("claude", root.as_path())];
+            let shown = preview(&home, &roots).unwrap();
+            // The confirm reads the file twice: for its own preview, then to import it. The file
+            // grows in the second.
+            AFTER_READ.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    AFTER_READ.with_borrow_mut(|hook| *hook = Some(Box::new(move || grow(&file))));
+                }))
+            });
+            let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
+                panic!("no commits")
+            })
+            .unwrap_err();
+            assert_eq!(failed.code, FailureCode::Stale, "{prompts}");
+            assert!(records(&home).is_empty(), "{prompts}");
+        }
     }
 
     /// A line whose transcript named no directory gets no repository: "." is the importing

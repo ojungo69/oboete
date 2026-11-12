@@ -2030,13 +2030,46 @@ fn a_forgotten_unique_transcript_event_cannot_return_as_an_ambiguous_pair() {
     copy_backup(&old_backup, &home.join("backups"));
     ok(run(&home, &["restore"], ""));
     std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+    // A file after it in the import's order, of another session.
+    let later = serde_json::json!({
+        "type":"user", "sessionId":"after-the-ambiguous-pair", "cwd":"/synthetic",
+        "timestamp":"2026-09-01T00:00:02.000Z",
+        "message":{"role":"user", "content":"later-prompt-after-the-ambiguous-pair-512"}
+    });
+    std::fs::write(projects.join("z-later.jsonl"), format!("{later}\n")).unwrap();
     let imported = run(&home, &args, "");
     assert!(
         !imported.status.success(),
         "the ambiguous pair bypassed the surviving request"
     );
-    assert!(String::from_utf8_lossy(&imported.stderr).contains("ambiguous"));
+    let messages = format!(
+        "{}{}",
+        String::from_utf8_lossy(&imported.stdout),
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert!(messages.contains("ambiguous"), "{messages}");
+    // R19-04: the file is refused, not the run. The one after it is imported.
+    assert!(
+        messages.contains("1 transcript file(s) refused"),
+        "{messages}"
+    );
     ok(run(&home, &["worker", "--idle-ms", "0"], ""));
+    let later = ok(run(
+        &home,
+        &[
+            "search",
+            "--all",
+            "--raw",
+            "only",
+            "--",
+            "later-prompt-after-the-ambiguous-pair-512",
+        ],
+        "",
+    ));
+    assert!(
+        later.contains("later-prompt-after-the-ambiguous-pair-512"),
+        "{later}"
+    );
     let found = ok(run(
         &home,
         &["search", "--all", "--raw", "only", "--", CANARY],
@@ -2047,6 +2080,118 @@ fn a_forgotten_unique_transcript_event_cannot_return_as_an_ambiguous_pair() {
         ok(run(&home, &["get", &keep], ""))
             .contains("unrelated-record-before-ambiguous-transcript-511")
     );
+}
+
+/// Two transcripts under `home`'s Claude Code projects, in the import's order:
+/// `a-filename-only.jsonl` of `prompts` prompts (with no session id of its own when `labelled`
+/// is false) and `b-labelled.jsonl` of one.
+fn two_transcripts(home: &Path, labelled: bool, prompts: usize) {
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = |session: Option<&str>, second: usize, text: &str| {
+        let mut line = serde_json::json!({"type":"user", "cwd":"/synthetic",
+            "timestamp":format!("2026-09-01T{:02}:{:02}:{:02}.000Z", second / 3600, second / 60 % 60, second % 60),
+            "message":{"role":"user", "content":text}});
+        if let Some(session) = session {
+            line["sessionId"] = session.into();
+        }
+        format!("{line}\n")
+    };
+    let first = labelled.then_some("first-labelled-session-631");
+    let lines: String = (0..prompts)
+        .map(|i| line(first, i, &format!("first-transcript-prompt-631-{i}")))
+        .collect();
+    std::fs::write(projects.join("a-filename-only.jsonl"), lines).unwrap();
+    std::fs::write(
+        projects.join("b-labelled.jsonl"),
+        line(Some("labelled-session-631"), 86_000, "labelled-prompt-631"),
+    )
+    .unwrap();
+}
+
+fn transcript_prompts(home: &Path) -> i64 {
+    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM records WHERE type='event' AND source='transcript' AND kind='prompt'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// R19-04: a transcript the store refuses for a forget's sake is refused, and the import goes on
+/// to the files after it, run after run. Here a file with no session id of its own: once a forget
+/// is registered, none can tell its records from what was forgotten. Refused at its only batch,
+/// and at the first of two: no checkpoint says any of it was imported.
+#[test]
+fn a_transcript_refused_for_a_forget_does_not_stop_the_files_after_it() {
+    for prompts in [1, 501] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        let forgotten = hook_record(home, CANARY);
+        ok(run(home, &["forget", "--record", &forgotten, "--yes"], ""));
+        two_transcripts(home, false, prompts);
+        for round in 0..2 {
+            let imported = run(
+                home,
+                &["import", "transcripts", "--agent", "claude", "--yes"],
+                "",
+            );
+            let shown = String::from_utf8_lossy(&imported.stdout).into_owned();
+            let said = format!("{shown}{}", String::from_utf8_lossy(&imported.stderr));
+            let at = format!("{prompts} prompts, run {round}: {said}");
+            assert!(!imported.status.success(), "{at}");
+            assert!(
+                said.contains("cannot import raw without a native source identity after forget"),
+                "{at}"
+            );
+            assert!(said.contains("1 transcript file(s) refused"), "{at}");
+            // The labelled file's prompt, once; nothing of the refused file, in the store or
+            // behind a checkpoint: the second run has seen the labelled file's two lines only
+            // (its start and its prompt).
+            assert_eq!(transcript_prompts(home), 1, "{at}");
+            let stats = shown.lines().rfind(|l| l.starts_with('{')).expect(&at);
+            let stats: serde_json::Value = serde_json::from_str(stats).unwrap();
+            assert_eq!(stats["agents"]["claude"]["seen"], 2 * round, "{at}");
+        }
+    }
+}
+
+/// An append that fails for another reason than a forget still ends the import at once: no file
+/// is counted as refused, and none is read after it. At the file's only batch, and at the first
+/// of two.
+#[test]
+fn a_transcript_batch_that_fails_for_another_reason_ends_the_import() {
+    for prompts in [1, 501] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+        hook_record(home, "a-record-so-the-store-is-there-632");
+        let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_transcripts BEFORE INSERT ON records WHEN NEW.source = 'transcript'
+             BEGIN SELECT RAISE(ABORT, 'synthetic append failure'); END;",
+        )
+        .unwrap();
+        drop(db);
+        two_transcripts(home, true, prompts);
+        let imported = run(
+            home,
+            &["import", "transcripts", "--agent", "claude", "--yes"],
+            "",
+        );
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&imported.stdout),
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let at = format!("{prompts} prompts: {said}");
+        assert!(!imported.status.success(), "{at}");
+        assert!(said.contains("synthetic append failure"), "{at}");
+        assert!(!said.contains("refused"), "{at}");
+        assert_eq!(transcript_prompts(home), 0, "{at}");
+    }
 }
 
 #[test]
