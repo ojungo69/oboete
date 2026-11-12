@@ -26,11 +26,12 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   turns are not recovered by that call. agy's step claims stay taken: the kept event is that step.
   The keep comes after the 2 s wait, so whatever ends a hook has to leave it that wait, a keep
   in progress (U5) and the hook's own end: 3 s. The timeouts `setup` writes do (the shortest is
-  3 s). A plugin that kills its child does for a hook whose answer nothing waits for: OpenCode's
-  every hook, and Pi's captures of a tool's result, a turn's end, a compaction and a session's
-  end. At a session's end Pi waits up to 2 s for its queue and goes on: that wait is not the
-  child's 3 s. Pi's plugin kills the two hooks whose answer it waits for, a prompt's and a
-  session start's, as its 2 s wait ends: on a held store those are lost still (#955).
+  3 s). A plugin that kills its child does where it gives the child 3 s: OpenCode's every hook,
+  the prompt's included, whose answer it waits those 3 s for; and Pi's captures of a tool's
+  result, a turn's end, a compaction and a session's end, whose answer nothing waits for. At a
+  session's end Pi waits up to 2 s for its queue and goes on: that wait is not the child's 3 s.
+  Pi's plugin kills the two hooks whose answer it waits for, a prompt's and a session start's,
+  as its 2 s wait ends: on a held store those are lost still (#955).
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
   seqs follow the events' times: a call visits at most the oldest 16 files and writes at most
   **256 KiB of serialized events**, including their labels and ledger rows, across all files.
