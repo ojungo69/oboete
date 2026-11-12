@@ -83,8 +83,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// What this build says it is: a trial build's own version (`OBOETE_VERSION`, given by the
+/// workflow that builds it: docs/spec.md 7.7), else Cargo.toml's.
+pub(crate) const VERSION: &str = match option_env!("OBOETE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 #[derive(Parser)]
-#[command(name = "oboete", version, about = "Memory for coding agents")]
+#[command(name = "oboete", version = VERSION, about = "Memory for coding agents")]
 struct Cli {
     /// Data directory (default: ~/.oboete)
     #[arg(long, global = true, env = "OBOETE_HOME")]
@@ -1263,6 +1269,31 @@ fn claims_listed(home: &std::path::Path, repo: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trial build's version is Cargo.toml's with its trial and its commit after it
+    /// (docs/spec.md 7.7): whatever this build was given starts with Cargo.toml's, and
+    /// `--version` prints it.
+    #[test]
+    fn a_build_says_the_crates_version_or_a_trial_of_it() {
+        use clap::CommandFactory;
+        let base = env!("CARGO_PKG_VERSION");
+        let trial = VERSION
+            .strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix("-trial."));
+        assert!(VERSION == base || trial.is_some(), "{VERSION}");
+        if let Some(trial) = trial {
+            let (number, commit) = trial.split_once('+').expect("a trial names its commit");
+            assert!(number.parse::<u32>().is_ok_and(|n| n > 0), "{VERSION}");
+            assert!(
+                commit.len() == 8 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{VERSION}"
+            );
+        }
+        assert_eq!(
+            Cli::command().render_version().trim(),
+            format!("oboete {VERSION}")
+        );
+    }
 
     thread_local! {
         /// Run after `oboete claims` built its listing (#439).
