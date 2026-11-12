@@ -1,0 +1,21 @@
+.github/workflows/trial-build.yml
+  s_b837d726e3a0bf::t_43c2261d93a6dc 126,130,141-146
+docs/trial-builds.md
+  s_b837d726e3a0bf::t_c08d66b3d2bac8 21-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fb2aea73176c192eaf4d6aaf60084372a2a2ce37",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
