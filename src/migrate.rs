@@ -2494,9 +2494,10 @@ mod tests {
             source.path().join("rollout-basic.jsonl"),
         )
         .unwrap();
-        let shown = crate::transcript::preview(home.path(), &[("codex", source.path())]).unwrap();
-        assert_eq!(shown.candidates.agents["codex"].events, 8);
-        let migration = shown.v1.expect("transcript consent must include v1");
+        let shown =
+            crate::transcript::preview_plan(home.path(), &[("codex", source.path())]).unwrap();
+        assert_eq!(shown.preview.candidates.agents["codex"].events, 8);
+        let migration = (shown.preview.v1.as_ref()).expect("transcript consent must include v1");
         assert_eq!(
             (migration.candidates.records, migration.candidates.documents),
             (1, 1)
@@ -2508,7 +2509,7 @@ mod tests {
         let imported = crate::transcript::run(
             home.path(),
             &[("codex", source.path())],
-            Some(&shown.key),
+            Some(shown),
             &mut |c| match c {
                 crate::transcript::Committed::V1(c) => stages.push(format!("v1:{:?}", c.stage)),
                 crate::transcript::Committed::Transcripts {
@@ -2636,8 +2637,8 @@ mod tests {
         let v1 = V1::new(home.path());
         v1.session("s1", "r", 100);
         v1.prompt("s1", 200, "one");
-        let shown = crate::transcript::preview(home.path(), &[]).unwrap();
-        let failed = crate::transcript::run(home.path(), &[], Some(&shown.key), &mut |c| {
+        let shown = crate::transcript::preview_plan(home.path(), &[]).unwrap();
+        let failed = crate::transcript::run(home.path(), &[], Some(shown), &mut |c| {
             if matches!(
                 c,
                 crate::transcript::Committed::V1(Committed {
@@ -2654,6 +2655,70 @@ mod tests {
         assert_eq!((imported.stats.records, imported.stats.repos), (1, 0));
         assert!(imported.settings.is_some());
         assert!(failed.outcome.stats.agents.is_empty());
+    }
+
+    /// A transcript confirm is of what its preview showed of the older store too. It makes no
+    /// preview of its own (#947), so each of these three looks stands alone. An older store that
+    /// appeared since the preview is not migrated.
+    #[test]
+    fn a_transcript_confirm_stops_at_an_older_store_its_preview_did_not_show() {
+        let home = tempfile::tempdir().unwrap();
+        let shown = crate::transcript::preview_plan(home.path(), &[]).unwrap();
+        assert!(shown.preview.v1.is_none());
+        let v1 = V1::new(home.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        let failed =
+            crate::transcript::run(home.path(), &[], Some(shown), &mut |_| panic!("no commits"))
+                .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert!(failed.outcome.v1.is_none());
+        assert!(!crate::raw::path(home.path()).exists());
+    }
+
+    /// One that changed since the preview is not migrated either: the migration is held to the
+    /// preview of it that the transcript preview showed.
+    #[test]
+    fn a_transcript_confirm_stops_at_an_older_store_that_changed_since_its_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let v1 = V1::new(home.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        let shown = crate::transcript::preview_plan(home.path(), &[]).unwrap();
+        assert!(shown.preview.v1.is_some());
+        v1.conn
+            .execute("UPDATE events SET payload = '{\"prompt\":\"two\"}'", [])
+            .unwrap();
+        let failed =
+            crate::transcript::run(home.path(), &[], Some(shown), &mut |_| panic!("no commits"))
+                .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert_eq!(failed.outcome.v1.map(|v1| v1.stats.records), Some(0));
+        assert!(!crate::raw::path(home.path()).exists());
+    }
+
+    /// And one the preview showed that is gone stops the confirm: its transcripts are not
+    /// imported without the migration that was shown with them.
+    #[test]
+    fn a_transcript_confirm_stops_when_the_older_store_its_preview_showed_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let v1 = V1::new(home.path());
+        v1.session("s1", "r", 100);
+        v1.prompt("s1", 200, "one");
+        let shown = crate::transcript::preview_plan(home.path(), &[]).unwrap();
+        assert!(shown.preview.v1.is_some());
+        let path = v1.path.clone();
+        drop(v1);
+        std::fs::remove_file(&path).unwrap();
+        for rest in ["oboete.db-wal", "oboete.db-shm"] {
+            let _ = std::fs::remove_file(home.path().join(rest));
+        }
+        let failed =
+            crate::transcript::run(home.path(), &[], Some(shown), &mut |_| panic!("no commits"))
+                .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale);
+        assert!(failed.outcome.v1.is_none());
+        assert!(!crate::raw::path(home.path()).exists());
     }
 
     /// v1's tables as its `db.rs` left them, `uid` columns included, in plain SQL: a fixture no

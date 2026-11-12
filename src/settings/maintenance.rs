@@ -78,6 +78,8 @@ struct Run {
 struct State {
     active: Option<Run>,
     last: Option<Run>,
+    /// The last transcript preview's plan, kept for its confirm and taken by it once (#947).
+    transcripts: Option<transcript::PreviewPlan>,
 }
 pub(crate) struct Maintenance {
     state: Mutex<State>,
@@ -217,12 +219,20 @@ impl Maintenance {
                 scope,
             ),
             Operation::Transcripts { agent } => {
-                let preview =
-                    transcript::preview(home, &self.roots(agent)).map_err(|_| failed())?;
-                Ok(json!({"kind":"transcripts", "agent":agent_name(agent),
+                let plan =
+                    transcript::preview_plan(home, &self.roots(agent)).map_err(|_| failed())?;
+                let preview = &plan.preview;
+                let shown = json!({"kind":"transcripts", "agent":agent_name(agent),
                     "preview_key":preview.key, "candidates":transcript_counts(&preview.candidates),
-                    "v1":preview.v1.map(|p| json!({"candidates":p.candidates,"settings":p.settings})),
-                    "no_model_request":true}))
+                    "v1":preview.v1.as_ref().map(|p| json!({"candidates":p.candidates,"settings":p.settings})),
+                    "no_model_request":true});
+                // Kept for its confirm, which imports of what this bound and does not read it
+                // all again. A newer preview's plan takes its place.
+                self.state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .transcripts = Some(plan);
+                Ok(shown)
             }
             Operation::Rebuild { .. } | Operation::Restore { .. } => {
                 let preview = match request.operation {
@@ -377,6 +387,7 @@ impl Maintenance {
         hash.update(request.preview_key.as_bytes());
         let fingerprint = format!("{:x}", hash.finalize());
         let consent;
+        let plan;
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             for run in [&state.active, &state.last].into_iter().flatten() {
@@ -411,6 +422,16 @@ impl Maintenance {
             } else {
                 None
             };
+            // The same once for a transcript preview's plan: the confirm of its key takes it.
+            // With none under the key the confirm is stale, and its receipt says so.
+            plan = if matches!(request.operation, Operation::Transcripts { .. })
+                && (state.transcripts.as_ref())
+                    .is_some_and(|plan| plan.preview.key == request.preview_key)
+            {
+                state.transcripts.take()
+            } else {
+                None
+            };
             state.active = Some(Run {
                 operation_id: request.operation_id.clone(),
                 kind: request.operation.kind(),
@@ -429,7 +450,7 @@ impl Maintenance {
             maintenance: self,
             id,
         };
-        let (result, code, partial) = self.execute(caller, home, &request, consent);
+        let (result, code, partial) = self.execute(caller, home, &request, consent, plan);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(mut run) = state.active.take() {
             run.phase = if code.is_none() {
@@ -451,6 +472,7 @@ impl Maintenance {
         home: &Path,
         request: &StartRequest,
         consent: Option<curate::Consent>,
+        plan: Option<transcript::PreviewPlan>,
     ) -> (Value, Option<&'static str>, bool) {
         let id = &request.operation_id;
         match &request.operation {
@@ -517,14 +539,15 @@ impl Maintenance {
                 }
             }
             Operation::Transcripts { agent } => {
+                // No plan under the key: another preview since, or the viewer started again.
+                let Some(plan) = plan else {
+                    let nothing = transcript::Outcome::default();
+                    let stale = failure_code(crate::preview::FailureCode::Stale);
+                    return (transcript_outcome(&nothing), Some(stale), false);
+                };
                 let mut committed =
                     |event: &transcript::Committed| self.transcript_progress(id, event);
-                match transcript::run(
-                    home,
-                    &self.roots(*agent),
-                    Some(&request.preview_key),
-                    &mut committed,
-                ) {
+                match transcript::run(home, &self.roots(*agent), Some(plan), &mut committed) {
                     Ok(outcome) => (transcript_outcome(&outcome), None, false),
                     Err(failure) => (
                         transcript_outcome(&failure.outcome),
@@ -1060,8 +1083,10 @@ mod tests {
         assert!(!home.join("providers.db").exists());
     }
 
+    /// A source that is no longer what its preview bound waits (#947): the confirm completes
+    /// with none of it stored, and none of its new contents in the receipt.
     #[test]
-    fn a_changed_source_returns_a_bounded_stale_receipt_before_import() {
+    fn a_changed_source_waits_and_none_of_it_is_stored_or_shown() {
         let (_root, maintenance, home, source) = fixture();
         let operation = json!({"kind":"transcripts","agent":"codex"});
         let preview = maintenance
@@ -1082,12 +1107,143 @@ mod tests {
         let result = maintenance
             .start(executable::CommandCaller::Worker, &home, &request)
             .unwrap();
-        assert_eq!(result["last"]["phase"], "failed");
-        assert_eq!(result["last"]["result"]["code"], "maintenance_stale");
+        assert_eq!(result["last"]["phase"], "complete", "{result}");
+        let codex = &result["last"]["result"]["outcome"]["transcripts"]["codex"];
+        assert_eq!(
+            (&codex["files"], &codex["events"], &codex["waiting"]),
+            (&json!(1), &json!(0), &json!(1)),
+            "{result}"
+        );
         assert_eq!(result["last"]["committed"], false);
-        assert!(!home.join("raw.db").exists());
+        assert_eq!(records(&home), 0);
         assert!(!home.join("config.toml").exists());
         assert!(!result.to_string().contains("unconfirmed source contents"));
+    }
+
+    /// The records in the home's store; none where there is no store.
+    fn records(home: &Path) -> i64 {
+        crate::raw::read_only(home).unwrap().map_or(0, |raw| {
+            raw.conn
+                .query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))
+                .unwrap()
+        })
+    }
+
+    /// A confirm imports of its preview's plan, which the viewer keeps and gives once (#947):
+    /// with none under the key the confirm is stale and stores nothing. An older preview's key
+    /// after a newer preview, a key another viewer process gave, and the same key a second time.
+    #[test]
+    fn a_confirm_without_its_previews_plan_is_stale() {
+        let (root, maintenance, home, source) = fixture();
+        let operation = json!({"kind":"transcripts","agent":"codex"});
+        let preview_request = serde_json::to_vec(&json!({"operation":operation})).unwrap();
+        let confirm = |maintenance: &Maintenance, key: &Value, id: char| {
+            let request = serde_json::to_vec(&json!({"operation":operation,
+                "preview_key":key,"operation_id":id.to_string().repeat(64),"confirmed":true}))
+            .unwrap();
+            maintenance
+                .start(executable::CommandCaller::Worker, &home, &request)
+                .unwrap()
+        };
+        let stale = |result: &Value| {
+            assert_eq!(result["last"]["phase"], "failed", "{result}");
+            assert_eq!(result["last"]["result"]["code"], "maintenance_stale");
+            assert_eq!(result["last"]["committed"], false);
+        };
+        let older = maintenance.preview(None, &home, &preview_request).unwrap();
+        another_session(&source);
+        let newer = maintenance.preview(None, &home, &preview_request).unwrap();
+        assert_ne!(older["preview_key"], newer["preview_key"]);
+        stale(&confirm(&maintenance, &older["preview_key"], 'a'));
+        assert_eq!(records(&home), 0);
+        // A viewer started since never made the plan.
+        let restarted = Maintenance::with_roots(
+            root.path().join("claude/projects"),
+            root.path().join("codex/sessions"),
+        );
+        stale(&confirm(&restarted, &newer["preview_key"], 'b'));
+        assert_eq!(records(&home), 0);
+        // A stale confirm leaves the newer plan where it is: its own confirm imports.
+        let done = confirm(&maintenance, &newer["preview_key"], 'c');
+        assert_eq!(done["last"]["phase"], "complete", "{done}");
+        assert_eq!(records(&home), 16);
+        // Given once: the same key again is stale, and stores nothing more.
+        stale(&confirm(&maintenance, &newer["preview_key"], 'd'));
+        assert_eq!(records(&home), 16);
+    }
+
+    const BASIC_SESSION: &str = "22222222-2222-4222-8222-222222222222";
+    const OTHER_SESSION: &str = "44444444-4444-4444-8444-444444444444";
+
+    /// The fixture's transcript again as another session's, beside it.
+    fn another_session(source: &Path) -> PathBuf {
+        let other = source.with_file_name("rollout-other.jsonl");
+        let basic = std::fs::read_to_string(source).unwrap();
+        std::fs::write(&other, basic.replace(BASIC_SESSION, OTHER_SESSION)).unwrap();
+        other
+    }
+
+    /// A session at work writes one more prompt to its transcript.
+    fn grows(transcript: &Path) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(transcript)
+            .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-09-02T00:00:20.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"appended after the preview"}}]}}}}"#
+        )
+        .unwrap();
+    }
+
+    fn records_of(home: &Path, session: &str) -> i64 {
+        let raw = crate::raw::read_only(home).unwrap().unwrap();
+        raw.conn
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE session = ?1",
+                [session],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// #947, decision 100: a transcript a session wrote to since the preview is left for a later
+    /// import, and the confirm imports the rest. Nothing of the one that grew is stored.
+    #[test]
+    fn a_confirm_imports_the_rest_when_a_transcript_grew_since_its_preview() {
+        let (_root, maintenance, home, source) = fixture();
+        another_session(&source);
+        let operation = json!({"kind":"transcripts","agent":"codex"});
+        let preview = maintenance
+            .preview(
+                None,
+                &home,
+                &serde_json::to_vec(&json!({"operation":operation})).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(preview["candidates"]["codex"]["events"], 16);
+        grows(&source);
+        let request = serde_json::to_vec(&json!({"operation":operation,
+            "preview_key":preview["preview_key"],"operation_id":"d".repeat(64),
+            "confirmed":true}))
+        .unwrap();
+        let result = maintenance
+            .start(executable::CommandCaller::Worker, &home, &request)
+            .unwrap();
+        assert_eq!(result["last"]["phase"], "complete", "{result}");
+        let codex = &result["last"]["result"]["outcome"]["transcripts"]["codex"];
+        assert_eq!(
+            (&codex["files"], &codex["events"], &codex["waiting"]),
+            (&json!(2), &json!(8), &json!(1)),
+            "{result}"
+        );
+        assert!(records_of(&home, OTHER_SESSION) > 0);
+        assert_eq!(
+            records_of(&home, BASIC_SESSION),
+            0,
+            "the one that grew waits"
+        );
     }
 
     fn panic_after_parse(remaining: usize) {
@@ -1131,8 +1287,9 @@ mod tests {
                 .unwrap()
             };
             let original = request(&preview["preview_key"], 'c');
-            // The two preview parses and first execution parse precede the real first commit.
-            panic_after_parse(if earlier_commit { 3 } else { 0 });
+            // The first execution parse precedes the real first commit: a confirm imports of
+            // its preview's plan, and parses nothing for a preview of its own (#947).
+            panic_after_parse(usize::from(earlier_commit));
             let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 maintenance.start(executable::CommandCaller::Worker, &home, &original)
             }));

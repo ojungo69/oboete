@@ -2483,6 +2483,7 @@ const TEXT = {
   maintenance_other_unavailable: ["Claude-mem import waits for repository mapping; updating is not built yet.", "claude-memの取り込みはリポジトリ対応づけを待っています。更新機能はまだ未実装です。"],
   maintenance_transcript_candidates: ["{agent}: {files} files, {sessions} sessions, {records} candidate records, {bytes} selected bytes; {waiting} waiting, {refused} refused.", "{agent}: {files}ファイル、{sessions}セッション、候補{records}レコード、選択{bytes}バイト。待機{waiting}、拒否{refused}。"],
   maintenance_transcript_actual: ["{agent}: {records} committed records; {seen} previously seen, {waiting} waiting, {refused} refused.", "{agent}: 確定{records}レコード。既存{seen}、待機{waiting}、拒否{refused}。"],
+  maintenance_transcript_waiting: ["Waiting: transcripts that were being written to, or that changed after the preview. What this import does not store of them, a later import brings in.", "待機：書き込み中だった、またはプレビューの後に変わった会話ファイルです。この取り込みで入らない分は、あとでもう一度取り込むと入ります。"],
   maintenance_conditional_v1: ["This transcript import also includes the older store in this memory folder. Confirmation covers both imports and the following settings effect.", "この会話履歴の取り込みには、この記憶フォルダー内の旧ストアも含まれます。確認は両方の取り込みと次の設定への影響を対象にします。"],
   maintenance_v1_candidates: ["Older store candidates: {events} events, {records} records, {repos} repository touches, {documents} documents, {bytes} bytes.", "旧ストアの候補: {events}イベント、{records}レコード、{repos}リポジトリ履歴、{documents}文書、{bytes}バイト。"],
   maintenance_v1_actual: ["Older store: {events} events read; {records} records, {repos} repository touches and {documents} documents committed; {seen} previously imported.", "旧ストア: {events}イベントを読み取り、{records}レコード・{repos}リポジトリ履歴・{documents}文書が確定しました。既存{seen}。"],
@@ -3317,6 +3318,10 @@ function maintenanceFinishPreview(p) {
       targets:p.deletion.targets.length,nodes:p.deletion.nodes,bytes:p.deletion.bytes})),
     el('ul',null,...p.deletion.targets.map(label=>el('li','text',label || t('maintenance_finish_target_hidden'))))];
 }
+// Under a transcript import's counts, what "waiting" is, when a transcript waits (#947).
+function maintenanceWaitingNote(counts) {
+  return Object.values(counts).some(s=>s?.waiting) ? [el('p','desc',t('maintenance_transcript_waiting'))] : [];
+}
 function maintenanceTranscriptPreview(p) {
   const rows=[];
   for(const [agent,s] of Object.entries(p.candidates)) {
@@ -3324,6 +3329,7 @@ function maintenanceTranscriptPreview(p) {
       agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),files:s.files,
       sessions:s.sessions,records:s.events,bytes:s.bytes,waiting:s.waiting,refused:s.refused})));
   }
+  rows.push(...maintenanceWaitingNote(p.candidates));
   if(p.v1)rows.push(el('p','desc',t('maintenance_conditional_v1')),
     maintenanceV1(p.v1.candidates,p.v1.settings,true));
   return rows;
@@ -3433,6 +3439,7 @@ function maintenanceImportOutcome(out) {
       agent:t(agent==='claude'?'maintenance_claude':'maintenance_codex'),records:s.events,
       seen:s.seen,waiting:s.waiting,refused:s.refused})));
   }
+  if(out.transcripts)rows.push(...maintenanceWaitingNote(out.transcripts));
   const v1=out.v1 || (!out.transcripts ? out : null);
   if(v1)rows.push(maintenanceV1(v1,v1.settings));
   return rows;

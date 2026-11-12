@@ -13,10 +13,27 @@ Transcript preview also includes any conditional v1 pass and its settings effect
 transcript-only counts never authorize an undisclosed migration.
 
 Confirmation binds the current operation, source identity/content/file set,
-effective settings and effects. A changed source or setting requires a new
+effective settings and effects. A changed v1 source or setting requires a new
 preview. Native import/config locks, no-replace settings copy, checkpoint and
 forget checks remain. Earlier committed batches stay committed if a later file
 or batch fails; an explicit rerun uses the existing checkpoint/deny rules.
+
+A transcript confirm imports of what its preview bound (decision 100, #947). The
+viewer keeps its last transcript preview's plan in memory, and the confirm of
+that preview's key takes it once: the transcripts are not all read again for a
+second preview, which on a machine with sessions at work never matched the
+first. Each bound transcript is imported while it is still the file that was
+bound, looked at before it is read, after, and before each batch of it is
+written. One that is not (a session wrote to it, or it was replaced or removed)
+waits for a later import and is counted as waiting; the transcripts after it
+are imported. A batch stored before a transcript changed stays, and a later
+import goes on from its checkpoint. A transcript that appeared after the
+preview is not read. The confirm still stops, with nothing stored, when the
+settings changed, when the store appeared or was replaced, when it is asked for
+other agents than the preview read, and when the viewer holds no plan under
+the key: after a newer preview, after a confirm of the same key, and after the
+viewer started again. The CLI's `oboete import transcripts --yes` binds
+nothing, as before.
 
 The authenticated status read uses bounded in-memory metadata and opens no
 store or source. The viewer keeps one active operation and one last receipt.
