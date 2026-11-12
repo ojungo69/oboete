@@ -7650,8 +7650,8 @@ console.log('PASS: W3 and W6: a view that reads no list waits for none, a poll u
 const run=code=>vm.runInContext(code,ctx);
 const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
 const counts=waiting=>({claude:null,codex:{files:2,sessions:2,events:8,bytes:10,seen:0,waiting,refused:0}});
-for(const [language,said] of [['en','Waiting: transcripts that were being written to, or that changed after the preview. This import leaves them out; a later import brings them in.'],
-    ['ja','待機：書き込み中だった、またはプレビューの後に変わった会話ファイルです。今回の取り込みには入れません。あとでもう一度取り込むと入ります。']]){
+for(const [language,said] of [['en','Waiting: transcripts that were being written to, or that changed after the preview. What this import does not store of them, a later import brings in.'],
+    ['ja','待機：書き込み中だった、またはプレビューの後に変わった会話ファイルです。この取り込みで入らない分は、あとでもう一度取り込むと入ります。']]){
   run(`lang=${JSON.stringify(language)}`);
   const shown=waiting=>[`maintenanceTranscriptPreview(${JSON.stringify({candidates:counts(waiting)})})`,
     `maintenanceImportOutcome(${JSON.stringify({transcripts:counts(waiting)})})`].map(code=>[...run(code)].map(text).join(' '));
