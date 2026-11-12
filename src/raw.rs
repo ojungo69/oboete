@@ -721,6 +721,20 @@ fn check_cross_source_forget(conn: &Connection, session: &str, source: &str) -> 
     Ok(())
 }
 
+/// An import's batch the store did not take for a forget's sake: its records cannot be told from
+/// what was forgotten. An importer of many sources refuses the one the batch came from and goes
+/// on to the next (`transcript::import_files`); any other error of an append ends its run.
+#[derive(Debug)]
+pub struct ForgetRefusal(&'static str);
+
+impl std::fmt::Display for ForgetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ForgetRefusal {}
+
 /// What `denied` refuses in tests.
 pub const DENIED_IN_TESTS: &str = "oboete-test:forgotten";
 
@@ -4701,7 +4715,9 @@ impl Raw {
                 })?;
             anyhow::ensure!(
                 !has_denials,
-                "cannot import raw without a native source identity after forget; use an importer that preserves verified provenance"
+                ForgetRefusal(
+                    "cannot import raw without a native source identity after forget; use an importer that preserves verified provenance"
+                )
             );
         }
         let from_seq = next_seq(&tx, &self.device)?;
@@ -4732,7 +4748,9 @@ impl Raw {
             if let Some(group) = identity.and_then(|i| i.ambiguous.as_ref()) {
                 anyhow::ensure!(
                     !denied(&tx, Some(group), "")?,
-                    "an ambiguous transcript event overlaps a surviving forget request: this batch was not imported"
+                    ForgetRefusal(
+                        "an ambiguous transcript event overlaps a surviving forget request: this batch was not imported"
+                    )
                 );
                 // A duplicate recognized after a checkpoint also marks its existing occurrence
                 // zero: forget_start reads this again while holding the write transaction.
