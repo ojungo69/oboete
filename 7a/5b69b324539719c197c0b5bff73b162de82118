@@ -1,0 +1,27 @@
+src/pi.ts
+  s_b837d726e3a0bf::t_074758790dfced 19-24
+src/setup.rs
+  s_b837d726e3a0bf::t_6d8b7bb24e5bfe 4074,4078-4083
+  s_b837d726e3a0bf::t_f48745ca2ae0c5 4566-4570,4573
+  s_b837d726e3a0bf::t_85c1f7d5d93087 4084-4085
+docs/unwritten.md
+  s_b837d726e3a0bf::t_4b07a0f42cbe76 27-33
+docs/hook-time.md
+  s_b837d726e3a0bf::t_9631ba073ff87a 48-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a5b69b324539719c197c0b5bff73b162de82118",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
