@@ -4557,6 +4557,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A plugin that kills its capture hook leaves it the store's wait and the hook's own end
+    /// after that (docs/unwritten.md U2, U3). Killed sooner, a hook whose store is held dies
+    /// before it keeps what it could not write, and nothing says an event was lost. The two
+    /// numbers are in two languages: this holds them together.
+    #[test]
+    fn a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write() {
+        let least = crate::hook::STORE_WAIT + crate::hook_time::MARGIN;
+        let ms_after = |text: &str, mark: &str| {
+            let at = text
+                .find(mark)
+                .unwrap_or_else(|| panic!("{mark} not found"))
+                + mark.len();
+            let digits: String = text[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            std::time::Duration::from_millis(digits.parse().unwrap())
+        };
+        let pi = ms_after(include_str!("pi.ts"), "const CAPTURE_KILL_MS = ");
+        assert!(pi >= least, "Pi's capture hook: {pi:?}");
+        // OpenCode's `send` spawns every hook with this timeout.
+        let opencode = include_str!("opencode.js");
+        let hook = opencode.find("\"hook\", \"opencode\", event]").unwrap();
+        let opencode = ms_after(&opencode[hook..], "timeout: ");
+        assert!(opencode >= least, "OpenCode's hook: {opencode:?}");
+    }
+
     #[test]
     fn pi_generated_extension_matches_event_and_tool_contract() {
         let dir = std::env::temp_dir().join(format!("oboete-pi-node-{}", std::process::id()));

@@ -44,7 +44,9 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   - a read's hook (the note on a file, a memory lookup) gives nothing once its time is over, and
     its lookup's wait, its store's wait and its fence's wait take what remains.
 - An agent whose hook oboete writes no timeout for (OpenCode's and Pi's plugins, an agent with no
-  adapter) has no such deadline: its waits are as they were.
+  adapter) has no such deadline: its waits are as they were. The plugins kill the hooks they
+  start themselves: OpenCode's each after 3 s; Pi's after 3 s where nothing waits for the hook,
+  and with its own 2 s wait where it waits for one (docs/unwritten.md U2).
 - A hook run inside another process (a test) has a clock that starts when it is called and no
   deadline unless the test sets one.
 

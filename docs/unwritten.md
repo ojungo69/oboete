@@ -24,6 +24,12 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   agent names no session is named for its device when it is written back (`own_session`), and
   Cursor's SessionEnd recovery, which counts the turns raw already holds, is not run, so those
   turns are not recovered by that call. agy's step claims stay taken: the kept event is that step.
+  The keep comes after the 2 s wait, so whatever ends a hook has to leave it that wait and the
+  hook's own end after it: 3 s. The timeouts `setup` writes do (the shortest is 3 s). A plugin
+  that kills its child does where nothing waits for the hook: OpenCode's every hook, and Pi's
+  captures of a tool's result, a turn's end, a compaction and a session's end. Pi's plugin kills
+  the two it waits for, a prompt's and a session start's, with its 2 s wait: on a held store
+  those are lost still (#955).
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
   seqs follow the events' times: a call visits at most the oldest 16 files and writes at most
   **256 KiB of serialized events**, including their labels and ledger rows, across all files.
