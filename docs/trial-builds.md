@@ -20,11 +20,14 @@ and the tag is `v0.1.0-trial.1`. The binary reports
 
 The macOS and Windows builds run `cargo test --locked --features local-embed`
 before a clean `cargo build --release --locked --features local-embed`, with the
-same environment. The Linux build runs in a container as root, on an overlay
-filesystem with OpenSSL 1.1.1, where 25 of the tests fail for those reasons
-(unreadable files, the key file's filesystem, TLS). It does not run the suite:
-on Linux the suite is CI's run on the commit, which the workflow requires to
-have passed, and the smoke test checks the version the build says.
+same environment. The Linux build runs in a container, where 25 of the tests
+failed in the workflow's first run: 2 that need a file the user cannot read (the
+container's user is root), 18 that save a managed key file (refused with
+`Protected`, as its check does on an overlay filesystem), and 5 whose synthetic
+TLS server, run by the image's `python3` and `openssl`, did not answer (not
+looked into further). It does not run the suite: on Linux the suite is CI's run
+on the commit, which the workflow requires to have passed, and the smoke test
+checks the version the build says.
 There is no build cache. The three targets and floors are:
 
 | Target | Floor |

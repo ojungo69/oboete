@@ -127,10 +127,12 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Say which toolchain builds this
         run: rustc -Vv && cargo -V
-      # Not in the Linux container: it is root, on an overlay filesystem, with OpenSSL 1.1.1, and 25
-      # tests about unreadable files, the key file's filesystem and TLS fail there for those
-      # reasons (#964's first run). CI's run on the commit, which `plan` requires, ran the suite
-      # on Linux, and the smoke test below checks the version this build says.
+      # Not in the Linux container, where 25 tests failed in #964's first run: 2 that need a file
+      # the user cannot read (the container's user is root), 18 that save a managed key file
+      # (refused with `Protected`, as its check does on an overlay filesystem), and 5 whose
+      # synthetic TLS server, run by the image's python3 and openssl, did not answer (not looked
+      # into further). CI's run on the commit, which `plan` requires, ran the suite on Linux, and
+      # the smoke test below checks the version this build says.
       - if: matrix.target != 'x86_64-unknown-linux-gnu'
         run: cargo test --locked --features local-embed
       - run: cargo build --release --locked --features local-embed
