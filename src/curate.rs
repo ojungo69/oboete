@@ -1408,7 +1408,12 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
 /// `None` when no span is found in both, or only where the gate hid something (a quote with a
 /// mask in it, or text a mask stands for).
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
-    let line = &window.lines[line_index(window, line)?];
+    locate_at(window, line_index(window, line)?, quote)
+}
+
+/// `locate` for the `at`-th of the window's lines: a caller that walks them has no id to look up.
+fn locate_at(window: &Window, at: usize, quote: &str) -> Option<crate::claims::Evidence> {
+    let line = &window.lines[at];
     let source = line.source.as_ref()?;
     if quote.is_empty() {
         return None;
@@ -4620,7 +4625,7 @@ fn located(
             .filter(|(line, _)| line_index(w, line).is_none())
             .count();
         let elsewhere = (missed.iter())
-            .filter(|(_, quote)| w.lines.iter().any(|l| locate(w, &l.id, quote).is_some()))
+            .filter(|(_, quote)| (0..w.lines.len()).any(|at| locate_at(w, at, quote).is_some()))
             .count();
         crate::provider::note_refusal(format!(
             "claims: {}, no such line: {no_line}, quote in another line: {elsewhere}",
