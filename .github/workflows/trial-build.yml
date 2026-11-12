@@ -1,0 +1,276 @@
+name: trial-build
+on:
+  workflow_dispatch:
+    inputs:
+      number:
+        description: Trial number (positive integer)
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/trial-build.yml
+      - .github/scripts/trial-*
+permissions: {}
+# A newer push ends the previous PR run. Runs by hand go one at a time: the second then finds the
+# first's draft and stops, where two at once could both pass the check for an existing release.
+concurrency:
+  group: trial-build-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'dispatch' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+      actions: read
+    outputs:
+      commit: ${{ steps.plan.outputs.commit }}
+      version: ${{ steps.plan.outputs.version }}
+      oboete_version: ${{ steps.plan.outputs.oboete_version }}
+    steps:
+      # Every job checks out the commit the run started on: main's, for a run by hand, and for a
+      # pull request its merge with main. No input names a commit to check out.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        name: Name the build
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          INPUT_NUMBER: ${{ inputs.number }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          commit="$COMMIT"
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$RUN_REF" == refs/heads/main ]] || { echo 'Run this workflow from main' >&2; exit 1; }
+            number="$INPUT_NUMBER"
+          else
+            number="$RUN_NUMBER"
+          fi
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid commit' >&2; exit 1; }
+          [[ "$number" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid trial number' >&2; exit 1; }
+          package_version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' Cargo.toml)"
+          [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]] || { echo 'Invalid package version' >&2; exit 1; }
+          version="$package_version-trial.$number"
+          printf 'commit=%s\nversion=%s\noboete_version=%s+%s\n' "$commit" "$version" "$version" "${commit:0:8}" >> "$GITHUB_OUTPUT"
+      - name: Require the commit's completed checks
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          set -euo pipefail
+          # CI's own run on the commit, as pushed to main, has to have passed: a gate that only
+          # looked for failing checks would pass a commit whose checks have not started.
+          gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" > "$RUNNER_TEMP/trial-ci.json"
+          jq -e '[.workflow_runs[] | select(.head_branch == "main")] | length >= 1 and (max_by(.created_at) | .status == "completed" and .conclusion == "success")' "$RUNNER_TEMP/trial-ci.json"
+          # And no other check on the commit may be failing or still running. This workflow's own
+          # runs on the commit are not the commit's checks: the run that asks is still in progress,
+          # and one that failed before would bar the commit for good.
+          gh api "repos/$REPO/actions/runs?head_sha=$COMMIT&per_page=100" --paginate --slurp > "$RUNNER_TEMP/trial-runs.json"
+          gh api "repos/$REPO/commits/$COMMIT/check-runs?per_page=100" --paginate --slurp > "$RUNNER_TEMP/trial-checks.json"
+          jq -e --slurpfile runs "$RUNNER_TEMP/trial-runs.json" '
+            [$runs[0][].workflow_runs[] | select(.path == ".github/workflows/trial-build.yml") | .check_suite_id] as $own
+            | [.[].check_runs[] | select(.check_suite.id as $suite | $own | index($suite) | not)]
+            | all(.[]; .status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped"))
+          ' "$RUNNER_TEMP/trial-checks.json"
+  build:
+    needs: plan
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36
+            macos_deployment_target: ''
+            rustflags: ''
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            container: ''
+            macos_deployment_target: '11.0'
+            rustflags: ''
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            container: ''
+            macos_deployment_target: ''
+            rustflags: '-C target-feature=+crt-static'
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      OBOETE_VERSION: ${{ needs.plan.outputs.oboete_version }}
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - name: Install Linux build tools
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          dnf -y install git gcc gcc-c++ make binutils pkgconfig python3 curl tar gzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Say which toolchain builds this
+        run: rustc -Vv && cargo -V
+      # Not in the Linux container, where 25 tests failed in #964's first run: 2 that need a file
+      # the user cannot read (the container's user is root), 18 that save a managed key file
+      # (refused with `Protected`, as its check does on an overlay filesystem), and 5 whose
+      # synthetic TLS server, run by the image's python3 and openssl, did not answer (not looked
+      # into further). On Linux the suite is CI's: `plan` requires CI's run on the commit to have
+      # passed before a run by hand, and a pull request's own CI run is beside its drill, which
+      # requires nothing of it. The smoke test below checks the version this build says.
+      - if: matrix.target != 'x86_64-unknown-linux-gnu'
+        run: cargo test --locked --features local-embed
+      - run: cargo build --release --locked --features local-embed
+      - name: Pack and test the archive
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          exe=oboete
+          extension=tar.gz
+          if [[ "$TARGET" == x86_64-pc-windows-msvc ]]; then
+            exe=oboete.exe
+            extension=zip
+          fi
+          bash .github/scripts/trial-package.sh "target/$TARGET/release/$exe" "$VERSION" "$TARGET" "$COMMIT" dist
+          bash .github/scripts/trial-smoke.sh "dist/oboete-$VERSION-$TARGET.$extension" "oboete $OBOETE_VERSION"
+      - name: Check the highest required glibc symbol version
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          objdump -T target/x86_64-unknown-linux-gnu/release/oboete > "$RUNNER_TEMP/trial-symbols"
+          highest="$(grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' "$RUNNER_TEMP/trial-symbols" | sed 's/^GLIBC_//' | sort -Vu | tail -n 1)"
+          [[ -n "$highest" ]]
+          printf 'Highest required glibc: %s\n' "$highest"
+          [[ "$(printf '%s\n' "$highest" 2.28 | sort -V | tail -n 1)" == 2.28 ]]
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trial-${{ matrix.target }}
+          path: dist/oboete-${{ needs.plan.outputs.version }}-${{ matrix.target }}.*
+          retention-days: 7
+          if-no-files-found: error
+  floor:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trial-x86_64-unknown-linux-gnu
+          path: artifacts
+      - name: Start the packed binary on glibc 2.28
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          EXPECTED_VERSION_LINE: oboete ${{ needs.plan.outputs.oboete_version }}
+        run: |
+          set -euo pipefail
+          unpacked="$(mktemp -d)"
+          trap 'rm -rf -- "$unpacked"' EXIT
+          name="oboete-$VERSION-x86_64-unknown-linux-gnu"
+          tar -xzf "artifacts/$name.tar.gz" -C "$unpacked"
+          docker run --rm --network none --env EXPECTED_VERSION_LINE \
+            --mount "type=bind,src=$unpacked/$name,dst=/trial,readonly" \
+            docker.io/library/almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b \
+            bash -euo pipefail -c '
+              actual="$(/trial/oboete --version && printf x)"
+              printf -v expected "%s\nx" "$EXPECTED_VERSION_LINE"
+              [[ "$actual" == "$expected" ]]
+              trial_home="$(mktemp -d)"
+              /trial/oboete --home "$trial_home" doctor
+            '
+  release:
+    needs: [plan, build, floor]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: trial-*
+          merge-multiple: true
+          path: dist
+      - name: Refuse an existing release or tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          # Listing also sees drafts, and an API failure must not mean "absent".
+          gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name' > "$RUNNER_TEMP/trial-releases"
+          gh api "repos/$REPO/git/matching-refs/tags/$tag" --jq '.[].ref' > "$RUNNER_TEMP/trial-tags"
+          if grep -Fxq -- "$tag" "$RUNNER_TEMP/trial-releases" || grep -Fxq -- "refs/tags/$tag" "$RUNNER_TEMP/trial-tags"; then
+            echo 'The release or tag already exists' >&2
+            exit 1
+          fi
+      - name: Write checksums and release notes
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          archives=("oboete-$VERSION-x86_64-unknown-linux-gnu.tar.gz" "oboete-$VERSION-aarch64-apple-darwin.tar.gz" "oboete-$VERSION-x86_64-pc-windows-msvc.zip")
+          sha256sum -- "${archives[@]}" > SHA256SUMS
+          cat > "$RUNNER_TEMP/trial-notes.md" <<EOF
+          This is a trial build of software that is not finished.
+
+          Commit: [$COMMIT](https://github.com/$REPO/commit/$COMMIT)
+
+          - x86_64-unknown-linux-gnu: needs glibc 2.28 or later.
+          - aarch64-apple-darwin: needs macOS 11 or later (Apple silicon).
+          - x86_64-pc-windows-msvc: needs Windows 10 or later (x86_64).
+
+          To check a download, print its SHA-256 digest: it is the one on the archive's line in SHA256SUMS.
+
+              sha256sum <archive>                         (Linux)
+              shasum -a 256 <archive>                     (macOS)
+              Get-FileHash -Algorithm SHA256 <archive>    (Windows PowerShell: the same digits, in capitals)
+
+          Its build provenance:
+
+              gh attestation verify <archive> --repo $REPO
+
+          Not verified on a real machine yet: a download by a browser on macOS (quarantine) and on Windows (SmartScreen).
+          EOF
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - name: Create the draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" --draft --prerelease --target "$COMMIT" \
+            --title "oboete $VERSION (trial build)" --notes-file "$RUNNER_TEMP/trial-notes.md" \
+            "dist/oboete-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "dist/oboete-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "dist/oboete-$VERSION-x86_64-pc-windows-msvc.zip" dist/SHA256SUMS
