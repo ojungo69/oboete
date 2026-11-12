@@ -153,7 +153,8 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn start_viewer(root: &Path, port: u16) -> Viewer {
+/// The viewer listening on `port`; none when the port was taken before it could bind it.
+fn start_viewer(root: &Path, port: u16) -> Option<Viewer> {
     let owner = root.join("owner");
     let mut command = Command::new(env!("CARGO_BIN_EXE_oboete"));
     command
@@ -194,22 +195,24 @@ fn start_viewer(root: &Path, port: u16) -> Viewer {
         };
         command.env("LLVM_PROFILE_FILE", profile);
     }
-    let mut viewer = Viewer(command.spawn().unwrap());
+    // What a start before this one said is not this start's.
     let outcome = root.join("store/state/view-outcome");
+    let _ = fs::remove_file(&outcome);
+    let mut viewer = Viewer(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
+        match fs::read_to_string(&outcome) {
+            Ok(text) if text.trim() == format!("listening {port}") => break,
+            Ok(text) if text.trim() == "port in use" => return None,
+            _ => assert!(Instant::now() < deadline, "private viewer did not bind"),
+        }
         assert!(
             viewer.0.try_wait().unwrap().is_none(),
             "private viewer exited"
         );
-        match fs::read_to_string(&outcome) {
-            Ok(text) if text.trim() == format!("listening {port}") => break,
-            Ok(text) if text.trim() == "port in use" => panic!("private port lost before bind"),
-            _ => assert!(Instant::now() < deadline, "private viewer did not bind"),
-        }
         std::thread::sleep(Duration::from_millis(25));
     }
-    viewer
+    Some(viewer)
 }
 
 fn request(root: &Path, port: u16, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
@@ -304,16 +307,21 @@ fn seven_agent_preview_apply_replay_stale_manual_and_unwire() {
     let private = tempfile::tempdir().unwrap();
     let root = private.path();
     let (_stub, log) = fixture(root);
-    let port = free_port();
     let config = root.join("store/config.toml");
-    write(
-        root,
-        "store/config.toml",
-        format!(
-            "providers = []\n[summary]\ncurate = false\n[embedding]\nprovider = 'none'\n[worker]\nresident = true\n[view]\nport = {port}\n"
-        ),
-    );
-    let mut viewer = start_viewer(root, port);
+    // A port `free_port` gave can be taken before the viewer binds it: another is tried.
+    let (port, mut viewer) = (0..5)
+        .find_map(|_| {
+            let port = free_port();
+            write(
+                root,
+                "store/config.toml",
+                format!(
+                    "providers = []\n[summary]\ncurate = false\n[embedding]\nprovider = 'none'\n[worker]\nresident = true\n[view]\nport = {port}\n"
+                ),
+            );
+            start_viewer(root, port).map(|viewer| (port, viewer))
+        })
+        .expect("a port the viewer could bind");
 
     let observed = [
         "owner/claude/settings.json",

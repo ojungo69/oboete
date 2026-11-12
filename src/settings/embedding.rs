@@ -414,10 +414,14 @@ mod tests {
         (model, runtime)
     }
 
-    /// A URL nobody answers: a file still to download fails.
+    /// A URL that answers nothing: a file still to download fails. Its port stays this test's,
+    /// each connection closed as it comes: a port let go could be bound by a test running
+    /// alongside, whose server would answer.
     fn closed() -> &'static str {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        leak(format!("http://{}/model", listener.local_addr().unwrap()))
+        let url = leak(format!("http://{}/model", listener.local_addr().unwrap()));
+        std::thread::spawn(move || listener.incoming().for_each(drop));
+        url
     }
 
     fn put_files(home: &Path) {

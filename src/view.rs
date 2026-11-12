@@ -9889,10 +9889,11 @@ curate = false
         crate::keyfile::fake_fs(Some(0x6969));
         let started = listen(p);
         crate::keyfile::fake_fs(None);
+        // No listener: none was returned, no token was written, and the outcome says why. The
+        // port is not bound again to show it: a test running alongside may have taken it.
         assert!(started.unwrap().is_none());
         assert!(!p.join("state/view-token").exists());
         assert_eq!(view_outcome(p), NOT_PRIVATE);
-        TcpListener::bind(("127.0.0.1", port)).unwrap();
     }
 
     /// CodeRabbit on #376 (R6): a `state` folder another user could write into is made the owner's
