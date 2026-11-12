@@ -1,0 +1,21 @@
+src/manifest.rs
+  s_b837d726e3a0bf::t_931316696db957 168-170,172-174,194-208
+src/mcp.rs
+  s_b837d726e3a0bf::t_7eb22ac179c7f7 1642-1645
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cd47cfd0ae80a15f19baa7e9e83fe7d982532136",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
