@@ -1,0 +1,23 @@
+.github/scripts/trial-package.sh
+  s_b837d726e3a0bf::t_8329c0cbc057e0 16,18-23,26-28,46,57-58,60-64
+.github/workflows/trial-build.yml
+  s_b837d726e3a0bf::t_ab48a3c692701e 31-32,37,42,47,56,229,238,242-248,250,252
+docs/trial-builds.md
+  s_b837d726e3a0bf::t_9578def6cadf70 4-6,8-10,19,34,50-51,54-56,60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "356b2827c9b7d2361fdf20c3c4bbad287e97ffc8",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
