@@ -131,8 +131,9 @@ jobs:
       # the user cannot read (the container's user is root), 18 that save a managed key file
       # (refused with `Protected`, as its check does on an overlay filesystem), and 5 whose
       # synthetic TLS server, run by the image's python3 and openssl, did not answer (not looked
-      # into further). CI's run on the commit, which `plan` requires, ran the suite on Linux, and
-      # the smoke test below checks the version this build says.
+      # into further). On Linux the suite is CI's: `plan` requires CI's run on the commit to have
+      # passed before a run by hand, and a pull request's own CI run is beside its drill, which
+      # requires nothing of it. The smoke test below checks the version this build says.
       - if: matrix.target != 'x86_64-unknown-linux-gnu'
         run: cargo test --locked --features local-embed
       - run: cargo build --release --locked --features local-embed
