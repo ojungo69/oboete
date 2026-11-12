@@ -2818,7 +2818,7 @@ pub fn doctor(home: &Path) -> Result<()> {
             "oboete.db",
             (|| -> Result<()> {
                 // Read only: v1's open writes its schema and a new device id into a copy.
-                let conn = crate::migrate::open_v1(&db_path)?;
+                let conn = crate::preview::open_v1(&db_path)?;
                 // A table that cannot be read makes the section unhealthy, not a count of 0; the
                 // readable counts and the calls below are still shown.
                 let counts = crate::migrate::legacy_counts_in(&conn);
@@ -3555,7 +3555,7 @@ impl DiagnosticDirectory {
             let binding = open(&resolved)?;
             anyhow::ensure!(
                 crate::db::store_file_from(&file)? == crate::db::store_file_from(&binding)?,
-                crate::migrate::PreviewCopyError::Changed
+                crate::preview::PreviewCopyError::Changed
             );
             (file, resolved)
         };

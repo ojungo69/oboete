@@ -53,6 +53,7 @@ mod my_work_rules;
 mod my_work_run;
 mod my_work_story;
 mod my_work_subagents;
+mod preview;
 mod provenance;
 mod provider;
 mod providers_db;

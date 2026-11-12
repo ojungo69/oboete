@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use super::readiness::Readiness;
-use crate::migrate::{OpenedSource, PreviewCopyError, SourceStamp};
+use crate::preview::{OpenedSource, PreviewCopyError, SourceStamp};
 
 mod ledger;
 use ledger::LedgerChecks;
@@ -759,7 +759,7 @@ fn copy_checks<T>(
         if matches!(database, Database::Knowledge) {
             crate::db::register_sqlite_vec();
         }
-        let checks = crate::migrate::with_preview_files(db, wal, |conn| {
+        let checks = crate::preview::with_preview_files(db, wal, |conn| {
             current(home, database, before)?;
             Ok(inspect(conn))
         })?;
