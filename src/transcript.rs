@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::capture::{self, Captured, Settings};
-use crate::migrate::FailureCode;
+use crate::preview::FailureCode;
 use crate::raw::{self, Checkpoint, IMPORT_BATCH, MAX_BATCH_BYTES};
 
 /// Claude Code records that only the transcript has: no prompt hook ever saw them.
@@ -778,7 +778,7 @@ pub(crate) struct Outcome {
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub outcome: Box<Outcome>,
-    pub code: crate::migrate::FailureCode,
+    pub code: crate::preview::FailureCode,
     pub cause: anyhow::Error,
 }
 
@@ -837,7 +837,7 @@ fn source_digest(path: &Path, agent: &str) -> Result<String> {
             Ok((
                 p.canonicalize()?,
                 crate::db::store_file(p),
-                crate::migrate::file_version(p)?,
+                crate::preview::file_version(p)?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -952,7 +952,7 @@ fn run_with_output(
         code = FailureCode::Stale;
         if let Some(before) = before_config {
             anyhow::ensure!(
-                crate::migrate::config_bytes(home)? == before,
+                crate::preview::config_bytes(home)? == before,
                 FailureCode::Stale
             );
         }
@@ -967,7 +967,7 @@ fn run_with_output(
             };
             if let Some(plan) = &plan {
                 anyhow::ensure!(
-                    plan.destination == crate::migrate::preview_key(home, &"destination")?,
+                    plan.destination == crate::preview::preview_key(home, &"destination")?,
                     FailureCode::Stale
                 );
             }
@@ -994,15 +994,15 @@ fn run_with_output(
         Ok(()) => Ok(outcome),
         Err(cause) => Err(Failure {
             outcome: Box::new(outcome),
-            code: crate::migrate::failure_code(&cause, code),
+            code: crate::preview::failure_code(&cause, code),
             cause,
         }),
     }
 }
 
 fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
-    let destination = crate::migrate::preview_key(home, &"destination")?;
-    let config = crate::migrate::config_bytes(home)?;
+    let destination = crate::preview::preview_key(home, &"destination")?;
+    let config = crate::preview::config_bytes(home)?;
     let path = home.join("oboete.db");
     let v1 = path
         .try_exists()?
@@ -1024,10 +1024,10 @@ fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
         Some(&mut files),
     )?;
     anyhow::ensure!(
-        crate::migrate::config_bytes(home)? == config,
+        crate::preview::config_bytes(home)? == config,
         "transcript settings changed during preview"
     );
-    let key = crate::migrate::preview_key(
+    let key = crate::preview::preview_key(
         home,
         &(
             "transcripts",
@@ -1039,7 +1039,7 @@ fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
         ),
     )?;
     anyhow::ensure!(
-        destination == crate::migrate::preview_key(home, &"destination")?,
+        destination == crate::preview::preview_key(home, &"destination")?,
         FailureCode::Stale
     );
     Ok(PreviewPlan {
@@ -1443,7 +1443,7 @@ fn preview_cut(v1: &Path) -> Result<HashMap<(String, String), i64>> {
     if !v1.exists() {
         return Ok(HashMap::new());
     }
-    crate::migrate::with_preview_v1(v1, |conn, _| {
+    crate::preview::with_preview_v1(v1, |conn, _| {
         let mut st = conn.prepare(
             "SELECT s.agent, e.session_id, MIN(e.ts) FROM events e
              JOIN sessions s ON s.id = e.session_id GROUP BY s.agent, e.session_id",
@@ -2394,7 +2394,7 @@ mod tests {
         .unwrap();
         let mut progress = Vec::new();
         let result = run(&home, &roots, None, &mut |c| progress.push(c.clone())).unwrap_err();
-        assert_eq!(result.code, crate::migrate::FailureCode::Refused);
+        assert_eq!(result.code, crate::preview::FailureCode::Refused);
         let stats = &result.outcome.stats.agents["codex"];
         assert_eq!((stats.events, stats.refused), (8, 1));
         assert!(matches!(

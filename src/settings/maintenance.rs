@@ -697,14 +697,14 @@ fn from_path(home: &Path, from: Option<&str>) -> PathBuf {
     from.filter(|from| !from.is_empty())
         .map_or_else(|| home.join("oboete.db"), PathBuf::from)
 }
-fn failure_code(code: migrate::FailureCode) -> &'static str {
+fn failure_code(code: crate::preview::FailureCode) -> &'static str {
     match code {
-        migrate::FailureCode::Stale => "maintenance_stale",
-        migrate::FailureCode::InvalidSource => "maintenance_source",
-        migrate::FailureCode::InvalidConfig => "maintenance_config",
-        migrate::FailureCode::Busy => "maintenance_busy",
-        migrate::FailureCode::Refused => "maintenance_refused",
-        migrate::FailureCode::Failed => "maintenance_failed",
+        crate::preview::FailureCode::Stale => "maintenance_stale",
+        crate::preview::FailureCode::InvalidSource => "maintenance_source",
+        crate::preview::FailureCode::InvalidConfig => "maintenance_config",
+        crate::preview::FailureCode::Busy => "maintenance_busy",
+        crate::preview::FailureCode::Refused => "maintenance_refused",
+        crate::preview::FailureCode::Failed => "maintenance_failed",
     }
 }
 fn native_code(code: &backup::MaintenanceCode) -> &'static str {

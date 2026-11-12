@@ -3,11 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::capture::{self, Captured, Settings};
+use crate::preview::{
+    FailureCode, absolute_identity, config_bytes, failure_code, open_v1, preview_key,
+    with_preview_v1,
+};
 use crate::raw::{
     Checkpoint, IMPORT_BATCH, ImportDoc, ImportIdentity, MAX_BATCH_BYTES, Raw, V1Row,
 };
@@ -269,31 +273,6 @@ pub(crate) struct Outcome {
     pub settings: Option<SettingsOutcome>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum FailureCode {
-    Stale,
-    InvalidSource,
-    InvalidConfig,
-    Busy,
-    Refused,
-    Failed,
-}
-
-impl std::fmt::Display for FailureCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for FailureCode {}
-
-pub(crate) fn failure_code(cause: &anyhow::Error, fallback: FailureCode) -> FailureCode {
-    cause
-        .downcast_ref::<FailureCode>()
-        .copied()
-        .unwrap_or(fallback)
-}
-
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub outcome: Box<Outcome>,
@@ -433,214 +412,6 @@ fn notify(stats: &Stats, stage: Stage, committed: &mut impl FnMut(&Committed)) {
         repos: stats.repos,
         documents: stats.documents,
     });
-}
-
-/// Bind consent to this code/ruleset, destination file identity, scope and effects.
-pub(crate) fn preview_key(home: &Path, scope: &impl serde::Serialize) -> Result<String> {
-    let identity = absolute_identity(home)?;
-    let bytes = serde_json::to_vec(&(
-        "settings-w5a-v1",
-        env!("CARGO_PKG_VERSION"),
-        crate::redact::Rules::default().version(),
-        identity,
-        crate::db::store_file(&crate::raw::path(home)),
-        scope,
-    ))?;
-    Ok(crate::forget::hash(&bytes))
-}
-
-fn absolute_identity(path: &Path) -> Result<PathBuf> {
-    if path.try_exists()? {
-        return Ok(path.canonicalize()?);
-    }
-    let path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let parent = path.parent().context("path has no parent")?;
-    Ok(absolute_identity(parent)?.join(path.file_name().context("path has no name")?))
-}
-
-pub(crate) fn file_version(path: &Path) -> Result<String> {
-    file_version_in(std::fs::File::open(path)?)
-}
-
-pub(crate) fn file_version_in(mut reader: impl std::io::Read) -> Result<String> {
-    let mut hash = Sha256::new();
-    let mut buf = [0; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-pub(crate) type SourceStamp = (PathBuf, String, u64, std::time::SystemTime, String);
-
-#[derive(Debug)]
-pub(crate) enum PreviewCopyError {
-    Changed,
-    Cleanup,
-}
-
-impl std::fmt::Display for PreviewCopyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Changed => "v1 changed during preview",
-            Self::Cleanup => "remove the private v1 preview copy",
-        })
-    }
-}
-
-impl std::error::Error for PreviewCopyError {}
-
-pub(crate) struct OpenedSource {
-    pub(crate) file: std::fs::File,
-    pub(crate) stamp: SourceStamp,
-}
-
-impl OpenedSource {
-    pub(crate) fn new(path: PathBuf, file: std::fs::File) -> Result<Self> {
-        Self::bounded(path, file, u64::MAX)
-    }
-
-    pub(crate) fn bounded(path: PathBuf, mut file: std::fs::File, limit: u64) -> Result<Self> {
-        use std::io::Read;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > limit {
-            return Err(std::io::Error::from(std::io::ErrorKind::Unsupported).into());
-        }
-        let id = crate::db::store_file_from(&file)?;
-        let hash = file_version_in((&mut file).take(metadata.len().saturating_add(1)))?;
-        let after = file.metadata()?;
-        if metadata.len() != after.len() || metadata.modified()? != after.modified()? {
-            return Err(PreviewCopyError::Changed.into());
-        }
-        Ok(Self {
-            file,
-            stamp: (path, id, metadata.len(), metadata.modified()?, hash),
-        })
-    }
-}
-
-/// Copies admitted descriptors only. The caller owns source selection and outside-home admission.
-pub(crate) fn with_preview_files<T>(
-    db: OpenedSource,
-    wal: Option<OpenedSource>,
-    inspect: impl FnOnce(&Connection) -> Result<T>,
-) -> Result<T> {
-    use std::io::{Read, Seek};
-    let scratch = crate::provider::scratch_dir()
-        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
-    let result = (|| {
-        for (index, mut source) in std::iter::once(db).chain(wal).enumerate() {
-            let path = scratch.0.join(if index == 0 {
-                "oboete.db"
-            } else {
-                "oboete.db-wal"
-            });
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut copy = options.open(&path)?;
-            source.file.rewind()?;
-            let bytes = std::io::copy(
-                &mut (&mut source.file).take(source.stamp.2.saturating_add(1)),
-                &mut copy,
-            )
-            .context("copy v1 for preview")?;
-            drop(copy);
-            let metadata = source.file.metadata()?;
-            if bytes != source.stamp.2
-                || metadata.len() != source.stamp.2
-                || metadata.modified()? != source.stamp.3
-                || crate::db::store_file_from(&source.file)? != source.stamp.1
-                || file_version(&path)? != source.stamp.4
-            {
-                return Err(PreviewCopyError::Changed.into());
-            }
-        }
-        let conn = open_v1(&scratch.0.join("oboete.db"))?;
-        conn.execute_batch("BEGIN")?;
-        inspect(&conn)
-    })();
-    std::fs::remove_dir_all(&scratch.0).context(PreviewCopyError::Cleanup)?;
-    result
-}
-
-/// SQLite may create sidecars even on a read-only open. Only open a stable private DB/WAL copy.
-/// Deliberately schema-neutral: transcript's legacy time-cut preview needs only two tables.
-pub(crate) fn with_preview_v1<T>(
-    from: &Path,
-    inspect: impl FnOnce(&Connection, &str) -> Result<T>,
-) -> Result<T> {
-    let parent = from
-        .parent()
-        .context("v1 store has no parent")?
-        .join(".")
-        .canonicalize()?;
-    anyhow::ensure!(
-        !std::env::temp_dir().canonicalize()?.starts_with(parent),
-        "preview needs a temporary directory outside the oboete home"
-    );
-    let source = from.canonicalize()?;
-    let mut wal = source.as_os_str().to_owned();
-    wal.push("-wal");
-    let wal = PathBuf::from(wal);
-    let versions = || -> Result<Vec<SourceStamp>> {
-        let mut paths = vec![source.clone()];
-        if wal.try_exists()? {
-            paths.push(wal.clone());
-        }
-        paths
-            .into_iter()
-            .map(|p| {
-                let m = std::fs::metadata(&p)?;
-                Ok((
-                    p.clone(),
-                    crate::db::store_file(&p),
-                    m.len(),
-                    m.modified()?,
-                    file_version(&p)?,
-                ))
-            })
-            .collect()
-    };
-    let before = versions()?;
-    let opened = before
-        .iter()
-        .map(|stamp| OpenedSource::new(stamp.0.clone(), std::fs::File::open(&stamp.0)?))
-        .collect::<Result<Vec<_>>>()?;
-    anyhow::ensure!(
-        opened.iter().map(|s| &s.stamp).eq(before.iter()),
-        "v1 changed during preview"
-    );
-    let version = crate::forget::hash(&serde_json::to_vec(&before)?);
-    let mut opened = opened.into_iter();
-    let db = opened.next().context("missing preview database")?;
-    with_preview_files(db, opened.next(), |conn| {
-        anyhow::ensure!(
-            before == versions()? && from.canonicalize()? == source,
-            "v1 changed during preview"
-        );
-        inspect(conn, &version)
-    })
-}
-
-pub(crate) fn config_bytes(home: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(home.join("config.toml")) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }
 
 fn missing_settings(text: &str) -> Result<Vec<MissingSetting>> {
@@ -2154,52 +1925,12 @@ fn read_documents(
     Ok(())
 }
 
-/// v1's store, read only (spec 7.4: the old store is left byte for byte), with the stores' busy
-/// wait. Never `immutable`, which skips the WAL, where the newest events are, and assumes no one
-/// writes: v1's hooks may write meanwhile.
-pub fn open_v1(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("open {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
-    Ok(conn)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::raw::{self, Event, Item, OpKind};
     use rusqlite::params;
     use std::path::PathBuf;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn w6d_preview_releases_original_descriptors_before_its_callback() {
-        let source = tempfile::tempdir().unwrap();
-        let path = source.path().join("source.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE fixture(value INTEGER); INSERT INTO fixture VALUES(1);")
-            .unwrap();
-        drop(conn);
-        let identity = crate::worker::file_id(std::fs::metadata(&path));
-        assert!(identity.is_some());
-        with_preview_v1(&path, |copy, _| {
-            let held = std::fs::read_dir("/proc/self/fd")
-                .unwrap()
-                .filter_map(std::result::Result::ok)
-                .filter(|entry| crate::worker::file_id(std::fs::metadata(entry.path())) == identity)
-                .count();
-            assert_eq!(
-                held, 0,
-                "preview still held a source descriptor during its callback"
-            );
-            assert_eq!(
-                copy.query_row("SELECT value FROM fixture", [], |row| row.get::<_, i64>(0))?,
-                1
-            );
-            Ok(())
-        })
-        .unwrap();
-    }
 
     #[test]
     fn w5c_confirmed_finish_creates_raw_without_invalidating_its_own_consent() {

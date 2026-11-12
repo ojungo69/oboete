@@ -2570,7 +2570,7 @@ fn recuration_source(path: &std::path::Path) -> Result<Option<(String, String)>>
                 !identity.is_empty(),
                 "recuration source identity unavailable"
             );
-            Some((identity, crate::migrate::file_version(path)?))
+            Some((identity, crate::preview::file_version(path)?))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
@@ -2780,7 +2780,7 @@ fn prepare_native(
         before == recuration_sources(home)?,
         "recuration source changed during planning"
     );
-    let logical = crate::migrate::preview_key(
+    let logical = crate::preview::preview_key(
         home,
         &(
             "oboete:recuration-logical:v1",
@@ -2819,7 +2819,7 @@ pub(crate) fn prepare_report(
         // Own close-time checkpoints are complete before the physical consent is captured.
         proof.check(home)?;
         let sources = recuration_sources(home)?;
-        let key = crate::migrate::preview_key(
+        let key = crate::preview::preview_key(
             home,
             &("oboete:recuration-preview:v2", &logical, &sources),
         )?;

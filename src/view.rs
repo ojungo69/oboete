@@ -4145,8 +4145,8 @@ mod tests {
                 );
                 assert!(!crate::db::store_file(&old).is_empty());
                 assert_eq!(
-                    crate::migrate::file_version(&old).unwrap(),
-                    crate::migrate::file_version(&replacement).unwrap()
+                    crate::preview::file_version(&old).unwrap(),
+                    crate::preview::file_version(&replacement).unwrap()
                 );
             }
             std::fs::create_dir(p.join("state")).unwrap();

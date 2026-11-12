@@ -172,7 +172,7 @@ fn version(path: &Path) -> Result<Option<FileVersion>> {
         identity,
         bytes: metadata.len(),
         modified: metadata.modified()?,
-        hash: crate::migrate::file_version(path)?,
+        hash: crate::preview::file_version(path)?,
     }))
 }
 
@@ -283,7 +283,7 @@ fn raw_info(home: &Path) -> Result<RawInfo> {
             healthy: false,
         });
     }
-    let result = crate::migrate::with_preview_v1(&path, |conn, _| {
+    let result = crate::preview::with_preview_v1(&path, |conn, _| {
         let healthy = crate::db::quick_check(conn, "raw.db").is_ok();
         let counts = conn
             .query_row(
@@ -438,7 +438,7 @@ fn preview_plan(
     }
     let knowledge_present = home.join("knowledge.db").try_exists()?;
     let cached_vectors = if knowledge_present {
-        crate::migrate::with_preview_v1(&home.join("knowledge.db"), |conn, _| {
+        crate::preview::with_preview_v1(&home.join("knowledge.db"), |conn, _| {
             let has: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='vectors')",
                 [],
@@ -2961,7 +2961,7 @@ pub(crate) mod tests {
                 } else {
                     files.push((
                         path.strip_prefix(root).unwrap().into(),
-                        crate::migrate::file_version(&path).unwrap(),
+                        crate::preview::file_version(&path).unwrap(),
                     ));
                 }
             }
