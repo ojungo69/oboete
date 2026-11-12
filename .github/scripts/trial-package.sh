@@ -13,12 +13,19 @@ output="$5"
 exe=oboete
 format=gztar
 extension=tar.gz
+# What prints a file's SHA-256 digest where the target runs.
 case "$target" in
-  x86_64-unknown-linux-gnu) floor='needs glibc 2.28 or later' ;;
-  aarch64-apple-darwin) floor='needs macOS 11 or later (Apple silicon)' ;;
-  x86_64-pc-windows-msvc) floor='x86_64'; exe=oboete.exe; format=zip; extension=zip ;;
+  x86_64-unknown-linux-gnu) floor='needs glibc 2.28 or later'; digest='sha256sum' ;;
+  aarch64-apple-darwin) floor='needs macOS 11 or later (Apple silicon)'; digest='shasum -a 256' ;;
+  x86_64-pc-windows-msvc)
+    floor='needs Windows 10 or later (x86_64)'
+    digest='Get-FileHash -Algorithm SHA256'
+    exe=oboete.exe; format=zip; extension=zip ;;
   *) die 'invalid target' ;;
 esac
+# The repository the build is of: the run's, or oboete's own when run by hand.
+repository="${GITHUB_REPOSITORY:-ojungo69/oboete}"
+[[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die 'invalid repository'
 [[ -f "$binary" && ! -L "$binary" ]] || die 'binary must be a regular file'
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 name="oboete-$version-$target"
@@ -36,7 +43,7 @@ cat > "$staging/$name/README.md" <<EOF
 # oboete $version
 
 This is a trial build of software that is not finished.
-https://github.com/ojungo69/oboete
+https://github.com/$repository
 
 Commit: $commit
 Target: $target, $floor
@@ -47,10 +54,14 @@ it by its path. Add that directory to PATH, then run:
     oboete setup <agent>
     oboete doctor
 
-Download SHA256SUMS beside the archive and verify the download:
+To check the download, print its SHA-256 digest: it is the one on the archive's
+line in SHA256SUMS, which is beside the archive on its release's page.
 
-    sha256sum -c --ignore-missing SHA256SUMS
-    gh attestation verify $name.$extension --repo ojungo69/oboete
+    $digest $name.$extension
+
+Its build provenance:
+
+    gh attestation verify $name.$extension --repo $repository
 EOF
 # Python's archive formats work on all three runners, including Git Bash on Windows.
 python=python3

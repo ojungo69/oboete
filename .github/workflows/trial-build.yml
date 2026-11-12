@@ -2,10 +2,6 @@ name: trial-build
 on:
   workflow_dispatch:
     inputs:
-      commit:
-        description: Commit on main (40 lowercase hex digits)
-        required: true
-        type: string
       number:
         description: Trial number (positive integer)
         required: true
@@ -32,38 +28,32 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       oboete_version: ${{ steps.plan.outputs.oboete_version }}
     steps:
+      # Every job checks out the commit the run started on: main's, for a run by hand, and for a
+      # pull request its merge with main. No input names a commit to check out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          fetch-depth: 0
       - id: plan
-        name: Validate the commit and name the build
+        name: Name the build
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           RUN_REF: ${{ github.ref }}
-          INPUT_COMMIT: ${{ inputs.commit }}
+          COMMIT: ${{ github.sha }}
           INPUT_NUMBER: ${{ inputs.number }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          commit="$COMMIT"
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$RUN_REF" == refs/heads/main ]] || { echo 'Run this workflow from main' >&2; exit 1; }
-            commit="$INPUT_COMMIT"
             number="$INPUT_NUMBER"
           else
-            commit="$PR_HEAD"
             number="$RUN_NUMBER"
           fi
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid commit' >&2; exit 1; }
           [[ "$number" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid trial number' >&2; exit 1; }
-          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
-            git merge-base --is-ancestor "$commit" origin/main
-          fi
-          git show "$commit:Cargo.toml" > "$RUNNER_TEMP/trial-Cargo.toml"
-          package_version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' "$RUNNER_TEMP/trial-Cargo.toml")"
+          package_version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' Cargo.toml)"
           [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]] || { echo 'Invalid package version' >&2; exit 1; }
           version="$package_version-trial.$number"
           printf 'commit=%s\nversion=%s\noboete_version=%s+%s\n' "$commit" "$version" "$version" "${commit:0:8}" >> "$GITHUB_OUTPUT"
@@ -130,7 +120,6 @@ jobs:
           dnf -y install git gcc gcc-c++ make binutils pkgconfig python3 curl tar gzip
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.commit }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
@@ -237,6 +226,7 @@ jobs:
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ needs.plan.outputs.commit }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           cd dist
@@ -245,16 +235,21 @@ jobs:
           cat > "$RUNNER_TEMP/trial-notes.md" <<EOF
           This is a trial build of software that is not finished.
 
-          Commit: [$COMMIT](https://github.com/ojungo69/oboete/commit/$COMMIT)
+          Commit: [$COMMIT](https://github.com/$REPO/commit/$COMMIT)
 
           - x86_64-unknown-linux-gnu: needs glibc 2.28 or later.
           - aarch64-apple-darwin: needs macOS 11 or later (Apple silicon).
-          - x86_64-pc-windows-msvc: x86_64.
+          - x86_64-pc-windows-msvc: needs Windows 10 or later (x86_64).
 
-          Download SHA256SUMS beside an archive and verify it:
+          To check a download, print its SHA-256 digest: it is the one on the archive's line in SHA256SUMS.
 
-              sha256sum -c --ignore-missing SHA256SUMS
-              gh attestation verify <archive> --repo ojungo69/oboete
+              sha256sum <archive>                         (Linux)
+              shasum -a 256 <archive>                     (macOS)
+              Get-FileHash -Algorithm SHA256 <archive>    (Windows PowerShell: the same digits, in capitals)
+
+          Its build provenance:
+
+              gh attestation verify <archive> --repo $REPO
 
           Not verified on a real machine yet: a download by a browser on macOS (quarantine) and on Windows (SmartScreen).
           EOF
