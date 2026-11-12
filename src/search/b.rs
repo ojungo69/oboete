@@ -745,10 +745,14 @@ pub(crate) fn curated_words(
         ..Default::default()
     };
     for (summaries, fts) in [(false, "cards_fts"), (true, "turns_fts")] {
+        // Asked before each read of the store, the index's lookup and then its statement, so
+        // that neither starts once it says so.
+        if stop() {
+            break;
+        }
         if !crate::consumer::manifest::exists(k, "table", fts)? {
             continue;
         }
-        // Asked right before the statement, so that none starts once it says so.
         if stop() {
             break;
         }
