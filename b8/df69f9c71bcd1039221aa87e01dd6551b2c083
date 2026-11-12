@@ -1,0 +1,23 @@
+src/my_work_rules.rs
+  s_b837d726e3a0bf::t_51a6e1cf14af99 903-910,914-918
+  s_b837d726e3a0bf::t_49a6e85493da32 1941,1946-1948,1951-1956,1958-1959,1973,1976,1978-1982,1988
+  s_b837d726e3a0bf::t_e00fcdb00e4617 515-517
+  s_b837d726e3a0bf::t_dad844bcf3138f 1942-1945,1949-1950,1957,1960-1972,1974-1975,1983-1987
+  s_b837d726e3a0bf::t_6ff1d91e8ff274 1977
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8df69f9c71bcd1039221aa87e01dd6551b2c083",
+  "prompts": {},
+  "sessions": {
+    "s_b837d726e3a0bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e3afe-6073-497d-a898-061b3f838414",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
