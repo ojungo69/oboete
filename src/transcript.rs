@@ -798,6 +798,18 @@ struct BoundFile {
     path: PathBuf,
     digest: String,
     parsed: String,
+    /// The session the preview read in it; none while its lines are not bound.
+    session: Option<String>,
+}
+
+/// A bound file that waits keeps its session's place among the files: a later copy of the
+/// session, which the preview counted as seen before, is not imported in its stead.
+fn keep_place(bound: Option<&BoundFile>, sessions: &mut HashSet<(String, String)>) {
+    if let Some(bound) = bound
+        && let Some(session) = &bound.session
+    {
+        sessions.insert((bound.agent.clone(), session.clone()));
+    }
 }
 
 /// What a preview bound. The viewer keeps it between a preview and its confirm (#947): the
@@ -860,6 +872,7 @@ fn bound_files(roots: &[(&str, &Path)]) -> Result<Vec<BoundFile>> {
                 agent: (*agent).to_owned(),
                 digest: source_digest(&path, agent)?,
                 parsed: String::new(),
+                session: None,
                 path,
             });
         }
@@ -1143,6 +1156,7 @@ fn import_files(
             if changed(&bound) {
                 stats.files += 1;
                 stats.waiting += 1;
+                keep_place(bound.as_deref(), &mut sessions);
                 continue;
             }
             stats.files += 1;
@@ -1152,10 +1166,12 @@ fn import_files(
             }
             let Some(mut lines) = stable_lines(&path, agent)? else {
                 stats.waiting += 1;
+                keep_place(bound.as_deref(), &mut sessions);
                 continue;
             };
             if changed(&bound) {
                 stats.waiting += 1;
+                keep_place(bound.as_deref(), &mut sessions);
                 continue;
             }
             #[cfg(test)]
@@ -1169,6 +1185,7 @@ fn import_files(
                 } else if bound.parsed != parsed {
                     // The same file by its bytes, and other lines than the preview read of it.
                     stats.waiting += 1;
+                    keep_place(Some(bound), &mut sessions);
                     continue;
                 }
             }
@@ -1182,6 +1199,11 @@ fn import_files(
                 continue;
             };
             let session = &first.session;
+            if let Some(bound) = bound.as_deref_mut()
+                && bound.session.is_none()
+            {
+                bound.session = Some(session.clone());
+            }
             let new_session = sessions.insert(((*agent).to_owned(), session.clone()));
             stats.sessions += u64::from(new_session);
             if lines
@@ -2553,6 +2575,87 @@ mod tests {
         let codex = &done.stats.agents["codex"];
         assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
         assert!(records(&home).is_empty());
+    }
+
+    /// Two files of one session: the preview counts the first as what is imported and the second
+    /// as seen before. When the first waits, the second is not imported in its stead (Codex's
+    /// security review of #947): the preview showed none of it as to be imported, and the
+    /// session's checkpoint would be of the copy, not of the file a later import reads first.
+    /// For each way a bound file comes to wait.
+    #[test]
+    fn a_confirm_imports_no_copy_of_a_session_whose_first_file_waits() {
+        for why in [
+            "it grew before its turn",
+            "its time changed while it was read",
+            "it was replaced while it was read",
+            "it reads as other lines",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = fixtures(dir.path());
+            let first = root.join("2026/09/02/rollout-basic.jsonl");
+            // The same session again, with a prompt the first file does not have.
+            let copy = root.join("2026/09/02/rollout-copy.jsonl");
+            let mut text = std::fs::read_to_string(&first).unwrap();
+            text.push_str(
+                r#"{"timestamp":"2026-09-02T00:00:20.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"only in the copy"}]}}"#,
+            );
+            text.push('\n');
+            std::fs::write(&copy, text).unwrap();
+            let home = dir.path().join("home");
+            let roots = [("codex", root.as_path())];
+            let mut shown = preview_plan(&home, &roots).unwrap();
+            let codex = &shown.preview.candidates.agents["codex"];
+            assert_eq!((codex.files, codex.events, codex.waiting), (2, 8, 0));
+            let seen = codex.seen;
+            assert!(seen > 0, "the copy is counted as seen before");
+            // The confirm reads the first file first: a hook below runs in that reading.
+            match why {
+                "it grew before its turn" => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&first)
+                        .unwrap();
+                    file.write_all(b"\n").unwrap();
+                }
+                "its time changed while it was read" => AFTER_PARSE.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        let file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&first)
+                            .unwrap();
+                        let later = file.metadata().unwrap().modified().unwrap()
+                            + std::time::Duration::from_secs(60);
+                        file.set_times(std::fs::FileTimes::new().set_modified(later))
+                            .unwrap();
+                    }))
+                }),
+                "it was replaced while it was read" => AFTER_PARSE.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        // Other bytes, its size and time as they were.
+                        let file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&first)
+                            .unwrap();
+                        let times = std::fs::FileTimes::new()
+                            .set_modified(file.metadata().unwrap().modified().unwrap());
+                        let text = std::fs::read_to_string(&first).unwrap();
+                        let other = text.replace("Try again with 100ms", "Try again with 200ms");
+                        assert_ne!(other, text);
+                        std::fs::write(&first, other).unwrap();
+                        file.set_times(times).unwrap();
+                    }))
+                }),
+                _ => shown.files[0].parsed = parsed_digest(&[]).unwrap(),
+            }
+            let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+            let codex = &done.stats.agents["codex"];
+            assert_eq!(
+                (codex.files, codex.events, codex.waiting, codex.seen),
+                (2, 0, 1, seen),
+                "{why}"
+            );
+            assert!(records(&home).is_empty(), "{why}");
+        }
     }
 
     /// A bound file that is the same by its bytes and reads as other lines than the preview read
