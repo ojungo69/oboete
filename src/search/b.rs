@@ -745,11 +745,12 @@ pub(crate) fn curated_words(
         ..Default::default()
     };
     for (summaries, fts) in [(false, "cards_fts"), (true, "turns_fts")] {
-        if stop() {
-            break;
-        }
         if !crate::consumer::manifest::exists(k, "table", fts)? {
             continue;
+        }
+        // Asked right before the statement, so that none starts once it says so.
+        if stop() {
+            break;
         }
         let class = if summaries {
             Class::Summary
