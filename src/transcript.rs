@@ -2523,6 +2523,38 @@ mod tests {
         assert!(records(&home).is_empty());
     }
 
+    /// A file the preview could not read as stable, and so counted as waiting with none of its
+    /// lines bound, is not read by the confirm, though it is the same file by its bytes: the
+    /// preview showed none of it.
+    #[test]
+    fn a_confirm_reads_no_transcript_its_preview_counted_as_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let touched = root.join("2026/09/02/rollout-basic.jsonl");
+        // Its time changes while the preview reads it, its bytes as they were.
+        AFTER_PARSE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&touched)
+                    .unwrap();
+                let later = file.metadata().unwrap().modified().unwrap()
+                    + std::time::Duration::from_secs(60);
+                file.set_times(std::fs::FileTimes::new().set_modified(later))
+                    .unwrap();
+            }))
+        });
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview_plan(&home, &roots).unwrap();
+        let codex = &shown.preview.candidates.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
+    }
+
     /// A bound file that is the same by its bytes and reads as other lines than the preview read
     /// of it (the plan is made to say so here) waits too: none of it is stored.
     #[test]
