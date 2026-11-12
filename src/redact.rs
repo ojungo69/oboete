@@ -501,6 +501,75 @@ pub fn outbound_with(text: &str, rules: &Rules) -> String {
     scan(&crate::hook::strip_blocks(text, false), rules).0
 }
 
+/// `text` with what the rules find in it now masked, and nothing else done to it: no block is
+/// taken out, and the byte ranges in `kept` (in order, apart) stay as they are, a match that runs
+/// over one masked on each side of it. For a text of parts that were each stripped of their
+/// blocks and then put between tags of oboete's own (`kept`): the rules read the whole, so a
+/// value one finds only beside what another part holds is masked, and the tags are not.
+///
+/// As `scan`: the spans are found in the text as it is, before any mask (a mask would take the
+/// context another rule needs), and then the rules read what the masks left until they find
+/// nothing new there (a remainder glued to a mask). Still finding after `MAX_PASSES`, the whole
+/// text is one mask.
+pub fn outbound_but(text: &str, kept: &[(usize, usize)]) -> String {
+    match egress() {
+        Some(rules) => outbound_but_with(text, kept, &rules),
+        None => MASK.to_string(),
+    }
+}
+
+pub fn outbound_but_with(text: &str, kept: &[(usize, usize)], rules: &Rules) -> String {
+    let (mut text, mut kept) = (text.to_owned(), kept.to_vec());
+    for _ in 0..=MAX_PASSES {
+        let (next, moved) = masked_but(&text, &ranges(&text, rules), &kept);
+        if next == text {
+            return text; // nothing found, or only what is kept
+        }
+        (text, kept) = (next, moved);
+    }
+    MASK.to_string()
+}
+
+/// `text` with each of `found` (in order, apart) masked but for the parts of it in `kept`, and
+/// where each of `kept` is in what comes back.
+fn masked_but(
+    text: &str,
+    found: &[(usize, usize)],
+    kept: &[(usize, usize)],
+) -> (String, Vec<(usize, usize)>) {
+    let mut masks = Vec::new();
+    for &(from, to) in found {
+        let mut start = from;
+        for &(tag, end) in kept.iter().filter(|k| k.0 < to && k.1 > from) {
+            if start < tag {
+                masks.push((start, tag));
+            }
+            start = start.max(end);
+        }
+        if start < to {
+            masks.push((start, to));
+        }
+    }
+    let (mut out, mut moved, mut at) = (String::with_capacity(text.len()), Vec::new(), 0);
+    let mut tags = kept.iter().peekable();
+    // A tag is in a run that is copied: it moves by what the masks before it changed.
+    let mut place = |out: &String, at: usize, before: usize, moved: &mut Vec<(usize, usize)>| {
+        while let Some(&&(tag, end)) = tags.peek().filter(|t| t.0 < before) {
+            moved.push((out.len() + tag - at, out.len() + end - at));
+            tags.next();
+        }
+    };
+    for (from, to) in masks {
+        place(&out, at, from, &mut moved);
+        out.push_str(&text[at..from]);
+        out.push_str(MASK);
+        at = to;
+    }
+    place(&out, at, usize::MAX, &mut moved);
+    out.push_str(&text[at..]);
+    (out, moved)
+}
+
 /// `outbound_with` of `text[range]`, one part of the whole `text` a window cut (spec 3.1, issue
 /// #54): what the gate hides in the whole text (`hidden`) is hidden in the part too, also where
 /// the cut splits it. `range` is on character boundaries.
@@ -2549,6 +2618,64 @@ mod tests {
         ] {
             assert_eq!(scan(&text, &rules).0, text);
         }
+    }
+
+    /// A text of parts between tags: the rules read the whole from the text as it is. A value one
+    /// rule masks in the first part is the context another needs for a value in the second: both
+    /// are masked. The tags stay, also under a match that runs over them.
+    #[test]
+    fn parts_between_tags_are_read_before_any_mask() {
+        let rules = user(concat!(
+            "[[redaction.extra_rules]]\nid = \"name\"\nregex = '(?s)wrote.*note=(ACME)'\nsecret_group = 1\n",
+            "[[redaction.extra_rules]]\nid = \"otp\"\nregex = '(?s)ACME.*otp=([0-9]{6})'\nsecret_group = 1\n",
+        ))
+        .unwrap();
+        let (open, close) = ("<tag>\n", "</tag>\n");
+        let (first, second) = (
+            "What agents wrote: note=ACME",
+            "A code: otp=654321 and more",
+        );
+        let text = format!("{open}{first}\n{close}{open}{second}\n{close}");
+        let tags: Vec<(usize, usize)> = text
+            .match_indices("tag>\n")
+            .map(|(i, t)| {
+                let from = text[..i].rfind('<').unwrap();
+                (from, i + t.len())
+            })
+            .collect();
+        assert_eq!(tags.len(), 4);
+        let shown = outbound_but_with(&text, &tags, &rules);
+        assert!(
+            !shown.contains("ACME") && !shown.contains("654321"),
+            "{shown}"
+        );
+        assert_eq!(
+            shown,
+            format!(
+                "{open}What agents wrote: note={MASK}\n{close}{open}A code: otp={MASK} and more\n{close}"
+            )
+        );
+        // A match that runs over a tag is masked on each side of it, and the tag is not.
+        let over =
+            user("[[redaction.extra_rules]]\nid = \"all\"\nregex = '(?s)note=.*otp=[0-9]{6}'\n")
+                .unwrap();
+        let shown = outbound_but_with(&text, &tags, &over);
+        assert_eq!(
+            shown,
+            format!("{open}What agents wrote: {MASK}{close}{open}{MASK} and more\n{close}")
+        );
+    }
+
+    /// A rule that finds something in the mask's own text finds it again every pass. Past
+    /// `MAX_PASSES` nothing of the text is shown, the kept ranges neither, as `scan` ends.
+    #[test]
+    fn parts_between_tags_end_as_one_mask_when_the_passes_run_out() {
+        let rules = user("[[redaction.extra_rules]]\nid = \"caps\"\nregex = '[A-Z]{8}'\n").unwrap();
+        let text = "<tag>\nA name: ABCDEFGH and more\n</tag>\n";
+        let tags = [(0, 6), (text.len() - 7, text.len())];
+        assert_eq!(&text[tags[1].0..tags[1].1], "</tag>\n");
+        assert_eq!(outbound_but_with(text, &tags, &rules), MASK);
+        assert_eq!(scan(text, &rules).0, MASK);
     }
 
     /// #931: an Azure Storage shared access signature (a URL's query, or a token, with `sv=`, the
