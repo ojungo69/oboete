@@ -26,6 +26,7 @@ async function load(env = {}, manualTimers = false) {
   const handlers = new Map();
   const tools = new Map();
   const timeouts = [];
+  const kills = [];
   const timers = new Map();
   let nextTimerId = 0;
   let now = 0;
@@ -59,7 +60,7 @@ async function load(env = {}, manualTimers = false) {
         child.emit("close", 0);
       });
     };
-    child.kill = () => { child.emit("close", null); return true; };
+    child.kill = () => { kills.push(now); child.emit("close", null); return true; };
     return child;
   };
   const Type = Object.fromEntries(["Object", "String", "Boolean", "Integer", "Number", "Optional"].map(name => [name, (...args) => ({ kind: name, args })]));
@@ -70,7 +71,7 @@ async function load(env = {}, manualTimers = false) {
       timeouts.push(ms);
       if (!manualTimers) return setTimeout(fn, ms);
       const id = ++nextTimerId;
-      timers.set(id, fn);
+      timers.set(id, { fn, at: now + ms });
       return id;
     },
     clearTimeout: id => manualTimers ? timers.delete(id) : clearTimeout(id),
@@ -96,19 +97,26 @@ async function load(env = {}, manualTimers = false) {
   };
   await deadline(module.namespace.default(pi), "extension factory");
   return {
-    hooks, execs, handlers, tools, timeouts,
+    hooks, execs, handlers, tools, timeouts, kills,
     set failNextHook(value) { failNextHook = value; },
     set stallNextHook(value) { stallNextHook = value; },
     set nextHookOutput(value) { nextHookOutput = value; },
     set nextExec(value) { nextExec = value; },
     advance(ms) { now += ms; },
+    // The clock goes on by `ms`, and every timer due by then fires, the oldest first.
+    tick(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now && timers.delete(id)) timer.fn();
+      }
+    },
     fireLastTimer() {
-      const [id, fn] = [...timers].at(-1);
+      const [id, { fn }] = [...timers].at(-1);
       timers.delete(id);
       fn();
     },
     fireFirstTimer() {
-      const [id, fn] = timers.entries().next().value;
+      const [id, { fn }] = timers.entries().next().value;
       timers.delete(id);
       fn();
     },
@@ -213,7 +221,6 @@ assert.equal(run.hooks[5].payload.compact_summary, "summary");
 assert.equal(run.hooks[5].payload.trigger, "manual");
 assert.equal(run.hooks[6].payload.source, "compact");
 assert.equal(run.hooks[7].payload.reason, "quit");
-assert.ok(run.timeouts.length > 0 && run.timeouts.every(ms => ms > 0 && ms <= 2000), "hook waits need a 2-second cap");
 
 const { ctx: resumeCtx, state: resumeState } = session("resumed", [{ type: "custom" }]);
 const resumed = await load();
@@ -307,6 +314,37 @@ remaining.advance(500);
 remaining.fireLastTimer();
 await limitedInput;
 assert.equal(await remaining.emit("before_agent_start", { prompt: "after timeout" }, ctx), undefined);
+
+// What Pi waits for ends at 2 seconds. A capture's child, which nothing waits for, lives 3: its
+// hook waits 2 seconds for a held store before it keeps what it could not write.
+const clock = await load({}, true);
+clock.stallNextHook = true;
+clock.handlers.get("tool_result")(toolEvent, ctx);
+await Promise.resolve();
+const behind = clock.emit("input", { source: "interactive", text: "behind a capture" }, ctx);
+await Promise.resolve();
+clock.tick(1999);
+assert.equal(clock.kills.length, 0);
+clock.tick(1);
+await behind; // Pi goes on; its prompt's hook, queued behind the capture, never started
+assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
+assert.equal(clock.kills.length, 0, "a capture's child is not killed at 2 seconds");
+clock.tick(999);
+assert.equal(clock.kills.length, 0, "nor before 3");
+clock.tick(1);
+assert.deepEqual(clock.kills, [3000], "a capture's child is killed at 3 seconds");
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
+// A hook Pi waits for dies with the wait: what it prints later must not come to count as shown.
+const waited = await load({}, true);
+waited.stallNextHook = true;
+const stalled = waited.emit("input", { source: "interactive", text: "stalled" }, ctx);
+await Promise.resolve();
+waited.tick(1999);
+assert.equal(waited.kills.length, 0);
+waited.tick(1);
+await stalled;
+assert.deepEqual(waited.kills, [2000], "a hook Pi waits for is killed as the wait ends");
 
 // What a prompt gets joins the stash its run starts with, after SessionStart's, once.
 const prompted = await load();

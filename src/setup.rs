@@ -4071,10 +4071,16 @@ mod tests {
             .chain(GROK_EVENTS.iter().map(|e| e.1))
             .min()
             .unwrap();
-        let needed = crate::hook::STORE_WAIT
-            + crate::unwritten::KEEP_WAIT
-            + std::time::Duration::from_millis(500);
+        let needed = failed_write_and_keep();
         assert!(needed <= std::time::Duration::from_secs(shortest.into()));
+    }
+
+    /// What a hook whose store does not open takes to its end: the store's wait, a keep in
+    /// progress, and its own file and marker.
+    fn failed_write_and_keep() -> std::time::Duration {
+        crate::hook::STORE_WAIT
+            + crate::unwritten::KEEP_WAIT
+            + std::time::Duration::from_millis(500)
     }
 
     #[test]
@@ -4555,6 +4561,34 @@ mod tests {
             eprintln!("node not on PATH: skipping generated plugin syntax and runtime checks");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A plugin that kills its capture hook lets it live through the store's wait, a keep in
+    /// progress and its own file and marker (docs/unwritten.md U2, U5), as the shortest timeout
+    /// `setup` writes does. Killed sooner, a hook whose store is held dies before it keeps what
+    /// it could not write, and nothing says an event was lost. The numbers are in two
+    /// languages: this holds them together.
+    #[test]
+    fn a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write() {
+        let least = failed_write_and_keep();
+        let ms_after = |text: &str, mark: &str| {
+            let at = text
+                .find(mark)
+                .unwrap_or_else(|| panic!("{mark} not found"))
+                + mark.len();
+            let digits: String = text[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            std::time::Duration::from_millis(digits.parse().unwrap())
+        };
+        let pi = ms_after(include_str!("pi.ts"), "const CAPTURE_KILL_MS = ");
+        assert!(pi >= least, "Pi's capture hook: {pi:?}");
+        // OpenCode's `send` spawns every hook with this timeout.
+        let opencode = include_str!("opencode.js");
+        let hook = opencode.find("\"hook\", \"opencode\", event]").unwrap();
+        let opencode = ms_after(&opencode[hook..], "timeout: ");
+        assert!(opencode >= least, "OpenCode's hook: {opencode:?}");
     }
 
     #[test]
