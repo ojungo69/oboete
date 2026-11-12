@@ -2494,9 +2494,10 @@ mod tests {
             source.path().join("rollout-basic.jsonl"),
         )
         .unwrap();
-        let shown = crate::transcript::preview(home.path(), &[("codex", source.path())]).unwrap();
-        assert_eq!(shown.candidates.agents["codex"].events, 8);
-        let migration = shown.v1.expect("transcript consent must include v1");
+        let shown =
+            crate::transcript::preview_plan(home.path(), &[("codex", source.path())]).unwrap();
+        assert_eq!(shown.preview.candidates.agents["codex"].events, 8);
+        let migration = (shown.preview.v1.as_ref()).expect("transcript consent must include v1");
         assert_eq!(
             (migration.candidates.records, migration.candidates.documents),
             (1, 1)
@@ -2508,7 +2509,7 @@ mod tests {
         let imported = crate::transcript::run(
             home.path(),
             &[("codex", source.path())],
-            Some(&shown.key),
+            Some(shown),
             &mut |c| match c {
                 crate::transcript::Committed::V1(c) => stages.push(format!("v1:{:?}", c.stage)),
                 crate::transcript::Committed::Transcripts {
@@ -2636,8 +2637,8 @@ mod tests {
         let v1 = V1::new(home.path());
         v1.session("s1", "r", 100);
         v1.prompt("s1", 200, "one");
-        let shown = crate::transcript::preview(home.path(), &[]).unwrap();
-        let failed = crate::transcript::run(home.path(), &[], Some(&shown.key), &mut |c| {
+        let shown = crate::transcript::preview_plan(home.path(), &[]).unwrap();
+        let failed = crate::transcript::run(home.path(), &[], Some(shown), &mut |c| {
             if matches!(
                 c,
                 crate::transcript::Committed::V1(Committed {

@@ -800,8 +800,12 @@ struct BoundFile {
     parsed: String,
 }
 
-struct PreviewPlan {
-    preview: Preview,
+/// What a preview bound. The viewer keeps it between a preview and its confirm (#947): the
+/// confirm imports of these files the ones that are still what was bound, and no other file.
+pub(crate) struct PreviewPlan {
+    pub(crate) preview: Preview,
+    /// The agents and their transcript folders the preview read.
+    roots: Vec<(String, PathBuf)>,
     files: Vec<BoundFile>,
     config: Option<Vec<u8>>,
     destination: String,
@@ -863,23 +867,22 @@ fn bound_files(roots: &[(&str, &Path)]) -> Result<Vec<BoundFile>> {
     Ok(files)
 }
 
-pub(crate) fn preview(home: &Path, roots: &[(&str, &Path)]) -> Result<Preview> {
-    Ok(preview_plan(home, roots)?.preview)
-}
-
+/// The import. `prepared` is a preview's plan, for a confirm of it: of the files it bound, each
+/// is imported while it is still the file that was bound, the others wait for a later import,
+/// and no file it did not bind is read. Without one (the CLI's `--yes`) nothing is bound.
 pub(crate) fn run(
     home: &Path,
     roots: &[(&str, &Path)],
-    expected: Option<&str>,
+    prepared: Option<PreviewPlan>,
     committed: &mut impl FnMut(&Committed),
 ) -> std::result::Result<Outcome, Failure> {
-    run_with_output(home, roots, expected, committed, &mut std::io::sink())
+    run_with_output(home, roots, prepared, committed, &mut std::io::sink())
 }
 
 fn run_with_output(
     home: &Path,
     roots: &[(&str, &Path)],
-    expected: Option<&str>,
+    prepared: Option<PreviewPlan>,
     committed: &mut impl FnMut(&Committed),
     out: &mut impl Write,
 ) -> std::result::Result<Outcome, Failure> {
@@ -890,14 +893,17 @@ fn run_with_output(
         crate::migrate::check_source(home, &v1)?;
         code = FailureCode::Busy;
         let _lock = crate::import::lock(home)?;
-        let mut plan = if let Some(expected) = expected {
+        // A confirm is of what its preview read: the same agents' folders. What else the
+        // preview's key bound is looked at again below, the settings and the destination, and
+        // the files one by one as they are read.
+        let mut plan = prepared;
+        if let Some(plan) = &plan {
             code = FailureCode::Stale;
-            let plan = preview_plan(home, roots)?;
-            anyhow::ensure!(plan.preview.key == expected, FailureCode::Stale);
-            Some(plan)
-        } else {
-            None
-        };
+            let same = (plan.roots.iter())
+                .map(|(agent, root)| (agent.as_str(), root.as_path()))
+                .eq(roots.iter().copied());
+            anyhow::ensure!(same, FailureCode::Stale);
+        }
         let before_config = plan.as_ref().map(|p| p.config.clone());
         let mut raw = None;
         if v1.try_exists()? {
@@ -1000,7 +1006,7 @@ fn run_with_output(
     }
 }
 
-fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
+pub(crate) fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
     let destination = crate::preview::preview_key(home, &"destination")?;
     let config = crate::preview::config_bytes(home)?;
     let path = home.join("oboete.db");
@@ -1048,6 +1054,9 @@ fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
             candidates,
             v1,
         },
+        roots: (roots.iter())
+            .map(|(agent, root)| ((*agent).to_owned(), root.to_path_buf()))
+            .collect(),
         files,
         config,
         destination,
@@ -1121,16 +1130,17 @@ fn import_files(
                     .find(|file| file.agent == *agent && file.path == path)
             });
             // A file that is not the one the preview bound (a session at work has written to it
-            // since): a confirm stops, since what it was shown is not what is there. A preview
-            // counts the file as waiting, as one that changes while it is read, and leaves it
-            // bound as it was with nothing parsed: it authorizes no later version of the file.
-            // Once its lines are read and it is still the file that was bound, a preview does not
-            // look at it again: what it counts is what it bound.
+            // since) waits for a later import, and the files after it are read (#947, decision
+            // 100): what a confirm stores is a part of what its preview showed, never another
+            // version of a file. A preview counts such a file as waiting too, as one that
+            // changes while it is read, and leaves it bound as it was with nothing parsed: it
+            // authorizes no later version of the file. Once its lines are read and it is still
+            // the file that was bound, a preview does not look at it again: what it counts is
+            // what it bound.
             let changed = |bound: &Option<&mut BoundFile>| {
                 bound.as_deref().is_some_and(|b| check_bound(b).is_err())
             };
             if changed(&bound) {
-                anyhow::ensure!(!yes, FailureCode::Stale);
                 stats.files += 1;
                 stats.waiting += 1;
                 continue;
@@ -1141,14 +1151,10 @@ fn import_files(
                 continue;
             }
             let Some(mut lines) = stable_lines(&path, agent)? else {
-                if yes && bound.is_some() {
-                    anyhow::bail!(FailureCode::Stale);
-                }
                 stats.waiting += 1;
                 continue;
             };
             if changed(&bound) {
-                anyhow::ensure!(!yes, FailureCode::Stale);
                 stats.waiting += 1;
                 continue;
             }
@@ -1160,8 +1166,10 @@ fn import_files(
                 let parsed = parsed_digest(&lines)?;
                 if bound.parsed.is_empty() {
                     bound.parsed = parsed;
-                } else {
-                    anyhow::ensure!(bound.parsed == parsed, FailureCode::Stale);
+                } else if bound.parsed != parsed {
+                    // The same file by its bytes, and other lines than the preview read of it.
+                    stats.waiting += 1;
+                    continue;
                 }
             }
             // EOF's interrupted calls, Stop and SessionEnd may be replaced when the file grows.
@@ -1259,6 +1267,8 @@ fn import_files(
             // A batch the store did not take for a forget's sake: the file is refused where it
             // stands, as one `transcript_cut` refuses, and the files after it are still read.
             let mut refused = None;
+            // Written to while a confirm imported it (#947): nothing more of it is stored.
+            let mut grew = false;
             for (mut line, event_hash) in lines.into_iter().zip(&fingerprints) {
                 let occurrence = occurrences.entry(event_hash.clone()).or_default();
                 let identity = format!("{event_hash}:{occurrence}");
@@ -1293,11 +1303,13 @@ fn import_files(
                     capture::imported(agent, &line.event, &line.payload, ts, &repo, cwd, &settings);
                 let size: usize = captured.iter().map(|c| c.event.body.len()).sum();
                 if batch.len() + captured.len() > IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
-                    // A confirm stops when the file is no longer the one it was shown. A preview
-                    // writes nothing and has the lines it read from the file it bound: it reads
-                    // on, and a confirm of it finds the file changed.
-                    if yes && let Some(bound) = bound.as_deref() {
-                        check_bound(bound)?;
+                    // A confirm leaves a file that is no longer the one it was shown where its
+                    // last batch left it: the rest waits. A preview writes nothing and has the
+                    // lines it read from the file it bound: it reads on, and a confirm of it
+                    // finds the file changed.
+                    if yes && bound.as_deref().is_some_and(|b| check_bound(b).is_err()) {
+                        grew = true;
+                        break;
                     }
                     if let Err(e) = append_batch(raw, &mut batch, &checkpoint, &settings, stats) {
                         refused = Some(forget_refusal(e)?);
@@ -1333,10 +1345,14 @@ fn import_files(
                 checkpoint.through = through;
                 checkpoint.prefix = fingerprint;
             }
-            if refused.is_none() && checkpoint.through > seen {
-                if yes && let Some(bound) = bound.as_deref() {
-                    check_bound(bound)?;
-                }
+            grew = grew
+                || (refused.is_none()
+                    && checkpoint.through > seen
+                    && yes
+                    && bound.as_deref().is_some_and(|b| check_bound(b).is_err()));
+            if grew {
+                stats.waiting += 1;
+            } else if refused.is_none() && checkpoint.through > seen {
                 match append_batch(raw, &mut batch, &checkpoint, &settings, stats) {
                     Ok(()) => {
                         if raw.is_some() {
@@ -1969,26 +1985,20 @@ mod tests {
         });
         let home = dir.path().join("home");
         let roots = [("codex", root.as_path())];
-        let shown = preview(&home, &roots).unwrap();
-        assert_eq!(
-            (
-                shown.candidates.agents["codex"].events,
-                shown.candidates.agents["codex"].waiting
-            ),
-            (0, 1)
-        );
+        let shown = preview_plan(&home, &roots).unwrap();
+        let codex = &shown.preview.candidates.agents["codex"];
+        assert_eq!((codex.events, codex.waiting), (0, 1));
         assert!(!home.exists());
-        let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
-            panic!("no commits")
-        })
-        .unwrap_err();
-        assert_eq!(failed.code, FailureCode::Stale);
-        assert!(!raw::path(&home).exists());
+        // Its confirm leaves the file for a later import: none of the later version is stored.
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
     }
 
     /// A transcript a session at work wrote to after the preview bound it, before the preview
     /// came to it: counted as waiting, as one that changes while it is read. The preview is shown,
-    /// and a confirm of it stops at the file: it was shown none of that version.
+    /// and a confirm of it leaves the file for a later import: it was shown none of that version.
     #[test]
     fn a_preview_counts_a_transcript_that_grew_before_its_turn_as_waiting() {
         let dir = tempfile::tempdir().unwrap();
@@ -2006,20 +2016,19 @@ mod tests {
         });
         let home = dir.path().join("home");
         let roots = [("codex", root.as_path())];
-        let shown = preview(&home, &roots).unwrap();
-        let codex = &shown.candidates.agents["codex"];
+        let shown = preview_plan(&home, &roots).unwrap();
+        let codex = &shown.preview.candidates.agents["codex"];
         assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
         assert!(!home.exists());
-        let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
-            panic!("no commits")
-        })
-        .unwrap_err();
-        assert_eq!(failed.code, FailureCode::Stale);
-        assert!(!raw::path(&home).exists());
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
     }
 
     /// The same for a file another took the place of while it was read, of the same size and
-    /// time: its lines read as stable, and it is not the file the preview bound.
+    /// time: its lines read as stable, and it is not the file the preview bound. A confirm
+    /// stores nothing of the one that took its place.
     #[test]
     fn a_preview_counts_a_transcript_replaced_while_it_was_read_as_waiting() {
         let dir = tempfile::tempdir().unwrap();
@@ -2038,10 +2047,14 @@ mod tests {
         });
         let home = dir.path().join("home");
         let roots = [("codex", root.as_path())];
-        let shown = preview(&home, &roots).unwrap();
-        let codex = &shown.candidates.agents["codex"];
+        let shown = preview_plan(&home, &roots).unwrap();
+        let codex = &shown.preview.candidates.agents["codex"];
         assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
         assert!(!home.exists());
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
     }
 
     /// A Claude Code transcript of `prompts` prompts, one session, under `dir`: its root and file.
@@ -2069,8 +2082,8 @@ mod tests {
 
     /// A transcript a session at work wrote to after the preview read it: the preview has its
     /// lines, read from the file it bound, and writes nothing, so it reads on and is shown with
-    /// the file's events counted. A confirm of it stops: the file is not the one it was shown.
-    /// With one batch (the check at the file's end) and with two (the check before a batch).
+    /// the file's events counted. A confirm of it leaves the file for a later import: it is not
+    /// the one it was shown. With one batch and with two.
     #[test]
     fn a_preview_reads_on_when_a_transcript_grows_after_it_was_read() {
         for prompts in [3, raw::IMPORT_BATCH + 1] {
@@ -2080,44 +2093,83 @@ mod tests {
             AFTER_READ.with_borrow_mut(|hook| *hook = Some(Box::new(move || grow(&grown))));
             let home = dir.path().join("home");
             let roots = [("claude", root.as_path())];
-            let shown = preview(&home, &roots).unwrap();
-            let claude = &shown.candidates.agents["claude"];
+            let shown = preview_plan(&home, &roots).unwrap();
+            let claude = &shown.preview.candidates.agents["claude"];
             assert_eq!((claude.files, claude.waiting), (1, 0), "{prompts}");
             assert!(claude.events >= prompts as u64, "{prompts}: {claude:?}");
             assert!(!home.exists());
-            let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
-                panic!("no commits")
-            })
-            .unwrap_err();
-            assert_eq!(failed.code, FailureCode::Stale, "{prompts}");
-            assert!(!raw::path(&home).exists());
+            let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+            let claude = &done.stats.agents["claude"];
+            assert_eq!(
+                (claude.files, claude.events, claude.waiting),
+                (1, 0, 1),
+                "{prompts}"
+            );
+            assert!(records(&home).is_empty(), "{prompts}");
         }
     }
 
-    /// A confirm still stops when the file grows after it was read, before a batch of it is
-    /// written: none of the file is imported. With one batch and with two.
+    /// A confirm leaves a file that grows after it was read, before a batch of it is written,
+    /// for a later import: none of the file is stored. With one batch (the check at the file's
+    /// end) and with two (the check before a batch).
     #[test]
-    fn a_confirm_stops_when_a_transcript_grows_after_it_was_read() {
+    fn a_confirm_leaves_a_transcript_that_grows_after_it_was_read_for_later() {
         for prompts in [3, raw::IMPORT_BATCH + 1] {
             let dir = tempfile::tempdir().unwrap();
             let (root, file) = prompts_transcript(dir.path(), prompts);
             let home = dir.path().join("home");
             let roots = [("claude", root.as_path())];
-            let shown = preview(&home, &roots).unwrap();
-            // The confirm reads the file twice: for its own preview, then to import it. The file
-            // grows in the second.
-            AFTER_READ.with_borrow_mut(|hook| {
-                *hook = Some(Box::new(move || {
-                    AFTER_READ.with_borrow_mut(|hook| *hook = Some(Box::new(move || grow(&file))));
-                }))
-            });
-            let failed = run(&home, &roots, Some(&shown.key), &mut |_| {
-                panic!("no commits")
-            })
-            .unwrap_err();
-            assert_eq!(failed.code, FailureCode::Stale, "{prompts}");
+            let shown = preview_plan(&home, &roots).unwrap();
+            // The confirm reads the file once, to import it: it grows after that reading.
+            AFTER_READ.with_borrow_mut(|hook| *hook = Some(Box::new(move || grow(&file))));
+            let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+            let claude = &done.stats.agents["claude"];
+            assert_eq!(
+                (claude.files, claude.events, claude.waiting),
+                (1, 0, 1),
+                "{prompts}"
+            );
             assert!(records(&home).is_empty(), "{prompts}");
         }
+    }
+
+    /// A file that grows after a confirm stored a batch of it keeps that batch, read from the
+    /// file that was bound, and the rest waits: the next import brings the rest, and nothing
+    /// twice.
+    #[test]
+    fn a_confirm_keeps_the_batch_it_stored_before_a_transcript_grew() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, file) = prompts_transcript(dir.path(), raw::IMPORT_BATCH + 1);
+        let roots = [("claude", root.as_path())];
+        let bodies = |home: &Path| {
+            let mut bodies: Vec<String> = records(home).into_iter().map(|e| e.body).collect();
+            bodies.sort();
+            bodies
+        };
+        // What one import of the whole file stores, in another home.
+        let whole = dir.path().join("whole");
+        import(&whole, &roots, true, &mut Vec::new()).unwrap();
+        let whole = bodies(&whole);
+        let home = dir.path().join("home");
+        let shown = preview_plan(&home, &roots).unwrap();
+        let mut grown = false;
+        let done = run(&home, &roots, Some(shown), &mut |_| {
+            // The first batch is stored: the session writes on.
+            if !std::mem::replace(&mut grown, true) {
+                grow(&file);
+            }
+        })
+        .unwrap();
+        let claude = &done.stats.agents["claude"];
+        assert_eq!((claude.files, claude.waiting), (1, 1));
+        let first = records(&home).len();
+        assert!(
+            0 < first && first < whole.len(),
+            "{first} of {}",
+            whole.len()
+        );
+        import(&home, &roots, true, &mut Vec::new()).unwrap();
+        assert_eq!(bodies(&home), whole);
     }
 
     /// A line whose transcript named no directory gets no repository: "." is the importing
@@ -2406,58 +2458,119 @@ mod tests {
         assert_eq!((stats.events, stats.refused), (0, 1));
     }
 
-    #[test]
-    fn transcript_consent_binds_content_file_set_scope_config_and_destination() {
-        for change in ["content", "file_set", "scope", "config", "destination"] {
-            let dir = tempfile::tempdir().unwrap();
-            let (_, root) = fixtures(dir.path());
-            let home = dir.path().join("home");
-            let roots = [("codex", root.as_path())];
-            let shown = preview(&home, &roots).unwrap();
-            match change {
-                "content" => {
-                    let path = root.join("2026/09/02/rollout-basic.jsonl");
-                    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-                    let times = std::fs::FileTimes::new()
-                        .set_modified(file.metadata().unwrap().modified().unwrap());
-                    let text = std::fs::read_to_string(&path)
-                        .unwrap()
-                        .replace("Try again with 100ms", "Try again with 200ms");
-                    std::fs::write(path, text).unwrap();
-                    file.set_times(times).unwrap();
-                }
-                "file_set" => {
-                    std::fs::copy(CODEX, root.join("rollout-new.jsonl")).unwrap();
-                }
-                "config" => {
-                    std::fs::create_dir_all(&home).unwrap();
-                    std::fs::write(home.join("config.toml"), "# new\n").unwrap();
-                }
-                "destination" => {
-                    std::fs::create_dir_all(&home).unwrap();
-                    drop(raw::open(&home).unwrap());
-                }
-                _ => {}
-            }
-            let selected = if change == "scope" {
-                vec![("claude", root.as_path())]
-            } else {
-                roots.to_vec()
-            };
-            let failed = run(&home, &selected, Some(&shown.key), &mut |_| {
-                panic!("no committed effects")
-            })
-            .unwrap_err();
-            assert_eq!(failed.code, FailureCode::Stale, "{change}: {failed:?}");
-            assert!(failed.outcome.stats.agents.is_empty());
-            if change != "destination" {
-                assert!(!raw::path(&home).exists());
-            }
-        }
+    /// What a confirm still stops for, with nothing stored (#947 changed what a changed file
+    /// does, and none of this): a preview of the codex folder, then `change` on the home, then
+    /// its confirm, asked for `agent`'s folder.
+    fn stale_confirm(agent: &str, change: impl FnOnce(&Path)) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        let shown = preview_plan(&home, &[("codex", root.as_path())]).unwrap();
+        change(&home);
+        let store = raw::path(&home).exists();
+        let failed = run(&home, &[(agent, root.as_path())], Some(shown), &mut |_| {
+            panic!("no committed effects")
+        })
+        .unwrap_err();
+        assert_eq!(failed.code, FailureCode::Stale, "{failed:?}");
+        assert!(failed.outcome.stats.agents.is_empty());
+        assert_eq!(raw::path(&home).exists(), store);
+        assert!(!store || records(&home).is_empty());
     }
 
     #[test]
-    fn confirmed_transcript_stops_when_next_bound_file_changes_after_a_commit() {
+    fn a_confirm_stops_when_the_settings_changed_since_its_preview() {
+        stale_confirm("codex", |home| {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(home.join("config.toml"), "# new\n").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_confirm_stops_when_the_store_appeared_since_its_preview() {
+        stale_confirm("codex", |home| {
+            std::fs::create_dir_all(home).unwrap();
+            drop(raw::open(home).unwrap());
+        });
+    }
+
+    #[test]
+    fn a_confirm_stops_when_it_is_asked_for_other_folders_than_its_preview_read() {
+        stale_confirm("claude", |_| {});
+    }
+
+    /// A bound file whose bytes changed since the preview, its size and time as they were, waits
+    /// for a later import: the confirm stores none of it.
+    #[test]
+    fn a_confirm_leaves_a_transcript_whose_bytes_changed_since_its_preview_for_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview_plan(&home, &roots).unwrap();
+        let path = root.join("2026/09/02/rollout-basic.jsonl");
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let times =
+            std::fs::FileTimes::new().set_modified(file.metadata().unwrap().modified().unwrap());
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Try again with 100ms", "Try again with 200ms");
+        std::fs::write(&path, text).unwrap();
+        file.set_times(times).unwrap();
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
+    }
+
+    /// A bound file that is the same by its bytes and reads as other lines than the preview read
+    /// of it (the plan is made to say so here) waits too: none of it is stored.
+    #[test]
+    fn a_confirm_leaves_a_transcript_that_reads_as_other_lines_than_its_preview_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let mut shown = preview_plan(&home, &roots).unwrap();
+        shown.files[0].parsed = parsed_digest(&[]).unwrap();
+        let done = run(&home, &roots, Some(shown), &mut |_| panic!("no commits")).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 0, 1));
+        assert!(records(&home).is_empty());
+    }
+
+    /// A transcript that appeared since the preview is none the preview bound: the confirm
+    /// imports what was bound and does not read it. The next import brings it.
+    #[test]
+    fn a_confirm_reads_no_transcript_its_preview_did_not_bind() {
+        const LATER: &str = "33333333-3333-4333-8333-333333333333";
+        let dir = tempfile::tempdir().unwrap();
+        let (_, root) = fixtures(dir.path());
+        let home = dir.path().join("home");
+        let roots = [("codex", root.as_path())];
+        let shown = preview_plan(&home, &roots).unwrap();
+        let text = std::fs::read_to_string(CODEX).unwrap();
+        std::fs::write(
+            root.join("2026/09/02/rollout-new.jsonl"),
+            text.replace(CODEX_SESSION, LATER),
+        )
+        .unwrap();
+        let done = run(&home, &roots, Some(shown), &mut |_| {}).unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (1, 8, 0));
+        let stored = records(&home);
+        assert_eq!(stored.len(), 8);
+        assert!(stored.iter().all(|e| e.session == CODEX_SESSION));
+        import(&home, &roots, true, &mut Vec::new()).unwrap();
+        let stored = records(&home);
+        assert_eq!(stored.iter().filter(|e| e.session == LATER).count(), 8);
+        assert_eq!(stored.len(), 16);
+    }
+
+    /// The next bound file changes after a commit of the one before it: the confirm keeps what
+    /// it stored and leaves the changed file for a later import, which brings it.
+    #[test]
+    fn a_confirm_leaves_the_next_bound_file_for_later_when_it_changes_after_a_commit() {
         let dir = tempfile::tempdir().unwrap();
         let (_, root) = fixtures(dir.path());
         let next = root.join("2026/09/02/rollout-new.jsonl");
@@ -2467,8 +2580,8 @@ mod tests {
         std::fs::write(&next, &text).unwrap();
         let home = dir.path().join("home");
         let roots = [("codex", root.as_path())];
-        let shown = preview(&home, &roots).unwrap();
-        let failed = run(&home, &roots, Some(&shown.key), &mut |c| {
+        let shown = preview_plan(&home, &roots).unwrap();
+        let done = run(&home, &roots, Some(shown), &mut |c| {
             if matches!(c, Committed::Transcripts { .. }) {
                 std::fs::write(
                     &next,
@@ -2477,13 +2590,14 @@ mod tests {
                 .unwrap();
             }
         })
-        .unwrap_err();
-        assert_eq!(failed.code, FailureCode::Stale);
-        assert_eq!(failed.outcome.stats.agents["codex"].events, 8);
+        .unwrap();
+        let codex = &done.stats.agents["codex"];
+        assert_eq!((codex.files, codex.events, codex.waiting), (2, 8, 1));
         assert_eq!(records(&home).len(), 8);
-        let shown = preview(&home, &roots).unwrap();
-        let resumed = run(&home, &roots, Some(&shown.key), &mut |_| {}).unwrap();
+        let shown = preview_plan(&home, &roots).unwrap();
+        let resumed = run(&home, &roots, Some(shown), &mut |_| {}).unwrap();
         assert_eq!(resumed.stats.agents["codex"].events, 8);
+        assert_eq!(records(&home).len(), 16);
     }
 
     #[test]

@@ -7643,3 +7643,21 @@ $('repo').replaceChildren(...__reads.picker);$('repo').value=__reads.picked;dele
 delete document.visibilityState;
 console.log('PASS: W3 and W6: a view that reads no list waits for none, a poll under it reads none, a click while the list is read is read once, a list left unread or failed is read by the next view that uses it');
 }
+
+// #947 (decision 100): under the counts of a transcript preview and of its import, what "waiting"
+// is, when a transcript waits; nothing of it when none does. JA/EN.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const counts=waiting=>({claude:null,codex:{files:2,sessions:2,events:8,bytes:10,seen:0,waiting,refused:0}});
+for(const [language,said] of [['en','Waiting: transcripts a session is still writing to. This import leaves them out; a later import brings them in.'],
+    ['ja','待機：セッションがまだ書き込んでいる会話ファイルです。今回の取り込みには入れません。あとでもう一度取り込むと入ります。']]){
+  run(`lang=${JSON.stringify(language)}`);
+  const shown=waiting=>[`maintenanceTranscriptPreview(${JSON.stringify({candidates:counts(waiting)})})`,
+    `maintenanceImportOutcome(${JSON.stringify({transcripts:counts(waiting)})})`].map(code=>[...run(code)].map(text).join(' '));
+  for(const rows of shown(1))assert(rows.includes(said),`${language}: a transcript that waits is explained: ${rows}`);
+  for(const rows of shown(0))assert(!rows.includes(said),`${language}: none waits, nothing is said of it: ${rows}`);
+}
+run('lang="en"');
+console.log('PASS: #947: a transcript import says what its waiting count is, in the preview and in the result, JA/EN');
+}
