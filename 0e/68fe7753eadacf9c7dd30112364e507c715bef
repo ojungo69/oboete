@@ -1,0 +1,32 @@
+docs/milestone-2.md
+  s_76c95352747315::t_3ced1eaf24128f 55
+src/redact.rs
+  s_76c95352747315::t_bd73708f3fdf66 986-987
+  s_76c95352747315::t_4b2f540b21f7fd 3989
+  s_76c95352747315::t_3ced1eaf24128f 982-985,988-1019,1022,1025,1802,3968,3991
+  s_76c95352747315::t_e4c47e5fb17aa2 1026
+  s_76c95352747315::t_a1e7d1c7006893 1803
+  s_76c95352747315::t_2bb36bb4a9d927 3965-3967
+  s_76c95352747315::t_c96de05e529c52 3969-3971,3986-3988
+  s_76c95352747315::t_2c08ab271fa7d8 3990
+  s_76c95352747315::t_9f4ac044c8869a 3992
+  s_76c95352747315::t_5f55c0b63a9755 213,1358-1359,1858-1859,3877-3888,3939-3964,3972-3985
+src/consumer/rescan.rs
+  s_76c95352747315::t_2773935cefbdef 112,123,187-212,515-587
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e68fe7753eadacf9c7dd30112364e507c715bef",
+  "prompts": {},
+  "sessions": {
+    "s_76c95352747315": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85c9c838-1efe-4bce-8363-c07637811bb4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
