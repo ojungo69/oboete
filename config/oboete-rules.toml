@@ -111,6 +111,41 @@ regexTarget = "match"
 regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+["']?$''']
 
 [[rules]]
+id = "curl-user"
+description = "The user:password given to curl's -u / --user or -U / --proxy-user, as one word of a shell: whatever follows it, of any characters, the option alone or last in a cluster of short ones (-su)"
+regex = '''(?:^|[ \t\n\r])(?:(?:-[A-Za-z0-9#]{0,8}?[uU]|--(?:proxy-)?user)(?:=|[ \t]{1,5})(?:((?:"(?:[^"\\\r\n]|\\[^nr]){3,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:"(?:[^"\\\r\n}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:(?:(?:[^:"\\\r\n]|\\[^nr]){3,})?:(?:[^"\\\r\n]|\\[^nr]){3,}|(?:[^:"\\\r\n]|\\[^nr]){3,}:)"|'(?:(?:(?:[^:'\\\r\n]|\\[^nr]){3,})?:(?:[^'\\\r\n]|\\[^nr]){3,}|(?:[^:'\\\r\n]|\\[^nr]){3,}:)'|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"\\\r\n]{3,})?:[^"\\\r\n]{3,}|[^:"\\\r\n]{3,}:)\\+")|-[A-Za-z0-9#]{0,8}?[uU](?:((?:[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}"|'(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}')|\\+"((?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,})\\+"))'''
+keywords = ["curl"]
+entropy = 2
+# gitleaks' curl-auth-user (kept as it is) takes an unquoted value only of word characters, only
+# before white space or the text's end, only after `-u` or `--user`, and passes over every password
+# that starts with one of its placeholders (#985). This rule reads the option's value where it
+# stands, in a text that names curl: each value of the text, left to right, with no run from the
+# word curl to it, and the pattern ends on the value. In this order: user:password with each part
+# quoted or not (the user may be empty); a value quoted whole, in quotes or in escaped ones (a
+# flattened field, a JSON text inside one); a key that holds a digit, with no password. A part in
+# quotes is at least three characters, as gitleaks has it, and ends on its line. Right after a
+# short option (`-uadmin:<pw>`) a value in quotes holds no white space, quote or comma: a quote
+# there mostly closes a string around a command that ends on the option (`bash -c 'date -u'`). An
+# unquoted password runs to white space, a quote, a backquote, `|&;()<>` or a backslash that
+# escapes one of them. What it passes over is in its own allowlist, each entry on the whole value.
+[[rules.allowlists]]
+regexes = [
+    # a placeholder for the password, whole (gitleaks matches these anywhere in the value); a full
+    # stop or a comma of the sentence may follow it
+    '''^["']?[^:]*["']?:["']?(?:change(?:it|me)|pass(?:word)?|pwd|test|token|\*+|x+|\.+)["']?[.,]?$''',
+    '''^["']?(?:<[^>]+>|[^:<]*)["']?:["']?<[^>]+>["']?[.,]?$|^["']?<[^:>]+:[^>]+>["']?[.,]?$''',
+    '''^["']?[^:]*:\[[^\]]+\]["']?[.,]?$''',
+    # a variable, a command or a template for the password; for the user where no password follows
+    '''^["']?(?:\$+(?:\w+|\{[^}]*\}|\([^)]*\))|\$?\{\{[^}]*\}\}|[^:$])*["']?:["']?(?:\$+(?:\w+|\{[^}]*\}|\([^)]*\))|\$?\{\{[^}]*\}\})+["']?[.,]?$''',
+    '''^["']?(?:\$+(?:\w+|\{[^}]*\}|\([^)]*\))|\$?\{\{[^}]*\}\}|<[^>]+>)+["']?:["']?$''',
+    # another tool's -u: a URL, a format of date
+    '''^["']?(?:https?|rediss?)://''',
+    '''^["']?\+[^:]*%''',
+    # the placeholder as sessions in Japanese write it (`-u ユーザー名:パスワード`)
+    '''^["']?[^:]*["']?:["']?パスワード''',
+]
+
+[[rules]]
 id = "slack-token"
 description = "A Slack token of any length and kind (xoxb-, xoxp-, xoxe-, xoxc-, xoxd- and the rest, xapp-), as claude-mem 15.5 masks one and its client and cookie tokens too: gitleaks' rules take a refresh token only at 146 characters after xoxe-1-, and neither takes xoxc- or xoxd-"
 regex = '''(?i)\b((?:xox[a-z]|xapp)-[a-z0-9%/+=-]{10,})'''

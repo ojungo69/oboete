@@ -3876,13 +3876,23 @@ extra_rules = [
         rest.ends_with(last)
     }
 
+    /// The made-up value of #537's tests. Since #985 curl-user reads a credential wherever it
+    /// stands, a passed-over value after it or not, and the looks of #537 have nothing left to
+    /// find there. What they still add to a scan is a value gitleaks' rule takes and curl-user
+    /// passes over: here a password that starts with the placeholder curl-user knows
+    /// (`パスワード`), which is of word characters and over the entropy for gitleaks' rule. The
+    /// tests of the looks use it, so that they still say what the looks do.
+    fn looks_only(mark: &str) -> String {
+        format!("パスワード{mark}")
+    }
+
     /// #537: curl-auth-user's `.*` takes the last `-u` in its reach. When that one is a value the
     /// rule passes over (its allowlist's, or one at or below its entropy), the credential before
     /// it was stored as written.
     #[test]
     fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one_before() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         for last in ["bob:pass", "a:b"] {
             let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
             // The scan before #537.
@@ -3923,7 +3933,7 @@ extra_rules = [
     #[test]
     fn a_rescan_finds_the_credential_before_a_value_a_greedy_rule_passes_over() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         for last in ["bob:pass", "a:b"] {
             for user in [format!("admin:{pw}"), format!("\"admin:{pw}\"")] {
                 let line = format!("curl -u {user} https://h.test -u {last} && echo ok");
@@ -3960,7 +3970,7 @@ extra_rules = [
     #[test]
     fn the_first_look_again_at_a_match_does_not_wait_for_the_others() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         let filler = "x".repeat(1024);
         let lines = LOOK_AGAIN / 1024 + 8;
         // The last line's part before `bob:pass` is longer than any before it, so no rest of a
@@ -3983,8 +3993,8 @@ extra_rules = [
     #[test]
     fn the_further_looks_again_stop_at_what_they_may_read_and_mask_nothing_whole() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
-        let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
+        let far = looks_only("Q2mX9tB4");
         // One line: a credential, then values the rule passes over until the parts before them
         // add up to many times what the looks may read, then a credential it finds at once.
         let passed = " -u $USER:$PASS".repeat(2 * LOOK_AGAIN / 1024);
@@ -4060,6 +4070,531 @@ extra_rules = [
         assert_eq!(found, LOOKS_AGAIN);
     }
 
+    /// #985: a credential given to one of curl's user options, as a shell would take the
+    /// command. gitleaks' curl-auth-user takes it only of word characters, only before white
+    /// space or the text's end, only after `-u` or `--user`, and not where its password starts
+    /// with one of the rule's placeholders; curl-user reads the option's value where it stands.
+    /// Each row: what is before the credential, the credential, what is after it. The credential
+    /// is masked and nothing else of the line is: as a text of its own, as a tool's flattened
+    /// field (where a quote follows what ends the command), by the gate alone, and in a record
+    /// stored before the rule (the rescan's ranges).
+    #[test]
+    fn a_credential_given_to_curls_user_option_is_masked_whatever_follows_and_whatever_it_holds() {
+        let rules = Rules::default();
+        for (before, credential, after) in curl_user_rows() {
+            let line = format!("{before}{credential}{after}");
+            let want = format!("{before}{MASK}{after}");
+            assert_eq!(scan(&line, &rules).0, want, "{line}");
+            assert_eq!(outbound_with(&line, &rules), want, "{line}");
+            let flat =
+                serde_json::json!({ "command": line, "description": "Calls: it" }).to_string();
+            let want_flat =
+                serde_json::json!({ "command": want, "description": "Calls: it" }).to_string();
+            assert_eq!(scan(&flat, &rules).0, want_flat, "{line}");
+            assert_eq!(outbound_with(&flat, &rules), want_flat, "{line}");
+            // A record stored before the rule holds the flattened field as it was: the rescan's
+            // ranges are the credential's bytes.
+            let body = serde_json::json!({ "input": flat }).to_string();
+            let ranges = field_ranges(&body, &rules);
+            assert!(!ranges.is_empty(), "{line}");
+            let (mut left, mut at) = (String::new(), 0);
+            for (start, end) in ranges {
+                left.push_str(&body[at..start]);
+                left.push_str(MASK);
+                at = end;
+            }
+            left.push_str(&body[at..]);
+            assert_eq!(
+                left,
+                serde_json::json!({ "input": want_flat }).to_string(),
+                "{line}"
+            );
+        }
+    }
+
+    /// The rows of #985's table: before the credential, the credential, after it. Made-up values;
+    /// every password holds the same marker, written apart so that no scanner takes one for a
+    /// credential.
+    fn curl_user_rows() -> Vec<(String, String, String)> {
+        let m = format!("N3kL{}", "7pW2");
+        let pw = format!("Zq8v{m}");
+        let c = format!("admin:{pw}");
+        let curl = format!("curl -s https://h.test {U} ");
+        let row = |before: &str, credential: &str, after: &str| {
+            (before.to_owned(), credential.to_owned(), after.to_owned())
+        };
+        let mut rows = vec![
+            // gitleaks' reading: of word characters, before white space
+            row(&curl, &c, " && echo ok"),
+            // what follows the value
+            row(&curl, &c, ""),
+            row(&curl, &format!("'{c}'"), ""),
+            row(&curl, &format!("\"{c}\""), ""),
+            row("curl -s https://h.test --user=", &c, ""),
+            row(&format!("x=$({curl}"), &c, ")"),
+            row(&format!("x=$({curl}"), &c, ") && echo $x"),
+            row(&curl, &c, "; echo ok"),
+            row(&curl, &c, "|jq ."),
+            row(&curl, &c, ">out.json"),
+            row(&curl, &c, "& wait"),
+            row(&format!("run `{curl}"), &c, "` please"),
+            row(&format!("ssh host '{curl}"), &c, "' && echo ok"),
+            row(&format!("bash -c \"{curl}"), &c, "\" && echo ok"),
+            row(&format!("x=$({curl}"), &format!("'{c}'"), ") && echo $x"),
+            row(&format!("x=$({curl}"), &format!("\"{c}\""), ") && echo $x"),
+            // a comma is a character of a word: it is masked with the value
+            row(&curl, &format!("{c},"), " then more"),
+            // an empty user, a key with no password
+            row(&curl, &format!(":{pw}"), " && echo ok"),
+            row(&curl, &format!("':{pw}'"), " && echo ok"),
+            row(
+                &format!("curl https://h.test/v1/x {U} "),
+                &format!("Zq8v{m}abcd:"),
+                " -d a=1",
+            ),
+            row(
+                &format!("curl https://h.test/v1/x {U} "),
+                &format!("Zq8v{m}abcd:"),
+                "",
+            ),
+            // a user of more than word characters
+            row(&curl, &format!("me+ops@h.test:{pw}"), " && echo ok"),
+            row(&curl, &format!("CORP\\\\ops:{pw}"), " && echo ok"),
+            row(
+                &format!("curl --ntlm {U} "),
+                &format!("'CORP\\ops:{pw}'"),
+                " https://h.test",
+            ),
+            // the option written another way
+            row("curl -su ", &c, " https://h.test && echo ok"),
+            row("curl -sSLu ", &c, " https://h.test && echo ok"),
+            row("curl -su", &c, " https://h.test && echo ok"),
+            row("curl -s https://h.test -u", &c, "; echo ok"),
+            row("curl -s https://h.test -u", &format!("'{c}'"), ""),
+            row("x=$(curl -su", &format!("\"{c}\""), ")"),
+            row(
+                "curl -x http://p.test:3128 -U ",
+                &c,
+                " https://h.test && echo ok",
+            ),
+            row(
+                "curl -x http://p.test:3128 --proxy-user ",
+                &c,
+                " https://h.test && echo ok",
+            ),
+            // beside a value the rules pass over, a single space apart (with `)` after it, so
+            // that gitleaks' rule does not take it either)
+            row(
+                &format!("x=$(curl -x http://p.test:3128 -U $P:$Q {U} "),
+                &c,
+                ")",
+            ),
+            row(&format!("x=$(curl {U} \"$A:$B\" {U} "), &c, ")"),
+            row(
+                &format!("curl {U} "),
+                &c,
+                &format!(" https://h.test {U} $USER:$PASS"),
+            ),
+            // a user in another script
+            row(&format!("x=$({curl}"), &format!("太郎:{pw}"), ")"),
+            // gitleaks' own examples of the rule, with the marker in them
+            row(
+                &format!("curl --cacert ca.crt {U} "),
+                &format!("elastic:P@ss{m}$1"),
+                " https://localhost:9200",
+            ),
+            row(
+                &format!(
+                    "sh-5.0$ curl -k -X POST https://h.test/rest \\\n  -H 'Content-type: text/plain' \\\n  -d 'world' \\\n  {U} "
+                ),
+                &format!("developer:yqDV{m}LRi"),
+                "",
+            ),
+            row(
+                &format!("curl {U} "),
+                &format!("\":d2Lk{m}!t\""),
+                " https://localhost:9200",
+            ),
+            row(
+                &format!("curl {U} "),
+                &format!("\"d2Lk{m}!t:\""),
+                " https://localhost:9200",
+            ),
+            row(
+                "curl -sw '%{http_code}' -X POST --user  ",
+                &format!("'johns:h0p{m}~21s'"),
+                " $URL/$C --data",
+            ),
+            row(
+                "curl -X POST --user ",
+                &format!("\"{{acd3c08b-74e8}}\":\"{{{m}tA2}}\""),
+                " --header \"Accept: application/json\"",
+            ),
+            row(
+                "curl --user ",
+                &format!("kevin:'pRf7{m}W9'"),
+                " -iX PATCH -H \"Content-Type: application/json\" -d",
+            ),
+        ];
+        // a password of more than word characters, and one that starts with a placeholder's word
+        for inside in [
+            "+", "/", "!", "#", "%", "*", ",", ":", "^", "~", "?", "=", "\\$",
+        ] {
+            rows.push(row(&curl, &format!("admin:Zq8v{inside}{m}"), " && echo ok"));
+        }
+        for start in ["x", "test", "pass", "token", "pwd", "changeit"] {
+            rows.push(row(&curl, &format!("admin:{start}{pw}"), " && echo ok"));
+        }
+        // what an entry of the allowlist must not pass: a password after `//` is no URL's, and
+        // one of no ASCII character is a password
+        rows.push(row(&curl, &format!("admin://{pw}"), " && echo ok"));
+        rows.push(row(&format!("x=$({curl}"), "admin:пароль", ")"));
+        rows
+    }
+
+    /// #985: a value in escaped quotes, as a JSON text inside a tool's field holds it (a log
+    /// line, a command that writes JSON): neither view of the field shows its quotes as quotes.
+    /// What the quotes hold is masked, and the quotes stay.
+    #[test]
+    fn a_curl_credential_in_escaped_quotes_two_levels_deep_is_masked() {
+        let rules = Rules::default();
+        let m = format!("N3kL{}", "7pW2");
+        for credential in [
+            format!("admin:Zq8v{m}"),
+            format!(":Zq8v{m}"),
+            format!("Zq8v{m}abcd:"),
+        ] {
+            let inner = serde_json::json!({ "msg": format!("ran curl {U} \"{credential}\" https://h.test"), "rc": 0 });
+            let want = serde_json::json!({ "msg": format!("ran curl {U} \"{MASK}\" https://h.test"), "rc": 0 });
+            let field = |inner: &serde_json::Value| {
+                serde_json::json!({ "stdout": format!("done\n{inner}\n") }).to_string()
+            };
+            assert_eq!(scan(&field(&inner), &rules).0, field(&want), "{credential}");
+            assert_eq!(
+                outbound_with(&field(&inner), &rules),
+                field(&want),
+                "{credential}"
+            );
+        }
+        // A key with no password that ends a string of a JSON text: what closes the object and
+        // opens the next is no password in quotes.
+        let key = format!("Zq8v{m}abcd:");
+        let text = |key: &str| {
+            format!("[{{\"cmd\":\"curl https://h.test/v1/x {U} {key}\"}},{{\"cmd\":\"ls\"}}]")
+        };
+        assert_eq!(scan(&text(&key), &rules).0, text(MASK));
+        assert_eq!(outbound_with(&text(&key), &rules), text(MASK));
+        let list =
+            |key: &str| format!("[[\"a\",\"curl https://h.test/v1/x {U} {key}\"],[\"b\",\"ls\"]]");
+        assert_eq!(scan(&list(&key), &rules).0, list(MASK));
+    }
+
+    /// #985: what curl-user finds no credential in, as a text of its own and as a tool's
+    /// flattened field: gitleaks' own examples of what its rule passes over, and what a store
+    /// holds after a `-u` in a text that names curl (a format of `date -u`, another tool's
+    /// `-u <URL>`, a variable, a placeholder, a command that ends on the option).
+    #[test]
+    fn curl_user_passes_over_what_is_no_credential() {
+        let rules = Rules::default();
+        let own = bundled()
+            .rules
+            .iter()
+            .position(|r| r.id == "curl-user")
+            .expect("the rule");
+        let alone = |text: &str| {
+            let mut found = spans_in(text, &rules, Some(own), &mut Vec::new());
+            let (view, at) = unescaped(text);
+            found.extend(
+                spans_in(&view, &rules, Some(own), &mut Vec::new())
+                    .into_iter()
+                    .map(|(s, e, rule)| (at[s], at[e], rule)),
+            );
+            found.sort_unstable();
+            found.dedup();
+            found
+        };
+        for line in [
+            // gitleaks' examples
+            "curl -i -u 'test:test'",
+            "   curl -sL --user \"$1:$2\" \"$3\" > \"$4\"",
+            "curl -u <user:password> https://test.com/endpoint",
+            "curl --user neo4j:[PASSWORD] http://[IP]:7474/db/data/",
+            "curl -u \"myusername\" http://localhost:15130/api/check_user/",
+            "curl -u username:token",
+            "curl -u \"${_username}:${_password}\"",
+            "curl -u \"${username}\":\"${password}\"",
+            "curl -k -X POST -I -u \"SRVC_JENKINS:${APPID}\"",
+            "curl -u \":\" https://localhost:9200",
+            "curl -sw '%{http_code}' -X POST --user '$USERNAME:$PASSWORD' $URL/$C --data",
+            "curl --user \"xxx:yyy\"",
+            "curl --silent --fail {{- if and $.Values.username $.Values.password }} --user \"{{ $.Values.username }}:{{ $.Values.password }}\"",
+            "curl -XGET -i -u \"${{ env.ELK_ID }}:${{ build.env.ELK_PASS }}\"",
+            "curl -X POST --user \"$(cat ./login.txt):$(cat ./password.txt)\"",
+            "curl http://127.0.0.1:5000/file --user user:pass --digest        # digest auth",
+            "   curl -X GET --insecure --user \"username:password\" \\",
+            "curl --silent --insecure --user ${f5user}:${f5pass} \\",
+            "curl --insecure --ssl-reqd \"smtps://smtp.gmail.com\" --mail-from \"src@gmail.com\" --user \"src@gmail.com\" --upload-file out.txt",
+            "curl -X POST http://h.test:8080/serve\nnc -u -l 41234",
+            // what a store holds: a format of date, with a name before it, in escaped quotes
+            "curl -s https://h.test/a; date -u +%Y-%m-%dT%H:%M:%SZ",
+            "curl -s https://h.test/a; date -u '+%Y-%m-%dT%H:%M:%SZ'",
+            "curl -s https://h.test/a; date -u \"+%Y-%m-%dT%H:%M:%SZ\"",
+            "curl -s https://h.test/a; x=$(date -u +%H:%M:%S)",
+            "curl -s https://h.test/a; ssh ops@h.test 'date -u \\\"+NOW=%%Y-%%m-%%dT%%H:%%M:%%SZ\\\"'",
+            // a command that ends on the option: the quote after it closes a string, and one
+            // that opens after the option does not run over the end of its line
+            "curl -s https://h.test/a; bash -c 'date -u'; echo 'at: noon'",
+            "curl -s https://h.test/a; bash -c 'date -u'; echo \"at: noon\"; echo 'done'",
+            "curl -s https://h.test/a | grep -E 'a|uniq -u' /etc/os.txt | grep -i V && echo \"OS: it's\"",
+            "curl -s https://h.test/a | sort -u",
+            "curl -s https://h.test/a | sort -u\",name:xyz,key:12345\"",
+            "curl -s https://h.test/a; awk -u 'BEGIN {x = 1}\nEND {print \"a: b\"}' f; echo 'done'",
+            // a variable, a template, a placeholder
+            "curl -s -u \"$K:\" https://h.test/v1/x",
+            "curl -s -u \"$STRIPE_KEY:\" https://h.test/v1/x",
+            "curl -s -u $STRIPE_KEY: https://h.test/v1/x",
+            "curl -s -u ${STRIPE_KEY}: https://h.test/v1/x",
+            "curl -s -u \"$CF_EMAIL:$CF_KEY\" https://h.test/v1/x",
+            "curl -s -u \"$${API_USER}:$${API_PASS}\" https://h.test",
+            "curl https://h.test runs as -u $U:$P, in 2 s",
+            "then I ran curl -u user:pass. It failed",
+            "then I ran curl -u admin:... and it failed",
+            "curl -u admin:<password> https://h.test",
+            "curl -u user1:<password> https://h.test",
+            "curl -u YOUR_API_KEY: https://h.test/v1/x",
+            "curl -u admin: https://h.test/v1/x",
+            "curl -u ユーザー名:パスワード https://h.test",
+            "curl -u admin:パスワード https://h.test",
+            "curl -u 'ユーザー名:パスワード' https://h.test",
+            // another tool's option
+            "curl -s https://h.test/a; nuclei -u https://target.h.test/path -t cves",
+            "curl -s https://h.test/a; sqlmap -u \"http://h.test/a.php?id=1\" --batch",
+            "curl -s https://h.test/a; docker run --rm -u 1000:1000 alpine id",
+            "curl -s https://h.test/a; chrome --user-data-dir=C:\\\\Users\\\\x\\\\p --headless",
+            "curl -s https://h.test/a; git push -u origin feature/x",
+            "curl -s https://h.test/a; python3 -u script.py --port 8080",
+            "curl -s https://h.test/a; psql -U postgres -h db.h.test -p 5432",
+            // the same values, a JSON text inside the field
+            "echo '{\"cmd\":\"curl -s -u \\\"$API_USER:$API_PASS\\\" https://h.test\"}'",
+            "echo '{\"cmd\":\"curl -s -u \\\"username:password\\\" https://h.test\"}'",
+            "echo '{\"cmd\":\"curl --user \\\"xxx:yyy\\\"\"}'",
+            "echo '{\"cmd\":\"curl -s https://h.test; date -u\",\"note\":\"at: noon\"}'",
+        ] {
+            assert_eq!(alone(line), vec![], "{line}");
+            let flat =
+                serde_json::json!({ "command": line, "description": "Shows: it" }).to_string();
+            assert_eq!(alone(&flat), vec![], "{line}");
+        }
+        // What it does take that is no credential, as gitleaks' rule does where white space
+        // follows: a value of another tool's `-u` that has a credential's shape, in a text that
+        // names curl. Known, and written down so that a change of it is seen.
+        for line in [
+            format!("curl -s https://h.test/a; docker run --rm {U} node:node alpine id"),
+            format!("curl -s https://h.test/a | sed {U} 's/abc:def/ghi/'"),
+            format!(
+                "curl -s https://h.test/a; rsync -avz{} deploy@h.test:/srv/www/ ./backup/",
+                "u"
+            ),
+        ] {
+            assert_eq!(alone(&line).len(), 1, "{line}");
+        }
+    }
+
+    /// #985, what a mask costs: it takes the text it covers from every rule that reads the masked
+    /// text. A user's rule that finds its value only there (after another mask), by a context
+    /// that is inside a curl credential, finds it while the credential is not masked and loses
+    /// it once it is. gitleaks' rule did so wherever it found the credential (the second text);
+    /// curl-user finds the credential of the first too (#537's text of that kind, where the looks
+    /// come after everything else for this reason: curl-user is a rule among the rules). The
+    /// test pins that, it does not want it.
+    #[test]
+    fn a_mask_of_a_curl_credential_takes_the_context_a_users_rule_read_inside_it() {
+        let own = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "trigger", regex = 'trigger' },
+  { id = "after-trigger", regex = 'Signature:[^\n]*\n\[REDACTED\] ([A-Za-z0-9]+)' },
+]"#,
+        )
+        .unwrap();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+        for after in [format!(" {U} bob:pass"), String::new()] {
+            let text = format!("curl {U} Signature:{pw} https://h.test{after}\ntrigger {far}");
+            for out in [plain(&text, &own).0, outbound_with(&text, &own)] {
+                assert_eq!(
+                    out,
+                    format!("curl -u {MASK} https://h.test{after}\n{MASK} {far}"),
+                    "{text}"
+                );
+            }
+        }
+        // Where the context is outside the credential, the user's rule finds its value as before.
+        let text = format!(
+            "Signature: x\ncurl {U} admin:{pw} https://h.test\nSignature: y\ntrigger {far}"
+        );
+        assert_eq!(
+            plain(&text, &own).0,
+            format!("Signature: x\ncurl -u {MASK} https://h.test\nSignature: y\n{MASK} {MASK}")
+        );
+    }
+
+    /// #985: the rule is beside gitleaks' own and takes nothing from it. Whatever curl-auth-user
+    /// finds in a text, the gate hides with the new rule there too: for texts that cross the two
+    /// (a value one of them passes over next to a value the other takes).
+    #[test]
+    fn what_gitleaks_curl_rule_finds_the_gate_still_hides() {
+        let rules = Rules::default();
+        let theirs = bundled()
+            .rules
+            .iter()
+            .position(|r| r.id == "curl-auth-user")
+            .expect("the rule");
+        let pw = format!("Zq8v{}", "N3kL7pW2");
+        let parts = [
+            format!("curl -s https://h.test {U} admin:{pw} && echo ok"),
+            format!("curl -s https://h.test {U} admin:{pw}"),
+            format!("curl -s https://h.test {U} \"admin:{pw}\""),
+            format!("x=$(curl -s https://h.test {U} admin:{pw})"),
+            format!("curl {U} $USER:$PASS https://h.test"),
+            format!("curl https://h.test {U} $USER:$PASS"),
+            format!("curl https://h.test {U} bob:pass"),
+            format!("curl -su ops:{pw}9 https://h.test"),
+            format!("curl {U} admin:x{pw} https://h.test"),
+            format!("date {U} '+%Y-%m-%dT%H:%M:%SZ'"),
+            format!("docker run --rm {U} node:node alpine id"),
+        ];
+        for a in &parts {
+            for b in &parts {
+                for joined in [
+                    format!("{a} ; {b}"),
+                    format!("{a}\n{b}"),
+                    format!("{a} {b}"),
+                ] {
+                    let flat = serde_json::json!({ "command": joined }).to_string();
+                    for text in [joined.clone(), flat] {
+                        let hidden = hidden(&text, &rules).expect("not masked whole");
+                        let mut found = spans_in(&text, &rules, Some(theirs), &mut Vec::new());
+                        let (view, at) = unescaped(&text);
+                        found.extend(
+                            spans_in(&view, &rules, Some(theirs), &mut Vec::new())
+                                .into_iter()
+                                .map(|(s, e, rule)| (at[s], at[e], rule)),
+                        );
+                        for (s, e, _) in found {
+                            assert!(
+                                hidden.iter().any(|&(from, to)| from <= s && e <= to),
+                                "{text}: {s}..{e} of {hidden:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// #985: the bundled rules that end on a term of their own after the value, not on gitleaks'
+    /// usual one. curl-auth-user is the one that left a value at a string's end (it wants white
+    /// space or the text's end, and nothing else); the others take a value that ends a string of
+    /// a flattened field, and one before `)`. A rule added with an end of its own is listed here
+    /// with such a value, or fails. (The rules with the usual end take a value at a string's end
+    /// and not before `)`, `&` or `,`: #987.)
+    #[test]
+    fn the_rules_with_an_end_of_their_own_take_a_value_that_ends_a_string() {
+        const USUAL: &str = r#"(?:[\x60'"\s;]|\\[nr]|$)"#;
+        // the last term: an anchor, or a group with no group inside it
+        let own_end = |regex: &str| {
+            !regex.ends_with(USUAL)
+                && (regex.ends_with('$')
+                    || regex.ends_with("\\z")
+                    || (regex.ends_with(')')
+                        && regex.rfind("(?:").is_some_and(|at| {
+                            !regex[at + 3..regex.len() - 1].contains(['(', ')'])
+                        })))
+        };
+        let mut found: Vec<&str> = bundled()
+            .rules
+            .iter()
+            .filter(|rule| rule.regex.as_deref().is_some_and(own_end))
+            .map(|rule| rule.id.as_str())
+            .collect();
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            [
+                "curl-auth-header",
+                "curl-auth-user",
+                "openshift-user-token",
+                "perplexity-api-key",
+                "sentry-org-auth-token",
+                "sentry-org-token",
+                "sidekiq-sensitive-url",
+            ]
+        );
+        let rules = Rules::default();
+        // Made-up values, each with the marker, written in parts so that no scanner takes one
+        // for a credential.
+        let m = format!("N3kL{}", "7pW2");
+        let t43 = format!("Qm7xT2vK9pL4wZ8nB3cR6yH1sD5fG0jUeXa{m}");
+        let hex = format!("{}{}", "9f3a", "c07e");
+        for (rule, command, marker) in [
+            (
+                "curl-auth-header",
+                format!("curl -s https://h.test -H \"Authorization: Bearer {t43}\""),
+                m.clone(),
+            ),
+            (
+                "curl-auth-header",
+                format!("curl -s https://h.test -H 'X-Api-Key: {t43}'"),
+                m.clone(),
+            ),
+            (
+                "openshift-user-token",
+                format!("oc login --token={}~{t43}", "sha256"),
+                m.clone(),
+            ),
+            (
+                "perplexity-api-key",
+                format!(
+                    "export PPLX={}-{}{}{m}",
+                    "pplx", "a1B2c3D4e5F6g7H8i9J0", "k1L2m3N4o5P6q7R8s9T0"
+                ),
+                m.clone(),
+            ),
+            (
+                "sentry-org-auth-token",
+                format!(
+                    "sentry-cli --auth {}_{}_{t43}",
+                    "sntrys", "ZXlKcFlYUWlPakUzTVRBd01EQXdNREF3fQ=="
+                ),
+                m.clone(),
+            ),
+            (
+                "sentry-org-token",
+                format!(
+                    "sentry-cli --auth {}_{}jE3MDk4NzY1NDMy{}IjoiaHR0cHM6Ly91cy5z_{t43}",
+                    "sntrys", "eyJpYXQiO", "LCJyZWdpb25fdXJs"
+                ),
+                m.clone(),
+            ),
+            (
+                "sidekiq-sensitive-url",
+                format!(
+                    "bundle config https://{hex}:{}{}@gems.contribsys.com",
+                    "51bd", "e2a8"
+                ),
+                format!("{}{}", "51bd", "e2a8"),
+            ),
+        ] {
+            for line in [command.clone(), format!("x=$({command})")] {
+                let flat = serde_json::json!({ "command": line }).to_string();
+                for out in [scan(&flat, &rules).0, outbound_with(&flat, &rules)] {
+                    assert!(!out.contains(&marker), "{rule}: {out}");
+                }
+            }
+        }
+    }
+
     /// #537: the count is one for a scan of a text. Past the first look at each match, every look
     /// is within it: the parts before the further values of a match, and each further look at the
     /// whole text after a find (the rules read what the new masks left, and the rule looks at
@@ -4067,11 +4602,12 @@ extra_rules = [
     #[test]
     fn the_looks_again_of_a_scan_share_one_count() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
-        // 64 credentials, then 130 values at or below the rule's entropy, on one line: the looks
-        // pass over the 130 and find credentials from the last one back, while the count lasts.
+        let pw = looks_only("N3kL7pW2");
+        // 64 values the looks find, then 92 at or below the rule's entropy, on one line: the looks
+        // pass over the 92 and find values from the last one back, while the count lasts (24 of
+        // them, when this was written).
         let credentials: String = (0..64).map(|i| format!(" -u c{i:02}:{pw}{i:02}")).collect();
-        let line = format!("curl{credentials}{}", " -u a:b".repeat(130));
+        let line = format!("curl{credentials}{}", " -u a:b".repeat(92));
         let (masked, found) = scan(&line, &rules);
         assert!(
             masked.contains(" -u [REDACTED] -u a:b -u a:b"),
@@ -4116,7 +4652,7 @@ extra_rules = [
 ]"#,
         )
         .unwrap();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
         let text = format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\ntrigger {far}");
         assert_eq!(
@@ -4171,7 +4707,7 @@ extra_rules = [
         let rules =
             user("[redaction]\nextra_rules = [{ id = \"ticket\", regex = 'ticket-[0-9]{5}' }]")
                 .unwrap();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         let line =
             format!("ticket-11111 curl {U} admin:{pw} https://h.test {U} bob:pass ticket-22222");
         let (masked, found) = scan(&line, &rules);
@@ -4187,7 +4723,7 @@ extra_rules = [
             at,
             [
                 ("user:ticket", 0, 12),
-                ("curl-auth-user", 19, 18),
+                ("curl-auth-user", 19, 29),
                 ("user:ticket", 57, 12)
             ]
         );
@@ -4202,7 +4738,7 @@ extra_rules = [
     #[test]
     fn the_gate_and_what_it_hides_agree_where_capture_looks_again() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         for last in ["bob:pass", "a:b"] {
             let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
             assert_ne!(scan(&line, &rules).0, line, "capture looks again");
@@ -4217,7 +4753,7 @@ extra_rules = [
     /// stays, and the credential before it is found.
     #[test]
     fn a_value_the_user_keeps_stays_where_the_rule_looks_again() {
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         let own = format!("deploy:Kd7w{}", "Q2mX9tB4"); // split: scanners
         let toml = format!("[redaction]\nallowlist = [\"{}\"]", short_hash_full(&own));
         let rules = user(&toml).unwrap();
@@ -4237,7 +4773,7 @@ extra_rules = [
     #[test]
     fn a_cut_text_is_looked_at_again_as_it_is_stored() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         // Eleven line breaks between the `curl` and the `-u`: more than the rule reads on.
         let text = format!(
             "curl https://h.test\n{}\n{}{}\n {U} admin:{pw} {U} bob:pass\n",
@@ -4265,7 +4801,7 @@ extra_rules = [
     #[test]
     fn a_rescan_finds_nothing_new_where_capture_looked_again() {
         let rules = Rules::default();
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let pw = looks_only("N3kL7pW2");
         for line in [
             format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
             format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} a:b"),

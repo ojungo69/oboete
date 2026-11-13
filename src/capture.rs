@@ -1592,7 +1592,10 @@ mod tests {
     /// that closes it keeps the rule from that value, and it found the credential before).
     #[test]
     fn a_credential_before_a_value_a_greedy_rule_passes_over_is_masked_where_it_is_stored() {
-        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        // Since #985 curl-user reads a credential wherever it stands; what #537's looks still add
+        // is a value gitleaks' rule takes and curl-user passes over, as a password that starts
+        // with the placeholder curl-user knows. The made-up value here is one.
+        let pw = format!("パスワード{}", "N3kL7pW2");
         for last in ["bob:pass", "a:b"] {
             for tail in [" && echo ok", ""] {
                 let line = format!("curl {U} admin:{pw} https://h.test {U} {last}{tail}");
@@ -1629,6 +1632,84 @@ mod tests {
                 json!({"session_id": "s", "cwd": "/", "prompt": line}),
             );
             assert_eq!(body(&e)["prompt"], "[REDACTED]", "{line}");
+        }
+    }
+
+    /// #985: capture's own path stores a credential given to one of curl's user options masked,
+    /// whatever follows it and whatever it holds: as a tool's input (alone, where the closing
+    /// quote of the flattened field follows what ends the command, and beside another key), in
+    /// its output, in a prompt (a short one is scanned alone and beside its key, and the two
+    /// scans agree).
+    #[test]
+    fn a_credential_given_to_curls_user_option_is_masked_where_it_is_stored() {
+        let m = format!("N3kL{}", "7pW2"); // split: scanners
+        let pw = format!("Zq8v{m}");
+        let curl = format!("curl -s https://h.test {U} ");
+        for (before, credential, after) in [
+            (curl.clone(), format!("admin:{pw}"), ""),
+            (curl.clone(), format!("'admin:{pw}'"), ""),
+            (curl.clone(), format!("\"admin:{pw}\""), ""),
+            (format!("x=$({curl}"), format!("admin:{pw}"), ") && echo $x"),
+            (curl.clone(), format!("admin:{pw}"), "; echo ok"),
+            (curl.clone(), format!("admin:Zq8v+{m}/="), " && echo ok"),
+            (curl.clone(), format!("admin:x{pw}"), " && echo ok"),
+            (
+                "curl -sSLu ".to_owned(),
+                format!("admin:{pw}"),
+                " https://h.test && echo ok",
+            ),
+            (
+                format!("curl -s https://h.test {U}"),
+                format!("'admin:{pw}'"),
+                "",
+            ),
+            (
+                "curl -x http://p.test:3128 --proxy-user ".to_owned(),
+                format!("admin:{pw}"),
+                " https://h.test",
+            ),
+            (
+                format!("curl https://h.test/v1/x {U} "),
+                format!("Zq8v{m}abcd:"),
+                "",
+            ),
+        ] {
+            let line = format!("{before}{credential}{after}");
+            let want = format!("{before}[REDACTED]{after}");
+            let e = one(
+                "PostToolUse",
+                json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
+                       "tool_input": {"command": line},
+                       "tool_response": {"stdout": format!("+ {line}\n")}}),
+            );
+            let b = body(&e);
+            assert_eq!(b["input"], json!({"command": want}).to_string(), "{line}");
+            assert_eq!(
+                b["output"],
+                json!({"stdout": format!("+ {want}\n")}).to_string(),
+                "{line}"
+            );
+            let e = one(
+                "PostToolUse",
+                json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
+                       "tool_input": {"command": line, "description": "Calls: it"},
+                       "tool_response": {"stdout": "ok"}}),
+            );
+            assert_eq!(
+                body(&e)["input"],
+                json!({"command": want, "description": "Calls: it"}).to_string(),
+                "{line}"
+            );
+            for lead in [
+                "",
+                &"this is the one that works for me, word for word: ".repeat(6),
+            ] {
+                let e = one(
+                    "UserPromptSubmit",
+                    json!({"session_id": "s", "cwd": "/", "prompt": format!("{lead}{line}")}),
+                );
+                assert_eq!(body(&e)["prompt"], format!("{lead}{want}"), "{line}");
+            }
         }
     }
 
