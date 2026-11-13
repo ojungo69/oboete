@@ -6,8 +6,9 @@ not is found afterwards.
 
 ## What happened
 
-Claude Code cancels a hook at the timeout its settings give it, and `oboete setup claude` writes 5 s
-for `UserPromptSubmit`. On this PC Claude Code's transcripts hold seven cancellations of oboete's
+Claude Code cancels a hook at the timeout its settings give it, and `oboete setup claude` wrote 5 s
+for `UserPromptSubmit` then (15 s since decision 108, "The timeout `setup` writes" below). On this
+PC Claude Code's transcripts hold seven cancellations of oboete's
 hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11-07 04:49,
 2026-11-08 03:15, 03:21 and 03:23, 2026-11-10 00:01 and 01:26 UTC) and one `PostToolUse`.
 
@@ -28,10 +29,11 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
 
 ### One deadline for what a hook injects
 
-- A hook's time is its agent's timeout, as `setup` writes it for that agent's event
-  (`setup::hook_timeout`), less a margin of 1 s (`hook_time::MARGIN`) for the hook's own end (the
-  marker, the worker's start, its answer on stdout) and for the time before `main`. It is counted
-  from the first line of `main` (`hook_time::init`).
+- A hook's time is a timeout of its agent's event (`setup::hook_timeout`: the one `setup` wrote
+  for it until 2026-11-13, "The timeout `setup` writes" below), less a margin of 1 s
+  (`hook_time::MARGIN`) for the hook's own end (the marker, the worker's start, its answer on
+  stdout) and for the time before `main`. It is counted from the first line of `main`
+  (`hook_time::init`).
 - Recording is never cut short by it. The store's wait, the record and what is kept when the
   store cannot be had (docs/unwritten.md) are as they were.
 - What a hook injects takes what remains:
@@ -51,19 +53,66 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
 - A hook run inside another process (a test) has a clock that starts when it is called and no
   deadline unless the test sets one.
 
-| Agent | Event | Timeout | Time for what it injects |
-|---|---|---|---|
-| claude | `SessionStart` | 10 s | 9 s |
-| claude | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact`, `SubagentStop` | 5 s | 4 s |
-| codex | `SessionStart`, `SubagentStart` | 10 s | 9 s |
-| codex | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `PostCompact` | 5 s | 4 s |
-| grok | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact` | 5 s | 4 s |
-| claude, codex, grok | `SessionEnd` | 3 s | 2 s |
-| agy | `SessionStart`, `PreInvocation`, `PostToolUse`, `Stop` | 10 s | 9 s |
-| cursor | each of the seven hooks `setup` writes | 10 s | 9 s |
+| Agent | Event | Time counted from | Time for what it injects | Timeout `setup` writes |
+|---|---|---|---|---|
+| claude | `SessionStart` | 10 s | 9 s | 20 s |
+| claude | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact`, `SubagentStop` | 5 s | 4 s | 15 s |
+| codex | `SessionStart`, `SubagentStart` | 10 s | 9 s | 20 s |
+| codex | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `PostCompact` | 5 s | 4 s | 15 s |
+| grok | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PostCompact` | 5 s | 4 s | 15 s |
+| claude, codex, grok | `SessionEnd` | 3 s | 2 s | 3 s |
+| agy | `SessionStart`, `PreInvocation`, `PostToolUse`, `Stop` | 10 s | 9 s | 10 s |
+| cursor | each of the seven hooks `setup` writes | 10 s | 9 s | 10 s |
 
 An event that injects nothing (a `Stop`, a `SessionEnd`) has the time all the same: it only
 places the `late` line below. An event `setup` writes no hook for has none.
+
+### The timeout `setup` writes
+
+Decision 108 (2026-11-13). Until then `setup` wrote the timeout a hook's time is counted from,
+and the margin between a hook's own deadline and its agent's cancellation was the 1 s above.
+
+- For Claude Code, Codex and Grok `setup` writes 10 s more than that (`setup::TIMEOUT_ROOM`): 15 s
+  where it wrote 5 s, 20 s where it wrote 10 s.
+- The room is for what no deadline of the hook's cuts: a start that is late, a record that waits
+  for its store, and one statement that takes seconds ("Where it does not reach"). The 1 s of
+  margin was all they had. Such hooks are on record: the prompt of 2026-11-08 03:23, whose time
+  went before its record or in it ("What happened"); of the 41 hooks that never ended in the
+  record's first two days, the one in `record` and the one in `note` (the other 39 were the loop
+  that is now cut); and on 2026-11-13 at 11:43:48 UTC, with this PC under load, two of Claude
+  Code's `PostToolUse` hooks that waited for the store in `record`: one ended 5.9 s after it
+  began, and the other never ended. They are the only two of the 63 slow hooks on record after
+  those two days (to 2026-11-13 11:43 UTC) that ran past 3.2 s. A prompt after the store has gone
+  cold is where the next is expected: such a prompt's hook took 3.8 and 4.8 s on a copy of this
+  PC's store (docs/prompt-context.md), the second 0.2 s from the cancellation.
+- A hook's own time stays what it was, for two reasons.
+  - A settings file an older `setup` wrote still cancels at 5 s. A hook that counted its time
+    from 15 s would run into that cancellation with 10 s of its own time left: the cancellations
+    this document began with, for everyone who replaces the binary and does not run `setup`, and
+    for a session that read its settings before `setup` ran. Counted from the least any `setup`
+    has written, a hook keeps to every settings file there is.
+  - What a slow store costs the developer is what it was: a hook gives up what it injects 4 s
+    after it began (9 s at a session's start), where a time of its own counted from 15 s would
+    have it look for 14 s. A hook runs past that only for its record and for a statement that
+    had begun by then, and the agent now waits for those.
+- A session's end keeps 3 s for both. Nothing is injected there, the developer is leaving, and
+  Codex's trust rows hold no more than 3 s for one whatever is written
+  (`setup::codex_trust_hash`).
+- agy's and Cursor's hooks keep 10 s for both, as their specs write them: their margin is still
+  the 1 s. This PC's record holds none of their hooks (#897).
+- `oboete setup <agent>` writes the new timeouts: it takes its own handlers out of the agent's
+  file and writes them again, each event's after whatever else is there (`merge_groups`). A
+  developer's own handlers and the file's other settings are kept as they are; a group of the
+  developer's that stood after ours stands before it afterwards, and Codex's row for it follows
+  it (`codex_trust_delta`). Codex's trust rows for ours are written with them, since a row's hash
+  covers the timeout (`codex_trust_hash`). Until `setup` has run, the hooks work as they did,
+  Codex's rows still trust them, and what is there is not what this binary would write: the
+  settings page shows the agent's hooks as out of date (`setup::readiness`: stale), and
+  `oboete doctor` says how many are "not as this version writes them", with the command to
+  run, its `--home` included where the home is not the default one (`setup::hooks_status`).
+  Hooks wired for another home than the one doctor looks at are not judged.
+- An agent reads its hook files when it starts: a session that was open keeps the timeout it
+  read, as `setup` says when it has written.
 
 ### A record of slow hooks
 
@@ -74,7 +123,8 @@ places the `late` line below. An event `setup` writes no hook for has none.
   hook inside its time does no I/O for them.
 - A thread beside the hook (`Clock::watch`) writes a line when the hook is still running 2 s
   after its start (`"at": "slow"`), and one more half a second past the hook's time for what it
-  injects (`"at": "late"`), the last look before the agent's timeout. A hook with no such time
+  injects (`"at": "late"`), the last look: half a second before the timeout the hook's time is
+  counted from, which is the agent's own where an older `setup` wrote it. A hook with no such time
   (an agent oboete writes no timeout for) gets no `late` line. The thread ends with the process:
   a hook that ends inside 2 s never hears it.
 - A hook that took 2 s or more writes a line at its end (`"at": "end"`).
@@ -118,6 +168,9 @@ newest are counted.
   time and lose what may still arrive inside the agent's timeout. The record says whether that
   is where the time goes, in `manifest`, `prompt` or `note`; cutting those reads is #897's.
   A loop of reads is another matter, and the one the record found is cut (below).
+- Neither is cut by the timeout `setup` writes since decision 108 either: it leaves both 10 s
+  where the margin left them 1 s ("The timeout `setup` writes"), and a settings file from before
+  it leaves them the 1 s until `setup` runs again.
 - O1 is closed on what the record shows after the install, not on the deadline alone (#897).
 
 ## What the record showed (2026-11-13)
@@ -160,4 +213,10 @@ section).
   `a_read_whose_hook_has_no_time_left_gets_no_note`,
   `a_memory_lookup_waits_within_the_hooks_time`,
   `the_words_side_reads_no_document_once_the_hooks_time_is_over`.
-- `setup::tests::a_hooks_timeout_is_the_one_setup_writes`.
+- `setup::tests::a_hooks_time_is_counted_from_no_more_than_setup_writes` (the timeout each hook's
+  time is counted from and the one `setup` writes, by hand; 10 s apart for every hook of the
+  three agents but a session's end; agy's and Cursor's the same for both),
+  `an_older_setups_hooks_get_the_new_timeouts` (a file with the timeouts written until decision
+  108: `setup` changes its own handlers' timeouts and nothing else, and Codex's trust rows take
+  the new hashes), `doctor_names_the_hooks_an_older_setup_wrote`,
+  `setup::readiness::tests::hooks_with_an_older_setups_timeouts_are_stale_until_written_again`.

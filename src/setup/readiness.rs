@@ -5,7 +5,7 @@ use super::{
     claude_mcp_paths, claude_settings_file, codex_groups, codex_home, codex_trust_keys, cursor_dir,
     cursor_hook_spec, diagnostic_canonicalize, diagnostic_metadata, grok_config_file, grok_groups,
     has_ours, is_our_handler, launcher_files, mcp_command_in_json, mcp_command_in_toml,
-    mcp_disabled_in_json, mcp_disabled_in_toml, opencode_dir, opencode_plugin, pi_dir,
+    mcp_disabled_in_json, mcp_disabled_in_toml, only_ours, opencode_dir, opencode_plugin, pi_dir,
     pi_extension,
 };
 use anyhow::Result;
@@ -301,17 +301,7 @@ fn grouped_hooks(
             return Component::unknown(State::Invalid);
         };
         for group in entries.iter().filter(|group| has_ours(group)) {
-            let mut own = group.clone();
-            own["hooks"] = Value::Array(
-                group["hooks"]
-                    .as_array()
-                    .expect("has_ours checked handlers")
-                    .iter()
-                    .filter(|handler| is_our_handler(handler))
-                    .cloned()
-                    .collect(),
-            );
-            current.push((event.clone(), own));
+            current.push((event.clone(), only_ours(group)));
         }
     }
     compare_groups(&current, want.map(groups))
@@ -768,6 +758,42 @@ mod tests {
                 Some(false),
                 "Agy switch hid a different command"
             );
+        }
+    }
+
+    /// Decision 108 (docs/hook-time.md): hooks with the timeouts an older `setup` wrote are read
+    /// as stale, and as current once `setup` has written them again.
+    #[test]
+    fn hooks_with_an_older_setups_timeouts_are_stale_until_written_again() {
+        let want = HookCommand {
+            exe: "oboete".into(),
+            home: None,
+        };
+        type Groups = fn(&HookCommand) -> Vec<(String, Value)>;
+        // Each agent's groups, and what `setup` wrote for a start until decision 108.
+        let agents: [(Groups, u32); 3] =
+            [(claude_groups, 10), (codex_groups, 10), (grok_groups, 5)];
+        for (agent, (groups, start)) in agents.into_iter().enumerate() {
+            let mut root = json!({});
+            native::merge_groups(&mut root, groups(&want));
+            let read = |root: &Value| grouped_hooks(&Ok(Some(root.clone())), Some(&want), groups);
+            assert_eq!(read(&root).matches_current, Some(true), "{agent}");
+            // As `setup` wrote them until then: 5 s, a start as above, a session's end 3 s.
+            for (event, groups) in root["hooks"].as_object_mut().unwrap() {
+                let secs = match event.as_str() {
+                    "SessionStart" | "SubagentStart" => start,
+                    "SessionEnd" => 3,
+                    _ => 5,
+                };
+                groups[0]["hooks"][0]["timeout"] = json!(secs);
+            }
+            let older = read(&root);
+            assert_eq!(older.matches_current, Some(false), "{agent}");
+            assert!(matches!(older.state, State::Stale), "{agent}");
+            native::merge_groups(&mut root, groups(&want));
+            let again = read(&root);
+            assert_eq!(again.matches_current, Some(true), "{agent}");
+            assert!(matches!(again.state, State::Registered), "{agent}");
         }
     }
 
