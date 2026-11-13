@@ -167,6 +167,9 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
   removed from all its curator was shown (docs/cards.md K4), up to 500, and an op that cannot
   list them shows no card once any of them is found: what was removed from the window's own
   records and its goals, with what each earlier window's op listed so, stays within that;
+- its op would list more than 64 spans as read. Windows that follow each other are one span,
+  so that many means records between them went to no window of the conversation (imported ones,
+  covered without a call); an op's bytes are capped, and `read` is never cut from it;
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 

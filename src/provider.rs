@@ -415,6 +415,11 @@ const TALK_QUIET_MS: i64 = 3_600_000;
 /// with those of the stretches sent again. An op lists what was removed from all its curator was
 /// shown, and one with more than `curate::MAX_REMOVED` lists none and shows no card.
 const TALK_REMOVED: usize = crate::curate::MAX_REMOVED;
+/// Decision 107: the most spans a turn's op lists in `read`. Windows that follow each other are
+/// one span, so more than a few means records between them went to no window of this
+/// conversation (imported ones, covered without a call). An op's bytes are capped
+/// (`raw::MAX_OP_BYTES`) and `read` is never cut from it: this many are about two kilobytes.
+const TALK_SPANS: usize = 64;
 /// Decision 107: the tokens an estimated token is taken for, in the size of a conversation, until
 /// an entry's own answers say (`ratio`): a Messages entry's answers have counted from about 1.5
 /// to 2.6 times their estimates (docs/curator-conversation.md).
@@ -513,10 +518,10 @@ impl Talk {
     /// more than the entry's tokens were to its estimates of late (`ratio`); all of it from the
     /// estimate when that answer did not say; while the whole estimate at the entry's factor, as
     /// admission counts it, stays within `ceiling` too; and while their windows' ops list no more
-    /// removals between them than one op can (`TALK_REMOVED`). Else its own stretch alone: a
-    /// restart, which only loses the cache. A stretch that begins where the last one does takes
-    /// its place (a window sent again, after a refused answer or a hold). None while the entry
-    /// keeps none (`TALK_MISSES`).
+    /// removals between them than one op can (`TALK_REMOVED`), nor the op more spans as read
+    /// (`TALK_SPANS`). Else its own stretch alone: a restart, which only loses the cache. A
+    /// stretch that begins where the last one does takes its place (a window sent again, after a
+    /// refused answer or a hold). None while the entry keeps none (`TALK_MISSES`).
     fn plan(
         &self,
         db: &Connection,
@@ -566,7 +571,12 @@ impl Talk {
         let admitted = (estimated + est(stretch) + est(tail)) * budget::factor(db, name)?;
         // Nor more removals than its op can list (`TALK_REMOVED`).
         let removed = earlier.iter().map(|s| s.removed).sum::<usize>() + turn.removed;
-        if size > ceiling || admitted > ceiling || removed > TALK_REMOVED {
+        // Nor more spans than its op lists as read (`TALK_SPANS`).
+        if size > ceiling
+            || admitted > ceiling
+            || removed > TALK_REMOVED
+            || spans(earlier).len() > TALK_SPANS
+        {
             earlier = &[];
         }
         let mut prompt = String::with_capacity(turn.prompt.len());
@@ -580,18 +590,11 @@ impl Talk {
         prompt.push_str(stretch);
         marks.push(prompt.len());
         prompt.push_str(tail);
-        let mut read: Vec<(i64, i64)> = Vec::new();
-        for s in earlier {
-            match read.last_mut() {
-                Some(last) if s.from.0 <= last.1 + 1 => last.1 = last.1.max(s.to),
-                _ => read.push((s.from.0, s.to)),
-            }
-        }
         Ok(Some(Planned {
             prompt,
             marks,
             earlier: earlier.len(),
-            read,
+            read: spans(earlier),
             again: said
                 .filter(|_| !earlier.is_empty())
                 .map(|(tokens, gone)| tokens - gone * ratio),
@@ -669,6 +672,18 @@ impl Talk {
             _ => Vec::new(),
         }
     }
+}
+
+/// The spans of `stretches`' records, those next to each other as one.
+fn spans(stretches: &[Stretch]) -> Vec<(i64, i64)> {
+    let mut read: Vec<(i64, i64)> = Vec::new();
+    for s in stretches {
+        match read.last_mut() {
+            Some(last) if s.from.0 <= last.1 + 1 => last.1 = last.1.max(s.to),
+            _ => read.push((s.from.0, s.to)),
+        }
+    }
+    read
 }
 
 /// Decision 107: how far entry `provider`'s tokens may be from the estimate, for the size of a
@@ -8823,6 +8838,39 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 ("a", Some(2)),
                 ("b", Some(1))
             ]
+        );
+    }
+
+    /// Decision 107 (the security review of this branch): a turn's op lists what it read whole,
+    /// and an op's bytes are capped, so a turn reads no more spans than `TALK_SPANS`. Windows
+    /// with records between them that went to no window of the conversation are a span each: the
+    /// turn after that many starts again.
+    #[test]
+    fn a_turn_reads_no_more_spans_than_its_op_lists() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let calls = TALK_SPANS + 3;
+        let (url, _requests) = counting(calls, 1.5);
+        let providers = [talker(&url, 100_000)];
+        let mut talk = Talk::default();
+        let parts = window_prompt("A line.", "", 5);
+        for n in 0..calls as i64 {
+            // Two records, then eight that are no window's.
+            let turn = turn_of(&parts, "k", n * 10 + 1, n * 10 + 2);
+            talk_run(&providers, &conn, &mut talk, &turn).unwrap();
+            let read = talk.read("stub", &format!("{}-{}", n * 10 + 1, n * 10 + 2));
+            assert!(read.len() <= TALK_SPANS, "{n}: {}", read.len());
+        }
+        let went = earlier(&conn);
+        assert_eq!(
+            went[TALK_SPANS - 1..TALK_SPANS + 3],
+            [
+                Some(TALK_SPANS as i64 - 1),
+                Some(TALK_SPANS as i64),
+                Some(0),
+                Some(1)
+            ],
+            "{went:?}"
         );
     }
 
