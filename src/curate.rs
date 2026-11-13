@@ -12521,6 +12521,7 @@ curate = false
     /// turn it is asked (its span, key, prompt, stretch, first and last record), counts what it
     /// is asked as a plain prompt, answers `answer` (refused as unanchored when `refused`), and
     /// says each turn's entry read `read` before the window's own.
+    #[allow(clippy::type_complexity)]
     struct Talking {
         answer: Value,
         refused: bool,

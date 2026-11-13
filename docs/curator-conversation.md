@@ -143,7 +143,10 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
 - the entry's last call started longer ago than its cache keeps an entry, less a margin: the
   Messages API measures five minutes from a request's start, and a read renews it;
 - the prompt would pass the entry's `max_request_tokens` less a tenth, or what admission lets
-  through with the answer's bound (`budget::admit_with_history`), whichever is less. What goes
+  through with the answer's bound (`budget::admit_with_history`), whichever is less; counted as
+  below, and as admission counts it too (the whole estimate at the entry's factor, the median of
+  its last 50 answers), so that no turn is refused as too big where its window alone would go.
+  What goes
   again is counted in the entry's own tokens: the last answer's `prompt_tokens`, less the
   estimates of the last tail and of a stretch this window's takes the place of; only this stretch
   and tail are counted from their estimate (all of it, when that answer reported no tokens). An

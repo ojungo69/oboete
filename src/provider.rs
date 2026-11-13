@@ -509,8 +509,10 @@ impl Talk {
     /// lifetime ago, and the whole stays within `ceiling` tokens: the tokens its last answer
     /// reported for what goes again, and the new stretch and tail from their estimate, taken for
     /// more than the entry's tokens were to its estimates of late (`ratio`); all of it from the
-    /// estimate when that answer did not say; and while their windows' ops list no more removals
-    /// between them than one op can (`TALK_REMOVED`). Else its own stretch alone: a restart, which
+    /// estimate when that answer did not say; while the whole estimate at the entry's factor, as
+    /// admission counts it, stays within `ceiling` too; and while their windows' ops list no more
+    /// removals between them than one op can (`TALK_REMOVED`). Else its own stretch alone: a
+    /// restart, which
     /// only loses the cache. A stretch that begins where the last one does takes its place (a
     /// window sent again, after a refused answer or a hold). None while the entry keeps none
     /// (`TALK_MISSES`).
@@ -551,17 +553,19 @@ impl Talk {
         // at the least.
         let said = held.and_then(|c| Some((c.tokens? as f64, f64::from(c.tail + replaced))));
         let new = (est(stretch) + est(tail)) * ratio;
+        let estimated = est(instructions) + earlier.iter().map(|s| f64::from(s.est)).sum::<f64>();
         let size = match said {
             Some((tokens, gone)) => tokens - gone + new,
             // Its last answer did not say: all of it from the estimate.
-            None => {
-                let estimated: f64 = earlier.iter().map(|s| f64::from(s.est)).sum();
-                (est(instructions) + estimated) * ratio + new
-            }
+            None => estimated * ratio + new,
         };
+        // Nor more than admission lets through, which counts the whole from its estimate at the
+        // entry's own factor (`budget::reserve`): a turn refused there as too big is not tried
+        // again as its window alone.
+        let admitted = (estimated + est(stretch) + est(tail)) * budget::factor(db, name)?;
         // Nor more removals than its op can list (`TALK_REMOVED`).
         let removed = earlier.iter().map(|s| s.removed).sum::<usize>() + turn.removed;
-        if size > ceiling || removed > TALK_REMOVED {
+        if size > ceiling || admitted > ceiling || removed > TALK_REMOVED {
             earlier = &[];
         }
         let mut prompt = String::with_capacity(turn.prompt.len());
@@ -8654,6 +8658,55 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         *talk.quiet.get_mut("stub").unwrap() -= TALK_QUIET_MS;
         run(&mut talk, 6);
         assert_eq!(earlier(&conn).last(), Some(&Some(0)));
+    }
+
+    /// Decision 107: a turn is within what admission lets through too. Admission counts the whole
+    /// estimate at the entry's own factor, the median of its last 50 answers: an entry that has
+    /// counted twice its estimates is sent no turn its budget would refuse as too big, though the
+    /// lines of this conversation count only one and a half times.
+    #[test]
+    fn a_turn_stays_within_what_admission_counts() {
+        const CEILING: u32 = 100_000;
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        for _ in 0..50 {
+            let usage = Usage {
+                prompt: Some(2_000),
+                ..Usage::default()
+            };
+            let call = providers_db::Call {
+                provider: "stub",
+                role: "summary",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1_000),
+                usage,
+                usd: None,
+            };
+            providers_db::record(&conn, &call).unwrap();
+        }
+        assert_eq!(budget::factor(&conn, "stub").unwrap(), 2.0);
+        let calls = 14;
+        let (url, requests) = counting(calls, 1.5);
+        let providers = [talker(&url, CEILING)];
+        let mut talk = Talk::default();
+        // About 5,000 estimated tokens a window.
+        let parts = window_prompt(&"word ".repeat(3_570), "", 5);
+        for n in 0..calls as i64 {
+            // None is refused: each is a turn its budget admits.
+            let turn = turn_of(&parts, "k", n * 2 + 1, n * 2 + 2);
+            talk_run(&providers, &conn, &mut talk, &turn).unwrap();
+        }
+        let most = requests.try_iter().map(|r| counted(&r, None, 2.0));
+        assert!(most.max().unwrap() <= i64::from(CEILING) * 9 / 10);
+        let went = earlier(&conn);
+        let went = &went[50..];
+        assert!(went.iter().all(Option::is_some), "{went:?}");
+        assert!(went.contains(&Some(6)), "{went:?}");
+        assert!(went[1..].contains(&Some(0)), "{went:?}");
     }
 
     /// Decision 107: what a call reads from the cache is what went again: never the last call's
