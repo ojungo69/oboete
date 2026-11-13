@@ -88,7 +88,9 @@ op lists, from the turn's records (its session's: not another session's between 
 records of the windows whose cards it read, the stretches those windows read (decision 107: a
 window op's `read`, which the turn op lists with the windows' spans), or their goals:
 K4's rule over all it was shown or built on. A removal that hides a card hides every summary that
-read it.
+read it. The turn op names in `stretches` those of its spans that are stretches only, the span of
+no window whose card it was shown: forget's rule for a card read of a forgotten window is asked
+of the windows whose cards it read, not of them.
 
 T8. **Gated when read** (K6), through one reader, `turns::recent` (K7).
 

@@ -254,6 +254,7 @@ After it, on this PC: `provider_calls` against the estimate above.
   and its goals, so the op, its cards and the claims of its batch go with a forgotten or masked
   record of a stretch it read, and the op keeps `read` when a purge takes its text. A card is not
   shown once a removal its op does not list lands in a stretch its window read (K4), and a turn's
-  summary lists those stretches among what it read (T7).
+  summary lists those stretches among what it read (T7), named in `stretches` as spans it read
+  no card of.
 
 Nothing else yet: no entry is sent a stretch again.
