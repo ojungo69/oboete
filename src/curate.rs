@@ -2139,9 +2139,7 @@ fn answered(
                 key: &key,
                 from: (w.from_seq, w.from_offset),
                 to: w.to_seq,
-                removed: raw
-                    .removed_in(&w.device, w.from_seq, w.to_seq, Some(w.top))?
-                    .len(),
+                removed: removed_before(raw, w, &req.goals, &[])?.len(),
             };
             curator.ask_turn(&span, &turn, &check, &gate)
         }
@@ -4524,6 +4522,24 @@ fn shown_records(
     goals: &[i64],
     read: &[(i64, i64)],
 ) -> Result<()> {
+    let removed = removed_before(raw, w, goals, read)?;
+    if !goals.is_empty() {
+        op["goals"] = json!(goals);
+    }
+    if !removed.is_empty() && removed.len() <= MAX_REMOVED {
+        op["removed"] = json!(removed);
+    }
+    Ok(())
+}
+
+/// What was already removed, when `w` was cut, from the records its curator is shown: its own,
+/// the stretches it is sent again (`read`) and its `goals`, each removal once, in that order.
+fn removed_before(
+    raw: &Raw,
+    w: &Window,
+    goals: &[i64],
+    read: &[(i64, i64)],
+) -> Result<Vec<crate::raw::Removal>> {
     let mut removed = raw.removed_in(&w.device, w.from_seq, w.to_seq, Some(w.top))?;
     for &(from, to) in read {
         removed.extend(raw.removed_in(&w.device, from, to, Some(w.top))?);
@@ -4535,13 +4551,7 @@ fn shown_records(
     // stretch: what was removed from it is listed once.
     let mut listed = std::collections::HashSet::new();
     removed.retain(|r| listed.insert(*r));
-    if !goals.is_empty() {
-        op["goals"] = json!(goals);
-    }
-    if !removed.is_empty() && removed.len() <= MAX_REMOVED {
-        op["removed"] = json!(removed);
-    }
-    Ok(())
+    Ok(removed)
 }
 
 /// The window op, with the claims it yields, in one transaction: the curation checkpoint moves
@@ -12708,6 +12718,57 @@ curate = false
         assert_eq!(op["removed"], json!([[1, 3, 7]]));
     }
 
+    /// Decision 107 (the security review of this branch): a turn says how many removals its op is
+    /// to list besides those of what it read: from its window's own records and from its goals,
+    /// which lie outside the window.
+    #[test]
+    fn a_turn_counts_what_was_removed_from_its_goals_too() {
+        GROWS.set(false); // a backlog of small windows, as before decision 72
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        for word in ["alpha ", "beta "] {
+            raw.append(&prompt(&word.repeat(20))).unwrap();
+        }
+        // Two words of the first prompt, inside its JSON body.
+        for offset in [11, 17] {
+            let device = raw.device().to_owned();
+            let part = crate::raw::Target::Range {
+                device,
+                seq: 1,
+                offset,
+                length: 5,
+            };
+            raw.append_tombstone(part).unwrap();
+        }
+        let mut curator = Talking::new(json!({"claims": [], "summary": "Nothing."}), &[]);
+        let rules = Rules::default();
+        // The first prompt in windows of its own, then room for it as the second's goal.
+        let small = Summary {
+            conversation: true,
+            ..curating(30)
+        };
+        for _ in 0..2 {
+            let phase = run_phase(&mut raw, &kn(), &db, &rules, &small, "", &mut curator);
+            assert_eq!(phase.unwrap(), Phase::Covered);
+        }
+        let summary = Summary {
+            conversation: true,
+            idle_minutes: 0,
+            ..curating(1_000)
+        };
+        while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
+            == Phase::Covered
+        {}
+        let ws = windows(&raw);
+        let next = ws.iter().find(|w| w["from_seq"] == 2).unwrap();
+        assert_eq!(
+            (&next["goals"], &next["removed"]),
+            (&json!([1]), &json!([[1, 11, 5], [1, 17, 5]]))
+        );
+        let asked = curator.turns.iter().position(|t| t.4.0 == 2).unwrap();
+        assert_eq!(curator.removed[asked], 2, "{:?}", curator.removed);
+    }
+
     /// Decision 107: a record can be in what a window was shown twice over: the record it begins
     /// inside ends the stretch before it, and a session's goal lies in an earlier stretch. What
     /// was removed from such a record is listed once, in the order it was found.
@@ -12903,7 +12964,11 @@ curate = false
         );
         // The store opened again: another handle, which may read another file (a restore).
         drop(raw);
-        let (again, _db) = open(home.path());
+        let (mut again, _db) = open(home.path());
+        assert_ne!(key, talk_key(&again, &rules, &reading));
+        // The worker's lock let go and taken again: the same handle, as another open.
+        let key = talk_key(&again, &rules, &reading);
+        again.renew();
         assert_ne!(key, talk_key(&again, &rules, &reading));
     }
 

@@ -132,6 +132,11 @@ A window sent again (after an answer its check refused, or a hold, the same or g
 takes its own earlier stretch's place: no window's lines are in a prompt twice, and the cache is
 read through the stretch before it.
 
+A conversation, and what a call read, are kept by an entry's name: an entry whose name another
+entry of the chain has keeps none. And a 413 for a turn that went on says nothing of the entries
+after it, which are sent the window alone: one with the same ceiling is still asked, where a 413
+for any other prompt skips it.
+
 An answer joins nothing: the known claims already carry what was kept, and an answer sent again
 would be written at 1.25 times.
 
@@ -158,10 +163,10 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
   estimate than that can still pass the ceiling, and pays the higher price once. Haiku 5.5's
   price is five times past 100,000 tokens, tokens read from the cache count toward it, and a
   request past it pays the higher price for all of its tokens;
-- the stretches would hold more removals between them than an op can list. A window's op lists
-  what was already removed from all its curator was shown (docs/cards.md K4), up to 500, and an
-  op that cannot list them shows no card once any of them is found: a turn's stretches stay
-  within four fifths of that, the rest being room for its goals';
+- its op would have more removals to list than an op can. A window's op lists what was already
+  removed from all its curator was shown (docs/cards.md K4), up to 500, and an op that cannot
+  list them shows no card once any of them is found: what was removed from the window's own
+  records and its goals, with what each earlier window's op listed so, stays within that;
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 
@@ -215,11 +220,14 @@ rule 12), and a stretch sent again passes it again:
   The count needs no such pairing: whatever writes a tombstone stops the calls of what was read
   before it, and so nothing rendered before it goes again.
 - What rewrites a record's text holds the worker's lock: a forget's purge, retention's expiry
-  (`retention::rows`), a restore, a rebuild. The worker that holds it steps aside by ending its
-  loop, and the conversation ends with it, so none of them runs within a conversation and
-  retention needs no marker in the key (an earlier draft of this note gave it one). Within one
-  run the stores can be closed and opened again (a damaged raw.db restored): every open of
-  raw.db has an id of its own in the key, so the next window starts again.
+  (`retention::rows`), a restore, a rebuild. An expiry writes no tombstone, so the key cannot
+  see it: a conversation is kept for one holding of that lock instead. The worker that holds it
+  steps aside by ending its loop, and a worker that let the lock go and took it again in the same
+  run (a record arrived while it decided to exit) takes its handle of raw.db for another open
+  (`Raw::renew`). Within one run the stores can also be closed and opened again (a damaged
+  raw.db restored). Every open of raw.db has an id of its own in the key, so in each case the
+  next window starts again, and retention needs no marker in the key (an earlier draft of this
+  note gave it one).
 - A mute changes which claims are shown, never a record's lines: it can change a tail, which is
   made for each call, and restarts nothing (the earlier draft listed it).
 - Prompt injection (spec 3.3): each stretch's fence is the hash of its own text, the tail names
@@ -311,9 +319,12 @@ After it, on this PC: `provider_calls` against the estimate above.
   as "Restarting" and "The gate" say, and keeps none for an hour after two calls in a row that
   read less than half of what they were sent again. The window's op lists `read`, and what was
   already removed from what it read; `provider_calls.earlier` counts the stretches before each
-  call's own. A live triple of synthetic text on 2026-11-13 (claude-haiku-5-5): the second call
-  read the 3,691 tokens the first wrote and wrote 1,923, and the third read 5,614 and wrote
-  1,929. Every other entry, `oboete recurate`, and the summary's, My Work's and the judge's calls
+  call's own. An entry whose name another entry has keeps none; a turn's op has no more removals
+  to list than an op can; the worker's lock let go and taken again ends every conversation; a
+  413 for a turn that went on skips no other entry. Three requests of synthetic text built by
+  hand in this shape, sent on 2026-11-13 (claude-haiku-5-5, thinking disabled): the second read
+  the 3,691 tokens the first wrote and wrote 1,923, and the third read 5,614 and wrote 1,929.
+  The binary's own path has not called the API yet. Every other entry, `oboete recurate`, and the summary's, My Work's and the judge's calls
   are as they were, and off is the default. One thing changes with the setting off too: the gate
   before a call of any role (`Reading::still`) now stops on any tombstone written since its
   inputs were read, where it stopped on a denial or a masked range ("The gate").

@@ -1401,6 +1401,9 @@ fn serve(
         if wanted {
             return Ok(true);
         }
+        // Decision 107: whoever held the lock between may have rewritten what a conversation
+        // holds, with no tombstone (an expiry). Its key is of another open from here on.
+        raw.renew();
     }
 }
 
@@ -1543,9 +1546,10 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     // Opened once curation is on: a home that never asks for it gets no providers.db.
     let mut db = None;
     // Decision 107 (docs/curator-conversation.md): what each entry was sent in its conversation,
-    // for as long as this phase lives: one run of the worker, under its lock. A purge, an expiry
-    // and a restore take that lock, so none runs within a conversation; a store opened again
-    // within the run gives its windows another key (`curate::talk_key`).
+    // for as long as this phase lives: one run of the worker. A purge, an expiry and a restore
+    // take the worker's lock: a store opened again within the run, and the lock let go and taken
+    // again (`serve`, `Raw::renew`), give its windows another key (`curate::talk_key`), so none
+    // of them runs within a conversation.
     let mut talk = crate::provider::Talk::default();
     Box::new(move |raw: &mut Raw, k: &Connection| {
         // Read again for each window: a worker that stays up follows the owner's edits (turning
@@ -4273,6 +4277,62 @@ mod tests {
         // Another run of the worker.
         let mut phase = curation(home.path());
         assert_eq!(window(&mut raw, &mut phase), 1);
+    }
+
+    /// Decision 107 (the security review of this branch): the worker's lock let go and taken
+    /// again ends every conversation: whoever held it between may have rewritten a record's text
+    /// with no tombstone (a retention's expiry). A record that arrives while the worker decides
+    /// to exit is curated by the same run, with its phase and its handle of raw.db, and its
+    /// window's call sends no stretch again.
+    #[test]
+    fn a_conversation_ends_when_the_workers_lock_is_let_go_and_taken_again() {
+        use crate::provider::tests::{request_body, serve_each};
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
+        let answer = serde_json::json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
+                "cache_creation_input_tokens": 60, "output_tokens": 9}})
+        .to_string()
+        .into_bytes();
+        let (url, requests) = serve_each(vec![("200 OK", answer); 2], "");
+        let config = format!(
+            "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
+             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
+             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
+        );
+        std::fs::write(p.join("config.toml"), config).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("Use tabs in this repository."))
+            .unwrap();
+        let mut phase = curation(p);
+        let phases = Phases {
+            curation: Some(&mut *phase),
+            ..Phases::default()
+        };
+        let mut late = true;
+        // `before_exit` runs after the lock is released: the record it appends is found by the
+        // last check, and the lock is taken again for it.
+        let before_exit = || {
+            if std::mem::take(&mut late) {
+                raw::open(p)
+                    .unwrap()
+                    .append(&raw::test_event("Use spaces in that one."))
+                    .unwrap();
+            }
+        };
+        run_holding(p, 0, vec![Box::new(Seen)], before_exit, None, phases).unwrap();
+        // The stretches each window's call held: every block but its instructions and its tail.
+        let stretches: Vec<usize> = requests
+            .try_iter()
+            .map(|r| {
+                let body = request_body(&r);
+                body["messages"][0]["content"].as_array().unwrap().len() - 2
+            })
+            .collect();
+        assert_eq!(stretches, [1, 1]);
     }
 
     /// #94: the worker's chain leaves out an entry `[chain] off` turns off, and a window held under

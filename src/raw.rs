@@ -3106,6 +3106,13 @@ impl Raw {
         self.opened
     }
 
+    /// The handle as another open (`opened`): what is kept in memory about its records is let go.
+    /// The worker let its lock go and took it again, and whoever held it between may have
+    /// rewritten a record's text with no tombstone (a retention's expiry).
+    pub(crate) fn renew(&mut self) {
+        self.opened = OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// What a derived writer is fenced by (`FENCE_COUNT`).
     pub fn fence_count(&self) -> Result<i64> {
         Ok(self.conn.query_row(FENCE_COUNT, [], |r| r.get(0))?)

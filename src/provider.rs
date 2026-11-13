@@ -391,7 +391,8 @@ pub struct Turn<'a> {
     /// The window's first record and the offset into it, and its last record.
     pub from: (i64, Option<i64>),
     pub to: i64,
-    /// How many removals from its own records the window's op is to list (docs/cards.md K4).
+    /// How many removals the window's op is to list besides those of what it read: from its own
+    /// records and from its goals (docs/cards.md K4).
     pub removed: usize,
 }
 
@@ -410,10 +411,10 @@ const TALK_READ_SHARE: f64 = 0.5;
 /// `TALK_QUIET_MS`: a cache that does not answer costs more with a conversation than without.
 const TALK_MISSES: u32 = 2;
 const TALK_QUIET_MS: i64 = 3_600_000;
-/// Decision 107: the most removals the stretches of a turn hold between them, the window's own
-/// with those sent again. Its op lists what was removed from all it was shown, and one with more
-/// than `curate::MAX_REMOVED` lists none and shows no card: this leaves room for its goals'.
-const TALK_REMOVED: usize = crate::curate::MAX_REMOVED * 4 / 5;
+/// Decision 107: the most removals a turn's op has to list: its window's own and its goals'
+/// with those of the stretches sent again. An op lists what was removed from all its curator was
+/// shown, and one with more than `curate::MAX_REMOVED` lists none and shows no card.
+const TALK_REMOVED: usize = crate::curate::MAX_REMOVED;
 /// Decision 107: the tokens an estimated token is taken for, in the size of a conversation, until
 /// an entry's own answers say (`ratio`): a Messages entry's answers have counted from about 1.5
 /// to 2.6 times their estimates (docs/curator-conversation.md).
@@ -460,7 +461,8 @@ struct Stretch {
     to: i64,
     /// Its estimate (`budget::estimate`).
     est: u32,
-    /// The removals its window's op listed for its records (`Turn::removed`).
+    /// The removals its window's op listed besides those of what it read (`Turn::removed`): no
+    /// fewer than a later op lists for this stretch's records.
     removed: usize,
 }
 
@@ -1308,7 +1310,10 @@ impl<'a> Chain<'a> {
             // Decision 107: an entry that keeps a conversation is sent its earlier stretches
             // before this turn's; what follows (the estimate, the reservation, the bytes sent)
             // is of the prompt as this entry is sent it.
-            let planned = match (&self.talk, talks(p, role)) {
+            // An entry whose name another entry has keeps none: a conversation, and what a call
+            // read, are kept by name (the security review of this branch).
+            let alone = self.providers.iter().filter(|q| q.name() == name).count() == 1;
+            let planned = match (&self.talk, talks(p, role).filter(|_| alone)) {
                 (Some((talk, turn)), Some((ceiling, at))) => {
                     talk.plan(conn, &name, &at, turn, ceiling, db::now_ms())?
                 }
@@ -1676,7 +1681,8 @@ impl<'a> Chain<'a> {
                     });
                 }
                 Err(e) => {
-                    if e.status == Some(413) {
+                    // Not after a turn that went on: its peers are sent the window alone.
+                    if e.status == Some(413) && planned.as_ref().is_none_or(|t| t.earlier == 0) {
                         ceiling_hit.extend(p.limits().max_request_tokens);
                     }
                     let outcome = refused.unwrap_or(if e.invalid() { "invalid" } else { "error" });
@@ -8818,6 +8824,68 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 ("b", Some(1))
             ]
         );
+    }
+
+    /// Decision 107 (the security review of this branch): a conversation, and what a call read,
+    /// are kept by an entry's name, so an entry whose name another entry of the chain has keeps
+    /// none. Its calls are the prompt as it is, no turn in the ledger, and read nothing.
+    #[test]
+    fn an_entry_whose_name_another_has_keeps_no_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answers = (0..2).map(|_| ("200 OK", messages_answer(60, 0, 1_940)));
+        let (url, requests) = serve_each(answers.collect(), "");
+        let providers = [talker(&url, 100_000), talker("http://127.0.0.1:9", 100_000)];
+        let mut talk = Talk::default();
+        let one = window_prompt("One.", "", 5);
+        let two = window_prompt("Two.", "", 5);
+        talk_run(&providers, &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+        talk_run(&providers, &conn, &mut talk, &turn_of(&two, "k", 3, 4)).unwrap();
+        let last = requests.try_iter().last().unwrap();
+        assert_eq!(blocks(&last).len(), 2, "its instructions and the rest");
+        assert_eq!(earlier(&conn), [None, None]);
+        assert_eq!(talk.read("stub", "3-4"), []);
+        assert!(talk.entries.is_empty());
+    }
+
+    /// Decision 107 (the security review): a 413 for a turn that went on says nothing of the
+    /// entries after it, which are sent the window alone: one with the same ceiling is still
+    /// asked. A 413 for a turn that started again is of the prompt they would get, and they are
+    /// skipped as before.
+    #[test]
+    fn a_413_for_a_turn_that_went_on_skips_no_other_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let ok = || ("200 OK", messages_answer(60, 0, 1_940));
+        let too_large = || {
+            let body = json!({"error": {"code": "request_too_large"}}).to_string();
+            ("413 Payload Too Large", body.into_bytes())
+        };
+        let (url_a, _requests_a) = serve_each(vec![ok(), too_large(), too_large()], "");
+        let (url_b, requests_b) = serve_each(vec![ok()], "");
+        let named = |url: &str, to: &str| {
+            let mut p = talker(url, 100_000);
+            if let Provider::Openai { name, .. } = &mut p {
+                *name = to.into();
+            }
+            p
+        };
+        let providers = [named(&url_a, "a"), named(&url_b, "b")];
+        let mut talk = Talk::default();
+        let windows = ["One.", "Two.", "Three."].map(|line| window_prompt(line, "", 5));
+        let mut run = |n: usize| {
+            conn.execute("DELETE FROM provider_state", []).unwrap();
+            let from = n as i64 * 2 + 1;
+            let turn = turn_of(&windows[n], "k", from, from + 1);
+            talk_run(&providers, &conn, &mut talk, &turn).map(|r| r.provider)
+        };
+        assert_eq!(run(0).unwrap(), "a");
+        // a's turn went on and is refused as too large: b is asked, and sent the window alone.
+        assert_eq!(run(1).unwrap(), "b");
+        assert_eq!(blocks(&requests_b.try_iter().last().unwrap()).len(), 3);
+        // a starts again and is refused again: b would get no smaller a prompt.
+        assert!(run(2).is_err());
+        assert_eq!(outcomes(&conn), ["ok", "error", "ok", "error", "too_big"]);
     }
 
     /// Decision 107: a turn answered 429 with a short wait is sent again as it was planned,
