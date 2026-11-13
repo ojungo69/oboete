@@ -33,7 +33,9 @@ Why:
   the cards a window may give (`curate::most_cards`), more for a grown window (decision 72), so a
   grown window's instructions are other bytes with an entry of their own. A second breakpoint before
   that sentence would let such a call read the first 1,800 or so tokens instead of writing them,
-  166 times a week: a few cents, so the instructions stay as they are.
+  166 times a week: a few cents, so the instructions stay as they are. (With `[summary]
+  conversation = true` they name no number of cards, and every window's are the same bytes:
+  [curator-conversation.md](curator-conversation.md), As built.)
 
 ## Decision 86 (2026-11-10)
 
