@@ -745,6 +745,52 @@ mod tests {
         assert_eq!(titles(home.path()), ["Second."]);
     }
 
+    /// K4, decision 107 (docs/curator-conversation.md): a card's records are also those of the
+    /// stretches its window op lists in `read`, which its curator was sent again before the
+    /// window's own. A removal from one of them that the op does not list hides the card; what
+    /// the op lists, made again, hides nothing, nor does a removal from a record it did not read.
+    #[test]
+    fn a_removal_from_a_stretch_a_window_read_hides_its_card() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        for ts in 1..=6 {
+            raw.append(&event("s1", "r", ts * 1_000)).unwrap();
+        }
+        let part = |seq: i64, offset: i64| raw::Target::Range {
+            device: device.clone(),
+            seq,
+            offset,
+            length: 1,
+        };
+        // Gone before the windows were cut: a part of record 1.
+        raw.append_tombstone(part(1, 0)).unwrap();
+        let reading = |from: i64, to: i64, summary: &str, read: Value, removed: Value| {
+            let (kind, mut op) = window(from, to, "curated", summary);
+            (op["read"], op["removed"]) = (read, removed);
+            (kind, op)
+        };
+        raw.append_ops(&[
+            reading(3, 4, "Second.", json!([[1, 2]]), json!([[1, 0, 1]])),
+            reading(5, 6, "Third.", json!([[3, 4]]), json!([])),
+        ])
+        .unwrap();
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(titles(home.path()), ["Third.", "Second."]);
+        raw.append_tombstone(part(1, 0)).unwrap();
+        assert_eq!(titles(home.path()), ["Third.", "Second."]);
+        // Another part of record 1: the card of the window that read its stretch, not the other.
+        raw.append_tombstone(part(1, 1)).unwrap();
+        assert_eq!(titles(home.path()), ["Third."]);
+        // And a record of the stretch the other read.
+        raw.append_tombstone(raw::Target::Record {
+            device: device.clone(),
+            seq: 4,
+        })
+        .unwrap();
+        assert_eq!(titles(home.path()), Vec::<String>::new());
+    }
+
     /// K6: a summary as long as the op keeps one may have been cut there, before any gate read
     /// it: it is no card.
     #[test]

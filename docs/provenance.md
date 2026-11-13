@@ -148,3 +148,12 @@ further commit.
   Its plan was reviewed before the code: P2's marker record and op (the way this note offers)
   rather than a floor kept in raw.db's meta, which no backup holds; and the backup's segment check
   and set-aside rule must accept the gap a marker names.
+
+### A window's `read` (decision 107, 2026-11-13)
+
+- A window op of a conversation ([curator-conversation.md](curator-conversation.md)) lists `read`:
+  the spans of the stretches its curator was sent again before the window's own, pairs as a turn
+  op's. `provenance::of` reads them, so every reader of P1 has them: forget's judge takes the
+  forgotten and masked records of those spans as records the window showed (rule a, with its own
+  span and its goals), a restore's cut reads their ends (`Provenance::top`), and a purge that takes
+  the op's text keeps `read` (`WINDOW_STRUCTURE`).

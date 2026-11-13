@@ -85,7 +85,8 @@ makes it again and a rewind removes a device's rows above the point (K5).
 
 T7. **Hidden after a removal.** A summary is shown only while nothing is removed, beyond what its
 op lists, from the turn's records (its session's: not another session's between them), the
-records of the windows whose cards it read, or their goals:
+records of the windows whose cards it read, the stretches those windows read (decision 107: a
+window op's `read`, which the turn op lists with the windows' spans), or their goals:
 K4's rule over all it was shown or built on. A removal that hides a card hides every summary that
 read it.
 
