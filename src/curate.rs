@@ -2139,6 +2139,9 @@ fn answered(
                 key: &key,
                 from: (w.from_seq, w.from_offset),
                 to: w.to_seq,
+                removed: raw
+                    .removed_in(&w.device, w.from_seq, w.to_seq, Some(w.top))?
+                    .len(),
             };
             curator.ask_turn(&span, &turn, &check, &gate)
         }
@@ -4508,7 +4511,7 @@ fn cards_of(w: &Window, answer: &Value) -> Option<(Vec<Value>, u64)> {
 
 /// Removals a window op lists, at most: an op that lists none has no card shown once any of
 /// its records lost a part (docs/cards.md K4).
-const MAX_REMOVED: usize = 500;
+pub(crate) const MAX_REMOVED: usize = 500;
 
 /// `op` with the records its curator was shown besides the window's own (`goals`: the first
 /// prompt of each session, when it lies outside the window) and with what was already removed
@@ -4528,6 +4531,10 @@ fn shown_records(
     for &goal in goals {
         removed.extend(raw.removed_in(&w.device, goal, goal, Some(w.top))?);
     }
+    // A record a window begins inside can end the stretch before it, and a goal can lie in a
+    // stretch: what was removed from it is listed once.
+    let mut listed = std::collections::HashSet::new();
+    removed.retain(|r| listed.insert(*r));
     if !goals.is_empty() {
         op["goals"] = json!(goals);
     }
@@ -12528,6 +12535,8 @@ curate = false
             (i64, Option<i64>),
             i64,
         )>,
+        /// What each turn said was removed from its window's own records.
+        removed: Vec<usize>,
         plain: usize,
     }
 
@@ -12539,6 +12548,7 @@ curate = false
                 by: "fake",
                 read: vec![("fake", read.to_vec())],
                 turns: Vec::new(),
+                removed: Vec::new(),
                 plain: 0,
             }
         }
@@ -12569,6 +12579,7 @@ curate = false
                 turn.from,
                 turn.to,
             ));
+            self.removed.push(turn.removed);
             if self.refused {
                 let refused = Fallback {
                     provider: self.by.into(),
@@ -12666,6 +12677,64 @@ curate = false
                 );
             }
         }
+    }
+
+    /// Decision 107: a turn says how many removals its window's op is to list for the window's
+    /// own records, so that the stretches of a conversation hold no more than an op can list.
+    #[test]
+    fn a_turn_says_what_was_removed_from_its_windows_records() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        raw.append(&prompt("Use tabs in this repository.")).unwrap();
+        let device = raw.device().to_owned();
+        let part = crate::raw::Target::Range {
+            device,
+            seq: 1,
+            offset: 3,
+            length: 7,
+        };
+        raw.append_tombstone(part).unwrap();
+        let mut curator = Talking::new(json!({"claims": [], "summary": "Nothing."}), &[]);
+        let summary = Summary {
+            conversation: true,
+            ..curating(WINDOW_TOKENS)
+        };
+        let rules = Rules::default();
+        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator);
+        assert_eq!(phase.unwrap(), Phase::Covered);
+        assert_eq!(curator.removed, [1]);
+        let op = windows(&raw).pop().unwrap();
+        assert_eq!(op["removed"], json!([[1, 3, 7]]));
+    }
+
+    /// Decision 107: a record can be in what a window was shown twice over: the record it begins
+    /// inside ends the stretch before it, and a session's goal lies in an earlier stretch. What
+    /// was removed from such a record is listed once, in the order it was found.
+    #[test]
+    fn what_was_removed_from_a_record_shown_twice_is_listed_once() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, _db) = open(home.path());
+        raw.append(&prompt("An earlier window's line.")).unwrap();
+        raw.append(&prompt("Use tabs in this repository.")).unwrap();
+        for seq in [1, 2] {
+            let device = raw.device().to_owned();
+            let part = crate::raw::Target::Range {
+                device,
+                seq,
+                offset: 3,
+                length: 7,
+            };
+            raw.append_tombstone(part).unwrap();
+        }
+        let rules = Rules::default();
+        let span = Span::records(2, 2);
+        let reading = Reading::default();
+        let w = span_windows(&raw, &span, WINDOW_TOKENS, &rules, &reading)
+            .unwrap()
+            .remove(0);
+        let mut op = json!({});
+        shown_records(&raw, &mut op, &w, &[1], &[(1, 2)]).unwrap();
+        assert_eq!(op["removed"], json!([[2, 3, 7], [1, 3, 7]]));
     }
 
     /// #971 condition 15: a window's op lists what the entry whose answer it keeps read, not what

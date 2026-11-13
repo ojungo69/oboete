@@ -155,6 +155,10 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
   estimate than that can still pass the ceiling, and pays the higher price once. Haiku 5.5's
   price is five times past 100,000 tokens, tokens read from the cache count toward it, and a
   request past it pays the higher price for all of its tokens;
+- the stretches would hold more removals between them than an op can list. A window's op lists
+  what was already removed from all its curator was shown (docs/cards.md K4), up to 500, and an
+  op that cannot list them shows no card once any of them is found: a turn's stretches stay
+  within four fifths of that, the rest being room for its goals';
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 
@@ -185,7 +189,8 @@ record's own window is: the stretches a window read are records its curator was 
 goals are, so a removal from one that its op does not list hides its cards (docs/cards.md K4), and
 the summaries of the turns that read those cards (docs/summaries.md T7: a turn op lists the
 stretches with the windows' spans). The op lists what was already removed from the stretches when
-its window was cut, with what was removed from its own records.
+its window was cut, with what was removed from its own records, each removal once (a record a
+window begins inside can end the stretch before it, and a goal can lie in a stretch).
 
 ### The gate
 

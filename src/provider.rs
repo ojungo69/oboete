@@ -391,6 +391,8 @@ pub struct Turn<'a> {
     /// The window's first record and the offset into it, and its last record.
     pub from: (i64, Option<i64>),
     pub to: i64,
+    /// How many removals from its own records the window's op is to list (docs/cards.md K4).
+    pub removed: usize,
 }
 
 /// Decision 107: how long after a call started the next one may still be sent what it was: the
@@ -408,6 +410,10 @@ const TALK_READ_SHARE: f64 = 0.5;
 /// `TALK_QUIET_MS`: a cache that does not answer costs more with a conversation than without.
 const TALK_MISSES: u32 = 2;
 const TALK_QUIET_MS: i64 = 3_600_000;
+/// Decision 107: the most removals the stretches of a turn hold between them, the window's own
+/// with those sent again. Its op lists what was removed from all it was shown, and one with more
+/// than `curate::MAX_REMOVED` lists none and shows no card: this leaves room for its goals'.
+const TALK_REMOVED: usize = crate::curate::MAX_REMOVED * 4 / 5;
 /// Decision 107: the tokens an estimated token is taken for, in the size of a conversation, until
 /// an entry's own answers say (`ratio`): a Messages entry's answers have counted from about 1.5
 /// to 2.6 times their estimates (docs/curator-conversation.md).
@@ -454,6 +460,8 @@ struct Stretch {
     to: i64,
     /// Its estimate (`budget::estimate`).
     est: u32,
+    /// The removals its window's op listed for its records (`Turn::removed`).
+    removed: usize,
 }
 
 /// What an entry that keeps a conversation is sent for a turn (`Talk::plan`).
@@ -501,7 +509,8 @@ impl Talk {
     /// lifetime ago, and the whole stays within `ceiling` tokens: the tokens its last answer
     /// reported for what goes again, and the new stretch and tail from their estimate, taken for
     /// more than the entry's tokens were to its estimates of late (`ratio`); all of it from the
-    /// estimate when that answer did not say. Else its own stretch alone: a restart, which
+    /// estimate when that answer did not say; and while their windows' ops list no more removals
+    /// between them than one op can (`TALK_REMOVED`). Else its own stretch alone: a restart, which
     /// only loses the cache. A stretch that begins where the last one does takes its place (a
     /// window sent again, after a refused answer or a hold). None while the entry keeps none
     /// (`TALK_MISSES`).
@@ -550,7 +559,9 @@ impl Talk {
                 (est(instructions) + estimated) * ratio + new
             }
         };
-        if size > ceiling {
+        // Nor more removals than its op can list (`TALK_REMOVED`).
+        let removed = earlier.iter().map(|s| s.removed).sum::<usize>() + turn.removed;
+        if size > ceiling || removed > TALK_REMOVED {
             earlier = &[];
         }
         let mut prompt = String::with_capacity(turn.prompt.len());
@@ -611,6 +622,7 @@ impl Talk {
             from: turn.from,
             to: turn.to,
             est: budget::estimate(text),
+            removed: turn.removed,
         });
         // Only a call that went on says whether the cache answers: a restart reads none of it.
         if let Some(again) = planned.again {
@@ -8172,6 +8184,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             key,
             from: (from, None),
             to,
+            removed: 0,
         }
     }
 
@@ -8342,12 +8355,18 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             let mut p = talker(&url, 100_000);
             let mut talk = Talk::default();
             let one = window_prompt("One.", "", 5);
-            talk_run(&[p.clone()], &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+            // What was removed from each window's records: one over what an op lists with the
+            // first's, or as many as it lists.
+            let first = Turn {
+                removed: usize::from(case == "many removals"),
+                ..turn_of(&one, "k", 1, 2)
+            };
+            talk_run(&[p.clone()], &conn, &mut talk, &first).unwrap();
             let mut two = window_prompt("Two.", "", 5);
             let mut key = "k";
             let started = &mut talk.entries.get_mut("stub").unwrap().started;
             match case {
-                "none" => {}
+                "none" | "few removals" | "many removals" => {}
                 "key" => key = "another",
                 "language" => {
                     let text = "## claude session s\nL1 [user] Two.\n";
@@ -8396,7 +8415,15 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                 }
                 other => panic!("{other}"),
             }
-            talk_run(&[p], &conn, &mut talk, &turn_of(&two, key, 3, 4)).unwrap();
+            let last = Turn {
+                removed: if case.ends_with("removals") {
+                    TALK_REMOVED
+                } else {
+                    0
+                },
+                ..turn_of(&two, key, 3, 4)
+            };
+            talk_run(&[p], &conn, &mut talk, &last).unwrap();
             let all = if case == "address" {
                 other_requests
             } else {
@@ -8417,6 +8444,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             ("in time", 1),
             ("unsent", 1),
             ("no key", 1),
+            ("few removals", 1),
+            ("many removals", 0),
             ("key", 0),
             ("language", 0),
             ("model", 0),
