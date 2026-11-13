@@ -210,22 +210,7 @@ impl Rules {
         } else if extra.is_empty() && allow.is_empty() {
             bundled_version().to_owned()
         } else {
-            // Canonical: the order of rules, keywords or allowlist entries in the file does not
-            // change the version; anything that changes what is masked does (Task 7 rescans).
-            let mut rules: Vec<String> = r
-                .extra_rules
-                .iter()
-                .map(|x| {
-                    let mut x = x.clone();
-                    x.keywords.sort();
-                    serde_json::to_string(&x).expect("a rule serializes")
-                })
-                .collect();
-            rules.sort();
-            let mut kept: Vec<&String> = allow.iter().collect();
-            kept.sort();
-            let user = serde_json::json!({"rules": rules, "allowlist": kept}).to_string();
-            short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &user].concat())
+            version_of(MATCHING, Some(&canonical(r, &allow)))
         };
         Ok(Self {
             extra,
@@ -994,11 +979,50 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
     })
 }
 
-/// The bundled rules' version: a hash of their files.
+/// The matching code's own number, part of every rules version (#538): raised with each change
+/// to what the code between the `matching-code` markers finds or passes over in some text, so
+/// that a store scanned before the change is scanned again once. A change that leaves it as it
+/// was is never applied to what is stored already (`the_matching_code_is_the_one_its_number_names`
+/// fails on any edit between the markers, to ask). The first is "1": before it the version had
+/// no such part.
+const MATCHING: &str = "1";
+
+/// The user's rules and kept values in one form: the order of rules, keywords or allowlist
+/// entries in the file does not change it; anything that changes what is masked does (Task 7
+/// rescans).
+fn canonical(r: &crate::config::Redaction, allow: &HashSet<String>) -> String {
+    let mut rules: Vec<String> = r
+        .extra_rules
+        .iter()
+        .map(|x| {
+            let mut x = x.clone();
+            x.keywords.sort();
+            serde_json::to_string(&x).expect("a rule serializes")
+        })
+        .collect();
+    rules.sort();
+    let mut kept: Vec<&String> = allow.iter().collect();
+    kept.sort();
+    serde_json::json!({"rules": rules, "allowlist": kept}).to_string()
+}
+
+/// The version of the bundled rules as the matching code `matching` applies them, with the
+/// user's rules and kept values (`canonical`) when there are any.
+fn version_of(matching: &str, user: Option<&str>) -> String {
+    let mut parts = vec![matching, "\0", RULES_TOML, EXTRA_TOML];
+    if let Some(user) = user {
+        parts.extend(["\0", user]);
+    }
+    short_hash(&parts.concat())
+}
+
+/// The bundled rules' version: a hash of their files and of the matching code's number.
 fn bundled_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| short_hash(&[RULES_TOML, EXTRA_TOML].concat()))
+    VERSION.get_or_init(|| version_of(MATCHING, None))
 }
+
+// matching-code: begin
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets; a value the
 /// user keeps is never one. Every rule looks at the text once; a rule that found or kept
@@ -1330,6 +1354,8 @@ pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
         })
         .collect()
 }
+
+// matching-code: end
 
 /// The egress gate on indexed text (field values one per line): whole, then line by line, so a
 /// rule anchored to a field's end (`$`) matches each field as capture's did.
@@ -1773,6 +1799,8 @@ fn mask(text: &str, spans: Vec<(usize, usize, usize)>, rules: &Rules) -> (String
     (out, found)
 }
 
+// matching-code: begin
+
 /// gitleaks' allowlist: OR = any regex or stopword hit; AND = every configured check must hold
 /// (a path check can never hold here, so such lists never allow).
 fn allows(a: &Allow, secret: &str, whole: &str, line: &str) -> bool {
@@ -1826,6 +1854,8 @@ fn shannon_entropy(s: &str) -> f64 {
         })
         .sum()
 }
+
+// matching-code: end
 
 #[cfg(test)]
 mod tests {
@@ -3844,6 +3874,18 @@ extra_rules = [
             let text = format!("{{\"db_password\": \"{value}\"}}");
             assert_eq!(scan(&text, &rules).0, text);
         }
+        // #545's own examples.
+        for (head, value, tail) in [
+            ("DB_PASSWORD=", "false".to_owned() + "hood-2024!", ""),
+            ("TOKEN=", "true".to_owned() + "blue-12345678", ""),
+            ("secret: \"", "abc".to_owned() + "null", "\""),
+        ] {
+            let (masked, _) = scan(&format!("{head}{value}{tail}"), &rules);
+            assert_eq!(masked, format!("{head}[REDACTED]{tail}"));
+        }
+        for text in ["secret = true", "token: null", "\"password\": false"] {
+            assert_eq!(scan(text, &rules).0, text);
+        }
     }
 
     #[test]
@@ -3892,6 +3934,60 @@ extra_rules = [
         );
         let (masked, _) = scan("proj: yk-2222", &rules);
         assert!(!masked.contains("2222"), "{masked}");
+    }
+
+    /// #538: a change to how the rules are applied is a change of version, as a change to the
+    /// rules is, so a store scanned before it is scanned again (the rescan consumer compares
+    /// versions). With the user's rules too; off is off whatever the code.
+    #[test]
+    fn the_version_names_the_matching_code() {
+        assert_eq!(Rules::default().version(), version_of(MATCHING, None));
+        assert_ne!(version_of("2", None), version_of("3", None));
+        let toml = "[redaction]\nextra_rules = [{ id = \"a\", regex = 'a-[0-9]{4}' }]";
+        let own = canonical(
+            &crate::config::parse_capture(Some(toml)).unwrap().redaction,
+            &HashSet::new(),
+        );
+        assert!(own.contains("a-[0-9]{4}"), "{own}");
+        assert_eq!(
+            user(toml).unwrap().version(),
+            version_of(MATCHING, Some(&own))
+        );
+        assert_ne!(version_of("2", Some(&own)), version_of("3", Some(&own)));
+        // Before the number was part of it.
+        assert_ne!(
+            user(toml).unwrap().version(),
+            short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &own].concat())
+        );
+        assert_ne!(
+            Rules::default().version(),
+            short_hash(&[RULES_TOML, EXTRA_TOML].concat())
+        );
+        let off = user("[redaction]\nenabled = false").unwrap();
+        assert_eq!(off.version(), OFF);
+    }
+
+    /// #538: `MATCHING` numbers the code between the `matching-code` markers, and nothing else
+    /// ties the two: an edit there that leaves the number as it was is never applied to what a
+    /// store holds already. So this fails on any edit between the markers. Raise `MATCHING` when
+    /// the edit changes what some rule finds or passes over in some text (every store then
+    /// rescans once); either way, set the hash here to the one the failure shows.
+    #[test]
+    fn the_matching_code_is_the_one_its_number_names() {
+        let source = include_str!("redact.rs").replace("\r\n", "\n");
+        let begin = ["// matching-code", ": begin"].concat();
+        let end = ["// matching-code", ": end"].concat();
+        let marked: Vec<&str> = source
+            .split(&begin)
+            .skip(1)
+            .map(|part| part.split(&end).next().expect("its end marker"))
+            .collect();
+        assert_eq!(marked.len(), 2, "the two marked parts");
+        assert!(marked.concat().contains("fn spans_in(") && marked.concat().contains("fn allows("));
+        assert_eq!(
+            (MATCHING, short_hash(&marked.concat()).as_str()),
+            ("1", "a4643f0682094e48")
+        );
     }
 
     #[test]

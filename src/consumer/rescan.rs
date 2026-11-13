@@ -109,7 +109,7 @@ impl Consumer for Rescan {
                     .map(move |(start, end)| (seq, start, end))
             })
             .collect();
-        // A range a tombstone of the record masks already reads as stars (`Raw::after`), which a
+        // A range the record's tombstones mask already reads as stars (`Raw::after`), which a
         // rule with no entropy gate takes for a password: no second tombstone (Codex on #535).
         let found: Vec<_> = if found.is_empty() {
             found
@@ -120,11 +120,7 @@ impl Consumer for Rescan {
                 .filter(|&(seq, start, end)| {
                     !masks
                         .get(&(device.to_owned(), seq))
-                        .is_some_and(|(_, ranges)| {
-                            ranges.iter().any(|&(offset, length)| {
-                                offset as usize <= start && end <= (offset + length) as usize
-                            })
-                        })
+                        .is_some_and(|(_, ranges)| covered(ranges, start, end))
                 })
                 .collect()
         };
@@ -186,6 +182,32 @@ impl Consumer for Rescan {
         k.execute("DELETE FROM rescan WHERE device = ?1", [device])?;
         Ok(())
     }
+}
+
+/// Whether a record's tombstoned `ranges` (offset, length) cover `start..end` between them: two
+/// masks next to each other read as one run of stars (#539).
+fn covered(ranges: &[(i64, i64)], start: usize, end: usize) -> bool {
+    // A range this build cannot address (a damaged row, a 32-bit build) covers nothing.
+    let mut ranges: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter_map(|&(offset, length)| {
+            let from = usize::try_from(offset).ok()?;
+            Some((from, from.checked_add(usize::try_from(length).ok()?)?))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut through = start;
+    for (from, to) in ranges {
+        // Sorted by their starts: one that starts past what is covered leaves a gap for good.
+        if from > through {
+            return false;
+        }
+        through = through.max(to);
+        if through >= end {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -488,6 +510,79 @@ mod tests {
         );
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 2); // once
+    }
+
+    /// #539: `covered` is by the tombstones between them, in any order, and by nothing less.
+    #[test]
+    fn covered_is_by_the_union_of_the_ranges_and_no_gap() {
+        // (offset, length): 10..16 and 16..22 touch; 30..40 holds 32..34; 50..53 and 54..60 leave 53.
+        let ranges = [(16, 6), (54, 6), (32, 2), (10, 6), (30, 10), (50, 3)];
+        for (start, end, want) in [
+            (10, 22, true),  // across the two that touch
+            (12, 20, true),  // inside them
+            (10, 23, false), // one byte past them
+            (9, 16, false),  // one byte before the first
+            (30, 40, true),  // the one that holds another
+            (33, 40, true),
+            (50, 60, false), // the gap of one byte
+            (50, 53, true),
+            (54, 60, true),
+            (22, 30, false), // between tombstones
+            (0, 5, false),   // before any
+            (70, 80, false), // after all
+        ] {
+            assert_eq!(covered(&ranges, start, end), want, "{start}..{end}");
+        }
+        assert!(!covered(&[], 0, 1));
+        // A range that is no range covers nothing, and takes nothing from the others.
+        assert!(covered(
+            &[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)],
+            14,
+            16
+        ));
+        assert!(!covered(
+            &[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)],
+            0,
+            5
+        ));
+        // The two that overlap, as a wider range over an earlier one is stored (#932).
+        assert!(covered(&[(5, 10), (0, 20)], 0, 20));
+        assert!(!covered(&[(5, 10), (0, 20)], 0, 21));
+    }
+
+    /// #539: two masks next to each other read as one run of stars to a rule added later. The
+    /// range it finds is covered by the two tombstones between them, so it gets none of its own;
+    /// one that reaches past them does.
+    #[test]
+    fn a_range_two_adjacent_tombstones_cover_is_not_tombstoned_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let event = r#"{"prompt":"id aaaaaabbbbbb end, id ccccccdddddd-7 end"}"#;
+        let seq = raw.append(&raw::test_event(event)).unwrap();
+        let device = raw.device().to_owned();
+        for half in ["aaaaaa", "bbbbbb", "cccccc", "dddddd"] {
+            raw.append_tombstone(Target::Range {
+                device: device.clone(),
+                seq,
+                offset: event.find(half).unwrap() as i64,
+                length: 6,
+            })
+            .unwrap();
+        }
+        assert!(body(&raw, seq).contains("id ************ end, id ************-7 end"));
+        let rule = r#"{ id = "id", regex = 'id (\S+) end' }"#;
+        std::fs::write(
+            p.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{rule}]\n"),
+        )
+        .unwrap();
+        worker::run_once(p).unwrap();
+        // The second value reaches two characters past its two tombstones: one more, for it.
+        assert_eq!(tombstones(&raw), 5);
+        assert!(body(&raw, seq).contains("id ************ end, id ************** end"));
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 5);
     }
 
     #[test]
