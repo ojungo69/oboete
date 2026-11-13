@@ -2216,7 +2216,7 @@ fn answered(
                     json!({"provider": r.provider, "summary": summary, "dropped": dropped,
                         "lowered": gated.lowered}),
                     &r.output,
-                    &curator.read(&r.provider, &span),
+                    &read_before(req, curator, &r.provider, &span),
                 )?;
                 Ok((op, claims))
             }
@@ -2345,8 +2345,18 @@ fn refused_op(
         .collect();
     let fields = json!({"provider": provider, "summary": summary, "dropped": dropped,
         "lowered": [], "refused": true});
-    let read = curator.read(provider, &span_of(w));
+    let read = read_before(req, curator, provider, &span_of(w));
     Ok(Some(curated_op(raw, w, req, fields, answer, &read)?))
+}
+
+/// The spans `provider` was sent before the window's own in its call for `req` (decision 107):
+/// what its curator says of a turn, and none for a prompt sent alone, whatever a turn for the same
+/// span left with the curator before it (the setting turned off between two attempts).
+fn read_before(req: &Request, curator: &Curator, provider: &str, span: &str) -> Vec<(i64, i64)> {
+    match req.stretch {
+        Some(_) => curator.read(provider, span),
+        None => Vec::new(),
+    }
 }
 
 /// Records `from` to `to` of this device, to curate again (Task 11): from `from_offset` into the
@@ -12563,11 +12573,25 @@ curate = false
                 plain: 0,
             }
         }
+
+        /// Its answer, refused as unanchored.
+        fn refusal(&self) -> anyhow::Error {
+            ChainFailed(vec![Fallback {
+                provider: self.by.into(),
+                reason: "unanchored".into(),
+                skip: Skip::Refused,
+                answer: Some(self.answer.clone()),
+            }])
+            .into()
+        }
     }
 
     impl Curate for Talking {
         fn ask(&mut self, _: &str, _: &str, _: &AnswerCheck, _: &Gate) -> Result<ChainResult> {
             self.plain += 1;
+            if self.refused {
+                return Err(self.refusal());
+            }
             Ok(ChainResult {
                 output: self.answer.clone(),
                 ..answered("fake")
@@ -12592,13 +12616,7 @@ curate = false
             ));
             self.removed.push(turn.removed);
             if self.refused {
-                let refused = Fallback {
-                    provider: self.by.into(),
-                    reason: "unanchored".into(),
-                    skip: Skip::Refused,
-                    answer: Some(self.answer.clone()),
-                };
-                return Err(ChainFailed(vec![refused]).into());
+                return Err(self.refusal());
             }
             Ok(ChainResult {
                 output: self.answer.clone(),
@@ -12875,6 +12893,58 @@ curate = false
             (&op["refused"], &op["summary"], &op["read"]),
             (&json!(true), &json!("Refused."), &json!([[1, 1]]))
         );
+    }
+
+    /// CodeRabbit on #975: a window asked as a prompt alone lists nothing as read, whatever a
+    /// turn for the same span left with its curator: the setting turned off between a turn whose
+    /// answer was refused and the window's next attempt. Nor does its last resort.
+    #[test]
+    fn a_window_asked_as_a_prompt_alone_lists_nothing_as_read() {
+        let kept = json!({"claims": [{"id": "c1", "kind": "preference", "status": "decided",
+            "speaker": "user", "scope": "repo", "body": "Tabs in this repository.",
+            "quote": "Use tabs in this repository.", "line": "L1", "supersedes": []}],
+            "summary": "Tabs."});
+        let unanchored = json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+            "speaker": "user", "scope": "repo", "body": "Use tabs.",
+            "quote": "words the window never had", "line": "L1", "supersedes": [], "why": ""}],
+            "summary": "Refused.", "observations": [card("The parser reads one line at a time")]});
+        for last_resort in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt("An earlier window's line.")).unwrap();
+            curated_so_far(&mut raw);
+            raw.append(&prompt("Use tabs in this repository.")).unwrap();
+            let rules = Rules::default();
+            let talks = Summary {
+                conversation: true,
+                ..curating(WINDOW_TOKENS)
+            };
+            let alone = curating(WINDOW_TOKENS);
+            // A turn whose answer is refused: its curator holds what the entry read for the span.
+            let mut curator = Talking::new(unanchored.clone(), &[(1, 1)]);
+            curator.refused = true;
+            run_phase(&mut raw, &kn(), &db, &rules, &talks, "", &mut curator).unwrap();
+            assert_eq!((curator.plain, curator.turns.len()), (0, 1));
+            let span = curator.turns[0].0.clone();
+            assert_eq!(curator.read("fake", &span), [(1, 1)]);
+            // The setting is off from here: the same window, asked as a prompt alone.
+            if !last_resort {
+                curator.answer = kept.clone();
+                curator.refused = false;
+            }
+            for _ in 1..ATTEMPTS {
+                run_phase(&mut raw, &kn(), &db, &rules, &alone, "", &mut curator).unwrap();
+            }
+            assert_eq!(curator.turns.len(), 1, "asked as a turn again");
+            assert!(curator.plain >= 1, "not asked as a prompt alone");
+            let op = windows(&raw).pop().unwrap();
+            assert_eq!(
+                (op["from_seq"].as_i64(), op.get("refused").is_some()),
+                (span.split('-').next().unwrap().parse().ok(), last_resort),
+                "{op}"
+            );
+            assert!(op.get("read").is_none(), "{op}");
+        }
     }
 
     /// Decision 107, #971 condition 9: a conversation's key is what the egress gate holds for a

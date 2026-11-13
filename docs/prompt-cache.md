@@ -110,8 +110,10 @@ So:
   the CLIs and the OpenAI-compatible entries get a window's lines once, as before.
 - **The provider holds them in its prompt cache.** The request marks the instructions and the
   newest stretch, each for five minutes from the start of the last request that wrote or read
-  the entry. Without the setting only the instructions are marked, and a window's lines are held
-  in no cache.
+  the entry. Without the setting oboete marks the instructions alone, and a window's lines are
+  held in no cache, unless the entry marks a cache of its own in `extra`: a marker at the
+  request's top level writes the whole prompt, the window's lines with it (point 3 above), with
+  the setting or without it.
 - **What forget cannot do is the same, over more calls.** A record forgotten or masked is not sent
   again: its change starts every conversation again, and the gate is asked before each call. What
   was already sent stays sent (README, "Forget"), and the provider's cache lets go of it within

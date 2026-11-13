@@ -240,8 +240,9 @@ rule 12), and a stretch sent again passes it again:
 
 What changes for the person: a window's lines are sent to the same entry again with each later
 call of its conversation, and that entry's cache holds them until five minutes (thirty at OpenAI)
-after the last call. Without the setting they are sent once and not written to a cache. The text
-that says what leaves the machine and [prompt-cache.md](prompt-cache.md) say so.
+after the last call. Without the setting they are sent once, and written to a cache only where
+the entry marks one of its own (`extra`: at the request's top level it writes the whole prompt).
+The text that says what leaves the machine and [prompt-cache.md](prompt-cache.md) say so.
 
 ### The shorter window text
 
@@ -322,7 +323,8 @@ After it, on this PC: `provider_calls` against the estimate above.
   stretch (`provider::Talk`, kept by the worker's curation phase while it runs). It starts again
   as "Restarting" and "The gate" say, and keeps none for an hour after two calls in a row that
   read less than half of what they were sent again. The window's op lists `read`, and what was
-  already removed from what it read; `provider_calls.earlier` counts the stretches before each
+  already removed from what it read (a window asked as a prompt alone lists none, whatever a
+  turn for its span left before); `provider_calls.earlier` counts the stretches before each
   call's own. An entry whose name another entry has keeps none; a turn's op has no more removals
   to list than an op can; the worker's lock let go and taken again ends every conversation; a
   413 for a turn that went on skips no other entry. Three requests of synthetic text built by

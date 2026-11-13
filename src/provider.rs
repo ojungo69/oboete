@@ -6201,9 +6201,11 @@ child.wait()
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
+                // Before the answer: a client has it once its last byte is read, and a test that
+                // then asks for the requests so far (`try_iter`) is to find this one.
+                tx.send(req).ok();
                 conn.write_all(head.as_bytes()).ok();
                 conn.write_all(&body).ok();
-                tx.send(req).ok();
             }
         });
         (format!("http://{addr}"), rx)
