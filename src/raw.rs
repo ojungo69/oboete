@@ -8836,9 +8836,11 @@ impl Judge {
             .find(shown)
             .map(|r| r.1.clone())
             // (b) A card it read of a forgotten window: one written before it, whose span's next
-            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it).
+            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it). Not
+            // of a stretch a card's window read: it read no card of that span's window.
             .or_else(|| {
-                read.iter().find_map(|&(a, b)| {
+                let cards = read.iter().filter(|span| !p.stretches.contains(span));
+                cards.copied().find_map(|(a, b)| {
                     let ops = self.spans.get(&(device.to_owned(), a, b))?;
                     ops.iter().enumerate().find_map(|(n, (_, at, gone))| {
                         let gone = gone.as_ref().filter(|_| *at <= ts)?;

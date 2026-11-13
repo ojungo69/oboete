@@ -20,6 +20,9 @@ pub(crate) struct Provenance<'a> {
     /// Work op's, and a window's in a conversation, the stretches its curator was sent again before
     /// its own (decision 107, docs/curator-conversation.md).
     pub(crate) read: Vec<(i64, i64)>,
+    /// A turn's: those of `read` that are stretches only, the span of no window whose card it
+    /// read (decision 107).
+    pub(crate) stretches: Vec<(i64, i64)>,
     /// Its device's records carried in as goals, by seq.
     pub(crate) goals: Vec<i64>,
     /// Its device's ops it read, by op seq.
@@ -78,6 +81,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
             own: span(&body["from"], &body["through"]),
             end: body["through"].as_i64(),
             read: pairs(&body["read"]),
+            stretches: pairs(&body["stretches"]),
             goals: seqs(&body["goals"]),
             removed,
             ..Provenance::default()
@@ -181,6 +185,13 @@ mod tests {
             (p.holds, p.own, &p.read[..], &p.goals[..]),
             (true, Some((5, 8)), &[(1, 2), (4, 4)][..], &[2][..])
         );
+        assert_eq!(p.stretches, []);
+        // Decision 107: those of the spans it read that are stretches only; a window's are none.
+        let body = json!({"from": 5, "through": 8, "read": [[1, 2], [4, 4]],
+            "stretches": [[1, 2], [3], "x"]});
+        assert_eq!(of(OpKind::Turn, &body).stretches, [(1, 2)]);
+        let window = json!({"from_seq": 5, "to_seq": 8, "read": [[1, 2]], "stretches": [[1, 2]]});
+        assert_eq!(of(OpKind::Window, &window).stretches, []);
     }
 
     #[test]

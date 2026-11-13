@@ -4288,6 +4288,68 @@ mod tests {
         );
     }
 
+    /// Decision 107 (Codex on #974): a turn op lists the stretches its cards' windows read with
+    /// those windows' spans, and names them in `stretches`. A window taken for a claim it was
+    /// shown (its text may repeat the claim) takes the summary of a turn that read its card (rule
+    /// b), and of one whose op does not say the span is a stretch only; not the summary of a turn
+    /// that read the card of a later window which was sent the taken window's stretch again: the
+    /// claim was in the earlier call's tail, never in the stretch. The later window keeps its text
+    /// too.
+    #[test]
+    fn a_turn_keeps_its_text_when_its_cards_window_read_the_stretch_of_a_taken_window() {
+        use serde_json::json;
+        let mut s = crate::search::b::fixture::Store::new();
+        let device = s.raw.device().to_owned();
+        let gone = format!("Parsers stay in {WINDOW_CANARY} mode.");
+        let r1 = s.said("s", "github.com/o/r", 1_000, &gone);
+        let r2 = s.said("s", "github.com/o/r", 2_000, "Deploys run on Fridays.");
+        let r3 = s.said("s", "github.com/o/r", 3_000, "Tests run on CI.");
+        let claim = claim_op(&device, &[(r1, &gone)], &gone);
+        let a = crate::claims::op_uid(&claim.1).unwrap();
+        s.raw.append_ops(&[claim]).unwrap();
+        let said = |what: &str| format!("{what}: {WINDOW_CANARY}.");
+        let mut after_a_stretch = turn_op(
+            r3,
+            r3,
+            &[(r3, r3), (r2, r2)],
+            "Kept: its card's window read a stretch.",
+        );
+        after_a_stretch.1["stretches"] = json!([[r2, r2]]);
+        let ops = [
+            window_op(r2, r2, &said("its candidates"), json!({"candidates": [a]})),
+            window_op(
+                r3,
+                r3,
+                "Kept: it read the stretch of the window shown the claim.",
+                json!({"read": [[r2, r2]]}),
+            ),
+            after_a_stretch,
+            turn_op(r3, r3, &[(r2, r2)], &said("a card of that window")),
+            turn_op(r3, r3, &[(r3, r3), (r2, r2)], &said("both cards")),
+        ];
+        let seqs = s.raw.append_ops(&ops).unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        let before = op_bodies(&home);
+        let target = Target::Record { device, seq: r1 };
+        start(&home, &preview(&home, target).unwrap()).unwrap();
+        let crate::search::b::fixture::Store { home: _kept, raw } = s;
+        drop(raw);
+        purge(&home).unwrap();
+        let after = op_bodies(&home);
+        for gone in [0, 3, 4] {
+            let body = &after[&seqs[gone]];
+            assert!(body["forgotten"].is_string(), "op {gone}: {body}");
+        }
+        for kept in [1, 2] {
+            assert_eq!(after[&seqs[kept]], before[&seqs[kept]], "op {kept}");
+        }
+        assert_eq!(
+            store_hits(&home, WINDOW_CANARY.as_bytes()),
+            Vec::<&str>::new()
+        );
+    }
+
     /// Decision 107: `Raw::window_read` gives the spans a window op lists in `read`, as the one
     /// reading of its provenance takes them (an item that is no pair of seqs is none), and none
     /// of a turn op, whose `read` is its own, nor of an op raw does not hold.

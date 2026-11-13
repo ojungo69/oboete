@@ -157,3 +157,8 @@ further commit.
   forgotten and masked records of those spans as records the window showed (rule a, with its own
   span and its goals), a restore's cut reads their ends (`Provenance::top`), and a purge that takes
   the op's text keeps `read` (`WINDOW_STRUCTURE`).
+- A turn op lists those stretches in its own `read`, beside the spans of the windows whose cards
+  it read, and names them in `stretches`. Its records rule (a) is over all of `read`; its rule
+  (b), a card read of a forgotten window, is over the spans that are no stretch only: a window
+  taken for a claim it was shown takes no summary of a turn that read only the card of a later
+  window sent its stretch again.
