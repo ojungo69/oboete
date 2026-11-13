@@ -409,9 +409,12 @@ const TALK_READ_SHARE: f64 = 0.5;
 const TALK_MISSES: u32 = 2;
 const TALK_QUIET_MS: i64 = 3_600_000;
 /// Decision 107: the tokens an estimated token is taken for, in the size of a conversation, until
-/// an entry's own answers say (`ratio`): no entry in the owner's ledger counted twice its
-/// estimate (the median on this machine is about 1.5).
-const TALK_RATIO: f64 = 2.0;
+/// an entry's own answers say (`ratio`): a Messages entry's answers have counted from about 1.5
+/// to 2.6 times their estimates (docs/curator-conversation.md).
+const TALK_RATIO: f64 = 2.6;
+/// Decision 107: how far over the most its entry counted of late a window's tokens are taken to
+/// be: among the same answers the most was a third over the 99th percentile.
+const TALK_SPREAD: f64 = 4.0 / 3.0;
 
 /// Decision 107 (docs/curator-conversation.md): what each entry of the curator's chain was sent
 /// in its conversation, so that the next window's call sends it again before its own stretch and
@@ -462,8 +465,8 @@ struct Planned {
     earlier: usize,
     /// Their spans, those next to each other as one.
     read: Vec<(i64, i64)>,
-    /// The tokens of what goes again, by the entry's last answer: what a call that reads its
-    /// cache reads. None when that answer did not say.
+    /// The tokens of what goes again, at the least, by the entry's last answer: what a call that
+    /// reads its cache reads. None when that answer did not say, or nothing goes again.
     again: Option<f64>,
     at: String,
 }
@@ -495,9 +498,10 @@ fn talks(p: &Provider, role: &str) -> Option<(f64, String)> {
 impl Talk {
     /// What entry `name` is sent for `turn`: its earlier stretches again when they were sent under
     /// the same key, instructions, model and address, its last call started less than the cache's
-    /// lifetime ago, and the whole stays within `ceiling` tokens, counted twice: by the estimate,
-    /// and from the tokens its last answer reported, each estimate times a high ratio of the
-    /// entry's tokens to its estimates (`ratio`). Else its own stretch alone: a restart, which
+    /// lifetime ago, and the whole stays within `ceiling` tokens: the tokens its last answer
+    /// reported for what goes again, and the new stretch and tail from their estimate, taken for
+    /// more than the entry's tokens were to its estimates of late (`ratio`); all of it from the
+    /// estimate when that answer did not say. Else its own stretch alone: a restart, which
     /// only loses the cache. A stretch that begins where the last one does takes its place (a
     /// window sent again, after a refused answer or a hold). None while the entry keeps none
     /// (`TALK_MISSES`).
@@ -531,13 +535,22 @@ impl Talk {
         }
         let ratio = ratio(db, name)?;
         let est = |text: &str| f64::from(budget::estimate(text));
-        let new = est(stretch) + est(tail);
-        let again =
-            held.and_then(|c| Some(c.tokens? as f64 - f64::from(c.tail + replaced) * ratio));
-        let estimated: f64 = earlier.iter().map(|s| f64::from(s.est)).sum();
-        let by_estimate = (est(instructions) + estimated + new) * ratio;
-        let by_tokens = again.map_or(0.0, |again| again + new * ratio);
-        if by_estimate.max(by_tokens) > ceiling {
+        // What goes again, in the entry's own tokens: its last prompt less what does not go, that
+        // prompt's tail and the stretch this one replaces. Those are known by their estimate only:
+        // taken at the estimate for the size (the most that may go again: a Messages entry's
+        // tokens have been over it), and at `ratio` for what a call that reads its cache reads
+        // at the least.
+        let said = held.and_then(|c| Some((c.tokens? as f64, f64::from(c.tail + replaced))));
+        let new = (est(stretch) + est(tail)) * ratio;
+        let size = match said {
+            Some((tokens, gone)) => tokens - gone + new,
+            // Its last answer did not say: all of it from the estimate.
+            None => {
+                let estimated: f64 = earlier.iter().map(|s| f64::from(s.est)).sum();
+                (est(instructions) + estimated) * ratio + new
+            }
+        };
+        if size > ceiling {
             earlier = &[];
         }
         let mut prompt = String::with_capacity(turn.prompt.len());
@@ -563,15 +576,22 @@ impl Talk {
             marks,
             earlier: earlier.len(),
             read,
-            again: again.filter(|_| !earlier.is_empty()),
+            again: said
+                .filter(|_| !earlier.is_empty())
+                .map(|(tokens, gone)| tokens - gone * ratio),
             at: at.to_owned(),
         }))
     }
 
-    /// Entry `name`'s call for `span` goes out as `planned`.
-    fn sending(&mut self, name: &str, span: &str, planned: &Planned) {
-        self.sent
-            .insert(name.to_owned(), (span.to_owned(), planned.read.clone()));
+    /// Entry `name`'s call for `span` goes out as `planned`; or, with none, as the prompt alone,
+    /// which read nothing before the window's own (an entry that keeps no conversation for now).
+    fn sending(&mut self, name: &str, span: &str, planned: Option<&Planned>) {
+        match planned {
+            Some(planned) => self
+                .sent
+                .insert(name.to_owned(), (span.to_owned(), planned.read.clone())),
+            None => self.sent.remove(name),
+        };
     }
 
     /// Entry `name` answered the call that started at `started` and was sent `planned` for `turn`
@@ -635,16 +655,15 @@ impl Talk {
 }
 
 /// Decision 107: how far entry `provider`'s tokens may be from the estimate, for the size of a
-/// conversation: the 90th percentile of `prompt_tokens / est_tokens` over its last 50 answers
-/// that reported both (the budget counts with their median, `budget::factor`: a window is not
-/// the average one), and `TALK_RATIO` until there are 5.
+/// conversation: the most `prompt_tokens / est_tokens` was over its last 50 answers that
+/// reported both, and `TALK_SPREAD` over it (the budget counts with their median,
+/// `budget::factor`, but a window is not the average one); `TALK_RATIO` until there are 5.
 fn ratio(db: &Connection, provider: &str) -> Result<f64> {
-    let mut ratios = providers_db::token_ratios(db, provider, 50)?;
+    let ratios = providers_db::token_ratios(db, provider, 50)?;
     if ratios.len() < 5 {
         return Ok(TALK_RATIO);
     }
-    ratios.sort_by(f64::total_cmp);
-    Ok(ratios[ratios.len() * 9 / 10])
+    Ok(ratios.into_iter().fold(0.0, f64::max) * TALK_SPREAD)
 }
 
 /// How oboete marks a Messages request's prompt cache.
@@ -1445,8 +1464,8 @@ impl<'a> Chain<'a> {
             let switch = switched(p);
             // Decision 107: the turn goes out as planned, from now.
             let mut began = db::now_ms();
-            if let (Some((talk, _)), Some(planned)) = (self.talk.as_mut(), &planned) {
-                talk.sending(&name, span, planned);
+            if let Some((talk, _)) = self.talk.as_mut() {
+                talk.sending(&name, span, planned.as_ref());
             }
             let mut result = if forced {
                 drop(admission);
@@ -8124,8 +8143,13 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     /// A Messages answer whose prompt was `fresh` tokens not cached, `read` from the cache and
     /// `written` to it.
     fn messages_answer(fresh: i64, read: i64, written: i64) -> Vec<u8> {
-        json!({"stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "{\"summary\":\"s\"}"}],
+        messages_saying("s", fresh, read, written)
+    }
+
+    /// `messages_answer` whose summary is `summary`.
+    fn messages_saying(summary: &str, fresh: i64, read: i64, written: i64) -> Vec<u8> {
+        let text = json!({ "summary": summary }).to_string();
+        json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": text}],
             "usage": {"input_tokens": fresh, "cache_read_input_tokens": read,
                 "cache_creation_input_tokens": written, "output_tokens": 4}})
         .to_string()
@@ -8185,6 +8209,33 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     fn three(parts: &Parts) -> [String; 3] {
         let (p, at) = parts;
         [&p[..at.start], &p[at.clone()], &p[at.end..]].map(str::to_owned)
+    }
+
+    /// What a server that counts `times` the estimate counts of a Messages request's first `n`
+    /// blocks, and of all of them.
+    fn counted(request: &str, n: Option<usize>, times: f64) -> i64 {
+        let texts: Vec<String> = blocks(request).into_iter().map(|b| b.0).collect();
+        let text = texts[..n.unwrap_or(texts.len())].concat();
+        (f64::from(budget::estimate(&text)) * times).ceil() as i64
+    }
+
+    /// A Messages server for `calls` requests that counts `times` the estimate, and reads from
+    /// its cache what a request was sent again: all before its newest stretch.
+    fn counting(calls: usize, times: f64) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve_by(
+            calls,
+            move |request| {
+                let sent = blocks(request).len();
+                let read = if sent > 3 {
+                    counted(request, Some(sent - 2), times)
+                } else {
+                    0
+                };
+                let fresh = counted(request, None, times) - read;
+                ("200 OK", messages_answer(fresh, read, 0))
+            },
+            "",
+        )
     }
 
     /// How many stretches went before each turn's own, as the ledger has them (None: no turn).
@@ -8417,62 +8468,99 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     }
 
     /// #971 condition 10: no request of a conversation passes the entry's ceiling. A server that
-    /// counts one and a half times the estimate, as this machine's entries do, is sent windows of
-    /// many sizes; before its own answers say how it counts, an estimated token is taken for two.
+    /// counts one and a half times the estimate, as a Messages entry about does, is sent windows
+    /// of many sizes. One that counts two and a half times, and one that counts four times, from
+    /// their first answer: before an entry's own answers say how it counts, an estimated token
+    /// is taken for 2.6, and the tokens its last answer reported count for what they are.
     #[test]
     fn a_conversation_starts_again_before_its_prompt_passes_the_ceiling() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = providers_db::open(home.path()).unwrap();
         const CEILING: u32 = 100_000;
-        let calls = 40;
-        // What the server counts of a request's first `n` blocks, and of all of them.
-        fn counted(request: &str, n: Option<usize>) -> i64 {
-            let texts: Vec<String> = blocks(request).into_iter().map(|b| b.0).collect();
-            let text = texts[..n.unwrap_or(texts.len())].concat();
-            (f64::from(budget::estimate(&text)) * 1.5).ceil() as i64
-        }
-        let (url, requests) = serve_by(
-            calls,
-            move |request| {
-                // What it was sent again it reads from its cache: all before the newest stretch.
-                let sent = blocks(request).len();
-                let read = if sent > 3 {
-                    counted(request, Some(sent - 2))
-                } else {
-                    0
-                };
-                let fresh = counted(request, None) - read;
-                ("200 OK", messages_answer(fresh, read, 0))
-            },
-            "",
-        );
-        let providers = [talker(&url, CEILING)];
-        let mut talk = Talk::default();
-        for n in 0..calls as i64 {
-            // From about 300 to about 21,000 estimated tokens a window.
-            let line = "word ".repeat(200 + (n as usize * 7_919) % 15_000);
-            let parts = window_prompt(&line, "", 5);
-            talk_run(
-                &providers,
-                &conn,
-                &mut talk,
-                &turn_of(&parts, "k", n * 2 + 1, n * 2 + 2),
-            )
-            .unwrap();
-        }
-        let most = requests
-            .try_iter()
-            .map(|r| counted(&r, None))
-            .max()
-            .unwrap();
+        // The most tokens of a request, and how many stretches went before each call's own, for
+        // windows whose one line is `words(n)` words long.
+        let drive = |times: f64, calls: usize, words: &dyn Fn(usize) -> usize| {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let (url, requests) = counting(calls, times);
+            let providers = [talker(&url, CEILING)];
+            let mut talk = Talk::default();
+            for n in 0..calls {
+                let parts = window_prompt(&"word ".repeat(words(n)), "", 5);
+                let from = n as i64 * 2 + 1;
+                talk_run(
+                    &providers,
+                    &conn,
+                    &mut talk,
+                    &turn_of(&parts, "k", from, from + 1),
+                )
+                .unwrap();
+            }
+            let most = requests.try_iter().map(|r| counted(&r, None, times));
+            (most.max().unwrap(), earlier(&conn))
+        };
+        // From about 300 to about 21,000 estimated tokens a window.
+        let (most, went) = drive(1.5, 40, &|n| 200 + (n * 7_919) % 15_000);
         assert!(most <= i64::from(CEILING), "{most}");
-        let went = earlier(&conn);
         let restarts = went.iter().skip(1).filter(|n| **n == Some(0)).count();
         assert!(restarts >= 2, "{went:?}");
         assert!(went.iter().any(|n| n.is_some_and(|n| n >= 3)), "{went:?}");
-        // And it used the room it had: the request before a restart is within one window (at
-        // most about 32,000 tokens here) of the nine tenths a conversation may fill.
-        assert!(most > 55_000, "{most}");
+        // And it used the room it had: a restart comes when the tokens so far and twice the
+        // new window's estimate (at most about 21,300 here) pass the nine tenths it may fill.
+        assert!(most > 47_000, "{most}");
+        // Windows of about 20,000 estimated tokens, counted two and a half times from the first:
+        // the second would pass the ceiling beside the first, and starts again.
+        let (most, went) = drive(2.5, 3, &|_| 14_300);
+        assert!(most <= i64::from(CEILING), "{most}");
+        assert_eq!(went, [Some(0), Some(0), Some(0)]);
+        // Windows of about 5,000, counted four times: the estimate alone would let the fifth go
+        // on (five of them and the instructions, at 2.6); the tokens the fourth reported do not.
+        let (most, went) = drive(4.0, 8, &|_| 3_570);
+        assert!(most <= i64::from(CEILING), "{most}");
+        assert_eq!(
+            went[..5],
+            [Some(0), Some(1), Some(2), Some(3), Some(0)],
+            "{went:?}"
+        );
+    }
+
+    /// Decision 107: for the size of a conversation an estimated token is taken for more than the
+    /// entry counted of late: the most its tokens were to its estimates over its last 50 answers
+    /// that said both, and a third over that; 2.6 until it has answered five times.
+    #[test]
+    fn the_size_of_a_conversation_takes_an_estimate_for_more_than_the_entry_counted() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answered = |provider: &str, prompt: i64| {
+            let usage = Usage {
+                prompt: Some(prompt),
+                ..Usage::default()
+            };
+            let call = providers_db::Call {
+                provider,
+                role: "curator",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: Some(1_000),
+                usage,
+                usd: None,
+            };
+            providers_db::record(&conn, &call).unwrap();
+        };
+        assert_eq!(ratio(&conn, "stub").unwrap(), TALK_RATIO);
+        for prompt in [1_200, 1_500, 1_100, 1_300] {
+            answered("stub", prompt);
+        }
+        assert_eq!(ratio(&conn, "stub").unwrap(), 2.6, "four answers");
+        answered("stub", 1_400);
+        answered("another", 9_000);
+        assert_eq!(ratio(&conn, "stub").unwrap(), 1.5 * 4.0 / 3.0);
+        // Only its last 50 answers: an older, larger count no longer says how it counts.
+        for _ in 0..50 {
+            answered("stub", 1_200);
+        }
+        assert_eq!(ratio(&conn, "stub").unwrap(), 1.2 * 4.0 / 3.0);
     }
 
     /// Decision 107: a continued call that reads too little of what it was sent again from the
@@ -8499,9 +8587,13 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             )
             .unwrap();
         };
-        for n in 0..6 {
+        for n in 0..5 {
             run(&mut talk, n);
         }
+        assert_eq!(talk.read("stub", "9-10"), [(1, 8)]);
+        // The fifth window again: no turn, and it read nothing before its own this time.
+        run(&mut talk, 4);
+        assert_eq!(talk.read("stub", "9-10"), []);
         // The first started one; four went on (a miss, a hit, two misses); the sixth is no turn.
         assert_eq!(
             earlier(&conn),
@@ -8511,11 +8603,169 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         let plain = &sent[5];
         assert_eq!(plain.len(), 2, "its instructions and the rest");
         assert_eq!((plain[0].1, plain[1].1), (true, false));
-        assert_eq!(talk.read("stub", "11-12"), []);
         // An hour on, it keeps one again.
         *talk.quiet.get_mut("stub").unwrap() -= TALK_QUIET_MS;
         run(&mut talk, 6);
         assert_eq!(earlier(&conn).last(), Some(&Some(0)));
+    }
+
+    /// Decision 107: a window sent again reads from the cache only what went before the stretch
+    /// it replaces, however large that stretch was: it is no miss. A small window, a large one,
+    /// the large one twice more, and the conversation goes on with the next.
+    #[test]
+    fn a_window_sent_again_misses_nothing_by_the_stretch_it_replaces() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let (url, _requests) = counting(5, 1.7);
+        let providers = [talker(&url, 100_000)];
+        let mut talk = Talk::default();
+        let small = window_prompt("One.", "", 5);
+        let large = window_prompt(&"word ".repeat(14_000), "", 5);
+        let next = window_prompt("Three.", "", 5);
+        for (parts, from) in [
+            (&small, 1),
+            (&large, 3),
+            (&large, 3),
+            (&large, 3),
+            (&next, 5),
+        ] {
+            talk_run(
+                &providers,
+                &conn,
+                &mut talk,
+                &turn_of(parts, "k", from, from + 1),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            earlier(&conn),
+            [Some(0), Some(1), Some(1), Some(1), Some(2)]
+        );
+        assert!(talk.quiet.is_empty());
+    }
+
+    /// #971 condition 15: a conversation, and what a call read, are each entry's own. A window
+    /// whose first entry's answer the check refuses, after that entry's conversation, and whose
+    /// second entry answers at its first turn, was read nothing before by the entry whose answer
+    /// is kept. When the first entry fails at the next window, the second goes on with its own.
+    #[test]
+    fn each_entrys_conversation_and_what_it_read_are_its_own() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let of_a = vec![
+            ("200 OK", messages_saying("kept", 60, 0, 1_940)),
+            ("200 OK", messages_saying("refused", 70, 1_900, 60)),
+            ("500 Internal Server Error", b"{}".to_vec()),
+        ];
+        let of_b = vec![
+            ("200 OK", messages_saying("kept", 60, 0, 1_940)),
+            ("200 OK", messages_saying("kept", 70, 1_900, 60)),
+        ];
+        let ((url_a, _requests_a), (url_b, requests_b)) =
+            (serve_each(of_a, ""), serve_each(of_b, ""));
+        let named = |url: &str, to: &str| {
+            let mut p = talker(url, 100_000);
+            if let Provider::Openai { name, .. } = &mut p {
+                *name = to.into();
+            }
+            p
+        };
+        let providers = [named(&url_a, "a"), named(&url_b, "b")];
+        let mut talk = Talk::default();
+        let refuse = |v: &Value| (v["summary"] == "refused").then_some("unanchored");
+        let run = |talk: &mut Talk, parts: &Parts, from: i64| {
+            let turn = turn_of(parts, "k", from, from + 1);
+            let span = format!("{from}-{}", from + 1);
+            Chain::new(&providers, &conn)
+                .check(&refuse)
+                .talk(talk, &turn)
+                .run("curator", &span, &parts.0, &json!({"type": "object"}))
+                .unwrap()
+                .provider
+        };
+        let windows = ["One.", "Two.", "Three."].map(|line| window_prompt(line, "", 5));
+        assert_eq!(run(&mut talk, &windows[0], 1), "a");
+        assert_eq!(run(&mut talk, &windows[1], 3), "b");
+        assert_eq!(talk.read("a", "3-4"), [(1, 2)]);
+        assert_eq!(talk.read("b", "3-4"), [], "its first turn");
+        assert_eq!(run(&mut talk, &windows[2], 5), "b");
+        assert_eq!(talk.read("b", "5-6"), [(3, 4)]);
+        let last = requests_b.try_iter().last().unwrap();
+        let sent: Vec<String> = blocks(&last).into_iter().skip(1).map(|b| b.0).collect();
+        let stretch = |p: &Parts| three(p)[1].clone();
+        assert_eq!(sent[..2], [stretch(&windows[1]), stretch(&windows[2])]);
+        // a: its first turn, a second its check refused, a third that failed; b: two turns.
+        let by: Vec<(String, Option<i64>)> = conn
+            .prepare("SELECT provider, earlier FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let by: Vec<(&str, Option<i64>)> = by.iter().map(|(p, n)| (p.as_str(), *n)).collect();
+        assert_eq!(
+            by,
+            [
+                ("a", Some(0)),
+                ("a", Some(1)),
+                ("b", Some(0)),
+                ("a", Some(2)),
+                ("b", Some(1))
+            ]
+        );
+    }
+
+    /// Decision 107: a turn answered 429 with a short wait is sent again as it was planned,
+    /// through the budget and the gate again. Both attempts are turns in the ledger, with the
+    /// same stretches before their own, and the conversation's time is the second's: the call
+    /// whose request its cache was written by.
+    #[test]
+    fn a_turn_sent_again_after_a_429_is_the_same_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answers = vec![
+            ("200 OK", messages_answer(60, 0, 1_940)),
+            ("429 Too Many Requests", b"{}".to_vec()),
+            ("200 OK", messages_answer(70, 1_900, 60)),
+            ("200 OK", messages_answer(70, 1_960, 60)),
+        ];
+        let (url, requests) = serve_each(answers, "Retry-After: 0\r\n");
+        let mut p = talker(&url, 100_000);
+        if let Provider::Openai { retry_429, .. } = &mut p {
+            *retry_429 = true;
+        }
+        let providers = [p];
+        let mut talk = Talk::default();
+        let windows = ["One.", "Two.", "Three."].map(|line| window_prompt(line, "", 5));
+        talk_run(
+            &providers,
+            &conn,
+            &mut talk,
+            &turn_of(&windows[0], "k", 1, 2),
+        )
+        .unwrap();
+        let before = db::now_ms();
+        talk_run(
+            &providers,
+            &conn,
+            &mut talk,
+            &turn_of(&windows[1], "k", 3, 4),
+        )
+        .unwrap();
+        // The second attempt went half a second after the 429.
+        let started = talk.entries["stub"].started;
+        assert!(started >= before + 400, "{} ms after", started - before);
+        talk_run(
+            &providers,
+            &conn,
+            &mut talk,
+            &turn_of(&windows[2], "k", 5, 6),
+        )
+        .unwrap();
+        let sent: Vec<Vec<(String, bool)>> = requests.try_iter().map(|r| blocks(&r)).collect();
+        assert_eq!(sent[1], sent[2], "the same turn twice");
+        assert_eq!((sent[1].len(), sent[3].len()), (4, 5));
+        assert_eq!(earlier(&conn), [Some(0), Some(1), Some(1), Some(2)]);
     }
 
     /// #971 conditions 12 and 14: only an entry of the Messages API that declares a ceiling and

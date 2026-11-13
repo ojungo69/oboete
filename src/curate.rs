@@ -356,12 +356,16 @@ pub struct Reading {
     /// What forget denied and the ranges a rescan masked, counted before the window's inputs were
     /// read (milestone 5 D1 rule 12, slice 3e-1): every derived writer compares it inside its write.
     pub fence: i64,
+    /// The tombstones raw.db held then, whatever wrote them (decision 107): a call goes out only
+    /// while there are no more, so what is sent, a stretch sent again too, holds nothing a removal
+    /// took since it was read.
+    pub tombstones: i64,
 }
 
 impl Reading {
     /// With the exclusion list and the deny-list as raw holds them now.
     pub fn now(raw: &Raw, reads: Reads) -> Result<Self> {
-        let fence = raw.fence_count()?;
+        let (fence, tombstones) = (raw.fence_count()?, raw.tombstones()?);
         let exclusions = raw.exclusions_now()?;
         let excluded = raw.sessions_in(&exclusions)?;
         Ok(Self {
@@ -369,11 +373,12 @@ impl Reading {
             excluded: excluded.into(),
             reads,
             fence,
+            tombstones,
         })
     }
 
-    /// The egress gate before a call (spec 5.5): the list, the sessions it excludes and the
-    /// deny-list as they were, or `ListChanged`, and nothing is sent.
+    /// The egress gate before a call (spec 5.5): the list, the sessions it excludes, the
+    /// deny-list and the tombstones as they were, or `ListChanged`, and nothing is sent.
     pub fn still(&self, raw: &Raw) -> Result<()> {
         if Self::now(raw, self.reads.clone())? != *self {
             return Err(ListChanged.into());
@@ -2073,23 +2078,26 @@ fn span_of(w: &Window) -> String {
 
 /// Decision 107 (docs/curator-conversation.md): what the egress gate holds for a window, as the
 /// key of a conversation: the redaction rules' version, the exclusion list and the sessions it
-/// excludes, what forget denied and the ranges a rescan masked (`Reading`), and the handle that
-/// read them (a store opened again may be another, a restore's). An entry is sent a stretch
-/// again only before a window of the same key: a rule changed, a record or a claim forgotten, a
-/// range masked or a session excluded since gives another, and nothing rendered before it goes
-/// again. The gate itself is asked before each call (`answered`).
+/// excludes, what forget denied and the ranges a rescan masked, the tombstones there were
+/// (`Reading`), and the handle that read them (a store opened again may be another, a restore's).
+/// An entry is sent a stretch again only before a window of the same key: a rule changed, a record
+/// or a claim forgotten, a range masked, anything removed or a session excluded since gives
+/// another, and nothing rendered before it goes again. The gate itself is asked before each call
+/// (`answered`): a window whose reading no longer holds is not sent, so a key is of a state that
+/// held from before its window was cut until its call.
 fn talk_key(raw: &Raw, rules: &Rules, reading: &Reading) -> String {
     // A set has no order of its own.
     let mut excluded: Vec<&String> = reading.excluded.iter().collect();
     excluded.sort();
     sha256_hex(&format!(
-        "{}\n{}\n{:?}\n{:?}\n{:?}\n{}",
+        "{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}",
         raw.opened(),
         rules.version(),
         reading.exclusions,
         excluded,
         reading.reads,
-        reading.fence
+        reading.fence,
+        reading.tombstones
     ))
 }
 
@@ -12509,7 +12517,9 @@ curate = false
     struct Talking {
         answer: Value,
         refused: bool,
-        read: Vec<(i64, i64)>,
+        /// The entry that answers, and what each entry read.
+        by: &'static str,
+        read: Vec<(&'static str, Vec<(i64, i64)>)>,
         turns: Vec<(
             String,
             String,
@@ -12526,7 +12536,8 @@ curate = false
             Self {
                 answer,
                 refused: false,
-                read: read.to_vec(),
+                by: "fake",
+                read: vec![("fake", read.to_vec())],
                 turns: Vec::new(),
                 plain: 0,
             }
@@ -12560,7 +12571,7 @@ curate = false
             ));
             if self.refused {
                 let refused = Fallback {
-                    provider: "fake".into(),
+                    provider: self.by.into(),
                     reason: "unanchored".into(),
                     skip: Skip::Refused,
                     answer: Some(self.answer.clone()),
@@ -12569,16 +12580,15 @@ curate = false
             }
             Ok(ChainResult {
                 output: self.answer.clone(),
-                ..answered("fake")
+                ..answered(self.by)
             })
         }
 
         fn read(&self, provider: &str, span: &str) -> Vec<(i64, i64)> {
-            let last = self.turns.last().map(|t| t.0.as_str());
-            if provider == "fake" && last == Some(span) {
-                self.read.clone()
-            } else {
-                Vec::new()
+            let of = self.read.iter().find(|(name, _)| *name == provider);
+            match (of, self.turns.last()) {
+                (Some((_, read)), Some(last)) if last.0 == span => read.clone(),
+                _ => Vec::new(),
             }
         }
     }
@@ -12658,6 +12668,53 @@ curate = false
         }
     }
 
+    /// #971 condition 15: a window's op lists what the entry whose answer it keeps read, not what
+    /// an entry the chain went past read.
+    #[test]
+    fn a_windows_op_lists_what_the_answering_entry_read() {
+        for (by, read) in [("second", json!(null)), ("first", json!([[1, 1]]))] {
+            let home = tempfile::tempdir().unwrap();
+            let (mut raw, db) = open(home.path());
+            raw.append(&prompt("An earlier window's line.")).unwrap();
+            curated_so_far(&mut raw);
+            raw.append(&prompt("Use tabs in this repository.")).unwrap();
+            let answer = json!({"claims": [], "summary": "Nothing."});
+            let mut curator = Talking::new(answer, &[]);
+            curator.by = by;
+            curator.read = vec![("first", vec![(1, 1)]), ("second", vec![])];
+            let summary = Summary {
+                conversation: true,
+                ..curating(WINDOW_TOKENS)
+            };
+            let rules = Rules::default();
+            let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator);
+            assert_eq!(phase.unwrap(), Phase::Covered);
+            let op = windows(&raw).pop().unwrap();
+            assert_eq!((&op["provider"], &op["read"]), (&json!(by), &read));
+        }
+    }
+
+    /// Decision 107: a window op cut to the op cap keeps `read`, as it keeps its range: forget
+    /// finds the window by the stretches its curator was sent again, whatever the cap took of
+    /// its lists, its cards and the claims it was shown.
+    #[test]
+    fn a_window_op_cut_to_the_op_cap_keeps_what_it_read() {
+        let reasons = |n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| json!([format!("c{i}"), "x".repeat(200)]))
+                .collect()
+        };
+        let uids: Vec<String> = (0..2_000).map(|i| format!("{i:064}")).collect();
+        let op = json!({"outcome": "curated", "summary": "s", "read": [[1, 4], [7, 9]],
+            "dropped": reasons(400), "lowered": reasons(400), "candidates": uids,
+            "carried": uids, "observations": [card("A card"), card("Another")]});
+        assert!(op.to_string().len() > 4 * crate::raw::MAX_OP_BYTES);
+        let cut = within_op_cap(op);
+        assert!(cut.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        assert_eq!(cut["read"], json!([[1, 4], [7, 9]]));
+        assert!(cut["cut"].as_u64().unwrap() > 0 && cut["candidates_cut"].as_u64().unwrap() > 0);
+    }
+
     /// Decision 107, #971 condition 15: the op a window is left with as its last resort (an
     /// answer refused because none of its quotes anchored, docs/cards.md C5) lists what that
     /// answer's entry read, as a kept answer's op does.
@@ -12708,7 +12765,9 @@ curate = false
             excluded: sessions(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).into(),
             reads: Reads::Live,
             fence: 7,
+            tombstones: 3,
         };
+        let talk_key = super::talk_key;
         let key = talk_key(&raw, &rules, &reading);
         assert_eq!(key, talk_key(&raw, &rules, &reading.clone()));
         let reordered = Reading {
@@ -12719,6 +12778,10 @@ curate = false
         let others = [
             Reading {
                 fence: 8,
+                ..reading.clone()
+            },
+            Reading {
+                tombstones: 4,
                 ..reading.clone()
             },
             Reading {
@@ -12744,6 +12807,25 @@ curate = false
         .unwrap();
         let changed = Rules::load(home.path()).unwrap();
         assert_ne!(key, talk_key(&raw, &changed, &reading));
+        // A removal of any kind since the reading: a record's tombstone that no denial came with
+        // moves no fence, and the gate stops on it all the same; a record is no removal.
+        let mut raw = raw;
+        let read = Reading::now(&raw, Reads::Live).unwrap();
+        raw.append(&prompt("A record.")).unwrap();
+        read.still(&raw).unwrap();
+        let (device, seq) = (raw.device().to_owned(), raw.max_seq().unwrap());
+        raw.append_tombstone(crate::raw::Target::Record { device, seq })
+            .unwrap();
+        let after = Reading::now(&raw, Reads::Live).unwrap();
+        assert_eq!(
+            (after.fence, after.tombstones),
+            (read.fence, read.tombstones + 1)
+        );
+        assert!(read.still(&raw).is_err_and(|e| e.is::<ListChanged>()));
+        assert_ne!(
+            talk_key(&raw, &rules, &read),
+            talk_key(&raw, &rules, &after)
+        );
         // The store opened again: another handle, which may read another file (a restore).
         drop(raw);
         let (again, _db) = open(home.path());
@@ -12788,6 +12870,11 @@ curate = false
         let fourth = window(&mut raw, &mut curator);
         assert_ne!(third, fourth);
         assert_eq!(fourth, window(&mut raw, &mut curator));
+        // A record's tombstone with no denial, which the fence does not count.
+        let device = raw.device().to_owned();
+        raw.append_tombstone(crate::raw::Target::Record { device, seq: 2 })
+            .unwrap();
+        assert_ne!(fourth, window(&mut raw, &mut curator));
     }
 
     /// G09 of the 13.34.2 comparison: two windows' prompts are the same bytes up to the record,

@@ -143,14 +143,18 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
 - the entry's last call started longer ago than its cache keeps an entry, less a margin: the
   Messages API measures five minutes from a request's start, and a read renews it;
 - the prompt would pass the entry's `max_request_tokens` less a tenth, or what admission lets
-  through with the answer's bound (`budget::admit_with_history`), whichever is less. It is counted
-  twice, and the larger count decides: the whole prompt's estimate, and the entry's own tokens
-  (the last answer's `prompt_tokens`, less the last tail, plus this stretch and tail). An
-  estimate is taken times the 90th percentile of the entry's tokens to its estimates over its
-  last 50 answers (about 1.5 on this PC; the budget counts with their median, but a window is
-  not the average one), and times two until the entry has answered five times. Haiku 5.5's price
-  is five times past 100,000 tokens, tokens read from the cache count toward it, and a request
-  past it pays the higher price for all of its tokens;
+  through with the answer's bound (`budget::admit_with_history`), whichever is less. What goes
+  again is counted in the entry's own tokens: the last answer's `prompt_tokens`, less the
+  estimates of the last tail and of a stretch this window's takes the place of; only this stretch
+  and tail are counted from their estimate (all of it, when that answer reported no tokens). An
+  estimate is taken for more tokens than the entry counted of late: the most its tokens were to
+  its estimates over its last 50 answers, and a third over that, or 2.6 until it has answered
+  five times. The budget counts with the median of those ratios, but a window is not the average
+  one: over 20,137 answers of the Messages entry on this PC the median was 1.71, the 90th
+  percentile 1.84, the 99th 1.92 and the most 2.55. A window that counts further over its
+  estimate than that can still pass the ceiling, and pays the higher price once. Haiku 5.5's
+  price is five times past 100,000 tokens, tokens read from the cache count toward it, and a
+  request past it pays the higher price for all of its tokens;
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 
@@ -160,7 +164,9 @@ conversation. A restart only loses the cache.
 **A cache that does not answer.** A conversation costs less than separate calls only while what
 is sent again is read from the cache: a call that went on and read less than half of it wrote all
 of it instead, at 1.25 times. Two such calls in a row, and the entry keeps no conversation for an
-hour: its calls are the prompt with its one stretch, as before. `provider_calls.earlier` (how
+hour: its calls are the prompt with its one stretch, as before. What is sent again is taken at
+its least for this (the last tail, and a stretch replaced, at the high ratio above), so a window
+sent again is no miss for the stretch it replaced, however large. `provider_calls.earlier` (how
 many stretches went before a call's own; NULL for a call that was no turn) beside `cached_tokens`
 shows each such call.
 
@@ -187,13 +193,19 @@ Everything that leaves the machine passes the egress gate (spec 3.3, 5.5, 6.4; m
 rule 12), and a stretch sent again passes it again:
 
 - The key is made of what the gate holds for a window: the rules' version, `Reading` (the
-  exclusion list, the sessions it excludes, and `fence_count`: what forget denied, a record or a
-  claim, and the ranges a rescan masked), and the store's handle. A forget, a mask, an exclusion
-  or a rule change gives another key: nothing rendered before it is sent again. The language and
-  the prompt's wording need no key: a conversation goes on only with the same instructions, byte
-  for byte.
+  exclusion list, the sessions it excludes, `fence_count`: what forget denied, a record or a
+  claim, and the ranges a rescan masked; and how many tombstones raw.db held, a removal of any
+  kind, whether or not the fence counts it), and the store's handle. A forget, a mask, any other
+  removal, an exclusion or a rule change gives another key: nothing rendered before it is sent
+  again. The language and the prompt's wording need no key: a conversation goes on only with the
+  same instructions, byte for byte.
 - The gate still runs before each call, as now (`dispatch`, `Reading::still`, `rules_still`): at
-  a send the state is the window's, and every stretch sent again was rendered under an equal key.
+  a send the state is the one the window was read under, and every stretch sent again was
+  rendered under an equal key. `Reading` is taken before a window is cut, and now holds the
+  tombstones too: a call of any role goes out only while no record was removed since its inputs
+  were read. Before, a tombstone stopped a call only by the denial or the mask written with it.
+  The count needs no such pairing: whatever writes a tombstone stops the calls of what was read
+  before it, and so nothing rendered before it goes again.
 - What rewrites a record's text holds the worker's lock: a forget's purge, retention's expiry
   (`retention::rows`), a restore, a rebuild. The worker that holds it steps aside by ending its
   loop, and the conversation ends with it, so none of them runs within a conversation and
@@ -282,5 +294,19 @@ After it, on this PC: `provider_calls` against the estimate above.
   record of a stretch it read, and the op keeps `read` when a purge takes its text. A card is not
   shown once a removal its op does not list lands in a stretch its window read (K4), and a turn's
   summary lists those stretches among what it read (T7).
+- **The conversation, for the Messages API** (#975). With `[summary] conversation = true`, an
+  entry of the Messages API that declares `limits.max_request_tokens` and marks no cache of its
+  own is sent, before each window's stretch, the stretches of the windows before it in its
+  conversation, each a text block, with breakpoints on the instructions and on the newest
+  stretch (`provider::Talk`, kept by the worker's curation phase while it runs). It starts again
+  as "Restarting" and "The gate" say, and keeps none for an hour after two calls in a row that
+  read less than half of what they were sent again. The window's op lists `read`, and what was
+  already removed from what it read; `provider_calls.earlier` counts the stretches before each
+  call's own. A live triple of synthetic text on 2026-11-13 (claude-haiku-5-5): the second call
+  read the 3,691 tokens the first wrote and wrote 1,923, and the third read 5,614 and wrote
+  1,929. Every other entry, `oboete recurate`, and the summary's, My Work's and the judge's calls
+  are as they were, and off is the default. One thing changes with the setting off too: the gate
+  before a call of any role (`Reading::still`) now stops on any tombstone written since its
+  inputs were read, where it stopped on a denial or a masked range ("The gate").
 
-Nothing else yet: no entry is sent a stretch again.
+Not built yet: the same for OpenAI's own API, the measurement, the defaults and the settings page.

@@ -4842,7 +4842,8 @@ impl Raw {
         Ok(at)
     }
 
-    /// How many tombstones raw.db holds: the viewer's `version` moves when one hides a record.
+    /// How many tombstones raw.db holds: the viewer's `version` moves when one hides a record, and
+    /// the egress gate stops on one more (`curate::Reading`).
     pub fn tombstones(&self) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT count(*) FROM records WHERE type = 'tombstone'",
