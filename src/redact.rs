@@ -984,7 +984,8 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
 /// to what this file's code finds or passes over in some text, so that a store scanned before
 /// the change is scanned again once. A change that leaves it as it was is never applied to what
 /// is stored already (`the_matching_code_is_the_one_its_number_names` fails on any edit of the
-/// file's code, to ask). The first is "1": before it the version had no such part.
+/// file before its tests, and on a new version of a crate that matches, to ask). The first is
+/// "1": before it the version had no such part.
 const MATCHING: &str = "1";
 
 /// The user's rules and kept values in one form: the order of rules, keywords or allowlist
@@ -3968,28 +3969,56 @@ extra_rules = [
 
     /// #538: `MATCHING` numbers this file's code, and nothing else ties the two: an edit that
     /// leaves the number as it was is never applied to what a store holds already. So this fails
-    /// on any edit of the code before the tests, comment lines aside: the rules are loaded,
-    /// compiled, bounded and applied all over it (OCR on #981: two marked parts of it left out
-    /// the loading of the rules, the compiling of a pattern and the limits). Raise `MATCHING`
-    /// when the edit changes what some rule finds or passes over in some text (every store then
-    /// rescans once); either way, set the hash here to the one the failure shows.
+    /// on any edit of the file before its tests, as it is written, and on a new version of a
+    /// crate that matches: the rules are loaded, compiled, bounded and applied all over the file
+    /// (OCR on #981: two marked parts of it left out the loading of the rules, the compiling of a
+    /// pattern and the limits; a hash of its lines without their comments would not see an edit
+    /// inside a string of several lines). Raise `MATCHING` when the change makes some rule find
+    /// or pass over something else in some text (every store then rescans once); either way, set
+    /// the hash here to the one the failure shows.
     #[test]
     fn the_matching_code_is_the_one_its_number_names() {
         let source = include_str!("redact.rs").replace("\r\n", "\n");
-        let code = source
-            .split("\n#[cfg(test)]\nmod tests {")
-            .next()
-            .expect("the code before the tests");
+        let (code, tests) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the code, then the tests");
         assert!(code.contains("fn spans_in(") && code.contains("fn bundled("));
-        assert!(!code.contains("fn the_matching_code_is_the_one_its_number_names"));
-        let lines: Vec<&str> = code
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        // Nothing but test modules follows: an item at the file's top level there would be code
+        // this does not hash.
+        let lines: Vec<&str> = tests.lines().collect();
+        for pair in lines.windows(2) {
+            let item = [
+                "fn ", "pub ", "pub(", "const ", "static ", "impl ", "struct ", "enum ", "type ",
+                "use ", "mod ",
+            ]
+            .iter()
+            .any(|word| pair[1].starts_with(word));
+            assert!(
+                !item || pair[0] == "#[cfg(test)]",
+                "after the tests: {}",
+                pair[1]
+            );
+        }
+        // The crates that match, at the versions the lock file holds.
+        let lock = include_str!("../Cargo.lock").replace("\r\n", "\n");
+        let crates: Vec<String> = lock
+            .split("[[package]]\n")
+            .filter_map(|package| {
+                let mut lines = package.lines();
+                let (name, version) = (lines.next()?, lines.next()?);
+                ["regex", "regex-automata", "regex-syntax", "aho-corasick"]
+                    .iter()
+                    .any(|matcher| name == format!("name = \"{matcher}\""))
+                    .then(|| format!("{name} {version}"))
+            })
             .collect();
+        assert!(crates.len() >= 4, "{crates:?}");
         assert_eq!(
-            (MATCHING, short_hash(&lines.join("\n")).as_str()),
-            ("1", "2945a3436eb6a863")
+            (
+                MATCHING,
+                short_hash(&[code, &crates.join("\n")].concat()).as_str()
+            ),
+            ("1", "8ceeb9fbeab75719")
         );
     }
 
