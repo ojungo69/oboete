@@ -225,8 +225,9 @@ impl Rules {
         Self::new(&crate::config::load_capture(home)?.redaction)
     }
 
-    /// The version a finding came from (the ledger's `ruleset`): the bundled files' hash when
-    /// the user adds nothing, so a store upgraded without settings keeps its version.
+    /// The version a finding came from (the ledger's `ruleset`): a hash of the bundled files and
+    /// of the matching code's number (`MATCHING`) when the user adds nothing, so a store upgraded
+    /// without settings, by a build with the same matching code, keeps its version.
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -980,11 +981,10 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
 }
 
 /// The matching code's own number, part of every rules version (#538): raised with each change
-/// to what the code between the `matching-code` markers finds or passes over in some text, so
-/// that a store scanned before the change is scanned again once. A change that leaves it as it
-/// was is never applied to what is stored already (`the_matching_code_is_the_one_its_number_names`
-/// fails on any edit between the markers, to ask). The first is "1": before it the version had
-/// no such part.
+/// to what this file's code finds or passes over in some text, so that a store scanned before
+/// the change is scanned again once. A change that leaves it as it was is never applied to what
+/// is stored already (`the_matching_code_is_the_one_its_number_names` fails on any edit of the
+/// file's code, to ask). The first is "1": before it the version had no such part.
 const MATCHING: &str = "1";
 
 /// The user's rules and kept values in one form: the order of rules, keywords or allowlist
@@ -1022,7 +1022,12 @@ fn bundled_version() -> &'static str {
     VERSION.get_or_init(|| version_of(MATCHING, None))
 }
 
-// matching-code: begin
+/// The bundled rules' version as it was before the matching code had a number (#538): what a
+/// store last scanned by such a build holds.
+#[cfg(test)]
+pub(crate) fn version_before_matching() -> String {
+    short_hash(&[RULES_TOML, EXTRA_TOML].concat())
+}
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets; a value the
 /// user keeps is never one. Every rule looks at the text once; a rule that found or kept
@@ -1354,8 +1359,6 @@ pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
         })
         .collect()
 }
-
-// matching-code: end
 
 /// The egress gate on indexed text (field values one per line): whole, then line by line, so a
 /// rule anchored to a field's end (`$`) matches each field as capture's did.
@@ -1799,8 +1802,6 @@ fn mask(text: &str, spans: Vec<(usize, usize, usize)>, rules: &Rules) -> (String
     (out, found)
 }
 
-// matching-code: begin
-
 /// gitleaks' allowlist: OR = any regex or stopword hit; AND = every configured check must hold
 /// (a path check can never hold here, so such lists never allow).
 fn allows(a: &Allow, secret: &str, whole: &str, line: &str) -> bool {
@@ -1854,8 +1855,6 @@ fn shannon_entropy(s: &str) -> f64 {
         })
         .sum()
 }
-
-// matching-code: end
 
 #[cfg(test)]
 mod tests {
@@ -3967,26 +3966,30 @@ extra_rules = [
         assert_eq!(off.version(), OFF);
     }
 
-    /// #538: `MATCHING` numbers the code between the `matching-code` markers, and nothing else
-    /// ties the two: an edit there that leaves the number as it was is never applied to what a
-    /// store holds already. So this fails on any edit between the markers. Raise `MATCHING` when
-    /// the edit changes what some rule finds or passes over in some text (every store then
+    /// #538: `MATCHING` numbers this file's code, and nothing else ties the two: an edit that
+    /// leaves the number as it was is never applied to what a store holds already. So this fails
+    /// on any edit of the code before the tests, comment lines aside: the rules are loaded,
+    /// compiled, bounded and applied all over it (OCR on #981: two marked parts of it left out
+    /// the loading of the rules, the compiling of a pattern and the limits). Raise `MATCHING`
+    /// when the edit changes what some rule finds or passes over in some text (every store then
     /// rescans once); either way, set the hash here to the one the failure shows.
     #[test]
     fn the_matching_code_is_the_one_its_number_names() {
         let source = include_str!("redact.rs").replace("\r\n", "\n");
-        let begin = ["// matching-code", ": begin"].concat();
-        let end = ["// matching-code", ": end"].concat();
-        let marked: Vec<&str> = source
-            .split(&begin)
-            .skip(1)
-            .map(|part| part.split(&end).next().expect("its end marker"))
+        let code = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the code before the tests");
+        assert!(code.contains("fn spans_in(") && code.contains("fn bundled("));
+        assert!(!code.contains("fn the_matching_code_is_the_one_its_number_names"));
+        let lines: Vec<&str> = code
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
             .collect();
-        assert_eq!(marked.len(), 2, "the two marked parts");
-        assert!(marked.concat().contains("fn spans_in(") && marked.concat().contains("fn allows("));
         assert_eq!(
-            (MATCHING, short_hash(&marked.concat()).as_str()),
-            ("1", "a4643f0682094e48")
+            (MATCHING, short_hash(&lines.join("\n")).as_str()),
+            ("1", "2945a3436eb6a863")
         );
     }
 

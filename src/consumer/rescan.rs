@@ -115,12 +115,16 @@ impl Consumer for Rescan {
             found
         } else {
             let masks = raw.masks()?;
+            // A record's union is made once, for every range found in it.
+            let mut unions = std::collections::HashMap::new();
             found
                 .into_iter()
                 .filter(|&(seq, start, end)| {
-                    !masks
-                        .get(&(device.to_owned(), seq))
-                        .is_some_and(|(_, ranges)| covered(ranges, start, end))
+                    let Some((_, ranges)) = masks.get(&(device.to_owned(), seq)) else {
+                        return true;
+                    };
+                    let runs = unions.entry(seq).or_insert_with(|| union(ranges));
+                    !covered(runs, start, end)
                 })
                 .collect()
         };
@@ -184,10 +188,10 @@ impl Consumer for Rescan {
     }
 }
 
-/// Whether a record's tombstoned `ranges` (offset, length) cover `start..end` between them: two
-/// masks next to each other read as one run of stars (#539).
-fn covered(ranges: &[(i64, i64)], start: usize, end: usize) -> bool {
-    // A range this build cannot address (a damaged row, a 32-bit build) covers nothing.
+/// A record's tombstoned ranges (offset, length) as their union: runs in order, those that touch
+/// or overlap made one, so two masks next to each other are one run, as they read (#539). A range
+/// this build cannot address (a damaged row, a 32-bit build) is in none.
+fn union(ranges: &[(i64, i64)]) -> Vec<(usize, usize)> {
     let mut ranges: Vec<(usize, usize)> = ranges
         .iter()
         .filter_map(|&(offset, length)| {
@@ -196,18 +200,19 @@ fn covered(ranges: &[(i64, i64)], start: usize, end: usize) -> bool {
         })
         .collect();
     ranges.sort_unstable();
-    let mut through = start;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
     for (from, to) in ranges {
-        // Sorted by their starts: one that starts past what is covered leaves a gap for good.
-        if from > through {
-            return false;
-        }
-        through = through.max(to);
-        if through >= end {
-            return true;
+        match runs.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => runs.push((from, to)),
         }
     }
-    false
+    runs
+}
+
+/// Whether one of `runs` (a record's `union`) holds all of `start..end`.
+fn covered(runs: &[(usize, usize)], start: usize, end: usize) -> bool {
+    runs.iter().any(|&(from, to)| from <= start && end <= to)
 }
 
 #[cfg(test)]
@@ -531,23 +536,25 @@ mod tests {
             (0, 5, false),   // before any
             (70, 80, false), // after all
         ] {
-            assert_eq!(covered(&ranges, start, end), want, "{start}..{end}");
+            assert_eq!(covered(&union(&ranges), start, end), want, "{start}..{end}");
         }
-        assert!(!covered(&[], 0, 1));
+        assert!(!covered(&union(&[]), 0, 1));
         // A range that is no range covers nothing, and takes nothing from the others.
         assert!(covered(
-            &[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)],
+            &union(&[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)]),
             14,
             16
         ));
         assert!(!covered(
-            &[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)],
+            &union(&[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)]),
             0,
             5
         ));
         // The two that overlap, as a wider range over an earlier one is stored (#932).
-        assert!(covered(&[(5, 10), (0, 20)], 0, 20));
-        assert!(!covered(&[(5, 10), (0, 20)], 0, 21));
+        assert!(covered(&union(&[(5, 10), (0, 20)]), 0, 20));
+        assert!(!covered(&union(&[(5, 10), (0, 20)]), 0, 21));
+        // The union itself: in order, the touching and the overlapping ones made one.
+        assert_eq!(union(&ranges), [(10, 22), (30, 40), (50, 53), (54, 60)]);
     }
 
     /// #539: two masks next to each other read as one run of stars to a rule added later. The
@@ -571,6 +578,16 @@ mod tests {
             .unwrap();
         }
         assert!(body(&raw, seq).contains("id ************ end, id ************-7 end"));
+        // The same text with one tombstone, elsewhere: each record's ranges are held against
+        // its own tombstones.
+        let other = raw.append(&raw::test_event(event)).unwrap();
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: other,
+            offset: event.find("prompt").unwrap() as i64,
+            length: 6,
+        })
+        .unwrap();
         let rule = r#"{ id = "id", regex = 'id (\S+) end' }"#;
         std::fs::write(
             p.join("config.toml"),
@@ -579,10 +596,43 @@ mod tests {
         .unwrap();
         worker::run_once(p).unwrap();
         // The second value reaches two characters past its two tombstones: one more, for it.
-        assert_eq!(tombstones(&raw), 5);
+        // The other record gets one for each value.
+        assert_eq!(tombstones(&raw), 8);
         assert!(body(&raw, seq).contains("id ************ end, id ************** end"));
+        assert!(body(&raw, other).contains("id ************ end, id ************** end"));
         worker::run_once(p).unwrap();
-        assert_eq!(tombstones(&raw), 5);
+        assert_eq!(tombstones(&raw), 8);
+    }
+
+    /// #538: a store last scanned by a build from before the matching code had a number holds
+    /// that build's version, the rule files' hash. The same rules read by this build are another
+    /// version, so the store is scanned again from its first record, and a value the older
+    /// matching left is found. (Here it is left by rules that were off: there is no older
+    /// matching to run.)
+    #[test]
+    fn a_store_scanned_before_the_matching_code_had_a_number_is_scanned_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        std::fs::write(p.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let event = format!(r#"{{"prompt":"curl -u admin:{pw} https://h.test"}}"#);
+        let seq = raw.append(&raw::test_event(&event)).unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 0);
+        // The rules on again, and the row as the build before left it, at this record.
+        std::fs::remove_file(p.join("config.toml")).unwrap();
+        let k = crate::knowledge::open(p).unwrap();
+        let before = crate::redact::version_before_matching();
+        assert_eq!(
+            k.execute("UPDATE rescan SET version = ?1", [&before])
+                .unwrap(),
+            1
+        );
+        drop(k);
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, seq).contains(&pw), "{}", body(&raw, seq));
     }
 
     #[test]
