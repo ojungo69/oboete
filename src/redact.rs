@@ -484,7 +484,7 @@ pub fn outbound(text: &str) -> String {
 }
 
 pub fn outbound_with(text: &str, rules: &Rules) -> String {
-    scan(&crate::hook::strip_blocks(text, false), rules).0
+    plain(&crate::hook::strip_blocks(text, false), rules).0
 }
 
 /// `text` with what the rules find in it now masked, and nothing else done to it: no block is
@@ -493,7 +493,7 @@ pub fn outbound_with(text: &str, rules: &Rules) -> String {
 /// blocks and then put between tags of oboete's own (`kept`): the rules read the whole, so a
 /// value one finds only beside what another part holds is masked, and the tags are not.
 ///
-/// As `scan`: the spans are found in the text as it is, before any mask (a mask would take the
+/// As `plain`: the spans are found in the text as it is, before any mask (a mask would take the
 /// context another rule needs), and then the rules read what the masks left until they find
 /// nothing new there (a remainder glued to a mask). Still finding after `MAX_PASSES`, the whole
 /// text is one mask.
@@ -792,9 +792,21 @@ pub struct Finding {
     pub length: usize,
 }
 
-/// `text` masked, with its findings. `spans` finds every secret with the text's own context;
-/// the pass over the masked text after it can only add masks.
+/// `text` masked, with its findings, as it is stored: `plain`, and then what a rule of
+/// `LOOKS_AGAIN` finds in what that left, before a value one of its matches ends on
+/// (`look_again`, #537).
 pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
+    let (mut masked, mut found) = plain(text, rules);
+    if look_again(&mut masked, &mut found, rules) {
+        coalesce(&mut masked, &mut found);
+    }
+    (masked, found)
+}
+
+/// `text` masked, with its findings. `spans` finds every secret with the text's own context;
+/// the pass over the masked text after it can only add masks. `scan` without its looks again,
+/// and the egress gate's scan (`outbound_with`), which `gated` follows pass by pass.
+fn plain(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
     let (mut masked, mut found) = mask(text, spans(text, rules), rules);
     if !found.is_empty() {
         rescan(&mut masked, &mut found, rules);
@@ -860,30 +872,73 @@ fn rescan(masked: &mut String, found: &mut Vec<Finding>, rules: &Rules) {
             *masked = MASK.to_string();
             break;
         }
-        let runs = merged(&again);
-        let (next, more) = mask(masked, again, rules);
-        if next == *masked {
+        if !mask_too(masked, found, again, rules) {
             break; // a rule matching its own mask: nothing new to hide
         }
-        for f in found.iter_mut() {
-            let mut shift = 0isize;
-            let mut at = f.offset;
-            for &(s, e) in &runs {
-                if e <= f.offset {
-                    shift += MASK.len() as isize - (e - s) as isize;
-                } else {
-                    if s <= f.offset {
-                        at = s;
-                    }
-                    break;
-                }
-            }
-            f.offset = (at as isize + shift) as usize;
-        }
-        *masked = next;
-        found.extend(more);
     }
     found.sort_by_key(|f| f.offset);
+}
+
+/// `spans` of `masked` (sorted) masked too, and whether that changed it. Each earlier finding
+/// moves by what the runs before it changed, or to the start of a new mask covering it.
+fn mask_too(
+    masked: &mut String,
+    found: &mut Vec<Finding>,
+    spans: Vec<(usize, usize, usize)>,
+    rules: &Rules,
+) -> bool {
+    let runs = merged(&spans);
+    let (next, more) = mask(masked, spans, rules);
+    if next == *masked {
+        return false;
+    }
+    for f in found.iter_mut() {
+        let mut shift = 0isize;
+        let mut at = f.offset;
+        for &(s, e) in &runs {
+            if e <= f.offset {
+                shift += MASK.len() as isize - (e - s) as isize;
+            } else {
+                if s <= f.offset {
+                    at = s;
+                }
+                break;
+            }
+        }
+        f.offset = (at as isize + shift) as usize;
+    }
+    *masked = next;
+    found.extend(more);
+    true
+}
+
+/// The looks again of a scan (#537): what a rule of `LOOKS_AGAIN` finds in `masked` before a
+/// value one of its matches ends on (`before`) is masked too, and whether anything was.
+///
+/// It comes when `plain` is done with the text, and adds masks to what `plain` left. A mask made
+/// earlier could take the context another rule needs for a value `plain` masks (a user's rule
+/// that reads from a `curl` line to the line after it), and that value would be stored: so
+/// everything `plain` masks is masked, whatever is found here.
+///
+/// The rules then read what the new masks left (`rescan`), and the look is repeated on that
+/// while it finds something and `LOOK_AGAIN` lasts: each further look reads the whole text once
+/// more, within that count or not at all. Past the count the text stays as it is then, with
+/// nothing masked whole (`before_in`).
+fn look_again(masked: &mut String, found: &mut Vec<Finding>, rules: &Rules) -> bool {
+    let mut left = LOOK_AGAIN;
+    let mut any = false;
+    loop {
+        let more = before(masked, rules, &mut left);
+        if more.is_empty() || !mask_too(masked, found, more, rules) {
+            return any;
+        }
+        any = true;
+        rescan(masked, found, rules);
+        if masked.len() > left {
+            return any;
+        }
+        left -= masked.len();
+    }
 }
 
 /// `text` whole when it is at most `cap` bytes. Above that, only the first and last `cap / 2`
@@ -962,6 +1017,8 @@ pub fn scan_capped(text: &str, cap: usize, rules: &Rules) -> (String, Vec<Findin
     }
     let mut stored = masked[..head_end].to_string() + &marker + &masked[tail_start..];
     rescan(&mut stored, &mut found, rules);
+    // The cut can bring a rule's context and a value of far lines together: as `scan`.
+    look_again(&mut stored, &mut found, rules);
     (stored, found, Some(text.len()))
 }
 
@@ -986,7 +1043,7 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
 /// is stored already (`the_matching_code_is_the_one_its_number_names` fails on any edit of the
 /// file before its tests, and on a new version of a crate that matches, to ask). The first is
 /// "1": before it the version had no such part.
-const MATCHING: &str = "1";
+const MATCHING: &str = "2";
 
 /// The user's rules and kept values in one form: the order of rules, keywords or allowlist
 /// entries in the file does not change it; anything that changes what is masked does (Task 7
@@ -1318,6 +1375,128 @@ fn user_spans_in(
     spans
 }
 
+/// The bundled rules that look again before a value (`before`, #537): those whose pattern runs
+/// greedily up to its value, so that a match takes the last value in its reach and the ones
+/// before it are matched only once that one is masked. curl-auth-user's `.*` is the one there
+/// is, and a test fails when a bundled rule with such a run is not listed. No other rule does:
+/// the part of a match before its value is not a text a rule was written for, and another rule
+/// can read it differently (authorization-header, cut off before a token it passes over, takes
+/// the scheme's name for the token).
+const LOOKS_AGAIN: &[&str] = &["curl-auth-user"];
+
+/// What the looks again of one scan of a text may read past the first look at each match, in
+/// bytes. Each reads the part of a match before one of its values from that part's start, so a
+/// line of many values costs their number times its length: a line of some 60 values in 8 KiB is
+/// read through, a longer one from its end as far back as this reaches.
+const LOOK_AGAIN: usize = 256 * 1024;
+
+/// What the rules of `LOOKS_AGAIN` find in `text` before the values their matches end on (#537),
+/// in `text`'s offsets: from its unescaped view, which has the lines and the quotes of a stored
+/// tool output and so comes first, and from `text` as it is, as `views` reads them. `left` is
+/// what these looks may still read, one count for the caller's whole scan of the text
+/// (`LOOK_AGAIN`).
+fn before(text: &str, rules: &Rules, left: &mut usize) -> Vec<(usize, usize, usize)> {
+    // As `spans`: off, nothing is a secret (owner decision 43).
+    if rules.off {
+        return Vec::new();
+    }
+    let r = bundled();
+    let view = text.contains('\\').then(|| unescaped(text));
+    let mut all = Vec::new();
+    for i in (0..r.rules.len()).filter(|&i| LOOKS_AGAIN.contains(&r.rules[i].id.as_str())) {
+        if let Some((view, at)) = &view {
+            let found = before_in(view, rules, i, left);
+            all.extend(found.into_iter().map(|(s, e, rule)| (at[s], at[e], rule)));
+        }
+        all.extend(before_in(text, rules, i, left));
+    }
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+/// `before` in one view of a text, for bundled rule `i`. A match of such a rule ends on the last
+/// value in its reach, whatever the rule then does with it: masks it, or passes it over (its
+/// allowlist's or the global one's, one at or below its entropy, capture's own mask, one the user
+/// keeps). `spans` reaches the value before that one only through `fixpoint`, which blanks what
+/// the rule found or the user keeps: a value before one the rule passes over was never looked at
+/// (`curl -u admin:<password> https://h.test -u bob:pass` stored the password). Here the rule
+/// looks at the part of each match before its value, then at the part before the value it finds
+/// there, and so on to the match's start, and every value on the way that it would mask is
+/// given, the ones `spans` finds too.
+///
+/// The first look at the part of a match is not counted: a rule's matches do not overlap, so
+/// those are one more read of the text at most. The ones after it are counted against `left`,
+/// and a part longer than what is left is not read. From there the text is as it was before
+/// #537, and nothing is masked whole: the long runs of passed-over values that exist are the
+/// harmless ones (a script of `curl -u $USER:$PASS` lines, which one view reads as one line),
+/// and a whole mask there is a tombstone over the output for good (#535's first fix, taken back).
+fn before_in(text: &str, rules: &Rules, i: usize, left: &mut usize) -> Vec<(usize, usize, usize)> {
+    let r = bundled();
+    let rule = &r.rules[i];
+    // The rule looks where `spans_in` runs it: at a text that holds one of its keywords.
+    let named = r
+        .keywords
+        .find_overlapping_iter(text)
+        .any(|m| r.keyword_rule[m.pattern().as_usize()] == i);
+    let Some(re) = rule.regex.as_deref().and_then(compiled).filter(|_| named) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    // The line of the last match judged, by where the match starts: the looks at one match's
+    // parts all start there, and finding a line reads it to its end (Codex on this change: 241
+    // values before 7 MiB on one line read those 7 MiB 241 times).
+    let mut last: Option<(usize, &str)> = None;
+    // The parts of `text` to look at: the text itself (`whole`), then parts of matches.
+    let mut parts = vec![(0, text.len(), true)];
+    while let Some((from, to, whole)) = parts.pop() {
+        for caps in re.captures_iter(&text[from..to]) {
+            let all = caps.get(0).expect("group 0");
+            let secret = match rule.secret_group {
+                Some(g) => caps.get(g),
+                None => (1..caps.len())
+                    .find_map(|i| caps.get(i))
+                    .filter(|m| !m.is_empty()),
+            }
+            .unwrap_or(all);
+            let value = secret.as_str();
+            // As `spans_in` passes a value over, in its order.
+            let passed = value.trim() == MASK
+                || rule
+                    .entropy
+                    .is_some_and(|min| shannon_entropy(value) <= min)
+                || {
+                    let at = from + all.start();
+                    let line = match last {
+                        Some((start, line)) if start == at => line,
+                        _ => last.insert((at, line_of(text, at))).1,
+                    };
+                    rule.allowlists
+                        .iter()
+                        .chain(std::iter::once(&r.global))
+                        .any(|a| allows(a, value, all.as_str(), line))
+                };
+            if !passed && !rules.keeps(value) {
+                spans.push((from + secret.start(), from + secret.end(), i));
+            }
+            // The part of this match before its value. Only a smaller part than this one: an
+            // empty value at the end of a match over the whole part would give it again, forever.
+            let part = (from + all.start(), from + secret.start());
+            let length = part.1 - part.0;
+            if length == 0 || part == (from, to) {
+                continue;
+            }
+            if whole {
+                parts.push((part.0, part.1, false));
+            } else if length <= *left {
+                *left -= length;
+                parts.push((part.0, part.1, false));
+            }
+        }
+    }
+    spans
+}
+
 /// The byte ranges of `text` the rules find now, merged, from both of its views as capture scans
 /// them. What capture masked, or a tombstone starred, is no finding
 /// (`a_rescan_finds_nothing_new_in_what_capture_masked`).
@@ -1349,12 +1528,17 @@ fn literals(text: &str) -> Vec<(usize, usize)> {
 /// Task 7's rescan: `ranges` of a stored body, field by field as capture scanned it, as byte
 /// ranges of the body. Capture scanned each field's string as decoded, not the escapes the body
 /// stores it with: in those, `\n` joins lines and a pattern then matches across them (#541).
+/// With them, what a rule of `LOOKS_AGAIN` finds before a value its match ends on (`before`, as
+/// `scan` looks again), each field with a count of its own.
 pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
     literals(body)
         .into_iter()
         .flat_map(|(s, e)| {
             let (field, at) = unescaped(&body[s..e]);
-            ranges(&field, rules)
+            let mut found = spans(&field, rules);
+            found.extend(before(&field, rules, &mut { LOOK_AGAIN }));
+            found.sort_unstable();
+            merged(&found)
                 .into_iter()
                 .map(move |(a, b)| (s + at[a], s + at[b]))
         })
@@ -3659,6 +3843,442 @@ extra_rules = [
         );
     }
 
+    /// curl's flag, written apart from the word in the lines below: a scanner that reads this
+    /// file takes `curl`, the flag and a made-up `user:{pw}` on one line for a credential.
+    const U: &str = "-u";
+
+    /// What `ranges` hides of `text`, as a tombstone's stars would.
+    fn starred(text: &str, ranges: &[(usize, usize)]) -> String {
+        let mut out = text.to_owned();
+        for &(s, e) in ranges {
+            out.replace_range(s..e, &"*".repeat(e - s));
+        }
+        out
+    }
+
+    /// Whether `new` is `old` with more of it masked: the parts of `new` between its masks are
+    /// parts of `old`, in their order, from its start to its end.
+    fn masks_more(new: &str, old: &str) -> bool {
+        let mut parts = new.split(MASK);
+        let Some(mut rest) = old.strip_prefix(parts.next().expect("a first part")) else {
+            return false;
+        };
+        let parts: Vec<&str> = parts.collect();
+        let Some((last, between)) = parts.split_last() else {
+            return rest.is_empty();
+        };
+        for part in between {
+            match rest.find(part) {
+                Some(at) => rest = &rest[at + part.len()..],
+                None => return false,
+            }
+        }
+        rest.ends_with(last)
+    }
+
+    /// #537: curl-auth-user's `.*` takes the last `-u` in its reach. When that one is a value the
+    /// rule passes over (its allowlist's, or one at or below its entropy), the credential before
+    /// it was stored as written.
+    #[test]
+    fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one_before() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for last in ["bob:pass", "a:b"] {
+            let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
+            // The scan before #537.
+            assert_eq!(plain(&line, &rules), (line.clone(), vec![]));
+            let (masked, found) = scan(&line, &rules);
+            assert_eq!(
+                masked,
+                format!("curl -u [REDACTED] https://h.test -u {last} && echo ok")
+            );
+            assert_eq!(found.len(), 1, "{found:?}");
+        }
+        // Two it passes over after the credential; two credentials before one it passes over, the
+        // first of them quoted; and the credential on a later line of the same command (the rule
+        // reads up to five lines on).
+        let line = format!("curl {U} admin:{pw} https://h.test {U} bob:pass {U} $USER:$PASS");
+        assert_eq!(
+            scan(&line, &rules).0,
+            "curl -u [REDACTED] https://h.test -u bob:pass -u $USER:$PASS"
+        );
+        let line = format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} bob:pass");
+        let (masked, found) = scan(&line, &rules);
+        assert_eq!(
+            masked,
+            "curl -u [REDACTED] -u [REDACTED] https://h.test -u bob:pass"
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+        let lines = format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass");
+        assert_eq!(
+            scan(&lines, &rules).0,
+            "curl https://h.test \\\n  -u [REDACTED] \\\n  -u bob:pass"
+        );
+    }
+
+    /// #537 in a rescan: the same line as a tool's output is stored, JSON in a JSON string. The
+    /// words after the passed-over value matter: at the end of the output the rule's match cannot
+    /// end on it (a quote follows), and it found the credential before #537 too. The quoted
+    /// credential is one only the field's unescaped view shows the rule.
+    #[test]
+    fn a_rescan_finds_the_credential_before_a_value_a_greedy_rule_passes_over() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for last in ["bob:pass", "a:b"] {
+            for user in [format!("admin:{pw}"), format!("\"admin:{pw}\"")] {
+                let line = format!("curl -u {user} https://h.test -u {last} && echo ok");
+                let body =
+                    serde_json::json!({ "output": serde_json::json!({ "stdout": line }).to_string() })
+                        .to_string();
+                let hidden = starred(&body, &field_ranges(&body, &rules));
+                assert!(!hidden.contains(&pw), "{hidden}");
+                assert!(hidden.contains(last), "{hidden}");
+            }
+        }
+    }
+
+    /// #537: a script of lines the rule passes over, which one of a rescan's views reads as one
+    /// line, holds no secret: no range, and no span over the whole field. This passed before the
+    /// looks again too; the first fix tried for #537 (#535, taken back there) had `fixpoint` look
+    /// again past such values, and masked the field whole from 66 lines on.
+    #[test]
+    fn lines_a_greedy_bundled_rule_passes_over_are_no_finding_however_many() {
+        let rules = Rules::default();
+        let text = "curl -u $USER:$PASS https://x.test/api\n".repeat(200);
+        assert_eq!(scan(&text, &rules), (text.clone(), vec![]));
+        assert_eq!(ranges(&text, &rules), vec![]);
+        let single = serde_json::json!({ "stdout": text }).to_string();
+        assert_eq!(field_ranges(&single, &rules), vec![], "single-encoded");
+        let double = serde_json::json!({ "output": single }).to_string();
+        assert_eq!(field_ranges(&double, &rules), vec![], "double-encoded");
+        assert_eq!(scan(&single, &rules).1, vec![]);
+    }
+
+    /// #537: the first look at the part of a match is not counted against `LOOK_AGAIN`, so a
+    /// credential with one passed-over value after it is found wherever it is in the text: here
+    /// after more passed-over matches than `LOOK_AGAIN` would let a rule look at again.
+    #[test]
+    fn the_first_look_again_at_a_match_does_not_wait_for_the_others() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let filler = "x".repeat(1024);
+        let lines = LOOK_AGAIN / 1024 + 8;
+        // The last line's part before `bob:pass` is longer than any before it, so no rest of a
+        // count that the lines before it had used up would hold it.
+        let text = format!("curl https://x.test/{filler} -u $USER:$PASS\n").repeat(lines)
+            + &format!("curl https://h.test/{filler}{filler} {U} admin:{pw} {U} bob:pass\n");
+        let (masked, found) = scan(&text, &rules);
+        assert!(
+            masked.ends_with(" -u [REDACTED] -u bob:pass\n"),
+            "the last line ends: {}",
+            &masked[masked.len() - 60..]
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    /// #537: past the first at each match, the looks again of one scan share `LOOK_AGAIN`. When
+    /// it is spent the text is as it was before #537: nothing is masked whole, and what was found
+    /// stays found. So a credential behind more passed-over values than that reads is stored as
+    /// before; the test pins that limit, it does not want it.
+    #[test]
+    fn the_further_looks_again_stop_at_what_they_may_read_and_mask_nothing_whole() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+        // One line: a credential, then values the rule passes over until the parts before them
+        // add up to many times what the looks may read, then a credential it finds at once.
+        let passed = " -u $USER:$PASS".repeat(2 * LOOK_AGAIN / 1024);
+        let filler = "x".repeat(1024);
+        let line = format!("curl {U} admin:{pw} https://h.test/{filler}{passed} {U} ops:{far}");
+        let (masked, found) = scan(&line, &rules);
+        assert!(
+            !masked.contains(&far),
+            "the last credential is found as before"
+        );
+        assert!(
+            masked.contains(&pw),
+            "the first is past what the looks may read"
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        let body = serde_json::json!({ "output": line }).to_string();
+        assert!(
+            field_ranges(&body, &rules).iter().all(|&(s, e)| e - s < 64),
+            "no range over the field"
+        );
+        // An eighth as many passed-over values, and it is read.
+        let passed = " -u $USER:$PASS".repeat(LOOK_AGAIN / 4096);
+        let line = format!("curl {U} admin:{pw} https://h.test/{filler}{passed} {U} ops:{far}");
+        let (masked, found) = scan(&line, &rules);
+        assert!(!masked.contains(&pw) && !masked.contains(&far), "within it");
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    /// #537: only a rule whose pattern runs greedily up to its value looks again. The part of a
+    /// match before its value is not a text the rule was written for: authorization-header, cut
+    /// off before a token it passes over, takes the scheme's name for the token (Codex's review
+    /// of this change's first version). Such a find is no secret, and a rescan would tombstone it
+    /// for good.
+    #[test]
+    fn only_a_rule_that_runs_greedily_to_its_value_looks_again() {
+        let rules = Rules::default();
+        for text in [
+            "Authorization: Signature AAAAAAAA\n",
+            "Authorization: Signature AAAAAAAA",
+            "proxy-authorization: Negotiate xxxxxxxxxxxx end",
+        ] {
+            assert_eq!(scan(text, &rules), (text.to_owned(), vec![]), "{text}");
+            let body = serde_json::json!({ "output": text }).to_string();
+            assert_eq!(field_ranges(&body, &rules), vec![], "{text}");
+        }
+        // Every bundled rule with a greedy run of anything outside a class is one of them, and
+        // each of them is a rule: a rule added with such a run is listed, or fails here.
+        let greedy = |regex: &str| {
+            let (mut class, mut chars) = (false, regex.chars().peekable());
+            let mut runs = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '[' if !class => class = true,
+                    ']' if class => class = false,
+                    '.' if !class && matches!(chars.peek(), Some('*' | '+')) => {
+                        chars.next();
+                        runs |= chars.peek() != Some(&'?');
+                    }
+                    _ => {}
+                }
+            }
+            runs
+        };
+        let found: Vec<&str> = bundled()
+            .rules
+            .iter()
+            .filter(|rule| rule.regex.as_deref().is_some_and(greedy))
+            .map(|rule| rule.id.as_str())
+            .collect();
+        assert_eq!(found, LOOKS_AGAIN);
+    }
+
+    /// #537: the count is one for a scan of a text. Past the first look at each match, every look
+    /// is within it: the parts before the further values of a match, and each further look at the
+    /// whole text after a find (the rules read what the new masks left, and the rule looks at
+    /// that once more). What the count does not reach is stored as before #537.
+    #[test]
+    fn the_looks_again_of_a_scan_share_one_count() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        // 64 credentials, then 130 values at or below the rule's entropy, on one line: the looks
+        // pass over the 130 and find credentials from the last one back, while the count lasts.
+        let credentials: String = (0..64).map(|i| format!(" -u c{i:02}:{pw}{i:02}")).collect();
+        let line = format!("curl{credentials}{}", " -u a:b".repeat(130));
+        let (masked, found) = scan(&line, &rules);
+        assert!(
+            masked.contains(" -u [REDACTED] -u a:b -u a:b"),
+            "the last credential is found"
+        );
+        assert!(found.len() > 1 && found.len() < 64, "{} found", found.len());
+        // 300 credentials, each 1 KiB before the next, and a value the rule passes over: the part
+        // before the last credential is longer than the count, so the rule finds that one (the
+        // first look at a match is not counted) and no other. A further look at the whole line
+        // would find the one before it, and so on, each for a read of all of it: the line is
+        // longer than the count, so there is none.
+        let filler = "x".repeat(1024);
+        let credentials: String = (0..300)
+            .map(|i| format!(" -u c{i:03}:{pw}{i:03} https://h.test/{filler}"))
+            .collect();
+        let line = format!("curl{credentials} -u bob:pass");
+        assert!(line.len() > LOOK_AGAIN);
+        let (masked, found) = scan(&line, &rules);
+        assert_eq!(found.len(), 1, "{} found", found.len());
+        assert!(!masked.contains(&format!("c299:{pw}299")), "the last one");
+        assert!(
+            masked.contains(&format!("c298:{pw}298")),
+            "the one before it"
+        );
+    }
+
+    /// #537's looks again only add: what a scan masked before them it masks with them, with a
+    /// user's rules too, and what the rescan found before it finds with them. The first text is
+    /// from Codex's review of this change's first version, which masked the curl credential while
+    /// the rules were still at work: that took `Signature:` from the user's second rule, and the
+    /// value after the trigger was stored.
+    #[test]
+    fn what_a_scan_masked_before_the_looks_again_stays_masked() {
+        assert!(masks_more("a[REDACTED]c", "abc") && masks_more("abc", "abc"));
+        assert!(!masks_more("a[REDACTED]x", "abc") && !masks_more("ab", "abc"));
+        assert!(!masks_more("a[REDACTED]c d", "a[REDACTED]c [REDACTED]"));
+        let own = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "trigger", regex = 'trigger' },
+  { id = "after-trigger", regex = 'Signature:[^\n]*\n\[REDACTED\] ([A-Za-z0-9]+)' },
+]"#,
+        )
+        .unwrap();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+        let text = format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\ntrigger {far}");
+        assert_eq!(
+            plain(&text, &own).0,
+            format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\n[REDACTED] [REDACTED]")
+        );
+        assert_eq!(
+            scan(&text, &own).0,
+            "curl -u [REDACTED] https://h.test -u bob:pass\n[REDACTED] [REDACTED]"
+        );
+        let filler = "x".repeat(300);
+        let texts = [
+            text,
+            format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
+            format!("curl {U} \"admin:{pw}\" {U} ops:{far} https://h.test {U} a:b"),
+            format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass\ntrigger {far}"),
+            format!("Signature: x\ntrigger curl {U} admin:{pw} {U} $USER:$PASS\ntrigger {far}"),
+            format!(
+                "curl --json '{{\"cmd\":\"run {U} app:{pw} now\"}}' https://h.test --user \"$USER:$PASS\""
+            ),
+            format!(
+                "curl {U} [REDACTED] {U} admin:{pw} https://h.test/{filler} {U} bob:pass trigger"
+            ),
+            format!("Authorization: Signature AAAAAAAA\ncurl -u a:b -u c:d\ntrigger {far}"),
+            "curl -u $USER:$PASS https://x.test/api\n".repeat(80),
+        ];
+        for text in &texts {
+            for rules in [&Rules::default(), &own] {
+                let (before, now) = (plain(text, rules).0, scan(text, rules).0);
+                assert!(masks_more(&now, &before), "{text}\n{before}\n{now}");
+                // As a tool's output is stored, and as the rescan reads it.
+                let body = serde_json::json!({ "output": text }).to_string();
+                let now = field_ranges(&body, rules);
+                for (s, e) in literals(&body) {
+                    let (field, at) = unescaped(&body[s..e]);
+                    for (a, b) in ranges(&field, rules) {
+                        let (a, b) = (s + at[a], s + at[b]);
+                        assert!(
+                            now.iter().any(|&(x, y)| x <= a && b <= y),
+                            "{body}: {a}..{b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A finding of the looks again is at its mask, and the findings made before it move with
+    /// what it changed, as in a rescan: the ledger's offsets, and where `scan_capped` may cut.
+    #[test]
+    fn the_findings_of_the_looks_again_are_where_their_masks_are() {
+        let rules =
+            user("[redaction]\nextra_rules = [{ id = \"ticket\", regex = 'ticket-[0-9]{5}' }]")
+                .unwrap();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let line =
+            format!("ticket-11111 curl {U} admin:{pw} https://h.test {U} bob:pass ticket-22222");
+        let (masked, found) = scan(&line, &rules);
+        assert_eq!(
+            masked,
+            "[REDACTED] curl -u [REDACTED] https://h.test -u bob:pass [REDACTED]"
+        );
+        let at: Vec<(&str, usize, usize)> = found
+            .iter()
+            .map(|f| (f.rule.as_str(), f.offset, f.length))
+            .collect();
+        assert_eq!(
+            at,
+            [
+                ("user:ticket", 0, 12),
+                ("curl-auth-user", 19, 18),
+                ("user:ticket", 57, 12)
+            ]
+        );
+        for f in &found {
+            assert_eq!(&masked[f.offset..f.offset + MASK.len()], MASK, "{f:?}");
+        }
+    }
+
+    /// #537's looks again are capture's and the rescan's. The egress gate reads a text as it did
+    /// before; whatever it reads, what `hidden` gives of a text is what `outbound_with` hides of
+    /// it, and the gate that keeps ranges shows the same.
+    #[test]
+    fn the_gate_and_what_it_hides_agree_where_capture_looks_again() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for last in ["bob:pass", "a:b"] {
+            let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
+            assert_ne!(scan(&line, &rules).0, line, "capture looks again");
+            let out = outbound_with(&line, &rules);
+            let runs = hidden(&line, &rules).expect("not masked whole");
+            assert_eq!(masked_part(&line, 0..line.len(), &runs), out);
+            assert_eq!(outbound_but_with(&line, &[], &rules), out);
+        }
+    }
+
+    /// A value the user keeps is passed over where the rule looks again, as at every look: it
+    /// stays, and the credential before it is found.
+    #[test]
+    fn a_value_the_user_keeps_stays_where_the_rule_looks_again() {
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let own = format!("deploy:Kd7w{}", "Q2mX9tB4"); // split: scanners
+        let toml = format!("[redaction]\nallowlist = [\"{}\"]", short_hash_full(&own));
+        let rules = user(&toml).unwrap();
+        let line = format!("curl {U} admin:{pw} {U} {own} https://h.test {U} bob:pass");
+        assert_eq!(
+            scan(&line, &rules).0,
+            format!("curl {U} [REDACTED] {U} {own} https://h.test {U} bob:pass")
+        );
+        let body = serde_json::json!({ "output": line }).to_string();
+        let hidden = starred(&body, &field_ranges(&body, &rules));
+        assert!(!hidden.contains(&pw) && hidden.contains(&own), "{hidden}");
+    }
+
+    /// A cut can bring a `curl` and a `-u` of two far lines within the rule's reach.
+    /// `scan_capped` reads what it stores once more, and the rule looks again there too, so that
+    /// a rescan finds nothing new in it.
+    #[test]
+    fn a_cut_text_is_looked_at_again_as_it_is_stored() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        // Eleven line breaks between the `curl` and the `-u`: more than the rule reads on.
+        let text = format!(
+            "curl https://h.test\n{}\n{}{}\n {U} admin:{pw} {U} bob:pass\n",
+            "x".repeat(200),
+            "y\n".repeat(8),
+            "z".repeat(200)
+        );
+        assert_eq!(scan(&text, &rules), (text.clone(), vec![]));
+        // Cut to 300 bytes, four are left between them.
+        let (stored, found, full) = scan_capped(&text, 300, &rules);
+        assert_eq!(full, Some(text.len()));
+        assert!(stored.starts_with("curl https://h.test\nxxx"), "{stored}");
+        assert!(
+            stored.ends_with("zzz\n -u [REDACTED] -u bob:pass\n"),
+            "{stored}"
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(&stored[found[0].offset..][..MASK.len()], MASK);
+        let body = serde_json::json!({ "output": stored }).to_string();
+        assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+    }
+
+    /// What capture stored after it looked again holds nothing new for a second scan, nor for
+    /// the rescan.
+    #[test]
+    fn a_rescan_finds_nothing_new_where_capture_looked_again() {
+        let rules = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for line in [
+            format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
+            format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} a:b"),
+            format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass"),
+        ] {
+            let (stored, found) = scan(&line, &rules);
+            assert!(!found.is_empty(), "{line}");
+            assert_eq!(scan(&stored, &rules), (stored.clone(), vec![]));
+            let body = serde_json::json!({ "output": stored }).to_string();
+            assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+        }
+    }
+
     #[test]
     fn a_rescan_finds_nothing_new_in_what_capture_masked() {
         let rules = Rules::default();
@@ -4018,7 +4638,7 @@ extra_rules = [
                 MATCHING,
                 short_hash(&[code, &crates.join("\n")].concat()).as_str()
             ),
-            ("1", "8ceeb9fbeab75719")
+            ("2", "613a84622f8c93e2")
         );
     }
 

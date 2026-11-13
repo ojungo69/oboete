@@ -1582,6 +1582,56 @@ mod tests {
         serde_json::from_str(&e.body).unwrap()
     }
 
+    /// curl's flag, written apart from the word in the lines below: a scanner that reads this
+    /// file takes `curl`, the flag and a made-up `user:{pw}` on one line for a credential.
+    const U: &str = "-u";
+
+    /// #537 where a text is stored: the credential before a value curl-auth-user passes over is
+    /// masked in a tool's input and output and in a prompt, and the rest of the field stays. With
+    /// words after the passed-over value this was stored as written (at a field's end the quote
+    /// that closes it keeps the rule from that value, and it found the credential before).
+    #[test]
+    fn a_credential_before_a_value_a_greedy_rule_passes_over_is_masked_where_it_is_stored() {
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for last in ["bob:pass", "a:b"] {
+            for tail in [" && echo ok", ""] {
+                let line = format!("curl {U} admin:{pw} https://h.test {U} {last}{tail}");
+                let want = format!("curl -u [REDACTED] https://h.test -u {last}{tail}");
+                let e = one(
+                    "PostToolUse",
+                    json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
+                           "tool_input": {"command": line},
+                           "tool_response": {"stdout": format!("ran {line}\n")}}),
+                );
+                let b = body(&e);
+                assert_eq!(b["input"], json!({"command": want}).to_string());
+                assert_eq!(
+                    b["output"],
+                    json!({"stdout": format!("ran {want}\n")}).to_string()
+                );
+                let e = one(
+                    "UserPromptSubmit",
+                    json!({"session_id": "s", "cwd": "/", "prompt": line}),
+                );
+                assert_eq!(body(&e)["prompt"], want);
+            }
+        }
+        // A short field is scanned alone and beside its key, and masked whole where the two scans
+        // disagree, as before. With a credential that ends the field (in the pair the closing
+        // quote follows it, and the rule does not take it) and one before a passed-over value,
+        // they do; two credentials at a field's end did so before #537 too.
+        for line in [
+            format!("curl {U} admin:{pw} {U} bob:pass {U} ops:{pw}9"),
+            format!("curl {U} admin:{pw} {U} ops:{pw}9"),
+        ] {
+            let e = one(
+                "UserPromptSubmit",
+                json!({"session_id": "s", "cwd": "/", "prompt": line}),
+            );
+            assert_eq!(body(&e)["prompt"], "[REDACTED]", "{line}");
+        }
+    }
+
     #[test]
     fn replay_can_measure_a_cap_candidate_but_not_outside_their_range() {
         assert_eq!(field_cap(None), MAX_FIELD_BYTES);
