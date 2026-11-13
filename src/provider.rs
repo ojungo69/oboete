@@ -8384,6 +8384,16 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
                         .run("curator", "3-4", &two.0, &json!({"type": "object"}));
                     assert!(unsent.is_err());
                 }
+                "no key" => {
+                    // Its key file is not there: the call fails before anything is sent.
+                    let mut keyless = p.clone();
+                    if let Provider::Openai { key_file, .. } = &mut keyless {
+                        *key_file = Some(home.path().join("no-key.md"));
+                    }
+                    let unsent = talk_run(&[keyless], &conn, &mut talk, &turn_of(&two, key, 3, 4));
+                    assert!(unsent.is_err());
+                    conn.execute("DELETE FROM provider_state", []).unwrap();
+                }
                 other => panic!("{other}"),
             }
             talk_run(&[p], &conn, &mut talk, &turn_of(&two, key, 3, 4)).unwrap();
@@ -8406,6 +8416,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             ("none", 1),
             ("in time", 1),
             ("unsent", 1),
+            ("no key", 1),
             ("key", 0),
             ("language", 0),
             ("model", 0),
@@ -8507,10 +8518,11 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         // new window's estimate (at most about 21,300 here) pass the nine tenths it may fill.
         assert!(most > 47_000, "{most}");
         // Windows of about 20,000 estimated tokens, counted two and a half times from the first:
-        // the second would pass the ceiling beside the first, and starts again.
-        let (most, went) = drive(2.5, 3, &|_| 14_300);
+        // each would pass the ceiling beside the one before, and starts again. A call that starts
+        // again reads nothing it was sent before, and is no miss: the fourth is a turn still.
+        let (most, went) = drive(2.5, 4, &|_| 14_300);
         assert!(most <= i64::from(CEILING), "{most}");
-        assert_eq!(went, [Some(0), Some(0), Some(0)]);
+        assert_eq!(went, [Some(0), Some(0), Some(0), Some(0)]);
         // Windows of about 5,000, counted four times: the estimate alone would let the fifth go
         // on (five of them and the instructions, at 2.6); the tokens the fourth reported do not.
         let (most, went) = drive(4.0, 8, &|_| 3_570);
@@ -8571,8 +8583,14 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     fn an_entry_whose_cache_does_not_answer_keeps_no_conversation() {
         let home = tempfile::tempdir().unwrap();
         let conn = providers_db::open(home.path()).unwrap();
+        // Every answer counts its prompt 2,000 tokens. What goes again is taken at its least:
+        // those less the last tail at 2.6 times its estimate; half of that read is a hit, a
+        // token less a miss.
+        let tail = budget::estimate(&three(&window_prompt("Window 0.", "", 5))[2]);
+        let half = ((2_000.0 - f64::from(tail) * 2.6) / 2.0).ceil() as i64;
+        assert!(half > 500, "{half}");
         // What each call read from the cache: a miss, a hit, then two misses.
-        let read = [0, 0, 1_900, 0, 0, 0, 0];
+        let read = [0, half - 1, half, half - 1, half - 1, 0, 0];
         let answers = read.map(|read| ("200 OK", messages_answer(2_000 - read, read, 0)));
         let (url, requests) = serve_each(answers.to_vec(), "");
         let providers = [talker(&url, 100_000)];

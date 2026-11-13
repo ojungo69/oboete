@@ -12792,6 +12792,11 @@ curate = false
                 excluded: sessions(&[1, 2, 3]).into(),
                 ..reading.clone()
             },
+            // As many sessions, one of them another.
+            Reading {
+                excluded: sessions(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13]).into(),
+                ..reading.clone()
+            },
             Reading {
                 reads: Reads::Any,
                 ..reading.clone()
