@@ -1,0 +1,21 @@
+src/config.rs
+  s_76c95352747315::t_0de31638ddb8e8 191-195,217,1922-1931
+src/curate.rs
+  s_76c95352747315::t_3cade6437ce9ee 1961-1962,1968-1980,5326-5378,5380,5390,5393,5410-5411,5417,5440-5500,12201-12370
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e3480c49080502455f5931c2d2b93004cd803bcf",
+  "prompts": {},
+  "sessions": {
+    "s_76c95352747315": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85c9c838-1efe-4bce-8363-c07637811bb4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
