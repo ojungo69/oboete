@@ -231,5 +231,15 @@ After it, on this PC: `provider_calls` against the estimate above.
   showed short. An event names a subagent by a non-empty `agent_id`, as capture stores it from a
   hook and from a transcript. `true`, `false` and no line do what they did; any other value is a
   configuration error. Off is the default.
+- **The three-part prompt** (#973). With `[summary] conversation = true` a window's prompt is its
+  instructions, its stretch and its tail, as "The prompt" above says. The instructions name no
+  fence and no number of cards, and are the same bytes for every window. The stretch is the
+  window's lines between fence lines made of the hash of those lines, opened by the fence
+  sentence. The tail names the stretch by its fence and its line ids, says how many cards the
+  window may give, and holds the claims already known between fence lines of their own
+  (`=== KNOWN <16 hex> ===`). The Messages API's breakpoint, OpenAI's and the CLIs' system text
+  split where they did, at the fence sentence. Every entry gets one stretch: only the
+  instructions are read from a cache, as before, and a grown window's are now any other
+  window's. Off is the default, and off a prompt is the bytes it was.
 
-Nothing else yet: no prompt has three parts and no entry is sent a stretch again.
+Nothing else yet: no entry is sent a stretch again.

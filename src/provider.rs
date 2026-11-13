@@ -4306,6 +4306,17 @@ pub(crate) mod tests {
             "Extract the claims.\n{sentence}=== RECORD a ===`.\n\n=== RECORD a ===\nL1 a@b\n=== RECORD a ==="
         );
         let at = fenced.find(sentence).unwrap();
+        // Decision 107: a three-part prompt's instructions end at its stretch's fence sentence too,
+        // so they are the system prompt, the same for every window, and the stretch and the tail
+        // are the turn.
+        let window = "## claude session s\nL1 [user] a@b\n";
+        let parts = crate::curate::prompt_parts("English", window, "", "", 5, 1);
+        let parted = parts.find(sentence).unwrap();
+        let other = "## codex session t\nL1 [user] Other.\nL2 [assistant] Yes.\n";
+        let other = crate::curate::prompt_parts("English", other, "u1: kept", "", 15, 2);
+        assert_eq!(parts[..parted], other[..other.find(sentence).unwrap()]);
+        assert!(!parts[..parted].contains("=== ") && !parts[..parted].contains("a@b"));
+        assert!(parts[parted..].contains(window) && parts[parted..].contains("=== KNOWN "));
         let file_after = |cmd: &Command, flag: &str| -> String {
             let args: Vec<String> = cmd
                 .get_args()
@@ -4329,6 +4340,7 @@ pub(crate) mod tests {
         };
         for (n, (prompt, instructions, turn)) in [
             (fenced.as_str(), Some(&fenced[..at]), &fenced[at..]),
+            (parts.as_str(), Some(&parts[..parted]), &parts[parted..]),
             ("p", None, "p"),
         ]
         .into_iter()
@@ -9362,6 +9374,17 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(content[0]["text"], fenced[..at]);
         assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
         assert_eq!(content[1]["text"], fenced[at..]);
+        assert!(content[1].get("cache_control").is_none(), "{content}");
+        // Decision 107: a three-part prompt's instructions end at its stretch's fence sentence, and
+        // are marked the same; the stretch and the tail follow, unmarked.
+        let parts =
+            crate::curate::prompt_parts("English", "## claude session s\nL1 Hi.\n", "", "", 5, 1);
+        let content =
+            &anthropic_request("m", &parts, &schema, &none, false)["messages"][0]["content"];
+        let at = parts.find(crate::curate::FENCE_SENTENCE).unwrap();
+        assert_eq!(content[0]["text"], parts[..at]);
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(content[1]["text"], parts[at..]);
         assert!(content[1].get("cache_control").is_none(), "{content}");
         let hour = json!({"cache_control": {"type": "ephemeral", "ttl": "1h"}});
         let content = &anthropic_request("m", &fenced, &schema, hour.as_object().unwrap(), false)["messages"]
