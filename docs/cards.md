@@ -73,7 +73,9 @@ K4. **Removed records.** A card is not shown when a tombstone removes, from a re
 was shown, something its window op does not list: the curator read it, and the card's text may
 say it. Those records are the window's own and each session's goal, its first prompt, which a
 window carries in (`goals` names the ones outside the window that the prompt kept; one cut to fit
-the prompt was not shown). The op lists what was already
+the prompt was not shown); and, for a window of a conversation (decision 107,
+[curator-conversation.md](curator-conversation.md)), the records of the stretches its curator was
+sent again before the window's own (`read`, their spans). The op lists what was already
 removed from them when the window was cut (`removed`: each a record and, for a part of one, its
 offset and length), by this device's own tombstones up to the record that was its last before the
 window's first read; a removal that lands during the cut, or comes from another device, is not

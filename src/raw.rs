@@ -6330,6 +6330,27 @@ impl Raw {
             .optional()?)
     }
 
+    /// Decision 107 (docs/curator-conversation.md): the spans window op `op_seq` of `device` lists
+    /// in `read`, the stretches its curator was sent again before the window's own, as the one
+    /// reading of an op's provenance takes them; none for an op that lists none, or that raw does
+    /// not hold. A card's reader asks it of the op itself (docs/cards.md K4), so no derived table
+    /// has to hold them.
+    pub fn window_read(&self, device: &str, op_seq: i64) -> Result<Vec<(i64, i64)>> {
+        use rusqlite::OptionalExtension;
+        let read: Option<Option<String>> = self
+            .conn
+            .prepare_cached(
+                "SELECT CASE WHEN json_valid(body) THEN json_extract(body, '$.read') END FROM ops
+                 WHERE device = ?1 AND op_seq = ?2 AND type = 'window'",
+            )?
+            .query_row(params![device, op_seq], |r| r.get(0))
+            .optional()?;
+        let read = read
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok());
+        Ok(read.map_or(Vec::new(), |v| crate::provenance::pairs(&v)))
+    }
+
     /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
     pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
         ops_after_in(&self.conn, device, op_seq, limit)
@@ -8754,7 +8775,8 @@ impl Judge {
     }
 
     /// Rule (a): the forgotten records a window op of `device` over `from` to `to`, written at
-    /// `ts`, showed in its span or its goals.
+    /// `ts`, showed in its span, in the stretches its curator was sent again before it (`read`,
+    /// decision 107) or in its goals.
     fn shown_in<'a>(
         &'a self,
         device: &'a str,
@@ -8764,9 +8786,11 @@ impl Judge {
     ) -> impl Iterator<Item = &'a (i64, String, Option<i64>)> + 'a {
         let removed = p.removed;
         let goals = p.goals.iter().copied();
+        let read = p.read.iter();
         self.forgotten
             .between(device, from, to)
             .iter()
+            .chain(read.flat_map(move |&(a, b)| self.forgotten.between(device, a, b)))
             .chain(goals.filter_map(move |g| self.forgotten.entry(device, g)))
             .filter(move |r| shown_then(removed, ts, r))
     }
@@ -8798,9 +8822,11 @@ impl Judge {
             .find(shown)
             .map(|r| r.1.clone())
             // (b) A card it read of a forgotten window: one written before it, whose span's next
-            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it).
+            // window that is not forgotten came after its read (`READ_MARGIN_MS` before it). Not
+            // of a stretch a card's window read: it read no card of that span's window.
             .or_else(|| {
-                read.iter().find_map(|&(a, b)| {
+                let cards = read.iter().filter(|span| !p.stretches.contains(span));
+                cards.copied().find_map(|(a, b)| {
                     let ops = self.spans.get(&(device.to_owned(), a, b))?;
                     ops.iter().enumerate().find_map(|(n, (_, at, gone))| {
                         let gone = gone.as_ref().filter(|_| *at <= ts)?;
@@ -9060,7 +9086,7 @@ fn each_copy_op(home: &Path, f: &mut EachOp) -> Result<()> {
 
 /// What a window op keeps when a purge takes its text (slice 3d-2): its span and what the
 /// consumers read of it as a span, never what the curator wrote or was shown.
-const WINDOW_STRUCTURE: [&str; 16] = [
+const WINDOW_STRUCTURE: [&str; 17] = [
     "outcome",
     "reason",
     "from_seq",
@@ -9071,6 +9097,8 @@ const WINDOW_STRUCTURE: [&str; 16] = [
     "elided",
     "shortened",
     "excluded",
+    // Decision 107: the spans of the stretches its curator was sent again before its own.
+    "read",
     "goals",
     "removed",
     "refused",
@@ -12921,5 +12949,58 @@ mod tests {
         let p = crate::provenance::of(OpKind::Window, &body);
         let job = judge.job(OpKind::Window, "d", 50, &p, &Taken::new());
         assert_eq!(job.as_deref(), Some(""));
+    }
+
+    /// Decision 107 (docs/curator-conversation.md): a window op that lists `read`, the spans of
+    /// the stretches its curator was sent again before its own, showed their records as it showed
+    /// its own (rule a). A forgotten one takes its text; a masked one too when the op came before
+    /// the mask; the forget's comes first; and the forgotten records it showed (3d-4) are those of
+    /// what it read too. A record outside its span and what it read, a mask the op was written
+    /// well after, an op that lists no `read` and a skipped one take nothing.
+    #[test]
+    fn a_window_showed_the_records_of_the_stretches_it_read() {
+        use serde_json::json;
+        let forgotten = Forgotten::of([("d".to_owned(), 2)], std::iter::empty())
+            .with_masks(vec![("d".to_owned(), 4, Some(100))]);
+        let judge = Judge {
+            forgotten,
+            ..Judge::default()
+        };
+        let job = |body: &serde_json::Value, ts: i64| {
+            let p = crate::provenance::of(OpKind::Window, body);
+            judge.job(OpKind::Window, "d", ts, &p, &Taken::new())
+        };
+        let window = |read: serde_json::Value| json!({"outcome": "curated", "from_seq": 6, "to_seq": 7, "read": read});
+        assert_eq!(job(&window(json!([[1, 3]])), 50).as_deref(), Some(""));
+        assert_eq!(job(&window(json!([[4, 5]])), 50).as_deref(), Some(MASK_JOB));
+        assert_eq!(
+            job(&window(json!([[4, 5], [1, 3]])), 50).as_deref(),
+            Some("")
+        );
+        let late = 100 + SHOWN_MARGIN_MS + 1;
+        assert_eq!(job(&window(json!([[4, 5]])), late), None);
+        assert_eq!(job(&window(json!([[5, 5]])), 50), None);
+        assert_eq!(job(&window(json!([])), 50), None);
+        let none = json!({"outcome": "curated", "from_seq": 6, "to_seq": 7});
+        assert_eq!(job(&none, 50), None);
+        let skipped = json!({"outcome": "skipped", "from_seq": 6, "to_seq": 7, "read": [[1, 3]]});
+        assert_eq!(job(&skipped, 50), None);
+        let body = window(json!([[4, 5], [1, 3]]));
+        let p = crate::provenance::of(OpKind::Window, &body);
+        assert_eq!(judge.shown_records("d", 50, &p), [2]);
+    }
+
+    /// Decision 107: a window op whose text a purge takes keeps `read`, spans and no text, as it
+    /// keeps its own span and its goals: a restore's cut still reads the records it names.
+    #[test]
+    fn a_window_whose_text_is_taken_keeps_what_it_read() {
+        use serde_json::json;
+        let body = json!({"outcome": "curated", "from_seq": 6, "to_seq": 7, "read": [[1, 3]],
+            "summary": "s", "observations": [{"title": "t"}], "provider": "p"});
+        assert_eq!(
+            forgotten_window_body(&body, "j"),
+            json!({"outcome": "curated", "from_seq": 6, "to_seq": 7, "read": [[1, 3]],
+                "forgotten": "j"})
+        );
     }
 }

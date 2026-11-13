@@ -17,8 +17,12 @@ pub(crate) struct Provenance<'a> {
     /// That span's end alone, which a restore's cut reads with or without its start (#690).
     pub(crate) end: Option<i64>,
     /// The other spans of its device's records it read: a turn's (whose cards it read too), a My
-    /// Work op's.
+    /// Work op's, and a window's in a conversation, the stretches its curator was sent again before
+    /// its own (decision 107, docs/curator-conversation.md).
     pub(crate) read: Vec<(i64, i64)>,
+    /// A turn's: those of `read` that are stretches only, the span of no window whose card it
+    /// read (decision 107).
+    pub(crate) stretches: Vec<(i64, i64)>,
     /// Its device's records carried in as goals, by seq.
     pub(crate) goals: Vec<i64>,
     /// Its device's ops it read, by op seq.
@@ -62,6 +66,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
             holds: body["outcome"] == "curated",
             own: span(&body["from_seq"], &body["to_seq"]),
             end: body["to_seq"].as_i64(),
+            read: pairs(&body["read"]),
             goals: seqs(&body["goals"]),
             uids: (items(&body["candidates"]).iter())
                 .chain(items(&body["carried"]))
@@ -76,6 +81,7 @@ pub(crate) fn of(kind: OpKind, body: &Value) -> Provenance<'_> {
             own: span(&body["from"], &body["through"]),
             end: body["through"].as_i64(),
             read: pairs(&body["read"]),
+            stretches: pairs(&body["stretches"]),
             goals: seqs(&body["goals"]),
             removed,
             ..Provenance::default()
@@ -114,7 +120,7 @@ fn span(from: &Value, to: &Value) -> Option<(i64, i64)> {
     Some((from.as_i64()?, to.as_i64()?))
 }
 
-fn pairs(v: &Value) -> Vec<(i64, i64)> {
+pub(crate) fn pairs(v: &Value) -> Vec<(i64, i64)> {
     (items(v).iter())
         .filter_map(|r| Some((r[0].as_i64()?, r[1].as_i64()?)))
         .collect()
@@ -146,6 +152,8 @@ mod tests {
             (p.removed.len(), p.forgotten, p.taken_by()),
             (1, None, None)
         );
+        // Decision 107: none read before its own until an entry was sent a stretch again.
+        assert_eq!(p.read, []);
         let skipped = json!({"outcome": "skipped", "from_seq": 3});
         let p = of(OpKind::Window, &skipped);
         assert_eq!((p.holds, p.own), (false, None));
@@ -157,6 +165,17 @@ mod tests {
         assert_eq!((p.forgotten.is_some(), p.taken_by()), (true, None));
     }
 
+    /// Decision 107 (docs/curator-conversation.md): a window in a conversation lists `read`, the
+    /// spans of the stretches its curator was sent again before its own, as a turn lists the spans
+    /// it read; an item that is no pair of seqs is none.
+    #[test]
+    fn a_window_reads_the_stretches_sent_before_its_own() {
+        let body = json!({"outcome": "curated", "from_seq": 9, "to_seq": 12,
+            "read": [[1, 4], [5], "x", [5, 8]]});
+        let p = of(OpKind::Window, &body);
+        assert_eq!((p.own, &p.read[..]), (Some((9, 12)), &[(1, 4), (5, 8)][..]));
+    }
+
     #[test]
     fn a_turn_reads_its_own_records_and_the_spans_it_read() {
         let body = json!({"from": 5, "through": 8, "read": [[1, 2], [3], [4, 4]], "goals": [2],
@@ -166,6 +185,13 @@ mod tests {
             (p.holds, p.own, &p.read[..], &p.goals[..]),
             (true, Some((5, 8)), &[(1, 2), (4, 4)][..], &[2][..])
         );
+        assert_eq!(p.stretches, []);
+        // Decision 107: those of the spans it read that are stretches only; a window's are none.
+        let body = json!({"from": 5, "through": 8, "read": [[1, 2], [4, 4]],
+            "stretches": [[1, 2], [3], "x"]});
+        assert_eq!(of(OpKind::Turn, &body).stretches, [(1, 2)]);
+        let window = json!({"from_seq": 5, "to_seq": 8, "read": [[1, 2]], "stretches": [[1, 2]]});
+        assert_eq!(of(OpKind::Window, &window).stretches, []);
     }
 
     #[test]
@@ -188,6 +214,8 @@ mod tests {
         assert_eq!(of(OpKind::Window, &window).top("d"), Some(12));
         let turn = json!({"from": 5, "through": 8, "read": [[1, 20]]});
         assert_eq!(of(OpKind::Turn, &turn).top("d"), Some(20));
+        let read = json!({"from_seq": 5, "to_seq": 8, "read": [[1, 20]]});
+        assert_eq!(of(OpKind::Window, &read).top("d"), Some(20));
         let claim = json!({"evidence": [{"device": "d", "seq": 3}, {"device": "e", "seq": 50}]});
         assert_eq!(of(OpKind::Claim, &claim).top("d"), Some(3));
         assert_eq!(of(OpKind::Claim, &claim).top("f"), None);

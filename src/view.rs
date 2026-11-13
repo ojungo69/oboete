@@ -6649,6 +6649,7 @@ curate = false
             from: seq,
             through: seq,
             read: Vec::new(),
+            stretches: Vec::new(),
             goals: Vec::new(),
             removed: Vec::new(),
             fields: [

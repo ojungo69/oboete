@@ -46,8 +46,13 @@ pub struct TurnOp {
     /// The turn's first record and its reply, this device's.
     pub from: i64,
     pub through: i64,
-    /// The spans of the windows whose cards it was shown, and the goals they were shown (T7).
+    /// The spans of the windows whose cards it was shown, with the stretches those windows read
+    /// (decision 107), and the goals they were shown (T7).
     pub read: Vec<(i64, i64)>,
+    /// Those of `read` that are stretches only: the span of no window whose card it was shown.
+    /// Forget's rule for a card read of a forgotten window is not asked of them (Codex on #974).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stretches: Vec<(i64, i64)>,
     pub goals: Vec<i64>,
     /// What was removed from all of those records when it was asked, as a window op lists it.
     pub removed: Vec<Removal>,
@@ -110,6 +115,7 @@ struct Turn {
     /// The cards shown, as the prompt shows them, the newest first.
     cards: Vec<String>,
     read: Vec<(i64, i64)>,
+    stretches: Vec<(i64, i64)>,
     goals: Vec<i64>,
     removed: Vec<Removal>,
 }
@@ -155,7 +161,9 @@ impl Turn {
         let estimate = crate::budget::estimate;
         let mut room = window_tokens.saturating_sub(estimate(&prompts) + estimate(&reply));
         let (mut cards, mut read, mut goals) = (Vec::new(), Vec::new(), Vec::new());
-        for (card, span, shown) in crate::cards::of_turn(
+        // The spans of the windows whose cards it is shown: each card's first span.
+        let mut windows = Vec::new();
+        for (card, spans, shown) in crate::cards::of_turn(
             k,
             raw,
             &device,
@@ -170,8 +178,12 @@ impl Turn {
             };
             room = left;
             cards.push(text);
-            if !read.contains(&span) {
-                read.push(span);
+            // Its window's span, then the stretches that window read (decision 107).
+            windows.extend(spans.first().copied());
+            for span in spans {
+                if !read.contains(&span) {
+                    read.push(span);
+                }
             }
             for goal in shown {
                 if !goals.contains(&goal) {
@@ -189,6 +201,9 @@ impl Turn {
         }
         removed.sort();
         removed.dedup();
+        let stretches = (read.iter().copied())
+            .filter(|span| !windows.contains(span))
+            .collect();
         Ok(Turn {
             agent: r.agent.clone(),
             session: r.session.clone(),
@@ -200,6 +215,7 @@ impl Turn {
             reply,
             cards,
             read,
+            stretches,
             goals,
             removed,
         })
@@ -216,6 +232,7 @@ impl Turn {
             from: self.from,
             through: self.through,
             read: self.read.clone(),
+            stretches: self.stretches.clone(),
             goals: self.goals.clone(),
             removed: self.removed.clone(),
             fields: if skipped {
@@ -424,6 +441,7 @@ fn kept_back_op(raw: &Raw, r: &crate::raw::Labels) -> Result<TurnOp> {
         from,
         through: r.seq,
         read: Vec::new(),
+        stretches: Vec::new(),
         goals: Vec::new(),
         removed: Vec::new(),
         fields: BTreeMap::new(),
@@ -968,6 +986,7 @@ mod tests {
             reply: "Done.".into(),
             cards: Vec::new(),
             read: Vec::new(),
+            stretches: Vec::new(),
             goals: Vec::new(),
             removed: Vec::new(),
         };
@@ -2109,6 +2128,7 @@ mod tests {
             from: 1,
             through: 2,
             read: Vec::new(),
+            stretches: Vec::new(),
             goals: Vec::new(),
             removed: Vec::new(),
             fields: BTreeMap::from([("notes".to_owned(), "x".repeat(70_000))]),
@@ -2234,6 +2254,68 @@ mod tests {
         let fields = kept(&answer, &Rules::default());
         assert_eq!(fields.keys().collect::<Vec<_>>(), ["completed"]);
         assert_eq!(fields["completed"].chars().count(), 2_000);
+    }
+
+    /// T7, decision 107 (docs/curator-conversation.md): a card was built on the stretches its
+    /// window read too (its op's `read`), so a summary shown the card read them: its op lists
+    /// their spans with the window's, names them as stretches (it read no card of theirs), and a
+    /// removal from one of their records hides it.
+    #[test]
+    fn a_summary_rests_on_the_stretches_its_cards_window_read() {
+        let (kind, mut later) = window(3, 5, "Built it.", &[]);
+        later["read"] = json!([[1, 2]]);
+        let home = home(
+            &[
+                said("s0", "prompt", "Another session's."),
+                said("s0", "reply", "Done."),
+                said("s1", "prompt", "Earlier."),
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+            ],
+            &[(kind, later)],
+        );
+        run(home.path(), &completed("Done."));
+        run(home.path(), &completed("Built."));
+        let ops = turn_ops(home.path());
+        let op = ops.iter().find(|op| op.through == 5).unwrap();
+        assert_eq!((op.from, &op.read), (3, &vec![(3, 5), (1, 2)]));
+        assert_eq!(op.stretches, [(1, 2)]);
+        // The other session's summary and this one's.
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 2);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Record { device, seq: 2 })
+            .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 0);
+    }
+
+    /// Decision 107 (Codex on #974): a span is a stretch only when the turn was shown no card
+    /// of its window. A turn shown the cards of two windows, the later of which read the
+    /// earlier's stretch, names no stretch: forget's rule for a card read of a forgotten window
+    /// holds for both.
+    #[test]
+    fn a_span_whose_windows_card_was_shown_is_no_stretch() {
+        let (kind, mut later) = window(5, 5, "Built it.", &[]);
+        later["read"] = json!([[3, 4]]);
+        let home = home(
+            &[
+                said("s0", "prompt", "Another session's."),
+                said("s0", "reply", "Done."),
+                said("s1", "prompt", "Plan the parser."),
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+            ],
+            &[window(3, 4, "Planned it.", &[]), (kind, later)],
+        );
+        run(home.path(), &completed("Done."));
+        run(home.path(), &completed("Built."));
+        let ops = turn_ops(home.path());
+        let op = ops.iter().find(|op| op.through == 5).unwrap();
+        let mut read = op.read.clone();
+        read.sort();
+        assert_eq!((read, &op.stretches), (vec![(3, 4), (5, 5)], &vec![]));
     }
 
     /// Test 6 (T7): a removal from the turn's records, from a record of a window whose card it

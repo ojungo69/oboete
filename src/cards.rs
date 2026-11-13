@@ -501,12 +501,16 @@ pub(crate) const COLUMNS: &str = "device, op_seq, n, ts, agent, session, repo, t
                        removed, goals";
 
 /// K4: whether a removal its op does not list took from a record the curator of a row of
-/// `COLUMNS` was shown: its window and its goals.
+/// `COLUMNS` was shown: its window, the stretches that window read, as its op lists them
+/// (decision 107, `Raw::window_read`), and its goals.
 pub(crate) fn taken_row(r: &rusqlite::Row, raw: &Raw) -> Result<bool> {
     let device: String = r.get(0)?;
     let listed: Vec<Removal> = serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default();
     let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
     let mut removed = raw.removed_in(&device, r.get(15)?, r.get(16)?, None)?;
+    for (from, to) in raw.window_read(&device, r.get(1)?)? {
+        removed.extend(raw.removed_in(&device, from, to, None)?);
+    }
     for goal in goals {
         removed.extend(raw.removed_in(&device, goal, goal, None)?);
     }
@@ -723,12 +727,12 @@ pub fn around(
 }
 
 /// A card with the span of its window and the goals that window was shown.
-pub type TurnCard = (Card, (i64, i64), Vec<i64>);
+pub type TurnCard = (Card, Vec<(i64, i64)>, Vec<i64>);
 
 /// The cards a turn's summary may be shown (docs/summaries.md T2): its session's on `device`, of
 /// the windows that hold any of the records `from` to `through`, the newest first, at most
-/// `limit`; each with the span of its window and the goals it was shown, which a summary shown
-/// the card was built on too (T7).
+/// `limit`; each with the span of its window, then the stretches that window read (decision
+/// 107), and the goals it was shown, which a summary shown the card was built on too (T7).
 pub fn of_turn(
     k: &Connection,
     raw: &Raw,
@@ -761,7 +765,9 @@ pub fn of_turn(
             continue;
         };
         let goals: Vec<i64> = serde_json::from_str(&r.get::<_, String>(18)?).unwrap_or_default();
-        out.push((card, span, goals));
+        let mut spans = vec![span];
+        spans.extend(raw.window_read(device, r.get(1)?)?);
+        out.push((card, spans, goals));
     }
     Ok(out)
 }
