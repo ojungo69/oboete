@@ -210,22 +210,7 @@ impl Rules {
         } else if extra.is_empty() && allow.is_empty() {
             bundled_version().to_owned()
         } else {
-            // Canonical: the order of rules, keywords or allowlist entries in the file does not
-            // change the version; anything that changes what is masked does (Task 7 rescans).
-            let mut rules: Vec<String> = r
-                .extra_rules
-                .iter()
-                .map(|x| {
-                    let mut x = x.clone();
-                    x.keywords.sort();
-                    serde_json::to_string(&x).expect("a rule serializes")
-                })
-                .collect();
-            rules.sort();
-            let mut kept: Vec<&String> = allow.iter().collect();
-            kept.sort();
-            let user = serde_json::json!({"rules": rules, "allowlist": kept}).to_string();
-            short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &user].concat())
+            version_of(MATCHING, Some(&canonical(r, &allow)))
         };
         Ok(Self {
             extra,
@@ -240,8 +225,9 @@ impl Rules {
         Self::new(&crate::config::load_capture(home)?.redaction)
     }
 
-    /// The version a finding came from (the ledger's `ruleset`): the bundled files' hash when
-    /// the user adds nothing, so a store upgraded without settings keeps its version.
+    /// The version a finding came from (the ledger's `ruleset`): a hash of the bundled files and
+    /// of the matching code's number (`MATCHING`) when the user adds nothing, so a store upgraded
+    /// without settings, by a build with the same matching code, keeps its version.
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -994,10 +980,54 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
     })
 }
 
-/// The bundled rules' version: a hash of their files.
+/// The matching code's own number, part of every rules version (#538): raised with each change
+/// to what this file's code finds or passes over in some text, so that a store scanned before
+/// the change is scanned again once. A change that leaves it as it was is never applied to what
+/// is stored already (`the_matching_code_is_the_one_its_number_names` fails on any edit of the
+/// file before its tests, and on a new version of a crate that matches, to ask). The first is
+/// "1": before it the version had no such part.
+const MATCHING: &str = "1";
+
+/// The user's rules and kept values in one form: the order of rules, keywords or allowlist
+/// entries in the file does not change it; anything that changes what is masked does (Task 7
+/// rescans).
+fn canonical(r: &crate::config::Redaction, allow: &HashSet<String>) -> String {
+    let mut rules: Vec<String> = r
+        .extra_rules
+        .iter()
+        .map(|x| {
+            let mut x = x.clone();
+            x.keywords.sort();
+            serde_json::to_string(&x).expect("a rule serializes")
+        })
+        .collect();
+    rules.sort();
+    let mut kept: Vec<&String> = allow.iter().collect();
+    kept.sort();
+    serde_json::json!({"rules": rules, "allowlist": kept}).to_string()
+}
+
+/// The version of the bundled rules as the matching code `matching` applies them, with the
+/// user's rules and kept values (`canonical`) when there are any.
+fn version_of(matching: &str, user: Option<&str>) -> String {
+    let mut parts = vec![matching, "\0", RULES_TOML, EXTRA_TOML];
+    if let Some(user) = user {
+        parts.extend(["\0", user]);
+    }
+    short_hash(&parts.concat())
+}
+
+/// The bundled rules' version: a hash of their files and of the matching code's number.
 fn bundled_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| short_hash(&[RULES_TOML, EXTRA_TOML].concat()))
+    VERSION.get_or_init(|| version_of(MATCHING, None))
+}
+
+/// The bundled rules' version as it was before the matching code had a number (#538): what a
+/// store last scanned by such a build holds.
+#[cfg(test)]
+pub(crate) fn version_before_matching() -> String {
+    short_hash(&[RULES_TOML, EXTRA_TOML].concat())
 }
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets; a value the
@@ -3844,6 +3874,18 @@ extra_rules = [
             let text = format!("{{\"db_password\": \"{value}\"}}");
             assert_eq!(scan(&text, &rules).0, text);
         }
+        // #545's own examples.
+        for (head, value, tail) in [
+            ("DB_PASSWORD=", "false".to_owned() + "hood-2024!", ""),
+            ("TOKEN=", "true".to_owned() + "blue-12345678", ""),
+            ("secret: \"", "abc".to_owned() + "null", "\""),
+        ] {
+            let (masked, _) = scan(&format!("{head}{value}{tail}"), &rules);
+            assert_eq!(masked, format!("{head}[REDACTED]{tail}"));
+        }
+        for text in ["secret = true", "token: null", "\"password\": false"] {
+            assert_eq!(scan(text, &rules).0, text);
+        }
     }
 
     #[test]
@@ -3892,6 +3934,92 @@ extra_rules = [
         );
         let (masked, _) = scan("proj: yk-2222", &rules);
         assert!(!masked.contains("2222"), "{masked}");
+    }
+
+    /// #538: a change to how the rules are applied is a change of version, as a change to the
+    /// rules is, so a store scanned before it is scanned again (the rescan consumer compares
+    /// versions). With the user's rules too; off is off whatever the code.
+    #[test]
+    fn the_version_names_the_matching_code() {
+        assert_eq!(Rules::default().version(), version_of(MATCHING, None));
+        assert_ne!(version_of("2", None), version_of("3", None));
+        let toml = "[redaction]\nextra_rules = [{ id = \"a\", regex = 'a-[0-9]{4}' }]";
+        let own = canonical(
+            &crate::config::parse_capture(Some(toml)).unwrap().redaction,
+            &HashSet::new(),
+        );
+        assert!(own.contains("a-[0-9]{4}"), "{own}");
+        assert_eq!(
+            user(toml).unwrap().version(),
+            version_of(MATCHING, Some(&own))
+        );
+        assert_ne!(version_of("2", Some(&own)), version_of("3", Some(&own)));
+        // Before the number was part of it.
+        assert_ne!(
+            user(toml).unwrap().version(),
+            short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &own].concat())
+        );
+        assert_ne!(
+            Rules::default().version(),
+            short_hash(&[RULES_TOML, EXTRA_TOML].concat())
+        );
+        let off = user("[redaction]\nenabled = false").unwrap();
+        assert_eq!(off.version(), OFF);
+    }
+
+    /// #538: `MATCHING` numbers this file's code, and nothing else ties the two: an edit that
+    /// leaves the number as it was is never applied to what a store holds already. So this fails
+    /// on any edit of the file before its tests, as it is written, and on a new version of a
+    /// crate that matches: the rules are loaded, compiled, bounded and applied all over the file
+    /// (OCR on #981: two marked parts of it left out the loading of the rules, the compiling of a
+    /// pattern and the limits; a hash of its lines without their comments would not see an edit
+    /// inside a string of several lines). Raise `MATCHING` when the change makes some rule find
+    /// or pass over something else in some text (every store then rescans once); either way, set
+    /// the hash here to the one the failure shows.
+    #[test]
+    fn the_matching_code_is_the_one_its_number_names() {
+        let source = include_str!("redact.rs").replace("\r\n", "\n");
+        let (code, tests) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the code, then the tests");
+        assert!(code.contains("fn spans_in(") && code.contains("fn bundled("));
+        // Nothing but test modules follows: an item at the file's top level there would be code
+        // this does not hash.
+        let lines: Vec<&str> = tests.lines().collect();
+        for pair in lines.windows(2) {
+            let item = [
+                "fn ", "pub ", "pub(", "const ", "static ", "impl ", "struct ", "enum ", "type ",
+                "use ", "mod ",
+            ]
+            .iter()
+            .any(|word| pair[1].starts_with(word));
+            assert!(
+                !item || pair[0] == "#[cfg(test)]",
+                "after the tests: {}",
+                pair[1]
+            );
+        }
+        // The crates that match, at the versions the lock file holds.
+        let lock = include_str!("../Cargo.lock").replace("\r\n", "\n");
+        let crates: Vec<String> = lock
+            .split("[[package]]\n")
+            .filter_map(|package| {
+                let mut lines = package.lines();
+                let (name, version) = (lines.next()?, lines.next()?);
+                ["regex", "regex-automata", "regex-syntax", "aho-corasick"]
+                    .iter()
+                    .any(|matcher| name == format!("name = \"{matcher}\""))
+                    .then(|| format!("{name} {version}"))
+            })
+            .collect();
+        assert!(crates.len() >= 4, "{crates:?}");
+        assert_eq!(
+            (
+                MATCHING,
+                short_hash(&[code, &crates.join("\n")].concat()).as_str()
+            ),
+            ("1", "8ceeb9fbeab75719")
+        );
     }
 
     #[test]

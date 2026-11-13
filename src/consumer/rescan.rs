@@ -109,22 +109,22 @@ impl Consumer for Rescan {
                     .map(move |(start, end)| (seq, start, end))
             })
             .collect();
-        // A range a tombstone of the record masks already reads as stars (`Raw::after`), which a
+        // A range the record's tombstones mask already reads as stars (`Raw::after`), which a
         // rule with no entropy gate takes for a password: no second tombstone (Codex on #535).
         let found: Vec<_> = if found.is_empty() {
             found
         } else {
             let masks = raw.masks()?;
+            // A record's union is made once, for every range found in it.
+            let mut unions = std::collections::HashMap::new();
             found
                 .into_iter()
                 .filter(|&(seq, start, end)| {
-                    !masks
-                        .get(&(device.to_owned(), seq))
-                        .is_some_and(|(_, ranges)| {
-                            ranges.iter().any(|&(offset, length)| {
-                                offset as usize <= start && end <= (offset + length) as usize
-                            })
-                        })
+                    let Some((_, ranges)) = masks.get(&(device.to_owned(), seq)) else {
+                        return true;
+                    };
+                    let runs = unions.entry(seq).or_insert_with(|| union(ranges));
+                    !covered(runs, start, end)
                 })
                 .collect()
         };
@@ -186,6 +186,33 @@ impl Consumer for Rescan {
         k.execute("DELETE FROM rescan WHERE device = ?1", [device])?;
         Ok(())
     }
+}
+
+/// A record's tombstoned ranges (offset, length) as their union: runs in order, those that touch
+/// or overlap made one, so two masks next to each other are one run, as they read (#539). A range
+/// this build cannot address (a damaged row, a 32-bit build) is in none.
+fn union(ranges: &[(i64, i64)]) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter_map(|&(offset, length)| {
+            let from = usize::try_from(offset).ok()?;
+            Some((from, from.checked_add(usize::try_from(length).ok()?)?))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in ranges {
+        match runs.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => runs.push((from, to)),
+        }
+    }
+    runs
+}
+
+/// Whether one of `runs` (a record's `union`) holds all of `start..end`.
+fn covered(runs: &[(usize, usize)], start: usize, end: usize) -> bool {
+    runs.iter().any(|&(from, to)| from <= start && end <= to)
 }
 
 #[cfg(test)]
@@ -488,6 +515,124 @@ mod tests {
         );
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 2); // once
+    }
+
+    /// #539: `covered` is by the tombstones between them, in any order, and by nothing less.
+    #[test]
+    fn covered_is_by_the_union_of_the_ranges_and_no_gap() {
+        // (offset, length): 10..16 and 16..22 touch; 30..40 holds 32..34; 50..53 and 54..60 leave 53.
+        let ranges = [(16, 6), (54, 6), (32, 2), (10, 6), (30, 10), (50, 3)];
+        for (start, end, want) in [
+            (10, 22, true),  // across the two that touch
+            (12, 20, true),  // inside them
+            (10, 23, false), // one byte past them
+            (9, 16, false),  // one byte before the first
+            (30, 40, true),  // the one that holds another
+            (33, 40, true),
+            (50, 60, false), // the gap of one byte
+            (50, 53, true),
+            (54, 60, true),
+            (22, 30, false), // between tombstones
+            (0, 5, false),   // before any
+            (70, 80, false), // after all
+        ] {
+            assert_eq!(covered(&union(&ranges), start, end), want, "{start}..{end}");
+        }
+        assert!(!covered(&union(&[]), 0, 1));
+        // A range that is no range covers nothing, and takes nothing from the others.
+        assert!(covered(
+            &union(&[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)]),
+            14,
+            16
+        ));
+        assert!(!covered(
+            &union(&[(-4, 9), (14, 2), (16, -1), (i64::MAX, i64::MAX)]),
+            0,
+            5
+        ));
+        // The two that overlap, as a wider range over an earlier one is stored (#932).
+        assert!(covered(&union(&[(5, 10), (0, 20)]), 0, 20));
+        assert!(!covered(&union(&[(5, 10), (0, 20)]), 0, 21));
+        // The union itself: in order, the touching and the overlapping ones made one.
+        assert_eq!(union(&ranges), [(10, 22), (30, 40), (50, 53), (54, 60)]);
+    }
+
+    /// #539: two masks next to each other read as one run of stars to a rule added later. The
+    /// range it finds is covered by the two tombstones between them, so it gets none of its own;
+    /// one that reaches past them does.
+    #[test]
+    fn a_range_two_adjacent_tombstones_cover_is_not_tombstoned_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let event = r#"{"prompt":"id aaaaaabbbbbb end, id ccccccdddddd-7 end"}"#;
+        let seq = raw.append(&raw::test_event(event)).unwrap();
+        let device = raw.device().to_owned();
+        for half in ["aaaaaa", "bbbbbb", "cccccc", "dddddd"] {
+            raw.append_tombstone(Target::Range {
+                device: device.clone(),
+                seq,
+                offset: event.find(half).unwrap() as i64,
+                length: 6,
+            })
+            .unwrap();
+        }
+        assert!(body(&raw, seq).contains("id ************ end, id ************-7 end"));
+        // The same text with one tombstone, elsewhere: each record's ranges are held against
+        // its own tombstones.
+        let other = raw.append(&raw::test_event(event)).unwrap();
+        raw.append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: other,
+            offset: event.find("prompt").unwrap() as i64,
+            length: 6,
+        })
+        .unwrap();
+        let rule = r#"{ id = "id", regex = 'id (\S+) end' }"#;
+        std::fs::write(
+            p.join("config.toml"),
+            format!("[redaction]\nextra_rules = [{rule}]\n"),
+        )
+        .unwrap();
+        worker::run_once(p).unwrap();
+        // The second value reaches two characters past its two tombstones: one more, for it.
+        // The other record gets one for each value.
+        assert_eq!(tombstones(&raw), 8);
+        assert!(body(&raw, seq).contains("id ************ end, id ************** end"));
+        assert!(body(&raw, other).contains("id ************ end, id ************** end"));
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 8);
+    }
+
+    /// #538: a store last scanned by a build from before the matching code had a number holds
+    /// that build's version, the rule files' hash. The same rules read by this build are another
+    /// version, so the store is scanned again from its first record, and a value the older
+    /// matching left is found. (Here it is left by rules that were off: there is no older
+    /// matching to run.)
+    #[test]
+    fn a_store_scanned_before_the_matching_code_had_a_number_is_scanned_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        std::fs::write(p.join("config.toml"), "[redaction]\nenabled = false\n").unwrap();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        let event = format!(r#"{{"prompt":"curl -u admin:{pw} https://h.test"}}"#);
+        let seq = raw.append(&raw::test_event(&event)).unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 0);
+        // The rules on again, and the row as the build before left it, at this record.
+        std::fs::remove_file(p.join("config.toml")).unwrap();
+        let k = crate::knowledge::open(p).unwrap();
+        let before = crate::redact::version_before_matching();
+        assert_eq!(
+            k.execute("UPDATE rescan SET version = ?1", [&before])
+                .unwrap(),
+            1
+        );
+        drop(k);
+        worker::run_once(p).unwrap();
+        assert_eq!(tombstones(&raw), 1);
+        assert!(!body(&raw, seq).contains(&pw), "{}", body(&raw, seq));
     }
 
     #[test]
