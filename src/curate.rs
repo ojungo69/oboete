@@ -4591,6 +4591,9 @@ pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
 /// A draft with its evidence and its line's index in `w.lines`.
 type Located = (Draft, crate::claims::Evidence, usize);
 
+/// The longest quote, in bytes, an unanchored answer's count looks for in the other lines.
+const LOOKED_FOR: usize = 2_000;
+
 /// The summary, each draft whose quote is found in the window with its evidence and line, and
 /// the ids of the drafts whose quote is not (not claims: the window op counts them).
 fn located(
@@ -4599,7 +4602,7 @@ fn located(
 ) -> std::result::Result<(String, Vec<Located>, Vec<String>), AnswerFailure> {
     let (summary, drafts) = parse(answer, most_claims(w))?;
     let any = !drafts.is_empty();
-    let (mut found, mut lost) = (Vec::new(), Vec::new());
+    let (mut found, mut lost, mut missed) = (Vec::new(), Vec::new(), Vec::new());
     for mut d in drafts {
         match line_index(w, &d.line).zip(locate(w, &d.line, &d.quote)) {
             // As the line shows it, which the gates read its sentence from.
@@ -4607,10 +4610,34 @@ fn located(
                 d.quote = e.quote.clone();
                 found.push((d, e, i));
             }
-            None => lost.push(d.id),
+            None => {
+                lost.push(d.id);
+                missed.push((d.line, d.quote));
+            }
         }
     }
     if any && found.is_empty() {
+        // #368: what the claims missed, in numbers, for the call's detail. A provider wrote the
+        // quotes, so the search for them is a plain one with a bound (Codex on #968): each quote
+        // to the letter, in the lines other than the one its claim named, as the window shows
+        // them, and no quote longer than `LOOKED_FOR`. `locate` would build a matcher for each
+        // quote and line.
+        let named: Vec<Option<usize>> = (missed.iter())
+            .map(|(line, _)| line_index(w, line))
+            .collect();
+        let no_line = named.iter().filter(|at| at.is_none()).count();
+        let elsewhere = (missed.iter().zip(&named))
+            .filter(|((_, quote), named)| {
+                let other = |(at, l): (usize, &Line)| Some(at) != **named && l.text.contains(quote);
+                !quote.is_empty()
+                    && quote.len() <= LOOKED_FOR
+                    && w.lines.iter().enumerate().any(other)
+            })
+            .count();
+        crate::provider::note_refusal(format!(
+            "claims: {}, no such line: {no_line}, quote in another line: {elsewhere}",
+            missed.len()
+        ));
         return Err(AnswerFailure::Unanchored);
     }
     Ok((summary, found, lost))
@@ -5975,6 +6002,75 @@ mod tests {
         let (_, found, lost) = located(&w, &answer).unwrap();
         assert!(lost.is_empty());
         assert_eq!(found[0].0.quote, "tabs\nin every  file");
+    }
+
+    /// #368: an answer refused as unanchored says what its claims missed, in numbers and never in
+    /// text: how many it had, how many named a line the window has not, and how many quoted what
+    /// another line of the window holds. An answer with a claim that anchors leaves no note.
+    #[test]
+    fn an_unanchored_answer_says_in_numbers_what_its_claims_missed() {
+        let (_h, mut raw, dev) = store();
+        raw.append(&prompt("Use tabs in every file of the importer."))
+            .unwrap();
+        raw.append(&prompt("Keep the cache for one hour.")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let claim = |id: &str, line: &str, quote: &str| {
+            json!({"id": id, "kind": "decision", "status": "decided", "speaker": "user",
+                "scope": "repo", "body": "b", "quote": quote, "line": line, "supersedes": []})
+        };
+        let missed = json!({"claims": [
+            claim("c1", "L9", "Use tabs in every file"),
+            claim("c2", "L1", "Keep the cache for one hour"),
+            claim("c3", "L2", "said nowhere in the window"),
+        ], "summary": "s"});
+        crate::provider::refusal_note();
+        assert_eq!(check(&w, &missed), Some("unanchored"));
+        assert_eq!(
+            crate::provider::refusal_note().as_deref(),
+            Some("claims: 3, no such line: 1, quote in another line: 2")
+        );
+        let anchored = json!({"claims": [
+            claim("c1", "L1", "Use tabs in every file"),
+            claim("c2", "L1", "Keep the cache for one hour"),
+        ], "summary": "s"});
+        assert_eq!(check(&w, &anchored), None);
+        assert_eq!(crate::provider::refusal_note(), None);
+    }
+
+    /// Codex on #968: a provider wrote the quotes an unanchored answer's count looks for, so the
+    /// search is a plain one with a bound. A quote longer than `LOOKED_FOR` is not looked for,
+    /// and a quote its own line shows without holding it as evidence (the line's head is no part
+    /// of the event) is in no other line.
+    #[test]
+    fn an_unanchored_answers_count_looks_for_short_quotes_in_the_other_lines() {
+        let (_h, mut raw, dev) = store();
+        let long = "tabs ".repeat(LOOKED_FOR / 5 + 1);
+        let long = long.trim_end();
+        raw.append(&prompt(long)).unwrap();
+        raw.append(&prompt("Keep the cache for one hour.")).unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let note = |quote: &str| {
+            let claim = json!({"id": "c1", "kind": "decision", "status": "decided",
+                "speaker": "user", "scope": "repo", "body": "b", "quote": quote, "line": "L2",
+                "supersedes": []});
+            crate::provider::refusal_note();
+            let answer = json!({"claims": [claim], "summary": "s"});
+            assert_eq!(check(&w, &answer), Some("unanchored"));
+            crate::provider::refusal_note().unwrap()
+        };
+        let counts = |elsewhere: usize| {
+            format!("claims: 1, no such line: 0, quote in another line: {elsewhere}")
+        };
+        // The first line's words, quoted from the second: as long as the bound, and longer.
+        assert_eq!(note(&long[..LOOKED_FOR]), counts(1));
+        assert!(long.len() > LOOKED_FOR);
+        assert_eq!(note(long), counts(0));
+        // The second line as the window shows it, its head included.
+        assert_eq!(note(&w.lines[1].text), counts(0));
     }
 
     #[test]
