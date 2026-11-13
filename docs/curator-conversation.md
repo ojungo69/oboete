@@ -134,8 +134,8 @@ read through the stretch before it.
 
 A conversation, and what a call read, are kept by an entry's name: an entry whose name another
 entry of the chain has keeps none. And a 413 for a turn that went on says nothing of the entries
-after it, which are sent the window alone: one with the same ceiling is still asked, where a 413
-for any other prompt skips it.
+after it, which are sent another prompt (the window alone, or with their own earlier stretches):
+one with the same ceiling is still asked, where a 413 for any other prompt skips it.
 
 An answer joins nothing: the known claims already carry what was kept, and an answer sent again
 would be written at 1.25 times.

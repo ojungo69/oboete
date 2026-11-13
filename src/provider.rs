@@ -1681,7 +1681,7 @@ impl<'a> Chain<'a> {
                     });
                 }
                 Err(e) => {
-                    // Not after a turn that went on: its peers are sent the window alone.
+                    // Not after a turn that went on: its peers are sent another prompt.
                     if e.status == Some(413) && planned.as_ref().is_none_or(|t| t.earlier == 0) {
                         ceiling_hit.extend(p.limits().max_request_tokens);
                     }
@@ -8849,9 +8849,9 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
     }
 
     /// Decision 107 (the security review): a 413 for a turn that went on says nothing of the
-    /// entries after it, which are sent the window alone: one with the same ceiling is still
-    /// asked. A 413 for a turn that started again is of the prompt they would get, and they are
-    /// skipped as before.
+    /// entries after it, which are sent another prompt: one with the same ceiling is still
+    /// asked. A 413 for a turn that started again is of the window alone, and they are skipped
+    /// as before.
     #[test]
     fn a_413_for_a_turn_that_went_on_skips_no_other_entry() {
         let home = tempfile::tempdir().unwrap();
