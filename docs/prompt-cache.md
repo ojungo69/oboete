@@ -91,8 +91,43 @@ oboete keeps one call per window.
 Decision 107 (2026-11-13) gives this up: with long tool outputs sent short, the windows of an
 entry sent as one conversation cost about what the calls cost now, and 85 to 90% of the prompt is
 read from the cache. The measurement and the design are in
-[curator-conversation.md](curator-conversation.md); until it is built, what this page says is
-what runs.
+[curator-conversation.md](curator-conversation.md). It is off unless `[summary] conversation =
+true` asks for it, and what this page says above is what runs without it.
+
+## With `[summary] conversation = true`: what is sent again, and where it is held
+
+An entry of Anthropic's Messages API that declares a ceiling (`limits.max_request_tokens`) and
+marks no cache of its own keeps a conversation for the curator's windows. Each of its calls then
+holds, after the instructions, the lines of the windows it was sent before in that conversation
+(their stretches, the oldest first), this window's lines, and the tail (the claims already known).
+So:
+
+- **A window's lines leave the machine more than once.** They go to that same entry again with
+  each later call of the conversation, the same bytes as the first time, until it starts again:
+  when the egress gate's state changed (a rule, a forget, a mask, an exclusion), after about
+  four and a half minutes without a call, before the prompt passes nine tenths of the entry's
+  ceiling, after a failed call, and with each run of the worker. No other entry is sent them:
+  the CLIs and the OpenAI-compatible entries get a window's lines once, as before.
+- **The provider holds them in its prompt cache.** The request marks the instructions and the
+  newest stretch, each for five minutes from the start of the last request that wrote or read
+  the entry. Without the setting oboete marks the instructions alone, and a window's lines are
+  held in no cache, unless the entry marks a cache of its own in `extra`: a marker at the
+  request's top level writes the whole prompt, the window's lines with it (point 3 above), with
+  the setting or without it.
+- **What forget cannot do is the same, over more calls.** A record forgotten or masked is not sent
+  again: its change starts every conversation again, and the gate is asked before each call. What
+  was already sent stays sent (README, "Forget"), and the provider's cache lets go of it within
+  five minutes of the conversation's last call.
+- **What it costs.** A token sent again is read at a tenth of the input price, and a new one is
+  written at 1.25 times. A call that went on and read less than half of what it was sent again
+  is counted a miss; after two in a row the entry keeps no conversation for an hour.
+
+```sh
+# A turn's calls: how many stretches went before its own, and what was read from the cache.
+sqlite3 -readonly ~/.oboete/providers.db "SELECT datetime(ts / 1000, 'unixepoch'), earlier,
+  prompt_tokens, cached_tokens, outcome FROM provider_calls
+  WHERE role = 'curator' AND earlier IS NOT NULL ORDER BY id DESC LIMIT 20"
+```
 
 ## Measuring
 

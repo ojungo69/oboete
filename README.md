@@ -193,7 +193,10 @@ All agents write to the same store, so what Codex did yesterday is there for Cla
 - **You choose what leaves.** If you turn on summaries or an online embedder, text is masked again
   with your current rules before it is sent. `oboete exclude` keeps a repository's sessions from
   every AI from then on; what was sent before stays sent. Masking itself can be switched off in
-  Settings.
+  Settings. With `[summary] conversation = true` in `config.toml` (off unless you set it), a
+  summarizing AI on Anthropic's API is sent the same lines again with each later call of a
+  conversation, and keeps them in its prompt cache until five minutes after the last one
+  ([docs/prompt-cache.md](docs/prompt-cache.md)).
 - **No encryption at rest.** The files are as private as your disk: use your operating system's
   disk encryption.
 

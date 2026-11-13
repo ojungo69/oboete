@@ -117,14 +117,25 @@ models. It is sent
 where `*` is a breakpoint, stretches 1 to n-1 are what this entry was sent in its calls before,
 each a block of its own, and stretch n is this window. The call after it reads through stretch n
 and writes stretch n+1: its breakpoint finds the entry one block back (the lookback is 20
-blocks). Two of a request's four breakpoints are used; an entry whose `extra` leaves fewer than two
-does not talk. Every other entry (the CLIs, the OpenAI-compatible ones) gets
+blocks). Two of a request's four breakpoints are used. An entry whose `extra` marks a cache of its
+own does not talk: ours would follow its marker, and the API refuses a longer cache after a
+shorter one. Nor does one that declares no `max_request_tokens`: a conversation needs a size to
+start again at. Every other entry (the CLIs, the OpenAI-compatible ones) gets
 `[instructions][stretch n][tail n]`.
 
 The state is per entry: its stretches, when its last call started, how many tokens its last
-answer said that prompt was, and its key (below). The worker's loop owns it, in memory only: a
-worker that left starts again, and by then the entry's cache has lapsed. `oboete recurate` and
-every other role's calls are as now.
+answer said that prompt was, and its key (below). The worker's curation phase owns it, in memory
+only, for one run of the worker under its lock: a worker that left starts again, and by then the
+entry's cache has lapsed. `oboete recurate` and every other role's calls are as now.
+
+A window sent again (after an answer its check refused, or a hold, the same or grown by then)
+takes its own earlier stretch's place: no window's lines are in a prompt twice, and the cache is
+read through the stretch before it.
+
+A conversation, and what a call read, are kept by an entry's name: an entry whose name another
+entry of the chain has keeps none. And a 413 for a turn that went on says nothing of the entries
+after it, which are sent another prompt (the window alone, or with their own earlier stretches):
+one with the same ceiling is still asked, where a 413 for any other prompt skips it.
 
 An answer joins nothing: the known claims already carry what was kept, and an answer sent again
 would be written at 1.25 times.
@@ -136,16 +147,43 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
 - its key differs from this window's (the gate, below);
 - the entry's last call started longer ago than its cache keeps an entry, less a margin: the
   Messages API measures five minutes from a request's start, and a read renews it;
-- the prompt would pass the entry's `max_request_tokens` less a tenth. This is counted in the
-  entry's own tokens, not in estimates: the last answer's `prompt_tokens`, less the last tail,
-  plus this stretch and tail, each estimate times `budget::factor` (about 1.5 on this PC). Haiku
-  5.5's price is five times past 100,000 tokens, tokens read from the cache count toward it, and
-  a request past it pays the higher price for all of its tokens;
+- the prompt would pass the entry's `max_request_tokens` less a tenth, or what admission lets
+  through with the answer's bound (`budget::admit_with_history`), whichever is less; counted as
+  below, and as admission counts it too (the whole estimate at the entry's factor, the median of
+  its last 50 answers), so that no turn is refused as too big where its window alone would go.
+  What goes
+  again is counted in the entry's own tokens: the last answer's `prompt_tokens`, less the
+  estimates of the last tail and of a stretch this window's takes the place of; only this stretch
+  and tail are counted from their estimate (all of it, when that answer reported no tokens). An
+  estimate is taken for more tokens than the entry counted of late: the most its tokens were to
+  its estimates over its last 50 answers, and a third over that, or 2.6 until it has answered
+  five times. The budget counts with the median of those ratios, but a window is not the average
+  one: over 20,137 answers of the Messages entry on this PC the median was 1.71, the 90th
+  percentile 1.84, the 99th 1.92 and the most 2.55. A window that counts further over its
+  estimate than that can still pass the ceiling, and pays the higher price once. Haiku 5.5's
+  price is five times past 100,000 tokens, tokens read from the cache count toward it, and a
+  request past it pays the higher price for all of its tokens;
+- its op would have more removals to list than an op can. A window's op lists what was already
+  removed from all its curator was shown (docs/cards.md K4), up to 500, and an op that cannot
+  list them shows no card once any of them is found: what was removed from the window's own
+  records and its goals, with what each earlier window's op listed so, stays within that;
+- its op would list more than 64 spans as read. Windows that follow each other are one span,
+  so that many means records between them went to no window of the conversation (imported ones,
+  covered without a call); an op's bytes are capped, and `read` is never cut from it;
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 
 After a call that was sent and answered, accepted by `check` or not, its stretch joins the
 conversation. A restart only loses the cache.
+
+**A cache that does not answer.** A conversation costs less than separate calls only while what
+is sent again is read from the cache: a call that went on and read less than half of it wrote all
+of it instead, at 1.25 times. Two such calls in a row, and the entry keeps no conversation for an
+hour: its calls are the prompt with its one stretch, as before. What is sent again is taken at
+its least for this (the last tail, and a stretch replaced, at the high ratio above), so a window
+sent again is no miss for the stretch it replaced, however large. `provider_calls.earlier` (how
+many stretches went before a call's own; NULL for a call that was no turn) beside `cached_tokens`
+shows each such call.
 
 ### What a window was shown
 
@@ -154,15 +192,17 @@ A window in a conversation was shown the stretches before it. Its op says so, as
 ([provenance.md](provenance.md) P1; `Provenance` in src/raw.rs) takes a window op's span and its
 goals as the records it was shown; it takes `read` too. So one forgotten or masked record takes the
 summary, the cards and the claims of its own window and of every later window of that conversation
-(10 to 17 windows at the median on this PC's calls), and they are curated again. That is the price
-of a larger restart size, and a reason to lower it if forgets or masks come often.
+(10 to 17 windows at the median on this PC's calls), and they are queued to be curated again, as
+a forgotten record's own window is (`oboete recurate`). That is the price of a larger restart size,
+and a reason to lower it if forgets or masks come often.
 
 Until a forget's purge has rewritten them, what is read is held back as a card of the forgotten
 record's own window is: the stretches a window read are records its curator was shown, as its
 goals are, so a removal from one that its op does not list hides its cards (docs/cards.md K4), and
 the summaries of the turns that read those cards (docs/summaries.md T7: a turn op lists the
 stretches with the windows' spans). The op lists what was already removed from the stretches when
-its window was cut, with what was removed from its own records.
+its window was cut, with what was removed from its own records, each removal once (a record a
+window begins inside can end the stretch before it, and a goal can lie in a stretch).
 
 ### The gate
 
@@ -170,19 +210,39 @@ Everything that leaves the machine passes the egress gate (spec 3.3, 5.5, 6.4; m
 rule 12), and a stretch sent again passes it again:
 
 - The key is made of what the gate holds for a window: the rules' version, `Reading` (the
-  exclusion list, the sessions it excludes, and `fence_count`: what forget denied and the ranges a
-  rescan masked), retention's marker (an expiry is not in `fence_count`), the language and the
-  prompt's version. A forget, an expiry, a mute, an exclusion or a rule change gives another key:
-  nothing rendered before it is sent again.
-- The gate still runs before each call, as now (`dispatch`, `Reading::still`, `rules_still`).
+  exclusion list, the sessions it excludes, `fence_count`: what forget denied, a record or a
+  claim, and the ranges a rescan masked; and how many tombstones raw.db held, a removal of any
+  kind, whether or not the fence counts it), and the store's handle. A forget, a mask, any other
+  removal, an exclusion or a rule change gives another key: nothing rendered before it is sent
+  again. The language and the prompt's wording need no key: a conversation goes on only with the
+  same instructions, byte for byte.
+- The gate still runs before each call, as now (`dispatch`, `Reading::still`, `rules_still`): at
+  a send the state is the one the window was read under, and every stretch sent again was
+  rendered under an equal key. `Reading` is taken before a window is cut, and now holds the
+  tombstones too: a call of any role goes out only while no record was removed since its inputs
+  were read. Before, a tombstone stopped a call only by the denial or the mask written with it.
+  The count needs no such pairing: whatever writes a tombstone stops the calls of what was read
+  before it, and so nothing rendered before it goes again.
+- What rewrites a record's text holds the worker's lock: a forget's purge, retention's expiry
+  (`retention::rows`), a restore, a rebuild. An expiry writes no tombstone, so the key cannot
+  see it: a conversation is kept for one holding of that lock instead. The worker that holds it
+  steps aside by ending its loop, and a worker that let the lock go and took it again in the same
+  run (a record arrived while it decided to exit) takes its handle of raw.db for another open
+  (`Raw::renew`). Within one run the stores can also be closed and opened again (a damaged
+  raw.db restored). Every open of raw.db has an id of its own in the key, so in each case the
+  next window starts again, and retention needs no marker in the key (an earlier draft of this
+  note gave it one).
+- A mute changes which claims are shown, never a record's lines: it can change a tail, which is
+  made for each call, and restarts nothing (the earlier draft listed it).
 - Prompt injection (spec 3.3): each stretch's fence is the hash of its own text, the tail names
   the stretch to read after all recorded text, and the code gates do not change: a claim needs its
   quote in a line of this window, a decided one the developer's own line.
 
 What changes for the person: a window's lines are sent to the same entry again with each later
 call of its conversation, and that entry's cache holds them until five minutes (thirty at OpenAI)
-after the last call. Today they are sent once and not written to a cache. The text that says what
-leaves the machine (MUST-M23) and [prompt-cache.md](prompt-cache.md) say so when this is built.
+after the last call. Without the setting they are sent once, and written to a cache only where
+the entry marks one of its own (`extra`: at the request's top level it writes the whole prompt).
+The text that says what leaves the machine and [prompt-cache.md](prompt-cache.md) say so.
 
 ### The shorter window text
 
@@ -256,5 +316,70 @@ After it, on this PC: `provider_calls` against the estimate above.
   shown once a removal its op does not list lands in a stretch its window read (K4), and a turn's
   summary lists those stretches among what it read (T7), named in `stretches` as spans it read
   no card of.
+- **The conversation, for the Messages API** (#975). With `[summary] conversation = true`, an
+  entry of the Messages API that declares `limits.max_request_tokens` and marks no cache of its
+  own is sent, before each window's stretch, the stretches of the windows before it in its
+  conversation, each a text block, with breakpoints on the instructions and on the newest
+  stretch (`provider::Talk`, kept by the worker's curation phase while it runs). It starts again
+  as "Restarting" and "The gate" say, and keeps none for an hour after two calls in a row that
+  read less than half of what they were sent again. The window's op lists `read`, and what was
+  already removed from what it read (a window asked as a prompt alone lists none, whatever a
+  turn for its span left before); `provider_calls.earlier` counts the stretches before each
+  call's own. An entry whose name another entry has keeps none; a turn's op has no more removals
+  to list than an op can; the worker's lock let go and taken again ends every conversation; a
+  413 for a turn that went on skips no other entry. Three requests of synthetic text built by
+  hand in this shape, sent on 2026-11-13 (claude-haiku-5-5, thinking disabled): the second read
+  the 3,691 tokens the first wrote and wrote 1,923, and the third read 5,614 and wrote 1,929.
+  Every other entry, `oboete recurate`, and the summary's, My Work's and the judge's calls
+  are as they were, and off is the default. One thing changes with the setting off too: the gate
+  before a call of any role (`Reading::still`) now stops on any tombstone written since its
+  inputs were read, where it stopped on a denial or a masked range ("The gate").
+- **The binary's own path** (2026-11-13, a debug build of #975 in the isolated `oboete-dogfood`
+  user, on made-up sessions replayed with `oboete replay`; claude-haiku-5-5, thinking disabled,
+  `shrink = "subagents"`). Not at this PC's limits: with windows of 5,000 estimated tokens and
+  4,000 output tokens the first answer to the made-up text was cut off at the output limit
+  (`invalid`) and that run was stopped, so the runs below cut windows of 2,000 (grown three
+  times) and allow 8,000.
+  - Six windows of 130 events went as one conversation: the five calls after the first had one
+    to five stretches before their own and read 55%, 68%, 76%, 80% and 83% of their input from
+    the cache, 145,663 of 192,886 tokens. Each of their ops lists `read` as one span, from the
+    conversation's first record to the record before its window.
+  - The same events with the setting off, beside a second run with it on: six calls each, 71,015
+    tokens of input (18% read from the cache) against 205,412 (72%). The conversation's input
+    cost 1.41 times as much, its calls with their answers 1.17 times: reading more from the cache
+    is not paying less, as the estimate's table says of real calls (0.83 against 0.61).
+  - Fourteen windows of 298 events: the first nine went as one conversation, whose last call was
+    82,659 tokens with 89% of them read from the cache, and the tenth started again: the size
+    rule counted one more stretch past nine tenths of the entry's 100,000. Its instructions were
+    still read from the cache, and the ops after it list the second conversation's spans alone.
+    Of the twelve calls that went on, 437,851 of 551,461 tokens of input were read from the
+    cache (79%). The same events with the setting off: 167,187 tokens of input (20% read)
+    against 575,667 (77%), the conversations' input 1.54 times the cost and their calls with
+    their answers 1.20 times.
+  - What the windows gave, on made-up text and one run of each, so nothing is concluded from it:
+    with the setting on the six windows gave 16 cards and 25 claims (16 and 23 in the second
+    run) and the fourteen 39 and 56; with it off, 20 and 33, and 47 and 73. The first window,
+    which no stretch goes before, gave three cards in each of the three runs with the setting
+    on and four in each of the two with it off: the three-part prompt reaches every window, so
+    the difference is not the conversation's alone. Before any default changes, the measurement
+    shows what a window gives by its prompt and by its place in a conversation.
+  - Forget, in the first home: a record forgotten from the last window took that window's cards
+    alone. One forgotten from the second window then took the cards of that window and of the
+    three after it that still had theirs, each of which had read it, and left the first
+    window's; the ops kept `read` without their text, and the five windows' spans were queued.
+    `oboete recurate` then curated them again, as calls of no conversation; the ops of the
+    windows that hold the two forgotten records list them in `removed`, and their cards are
+    shown.
+  - The hooks, on the home of the second run: SessionStart took 126 ms at the median of 40
+    spawns (157 at the most), and the prompt hook with `[inject] per_prompt = true` 117 ms (182
+    at the most); on the home made with the setting off, which shows other cards, 137 and 124 ms.
+    What a card's reader would add on this PC's store (30,013 windows with cards, 65,534
+    tombstones; read-only, the reader's query timed from a script for 2,000 windows spread over
+    the store): for a window that had read the 10 windows before it, 25 µs at the median and
+    0.13 ms at the most (3 spans at the median); for 17 windows, 42 µs and 0.13 ms; for 64,
+    133 µs and 2.3 ms.
+  - Not reached by these runs, and resting on the tests alone: a call that misses its cache and
+    the hour without a conversation, a gate that stops a call, a 429's second send, a refused
+    answer's stretch, a key that changes while a worker runs.
 
-Nothing else yet: no entry is sent a stretch again.
+Not built yet: the same for OpenAI's own API, the measurement, the defaults and the settings page.

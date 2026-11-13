@@ -1401,6 +1401,9 @@ fn serve(
         if wanted {
             return Ok(true);
         }
+        // Decision 107: whoever held the lock between may have rewritten what a conversation
+        // holds, with no tombstone (an expiry). Its key is of another open from here on.
+        raw.renew();
     }
 }
 
@@ -1481,12 +1484,73 @@ fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -
     )
 }
 
+/// The curation phase's curator: the chain for one window, and the conversation each of its
+/// entries keeps from one window to the next (decision 107).
+struct Windows<'a> {
+    providers: &'a [crate::config::Provider],
+    /// What every paid entry together may spend this month.
+    paid: f64,
+    db: &'a Connection,
+    talk: &'a mut crate::provider::Talk,
+}
+
+impl Windows<'_> {
+    fn chain<'a>(
+        &'a self,
+        check: &'a crate::provider::AnswerCheck<'a>,
+        gate: &'a crate::provider::Gate<'a>,
+    ) -> crate::provider::Chain<'a> {
+        crate::provider::Chain::new(self.providers, self.db)
+            .paid_cap(self.paid)
+            .check(check)
+            .gate(gate)
+    }
+}
+
+impl crate::curate::Curate for Windows<'_> {
+    fn ask(
+        &mut self,
+        span: &str,
+        prompt: &str,
+        check: &crate::provider::AnswerCheck,
+        gate: &crate::provider::Gate,
+    ) -> Result<crate::provider::ChainResult> {
+        self.chain(check, gate)
+            .run("curator", span, prompt, &crate::curate::schema())
+    }
+
+    fn ask_turn(
+        &mut self,
+        span: &str,
+        turn: &crate::provider::Turn,
+        check: &crate::provider::AnswerCheck,
+        gate: &crate::provider::Gate,
+    ) -> Result<crate::provider::ChainResult> {
+        crate::provider::Chain::new(self.providers, self.db)
+            .paid_cap(self.paid)
+            .check(check)
+            .gate(gate)
+            .talk(self.talk, turn)
+            .run("curator", span, turn.prompt, &crate::curate::schema())
+    }
+
+    fn read(&self, provider: &str, span: &str) -> Vec<(i64, i64)> {
+        self.talk.read(provider, span)
+    }
+}
+
 /// The curation phase: it curates while `[summary] curate` asks for it, off until the cut-over
 /// (spec 7.5).
 fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     let home = home.to_owned();
     // Opened once curation is on: a home that never asks for it gets no providers.db.
     let mut db = None;
+    // Decision 107 (docs/curator-conversation.md): what each entry was sent in its conversation,
+    // for as long as this phase lives: one run of the worker. A purge, an expiry and a restore
+    // take the worker's lock: a store opened again within the run, and the lock let go and taken
+    // again (`serve`, `Raw::renew`), give its windows another key (`curate::talk_key`), so none
+    // of them runs within a conversation.
+    let mut talk = crate::provider::Talk::default();
     Box::new(move |raw: &mut Raw, k: &Connection| {
         // Read again for each window: a worker that stays up follows the owner's edits (turning
         // curation on or off, a provider removed, a lower cap). A file that no longer loads (one
@@ -1517,15 +1581,11 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 }
             },
         };
-        let mut curator = |span: &str,
-                           prompt: &str,
-                           check: &crate::provider::AnswerCheck,
-                           gate: &crate::provider::Gate| {
-            crate::provider::Chain::new(&cfg.providers, db)
-                .paid_cap(cfg.paid_usd_per_month)
-                .check(check)
-                .gate(gate)
-                .run("curator", span, prompt, &crate::curate::schema())
+        let mut curator = Windows {
+            providers: &cfg.providers,
+            paid: cfg.paid_usd_per_month,
+            db,
+            talk: &mut talk,
         };
         // Who is asked and within what caps: a window held under other ones is tried again now.
         // That includes the key an entry's budget comes from (#238): another has its own limit.
@@ -4162,6 +4222,117 @@ mod tests {
             "{}",
             p.reason
         );
+    }
+
+    /// Decision 107 (docs/curator-conversation.md), #971 condition 9: with `[summary]
+    /// conversation`, the curation phase keeps a Messages entry's conversation from one window to
+    /// the next: the second window's call sends the first's stretch again before its own, and the
+    /// window's op lists it in `read`. A store opened again within the run (a restore of a
+    /// damaged raw.db) starts the conversation again, and so does another run of the worker,
+    /// whose phase is another.
+    #[test]
+    fn the_curation_phase_keeps_a_conversation_until_the_store_is_opened_again() {
+        use crate::provider::tests::{request_body, serve_each};
+        let home = tempfile::tempdir().unwrap();
+        let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
+        let answer = serde_json::json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
+                "cache_creation_input_tokens": 60, "output_tokens": 9}})
+        .to_string()
+        .into_bytes();
+        let (url, requests) = serve_each(vec![("200 OK", answer); 5], "");
+        let config = format!(
+            "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
+             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
+             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
+        );
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        let k = Connection::open_in_memory().unwrap();
+        // The stretches a window's call holds: every block but its instructions and its tail.
+        let window = |raw: &mut Raw, phase: &mut CurationPhase| -> usize {
+            raw.append(&raw::test_event("Use tabs in this repository."))
+                .unwrap();
+            assert_eq!(phase(raw, &k).unwrap(), Phase::Covered);
+            let body = request_body(&requests.recv().unwrap());
+            body["messages"][0]["content"].as_array().unwrap().len() - 2
+        };
+        let read = |raw: &Raw| -> serde_json::Value {
+            let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+            let last = ops.iter().rfind(|o| o.kind == raw::OpKind::Window);
+            last.unwrap().body["read"].clone()
+        };
+        let mut raw = raw::open(home.path()).unwrap();
+        let mut phase = curation(home.path());
+        assert_eq!(window(&mut raw, &mut phase), 1);
+        assert_eq!(read(&raw), serde_json::Value::Null);
+        assert_eq!(window(&mut raw, &mut phase), 2);
+        assert_eq!(read(&raw), serde_json::json!([[1, 1]]));
+        // The store opened again: another handle, and a conversation of its own.
+        drop(raw);
+        let mut raw = raw::open(home.path()).unwrap();
+        assert_eq!(window(&mut raw, &mut phase), 1);
+        assert_eq!(read(&raw), serde_json::Value::Null);
+        assert_eq!(window(&mut raw, &mut phase), 2);
+        // Another run of the worker.
+        let mut phase = curation(home.path());
+        assert_eq!(window(&mut raw, &mut phase), 1);
+    }
+
+    /// Decision 107 (the security review of this branch): the worker's lock let go and taken
+    /// again ends every conversation: whoever held it between may have rewritten a record's text
+    /// with no tombstone (a retention's expiry). A record that arrives while the worker decides
+    /// to exit is curated by the same run, with its phase and its handle of raw.db, and its
+    /// window's call sends no stretch again.
+    #[test]
+    fn a_conversation_ends_when_the_workers_lock_is_let_go_and_taken_again() {
+        use crate::provider::tests::{request_body, serve_each};
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
+        let answer = serde_json::json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
+                "cache_creation_input_tokens": 60, "output_tokens": 9}})
+        .to_string()
+        .into_bytes();
+        let (url, requests) = serve_each(vec![("200 OK", answer); 2], "");
+        let config = format!(
+            "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
+             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
+             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
+        );
+        std::fs::write(p.join("config.toml"), config).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("Use tabs in this repository."))
+            .unwrap();
+        let mut phase = curation(p);
+        let phases = Phases {
+            curation: Some(&mut *phase),
+            ..Phases::default()
+        };
+        let mut late = true;
+        // `before_exit` runs after the lock is released: the record it appends is found by the
+        // last check, and the lock is taken again for it.
+        let before_exit = || {
+            if std::mem::take(&mut late) {
+                raw::open(p)
+                    .unwrap()
+                    .append(&raw::test_event("Use spaces in that one."))
+                    .unwrap();
+            }
+        };
+        run_holding(p, 0, vec![Box::new(Seen)], before_exit, None, phases).unwrap();
+        // The stretches each window's call held: every block but its instructions and its tail.
+        let stretches: Vec<usize> = requests
+            .try_iter()
+            .map(|r| {
+                let body = request_body(&r);
+                body["messages"][0]["content"].as_array().unwrap().len() - 2
+            })
+            .collect();
+        assert_eq!(stretches, [1, 1]);
     }
 
     /// #94: the worker's chain leaves out an entry `[chain] off` turns off, and a window held under
