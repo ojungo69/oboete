@@ -1711,7 +1711,7 @@ mod tests {
         let pasted = user(&format!("Here is the file: {middle}"));
         let shrink = Cut {
             tokens: 100_000,
-            shrink: true,
+            shrink: crate::curate::Shrink::All,
             steps: false,
         };
         let w = cut_window(&[tool(&output, false), pasted], shrink);
