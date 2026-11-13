@@ -1,0 +1,37 @@
+docs/cards.md
+  s_76c95352747315::t_9b589c91a80374 76-78
+docs/curator-conversation.md
+  s_76c95352747315::t_64fc72deab63af 177-183,278-284
+docs/provenance.md
+  s_76c95352747315::t_19894a1ad479c1 151-159
+docs/summaries.md
+  s_76c95352747315::t_10b910e6e5dac7 88-89
+src/cards.rs
+  s_76c95352747315::t_c5c9bc72249dad 504-505,511-513,730,734-735,768-770
+src/consumer/cards.rs
+  s_76c95352747315::t_048304622fc846 748-793
+src/forget.rs
+  s_76c95352747315::t_86e00d49b49b90 4214-4314
+src/provenance.rs
+  s_76c95352747315::t_1b36c3c096748f 20-21,66,119,151-152,164-174,206-207
+src/raw.rs
+  s_76c95352747315::t_8c3f5dd326913f 6346-6366,8791-8792,8802,8806,9100,9111-9112,12964-13016
+src/turns.rs
+  s_76c95352747315::t_097e5e394d88e6 49-50,159,174-178,2244-2276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2feccfd84698c2649f81db8b67642e5de18ae9df",
+  "prompts": {},
+  "sessions": {
+    "s_76c95352747315": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85c9c838-1efe-4bce-8363-c07637811bb4",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
