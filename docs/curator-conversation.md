@@ -174,6 +174,13 @@ summary, the cards and the claims of its own window and of every later window of
 (10 to 17 windows at the median on this PC's calls), and they are curated again. That is the price
 of a larger restart size, and a reason to lower it if forgets or masks come often.
 
+Until a forget's purge has rewritten them, what is read is held back as a card of the forgotten
+record's own window is: the stretches a window read are records its curator was shown, as its
+goals are, so a removal from one that its op does not list hides its cards (docs/cards.md K4), and
+the summaries of the turns that read those cards (docs/summaries.md T7: a turn op lists the
+stretches with the windows' spans). The op lists what was already removed from the stretches when
+its window was cut, with what was removed from its own records.
+
 ### The gate
 
 Everything that leaves the machine passes the egress gate (spec 3.3, 5.5, 6.4; milestone 5 D1
@@ -268,5 +275,12 @@ After it, on this PC: `provider_calls` against the estimate above.
   split where they did, at the fence sentence. Every entry gets one stretch: only the
   instructions are read from a cache, as before, and a grown window's are now any other
   window's. Off is the default, and off a prompt is the bytes it was.
+- **What reads `read`** (#974). No window op lists `read` yet; what will read it is built first.
+  The one reading of an op's provenance takes a window op's `read` as the spans it read. Forget's
+  rule for what a window showed (rule a) takes the records of those spans with the window's own
+  and its goals, so the op, its cards and the claims of its batch go with a forgotten or masked
+  record of a stretch it read, and the op keeps `read` when a purge takes its text. A card is not
+  shown once a removal its op does not list lands in a stretch its window read (K4), and a turn's
+  summary lists those stretches among what it read (T7).
 
 Nothing else yet: no entry is sent a stretch again.

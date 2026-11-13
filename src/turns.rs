@@ -46,7 +46,8 @@ pub struct TurnOp {
     /// The turn's first record and its reply, this device's.
     pub from: i64,
     pub through: i64,
-    /// The spans of the windows whose cards it was shown, and the goals they were shown (T7).
+    /// The spans of the windows whose cards it was shown, with the stretches those windows read
+    /// (decision 107), and the goals they were shown (T7).
     pub read: Vec<(i64, i64)>,
     pub goals: Vec<i64>,
     /// What was removed from all of those records when it was asked, as a window op lists it.
@@ -155,7 +156,7 @@ impl Turn {
         let estimate = crate::budget::estimate;
         let mut room = window_tokens.saturating_sub(estimate(&prompts) + estimate(&reply));
         let (mut cards, mut read, mut goals) = (Vec::new(), Vec::new(), Vec::new());
-        for (card, span, shown) in crate::cards::of_turn(
+        for (card, spans, shown) in crate::cards::of_turn(
             k,
             raw,
             &device,
@@ -170,8 +171,11 @@ impl Turn {
             };
             room = left;
             cards.push(text);
-            if !read.contains(&span) {
-                read.push(span);
+            // Its window's span, then the stretches that window read (decision 107).
+            for span in spans {
+                if !read.contains(&span) {
+                    read.push(span);
+                }
             }
             for goal in shown {
                 if !goals.contains(&goal) {
@@ -2235,6 +2239,39 @@ mod tests {
         let fields = kept(&answer, &Rules::default());
         assert_eq!(fields.keys().collect::<Vec<_>>(), ["completed"]);
         assert_eq!(fields["completed"].chars().count(), 2_000);
+    }
+
+    /// T7, decision 107 (docs/curator-conversation.md): a card was built on the stretches its
+    /// window read too (its op's `read`), so a summary shown the card read them: its op lists
+    /// their spans with the window's, and a removal from one of their records hides it.
+    #[test]
+    fn a_summary_rests_on_the_stretches_its_cards_window_read() {
+        let (kind, mut later) = window(3, 5, "Built it.", &[]);
+        later["read"] = json!([[1, 2]]);
+        let home = home(
+            &[
+                said("s0", "prompt", "Another session's."),
+                said("s0", "reply", "Done."),
+                said("s1", "prompt", "Earlier."),
+                said("s1", "prompt", "Build the parser."),
+                said("s1", "reply", "Built."),
+            ],
+            &[(kind, later)],
+        );
+        run(home.path(), &completed("Done."));
+        run(home.path(), &completed("Built."));
+        let ops = turn_ops(home.path());
+        let op = ops.iter().find(|op| op.through == 5).unwrap();
+        assert_eq!((op.from, &op.read), (3, &vec![(3, 5), (1, 2)]));
+        // The other session's summary and this one's.
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 2);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let device = raw.device().to_owned();
+        raw.append_tombstone(Target::Record { device, seq: 2 })
+            .unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(shown(home.path(), &Rules::default()).len(), 0);
     }
 
     /// Test 6 (T7): a removal from the turn's records, from a record of a window whose card it
