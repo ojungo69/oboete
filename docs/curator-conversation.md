@@ -225,4 +225,11 @@ After it, on this PC: `provider_calls` against the estimate above.
 
 ## As built
 
-Nothing yet.
+- **`[summary] shrink = "subagents"`** (#972). A window shows short only the tool calls a subagent
+  made, by the rule `true` uses for every call: a tool's input up to 300 characters, an output over
+  600 as its first and last 300, the owner's-words tools' output whole, the op listing what it
+  showed short. An event names a subagent by a non-empty `agent_id`, as capture stores it from a
+  hook and from a transcript. `true`, `false` and no line do what they did; any other value is a
+  configuration error. Off is the default.
+
+Nothing else yet: no prompt has three parts and no entry is sent a stretch again.
