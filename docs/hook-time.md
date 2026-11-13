@@ -6,8 +6,9 @@ not is found afterwards.
 
 ## What happened
 
-Claude Code cancels a hook at the timeout its settings give it, and `oboete setup claude` writes 5 s
-for `UserPromptSubmit`. On this PC Claude Code's transcripts hold seven cancellations of oboete's
+Claude Code cancels a hook at the timeout its settings give it, and `oboete setup claude` wrote 5 s
+for `UserPromptSubmit` then (15 s since decision 108, "The timeout `setup` writes" below). On this
+PC Claude Code's transcripts hold seven cancellations of oboete's
 hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11-07 04:49,
 2026-11-08 03:15, 03:21 and 03:23, 2026-11-10 00:01 and 01:26 UTC) and one `PostToolUse`.
 
@@ -73,11 +74,17 @@ and the margin between a hook's own deadline and its agent's cancellation was th
 
 - For Claude Code, Codex and Grok `setup` writes 10 s more than that (`setup::TIMEOUT_ROOM`): 15 s
   where it wrote 5 s, 20 s where it wrote 10 s.
-- The room is for what no deadline of the hook's cuts ("Where it does not reach"): a start that
-  is late, and one statement that takes seconds. With 1 s of margin either ended in a
-  cancellation, and the first prompt after the store had gone cold was where it was expected
-  next: such a prompt's hook took 3.8 and 4.8 s on a copy of this PC's store
-  (docs/prompt-context.md).
+- The room is for what no deadline of the hook's cuts: a start that is late, a record that waits
+  for its store, and one statement that takes seconds ("Where it does not reach"). The 1 s of
+  margin was all they had. Such hooks are on record: the prompt of 2026-11-08 03:23, whose time
+  went before its record or in it ("What happened"); of the 41 hooks that never ended in the
+  record's first two days, the one in `record` and the one in `note` (the other 39 were the loop
+  that is now cut); and on 2026-11-13 at 11:43:48 UTC, with this PC under load, two of Claude
+  Code's `PostToolUse` hooks that waited for the store in `record`: one ended 5.9 s after it
+  began, and the other never ended. They are the only two of the 63 slow hooks on record after
+  those two days (to 2026-11-13 11:43 UTC) that ran past 3.2 s. A prompt after the store has gone
+  cold is where the next is expected: such a prompt's hook took 3.8 and 4.8 s on a copy of this
+  PC's store (docs/prompt-context.md), the second 0.2 s from the cancellation.
 - A hook's own time stays what it was, for two reasons.
   - A settings file an older `setup` wrote still cancels at 5 s. A hook that counted its time
     from 15 s would run into that cancellation with 10 s of its own time left: the cancellations
@@ -89,16 +96,21 @@ and the margin between a hook's own deadline and its agent's cancellation was th
     have it look for 14 s. A hook runs past that only for its record and for a statement that
     had begun by then, and the agent now waits for those.
 - A session's end keeps 3 s for both. Nothing is injected there, the developer is leaving, and
-  Codex counts no more than 3 s for one whatever is written (`setup::codex_trust_hash`).
+  Codex's trust rows hold no more than 3 s for one whatever is written
+  (`setup::codex_trust_hash`).
 - agy's and Cursor's hooks keep 10 s for both, as their specs write them: their margin is still
   the 1 s. This PC's record holds none of their hooks (#897).
 - `oboete setup <agent>` writes the new timeouts: it takes its own handlers out of the agent's
-  file and writes them again (`merge_groups`), and nothing else in the file changes. Codex's
-  trust rows are written with them, since a row's hash covers the timeout
-  (`codex_trust_hash`). Until `setup` has run, the hooks work as they did, Codex's rows still
-  trust them, and what is there is not what this binary would write: the settings page shows
-  the agent's hooks as out of date (`setup::readiness`: stale), and `oboete doctor` says how many
-  are "not as this version writes them", with the command (`setup::hooks_status`).
+  file and writes them again, each event's after whatever else is there (`merge_groups`). A
+  developer's own handlers and the file's other settings are kept as they are; a group of the
+  developer's that stood after ours stands before it afterwards, and Codex's row for it follows
+  it (`codex_trust_delta`). Codex's trust rows for ours are written with them, since a row's hash
+  covers the timeout (`codex_trust_hash`). Until `setup` has run, the hooks work as they did,
+  Codex's rows still trust them, and what is there is not what this binary would write: the
+  settings page shows the agent's hooks as out of date (`setup::readiness`: stale), and
+  `oboete doctor` says how many are "not as this version writes them", with the command to
+  run, its `--home` included where the home is not the default one (`setup::hooks_status`).
+  Hooks wired for another home than the one doctor looks at are not judged.
 - An agent reads its hook files when it starts: a session that was open keeps the timeout it
   read, as `setup` says when it has written.
 

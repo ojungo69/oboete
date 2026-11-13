@@ -5,7 +5,7 @@ use super::{
     claude_mcp_paths, claude_settings_file, codex_groups, codex_home, codex_trust_keys, cursor_dir,
     cursor_hook_spec, diagnostic_canonicalize, diagnostic_metadata, grok_config_file, grok_groups,
     has_ours, is_our_handler, launcher_files, mcp_command_in_json, mcp_command_in_toml,
-    mcp_disabled_in_json, mcp_disabled_in_toml, opencode_dir, opencode_plugin, pi_dir,
+    mcp_disabled_in_json, mcp_disabled_in_toml, only_ours, opencode_dir, opencode_plugin, pi_dir,
     pi_extension,
 };
 use anyhow::Result;
@@ -301,17 +301,7 @@ fn grouped_hooks(
             return Component::unknown(State::Invalid);
         };
         for group in entries.iter().filter(|group| has_ours(group)) {
-            let mut own = group.clone();
-            own["hooks"] = Value::Array(
-                group["hooks"]
-                    .as_array()
-                    .expect("has_ours checked handlers")
-                    .iter()
-                    .filter(|handler| is_our_handler(handler))
-                    .cloned()
-                    .collect(),
-            );
-            current.push((event.clone(), own));
+            current.push((event.clone(), only_ours(group)));
         }
     }
     compare_groups(&current, want.map(groups))

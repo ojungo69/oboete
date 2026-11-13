@@ -892,6 +892,15 @@ impl HookCommand {
         }
         format!("{s} hook {agent} {event}")
     }
+    /// `oboete setup <agent> [--home <dir>]`: the command doctor names to write this home's
+    /// hooks for `agent` again. Without its home, a home that is not the default one would lose
+    /// the agent to the default one.
+    fn setup_line(&self, agent: &str) -> String {
+        match &self.home {
+            Some(h) => format!("oboete setup {agent} --home {}", shell_quote(h)),
+            None => format!("oboete setup {agent}"),
+        }
+    }
 
     fn agy_line(&self, event: &str, windows: bool) -> Result<String> {
         if !windows {
@@ -1030,6 +1039,20 @@ pub(crate) fn has_ours(group: &Value) -> bool {
     group["hooks"]
         .as_array()
         .is_some_and(|hs| hs.iter().any(is_our_handler))
+}
+
+/// The group with our handlers alone, as `setup` writes one: what a developer put beside them is
+/// left out.
+fn only_ours(group: &Value) -> Value {
+    let mut own = group.clone();
+    own["hooks"] = group["hooks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|h| is_our_handler(h))
+        .cloned()
+        .collect();
+    own
 }
 
 /// The group without our handlers; `None` when nothing else was in it.
@@ -2081,10 +2104,17 @@ fn agy_merge_mcp(mcp: &Path, mcp_root: &mut Value, cmd: &HookCommand, remove: bo
 }
 
 /// doctor's line for the hook groups `setup` wrote into `root`, the hooks file of Claude Code,
-/// Codex or Grok: how many there are, how many name another binary, and how many of this
-/// binary's are not among `wanted`, what its `setup` writes now (an older one's timeout,
-/// decision 108). Those work as they did; `setup` writes them again.
-fn hooks_status(root: &Value, exe: &str, agent: &str, wanted: &[(String, Value)]) -> String {
+/// Codex or Grok: how many there are, how many name another binary, and how many are not as
+/// `cmd`'s `setup` writes them now (`wanted`): an older one's timeout, decision 108. Those work
+/// as they did, and `setup` writes them again. A group is read by its own handlers, whatever a
+/// developer put beside them, as readiness reads it. One whose command line is not the one
+/// `wanted` holds (another home's) is not judged: it counts as wired, as it did.
+fn hooks_status(
+    root: &Value,
+    agent: &str,
+    cmd: &HookCommand,
+    wanted: &[(String, Value)],
+) -> String {
     let (mut n, mut elsewhere, mut older) = (0, 0, 0);
     for (event, groups) in root["hooks"].as_object().into_iter().flatten() {
         for g in groups
@@ -2094,10 +2124,15 @@ fn hooks_status(root: &Value, exe: &str, agent: &str, wanted: &[(String, Value)]
             .filter(|g| has_ours(g))
         {
             n += 1;
-            let cmd = g["hooks"][0]["command"].as_str().unwrap_or("");
-            if !cmd.contains(exe) || !cmd.contains(&format!(" hook {agent} ")) {
+            let own = only_ours(g);
+            let line = &own["hooks"][0]["command"];
+            let text = line.as_str().unwrap_or("");
+            if !text.contains(&cmd.exe) || !text.contains(&format!(" hook {agent} ")) {
                 elsewhere += 1;
-            } else if !wanted.iter().any(|(e, w)| e == event && w == g) {
+            } else if wanted
+                .iter()
+                .any(|(e, w)| e == event && w["hooks"][0]["command"] == *line && *w != own)
+            {
                 older += 1;
             }
         }
@@ -2106,7 +2141,8 @@ fn hooks_status(root: &Value, exe: &str, agent: &str, wanted: &[(String, Value)]
         (0, ..) => "not wired (run `oboete setup`)".to_string(),
         (_, 0, 0) => format!("{n} hooks wired"),
         (_, 0, _) => format!(
-            "{n} hooks wired, {older} not as this version writes them (rerun `oboete setup {agent}`)"
+            "{n} hooks wired, {older} not as this version writes them (rerun `{}`)",
+            cmd.setup_line(agent)
         ),
         _ => format!("{n} hooks, {elsewhere} point at another binary (rerun `oboete setup`)"),
     }
@@ -2986,15 +3022,10 @@ pub fn doctor(home: &Path) -> Result<()> {
         // docs/my-work-model.md J1: the judge's switch, key file and calls.
         println!("  {}", crate::judge::doctor_line(home, cfg.judge.as_ref()));
     }
-    let exe_str = exe
-        .canonicalize()
-        .unwrap_or(exe)
-        .to_string_lossy()
-        .into_owned();
     let want = HookCommand::current(home)?;
     let wired = |file: &Path, agent: &str, wanted: Vec<(String, Value)>| -> String {
         match read_json_object(file) {
-            Ok(root) => hooks_status(&root, &exe_str, agent, &wanted),
+            Ok(root) => hooks_status(&root, agent, &want, &wanted),
             Err(e) => format!("unreadable: {e}"),
         }
     };
@@ -5530,33 +5561,86 @@ mod tests {
             exe: "/x/oboete".into(),
             home: None,
         };
-        for (agent, wanted) in [
-            ("claude", claude_groups(&cmd)),
-            ("codex", codex_groups(&cmd)),
-            ("grok", grok_groups(&cmd)),
-        ] {
+        type Groups = fn(&HookCommand) -> Vec<(String, Value)>;
+        let agents: [(&str, Groups); 3] = [
+            ("claude", claude_groups),
+            ("codex", codex_groups),
+            ("grok", grok_groups),
+        ];
+        // The same binary at a home that is not the default one, and another binary.
+        let homed = HookCommand {
+            exe: "/x/oboete".into(),
+            home: Some("/h o".into()),
+        };
+        let other = HookCommand {
+            exe: "/y/oboete".into(),
+            home: None,
+        };
+        for (agent, groups) in agents {
+            let wanted = groups(&cmd);
             let n = wanted.len();
-            let status = |root: &Value, exe: &str| hooks_status(root, exe, agent, &wanted);
+            let status =
+                |root: &Value, by: &HookCommand| hooks_status(root, agent, by, &groups(by));
             let user = json!({"hooks": [{"type": "command", "command": "echo hi", "timeout": 5}]});
             let mut root = json!({"hooks": {"Stop": [user]}});
-            assert_eq!(status(&root, "/x/oboete"), "not wired (run `oboete setup`)");
+            assert_eq!(status(&root, &cmd), "not wired (run `oboete setup`)");
             merge_groups(&mut root, wanted.clone());
-            assert_eq!(status(&root, "/x/oboete"), format!("{n} hooks wired"));
+            assert_eq!(status(&root, &cmd), format!("{n} hooks wired"));
             // Two of them with the timeout `setup` wrote until decision 108.
-            root["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = json!(5);
-            root["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"] = json!(5);
+            let older = |root: &mut Value| {
+                root["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = json!(5);
+                root["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"] = json!(5);
+            };
+            older(&mut root);
             assert_eq!(
-                status(&root, "/x/oboete"),
+                status(&root, &cmd),
                 format!(
                     "{n} hooks wired, 2 not as this version writes them (rerun `oboete setup {agent}`)"
                 )
             );
             assert_eq!(
-                status(&root, "/y/oboete"),
+                status(&root, &other),
                 format!("{n} hooks, {n} point at another binary (rerun `oboete setup`)")
             );
+            // Hooks wired for another home are not this home's to judge: wired, as they were.
+            assert_eq!(status(&root, &homed), format!("{n} hooks wired"));
             merge_groups(&mut root, wanted.clone());
-            assert_eq!(status(&root, "/x/oboete"), format!("{n} hooks wired"));
+            assert_eq!(status(&root, &cmd), format!("{n} hooks wired"));
+            assert_eq!(status(&root, &homed), format!("{n} hooks wired"));
+            // A group the developer's own handler shares with ours is ours as written, whichever
+            // of the two comes first: the settings page reads it so (`readiness`).
+            for first in [true, false] {
+                let mut shared = root.clone();
+                let handlers = shared["hooks"]["UserPromptSubmit"][0]["hooks"]
+                    .as_array_mut()
+                    .unwrap();
+                let theirs = json!({"type": "command", "command": "echo hi"});
+                handlers.insert(if first { 0 } else { 1 }, theirs);
+                assert_eq!(status(&shared, &cmd), format!("{n} hooks wired"), "{first}");
+                older(&mut shared);
+                let ours = usize::from(first);
+                shared["hooks"]["UserPromptSubmit"][0]["hooks"][ours]["timeout"] = json!(5);
+                assert_eq!(
+                    status(&shared, &cmd),
+                    format!(
+                        "{n} hooks wired, 2 not as this version writes them (rerun `oboete setup {agent}`)"
+                    ),
+                    "{first}"
+                );
+            }
+            // A home that is not the default one is named in the command: without it `setup`
+            // would wire the agent to the default home.
+            let mut root = json!({});
+            merge_groups(&mut root, groups(&homed));
+            assert_eq!(status(&root, &homed), format!("{n} hooks wired"));
+            older(&mut root);
+            assert_eq!(
+                status(&root, &homed),
+                format!(
+                    "{n} hooks wired, 2 not as this version writes them (rerun `oboete setup {agent} --home '/h o'`)"
+                )
+            );
+            assert_eq!(status(&root, &cmd), format!("{n} hooks wired"));
         }
     }
 

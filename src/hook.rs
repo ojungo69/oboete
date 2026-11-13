@@ -57,8 +57,8 @@ const ENVELOPES: &[&str] = &[
 ];
 
 pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
-    // docs/hook-time.md: this hook is its process, so its time is the agent's timeout from the
-    // process's start. The thread beside it writes down a hook that is still running at 2 s.
+    // docs/hook-time.md: this hook is its process, so its time is counted from the process's
+    // start. The thread beside it writes down a hook that is still running at 2 s.
     let clock = Clock::of_process();
     clock.watch(home, agent, event);
     let result = run_clocked(
@@ -233,8 +233,9 @@ fn run_clocked(
             return Ok(());
         };
         agent = resolved;
-        // docs/hook-time.md: a hook that is its process keeps its agent's timeout, the resolved
-        // agent's where the command line named another.
+        // docs/hook-time.md: a hook that is its process counts its time from `hook_timeout`, the
+        // least `setup` has written for its agent's event and not the longer timeout it writes
+        // now (decision 108): the resolved agent's where the command line named another.
         if clock.keeps_timeouts() {
             clock.inject_within(crate::setup::hook_timeout(agent, event));
         }

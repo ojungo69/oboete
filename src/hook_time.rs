@@ -1,9 +1,11 @@
 //! A hook's time (docs/hook-time.md). An agent cancels a hook at its timeout (Claude Code's prompt
-//! hook at 5 s), and what the hook has not done by then is lost: its answer, the shown set, the
-//! counts doctor reads. Two things here keep a hook inside its time, and say where the time went
-//! when it was not:
-//! - One deadline for what a hook injects (`Clock::by`): the agent's timeout as `setup` writes it,
-//!   less `MARGIN`, counted from the process's start. Recording is never cut short by it
+//! hook at 5 s where an older `setup` wrote it, at 15 s since decision 108), and what the hook
+//! has not done by then is lost: its answer, the shown set, the counts doctor reads. Two things
+//! here keep a hook inside its time, and say where the time went when it was not:
+//! - One deadline for what a hook injects (`Clock::by`): `setup::hook_timeout`, the least `setup`
+//!   has written for the agent's event (it writes a longer one now, and an older settings file
+//!   still holds this one), less `MARGIN`, counted from the process's start. Recording is never
+//!   cut short by it
 //!   (MUST-M16, docs/unwritten.md); the waits of what it injects take what remains: the read
 //!   fence's, the prompt point's for the viewer, a file's note's and a memory lookup's. A local
 //!   read is not cut.
@@ -24,8 +26,8 @@ use serde_json::{Value, json};
 
 /// A hook still running this long after its start is written down.
 pub(crate) const SLOW: Duration = Duration::from_secs(2);
-/// What a hook keeps of its agent's timeout for its own end (the marker, the worker's start, its
-/// answer on stdout) and for the time before `main`.
+/// What a hook keeps of the timeout its time is counted from (`setup::hook_timeout`) for its own
+/// end (the marker, the worker's start, its answer on stdout) and for the time before `main`.
 pub(crate) const MARGIN: Duration = Duration::from_secs(1);
 /// The record's size at which it starts again, the one before it kept beside it.
 const CAP: u64 = 256 * 1024;
@@ -132,7 +134,7 @@ impl Clock {
     }
 
     /// Whether this hook is its process, which an agent's timeout ends: `run_stdin` sets its time
-    /// for what it injects from the timeout `setup` writes.
+    /// for what it injects from `setup::hook_timeout`.
     pub(crate) fn keeps_timeouts(&self) -> bool {
         self.process
     }
@@ -149,8 +151,9 @@ impl Clock {
         self.doing.store(phase as u8, Ordering::Relaxed);
     }
 
-    /// The hook's time for what it injects ends `timeout` less `MARGIN` after its start. An agent
-    /// whose timeout oboete does not write has none: `None` leaves the hook's waits as they are.
+    /// The hook's time for what it injects ends `timeout` less `MARGIN` after its start: `timeout`
+    /// is `setup::hook_timeout`'s, which the agent's own may be longer than. An agent whose
+    /// timeout oboete does not write has none: `None` leaves the hook's waits as they are.
     pub(crate) fn inject_within(&self, timeout: Option<Duration>) {
         let by = timeout.map_or(0, |t| {
             u32::try_from(t.saturating_sub(MARGIN).as_millis())
@@ -188,8 +191,10 @@ impl Clock {
     }
 
     /// Starts the thread beside a hook that is its process. It writes a line when the hook still
-    /// runs at `slow`, and one more half of `MARGIN` past its deadline, the last look before the
-    /// agent's timeout. The thread ends with the process: a hook inside its time never hears it.
+    /// runs at `slow`, and one more half of `MARGIN` past its deadline: the last look, half of
+    /// `MARGIN` before the timeout the hook's time is counted from, which is where an older
+    /// settings file cancels it. The thread ends with the process: a hook inside its time never
+    /// hears it.
     pub(crate) fn watch(self: &Arc<Self>, home: &Path, agent: &str, event: &str) {
         let clock = Arc::clone(self);
         let (home, agent, event) = (home.to_owned(), agent.to_owned(), event.to_owned());
