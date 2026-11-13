@@ -187,17 +187,21 @@ its tool's output, which `"subagents"` leaves whole.
 
 ## Measuring before a default changes
 
-Spec 3.5 (a) stands: the shrink is enabled only if the recall of decisions, lessons and fixes
-drops by 0.02 or less. Its one measurement (docs/milestone-3.md) recalled 22 decisions against 24
-of 44, within two runs' spread and failing the rule declared before it; lessons, fixes and cards
-were not measured. The measurement of decision 107 is one run of the kind decision 34 allows, its
-cost shown first, with the arms, the exact cost and the rule that fails an arm fixed before it:
+Spec 3.5 (a) stands, both of its clauses: the shrink is enabled only if the curator's input
+shrinks by 30% or more while the recall of decisions, lessons and fixes drops by 0.02 or less. Its
+one measurement (docs/milestone-3.md) passed the first clause for every tool call (70.9% less input
+on the dev set) and recalled 22 decisions against 24 of 44, within two runs' spread and failing the
+rule declared before it; lessons, fixes and cards were not measured, and `"subagents"` was not
+built. The measurement of decision 107 is one run of the kind decision 34 allows, its cost shown
+first, with the arms, the exact cost and the rule that fails an arm fixed before it:
 
 - the first line is the share of answers `check` refuses, for an entry that talks and for one
   that does not (the new prompt reaches both): an arm that raises it fails, whatever it recalls;
 - then the labelled lines of milestone 3 (decisions recalled, overturns still current), with
   enough runs of an arm to know its spread;
-- then what no label covers: lessons, fixes and cards, judged on a sample of windows side by side.
+- then what no label covers: lessons, fixes and cards, judged on a sample of windows side by side;
+- and each arm's input against the arm that shows every call whole: an arm whose input is not 30%
+  less is not made the default, whatever it recalls.
 
 The dev set's transcripts hold subagents' files (968 of 998), so `"subagents"` can be told from
 `true` on it.
@@ -210,11 +214,14 @@ After it, on this PC: `provider_calls` against the estimate above.
 2. `[summary] shrink = "subagents"`.
 3. The three-part prompt behind `[summary] conversation`, with no conversation yet.
 4. The conversation for the Messages API: the state, the restarts, the op's `read` and forget's
-   rule over it, the tokens counted from answers. Security review.
+   rule over it, the tokens counted from answers. The text that says what leaves the machine
+   (MUST-M23) and [prompt-cache.md](prompt-cache.md) change in the same PR: from the build that
+   lets a person turn the conversation on, they say that a window's lines are sent again and held
+   in the entry's cache. Security review.
 5. The same for OpenAI's own API: its explicit breakpoints are checked with a live pair of calls
    first (whether a later breakpoint reads what an earlier request wrote at an earlier one).
-6. The measurement, then the defaults, the settings page, the text for users, and the parity
-   table's row.
+6. The measurement, then the defaults, the settings page and its text, and the parity table's
+   row.
 
 ## As built
 
