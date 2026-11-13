@@ -512,10 +512,9 @@ impl Talk {
     /// estimate when that answer did not say; while the whole estimate at the entry's factor, as
     /// admission counts it, stays within `ceiling` too; and while their windows' ops list no more
     /// removals between them than one op can (`TALK_REMOVED`). Else its own stretch alone: a
-    /// restart, which
-    /// only loses the cache. A stretch that begins where the last one does takes its place (a
-    /// window sent again, after a refused answer or a hold). None while the entry keeps none
-    /// (`TALK_MISSES`).
+    /// restart, which only loses the cache. A stretch that begins where the last one does takes
+    /// its place (a window sent again, after a refused answer or a hold). None while the entry
+    /// keeps none (`TALK_MISSES`).
     fn plan(
         &self,
         db: &Connection,
