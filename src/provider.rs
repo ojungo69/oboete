@@ -8609,39 +8609,45 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
         assert_eq!(earlier(&conn).last(), Some(&Some(0)));
     }
 
-    /// Decision 107: a window sent again reads from the cache only what went before the stretch
-    /// it replaces, however large that stretch was: it is no miss. A small window, a large one,
-    /// the large one twice more, and the conversation goes on with the next.
+    /// Decision 107: what a call reads from the cache is what went again: never the last call's
+    /// tail, nor a stretch this window's takes the place of, however large they were. Neither is
+    /// a miss: after a small window and a large one, the large one twice more, the conversation
+    /// goes on with the next; and so it does through windows whose tails are large.
     #[test]
-    fn a_window_sent_again_misses_nothing_by_the_stretch_it_replaces() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = providers_db::open(home.path()).unwrap();
-        let (url, _requests) = counting(5, 1.7);
-        let providers = [talker(&url, 100_000)];
-        let mut talk = Talk::default();
+    fn a_turn_misses_nothing_by_what_does_not_go_again() {
+        // How many stretches went before each call's own, and whether the entry still keeps one.
+        let went = |windows: &[(&Parts, i64)]| {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let (url, _requests) = counting(windows.len(), 1.7);
+            let providers = [talker(&url, 100_000)];
+            let mut talk = Talk::default();
+            for (parts, from) in windows {
+                let turn = turn_of(parts, "k", *from, from + 1);
+                talk_run(&providers, &conn, &mut talk, &turn).unwrap();
+            }
+            (earlier(&conn), talk.quiet.is_empty())
+        };
         let small = window_prompt("One.", "", 5);
         let large = window_prompt(&"word ".repeat(14_000), "", 5);
         let next = window_prompt("Three.", "", 5);
-        for (parts, from) in [
-            (&small, 1),
-            (&large, 3),
-            (&large, 3),
-            (&large, 3),
-            (&next, 5),
-        ] {
-            talk_run(
-                &providers,
-                &conn,
-                &mut talk,
-                &turn_of(parts, "k", from, from + 1),
-            )
-            .unwrap();
-        }
         assert_eq!(
-            earlier(&conn),
-            [Some(0), Some(1), Some(1), Some(1), Some(2)]
+            went(&[
+                (&small, 1),
+                (&large, 3),
+                (&large, 3),
+                (&large, 3),
+                (&next, 5)
+            ]),
+            (vec![Some(0), Some(1), Some(1), Some(1), Some(2)], true)
         );
-        assert!(talk.quiet.is_empty());
+        let known = "- [c1] word word word word\n".repeat(700);
+        let tailed = window_prompt("One.", &known, 5);
+        assert!(budget::estimate(&three(&tailed)[2]) > 4_000);
+        assert_eq!(
+            went(&[(&tailed, 1), (&tailed, 3), (&tailed, 5), (&tailed, 7)]),
+            (vec![Some(0), Some(1), Some(2), Some(3)], true)
+        );
     }
 
     /// #971 condition 15: a conversation, and what a call read, are each entry's own. A window
