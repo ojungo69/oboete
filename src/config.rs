@@ -183,10 +183,11 @@ pub struct Summary {
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u32,
     /// Task 12's shrink: a window shows a tool's input short and a long output as its head and
-    /// tail, so it holds more of a session (docs/spike/m3-dev.md). Off until measurement shows the
+    /// tail, so it holds more of a session (docs/spike/m3-dev.md): `true` for every tool call,
+    /// `"subagents"` for those a subagent made (decision 107). Off until measurement shows the
     /// input shrinks by 30% or more and recall drops by 0.02 or less (spec 3.5).
     #[serde(default)]
-    pub shrink: bool,
+    pub shrink: crate::curate::Shrink,
 }
 
 impl Summary {
@@ -207,7 +208,7 @@ impl Default for Summary {
             curate: false,
             window_tokens: default_window_tokens(),
             idle_minutes: default_idle_minutes(),
-            shrink: false,
+            shrink: crate::curate::Shrink::Off,
         }
     }
 }
@@ -1910,6 +1911,23 @@ enabled = false
         }
         // A table no version reads is still an error.
         assert!(parse_capture(Some("[redactions]\n")).is_err());
+    }
+
+    /// `[summary] shrink` (decision 107): `true` is every tool call, `"subagents"` only a
+    /// subagent's, `false` and no line none; any other value is refused, not read as one of them.
+    #[test]
+    fn shrink_is_true_false_or_subagents() {
+        use crate::curate::Shrink;
+        let of = |line: &str| {
+            toml::from_str::<Config>(&format!("[summary]\n{line}\n")).map(|c| c.summary.shrink)
+        };
+        assert_eq!(of("shrink = true").unwrap(), Shrink::All);
+        assert_eq!(of("shrink = false").unwrap(), Shrink::Off);
+        assert_eq!(of("shrink = \"subagents\"").unwrap(), Shrink::Subagents);
+        assert_eq!(of("").unwrap(), Shrink::Off);
+        for bad in ["shrink = \"all\"", "shrink = \"Subagents\"", "shrink = 1"] {
+            assert!(of(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

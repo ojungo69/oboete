@@ -425,15 +425,56 @@ impl std::error::Error for ListChanged {}
 #[derive(Debug, Clone, Copy)]
 pub struct Cut {
     pub tokens: u32,
-    pub shrink: bool,
+    pub shrink: Shrink,
     pub steps: bool,
+}
+
+/// Which tool calls a window shows short (Task 12's shrink, `[summary] shrink`): none (`false`),
+/// every one (`true`), or only those a subagent made (`"subagents"`, decision 107:
+/// docs/curator-conversation.md), which its event names by an `agent_id` (`capture`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Shrink {
+    #[default]
+    Off,
+    Subagents,
+    All,
+}
+
+impl Shrink {
+    /// Whether a tool call is shown short: `sub`, a subagent made it.
+    fn takes(self, sub: bool) -> bool {
+        match self {
+            Shrink::Off => false,
+            Shrink::Subagents => sub,
+            Shrink::All => true,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Shrink {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum In {
+            Flag(bool),
+            Name(String),
+        }
+        match In::deserialize(d)? {
+            In::Flag(true) => Ok(Shrink::All),
+            In::Flag(false) => Ok(Shrink::Off),
+            In::Name(n) if n == "subagents" => Ok(Shrink::Subagents),
+            In::Name(n) => Err(serde::de::Error::custom(format!(
+                "shrink is true, false or \"subagents\", not {n:?}"
+            ))),
+        }
+    }
 }
 
 impl From<u32> for Cut {
     fn from(tokens: u32) -> Self {
         Cut {
             tokens,
-            shrink: false,
+            shrink: Shrink::Off,
             steps: false,
         }
     }
@@ -986,8 +1027,10 @@ struct Prepared<'r> {
 }
 
 impl<'r> Prepared<'r> {
-    fn new(e: &Event, rules: &'r Rules, shrink: bool) -> Self {
+    fn new(e: &Event, rules: &'r Rules, shrink: Shrink) -> Self {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
+        // A subagent's call names it (`capture`): `"subagents"` shows only those short.
+        let shrink = shrink.takes(body["agent_id"].as_str().is_some_and(|id| !id.is_empty()));
         let tool = body["tool"].as_str().unwrap_or("");
         let memory = e.kind == "tool" && memory_read(tool, &body);
         let note = e.kind == "tool" && memory_write(tool, &body);
@@ -1334,7 +1377,7 @@ fn owners_answers(body: &Value) -> Vec<String> {
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.
 #[cfg(test)]
 fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Piece {
-    Prepared::new(e, rules, false).piece(seq, from, to)
+    Prepared::new(e, rules, Shrink::Off).piece(seq, from, to)
 }
 
 /// What a piece's line takes in a window, its newline included: the sum over a window's lines and
@@ -6234,7 +6277,7 @@ mod tests {
             None,
             Cut {
                 tokens: WINDOW_TOKENS,
-                shrink: false,
+                shrink: Shrink::Off,
                 steps: false,
             },
             &rules,
@@ -6260,7 +6303,7 @@ mod tests {
             None,
             Cut {
                 tokens: WINDOW_TOKENS,
-                shrink: false,
+                shrink: Shrink::Off,
                 steps: false,
             },
             &rules,
@@ -7673,7 +7716,7 @@ mod tests {
         let dev = raw.device().to_owned();
         let cut = Cut {
             tokens: WINDOW_TOKENS,
-            shrink: false,
+            shrink: Shrink::Off,
             steps: true,
         };
         let reading = Reading::default();
@@ -8499,7 +8542,7 @@ mod tests {
     fn shrinking(tokens: u32) -> Cut {
         Cut {
             tokens,
-            shrink: true,
+            shrink: Shrink::All,
             steps: false,
         }
     }
@@ -8597,6 +8640,63 @@ mod tests {
         assert!(whole.text.contains("the input's end") && whole.shortened.is_empty());
     }
 
+    /// `[summary] shrink = "subagents"` (decision 107): only a call a subagent made, which its
+    /// event names by an `agent_id`, is shown short and named so; a main session's call beside
+    /// it is whole, as is one whose `agent_id` is empty.
+    #[test]
+    fn only_a_subagents_tool_call_is_shown_short() {
+        let (_home, mut raw, dev) = store();
+        let input = format!("{}the input's end", "q".repeat(400));
+        let output = format!(
+            "{}the middle{}the output's end",
+            "o".repeat(500),
+            "u".repeat(500)
+        );
+        let call = |agent: Option<&str>| {
+            let mut c = serde_json::json!({"tool": "Bash", "input": input, "output": output,
+                "failed": false});
+            if let Some(id) = agent {
+                c["agent_id"] = id.into();
+            }
+            event("tool", c)
+        };
+        let main = raw.append(&call(None)).unwrap();
+        let sub = raw.append(&call(Some("a1"))).unwrap();
+        let unnamed = raw.append(&call(Some(""))).unwrap();
+        let cut = |shrink| Cut {
+            tokens: WINDOW_TOKENS,
+            shrink,
+            steps: false,
+        };
+        let rules = Rules::default();
+        let w = next_window(&raw, &dev, cut(Shrink::Subagents), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!((w.from_seq, w.to_seq), (main, unnamed));
+        assert_eq!(w.shortened, [sub]);
+        // The subagent's line has neither its input's end nor its output's middle; the two
+        // others have both.
+        assert_eq!(w.text.matches("the input's end").count(), 2, "{}", w.text);
+        assert_eq!(w.text.matches("the middle").count(), 2, "{}", w.text);
+        assert_eq!(w.text.matches("the output's end").count(), 3, "{}", w.text);
+        assert_eq!(
+            w.text.matches("characters not shown").count(),
+            1,
+            "{}",
+            w.text
+        );
+        // `true` shows all three short, as before, and `false` none.
+        let all = next_window(&raw, &dev, cut(Shrink::All), &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(all.shortened, [main, sub, unnamed]);
+        let none = next_window(&raw, &dev, cut(Shrink::Off), &rules)
+            .unwrap()
+            .unwrap();
+        assert!(none.shortened.is_empty());
+        assert_eq!(none.text.matches("the middle").count(), 3, "{}", none.text);
+    }
+
     /// The phase records the calls it showed short, and a window holds more of them short.
     #[test]
     fn the_phase_records_the_calls_it_showed_short() {
@@ -8609,7 +8709,7 @@ mod tests {
             Ok(answered("fake"))
         };
         let summary = Summary {
-            shrink: true,
+            shrink: Shrink::All,
             ..curating(1_000)
         };
         let rules = Rules::default();

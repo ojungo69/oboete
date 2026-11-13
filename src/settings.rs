@@ -3063,7 +3063,7 @@ mod tests {
         let saved = save_to(&home, &body).unwrap();
         assert_eq!(saved["summary"]["language"], "English\n日本語 <example>");
         let cfg = config::load(home.path()).unwrap();
-        assert!(cfg.summary.curate && cfg.summary.shrink);
+        assert!(cfg.summary.curate && cfg.summary.shrink == crate::curate::Shrink::All);
         assert_eq!(cfg.summary.window_tokens, 0);
         assert_eq!(cfg.summary.idle_minutes, u32::MAX);
         let after = file(&home).unwrap();
