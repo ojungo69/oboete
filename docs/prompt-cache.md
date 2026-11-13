@@ -86,6 +86,12 @@ oboete's records would be written once at 1.25 times and read again at a tenth b
 that carries it: carried by three later calls, a record would cost 1.55 times what it costs now.
 oboete keeps one call per window.
 
+Decision 107 (2026-11-13) gives this up: with long tool outputs sent short, the windows of an
+entry sent as one conversation cost about what the calls cost now, and 85 to 90% of the prompt is
+read from the cache. The measurement and the design are in
+[curator-conversation.md](curator-conversation.md); until it is built, what this page says is
+what runs.
+
 ## Measuring
 
 ```sh
