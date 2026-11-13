@@ -117,14 +117,20 @@ models. It is sent
 where `*` is a breakpoint, stretches 1 to n-1 are what this entry was sent in its calls before,
 each a block of its own, and stretch n is this window. The call after it reads through stretch n
 and writes stretch n+1: its breakpoint finds the entry one block back (the lookback is 20
-blocks). Two of a request's four breakpoints are used; an entry whose `extra` leaves fewer than two
-does not talk. Every other entry (the CLIs, the OpenAI-compatible ones) gets
+blocks). Two of a request's four breakpoints are used. An entry whose `extra` marks a cache of its
+own does not talk: ours would follow its marker, and the API refuses a longer cache after a
+shorter one. Nor does one that declares no `max_request_tokens`: a conversation needs a size to
+start again at. Every other entry (the CLIs, the OpenAI-compatible ones) gets
 `[instructions][stretch n][tail n]`.
 
 The state is per entry: its stretches, when its last call started, how many tokens its last
-answer said that prompt was, and its key (below). The worker's loop owns it, in memory only: a
-worker that left starts again, and by then the entry's cache has lapsed. `oboete recurate` and
-every other role's calls are as now.
+answer said that prompt was, and its key (below). The worker's curation phase owns it, in memory
+only, for one run of the worker under its lock: a worker that left starts again, and by then the
+entry's cache has lapsed. `oboete recurate` and every other role's calls are as now.
+
+A window sent again (after an answer its check refused, or a hold, the same or grown by then)
+takes its own earlier stretch's place: no window's lines are in a prompt twice, and the cache is
+read through the stretch before it.
 
 An answer joins nothing: the known claims already carry what was kept, and an answer sent again
 would be written at 1.25 times.
@@ -136,16 +142,27 @@ A conversation restarts, as `[instructions]*[stretch]*[tail]`, when any of these
 - its key differs from this window's (the gate, below);
 - the entry's last call started longer ago than its cache keeps an entry, less a margin: the
   Messages API measures five minutes from a request's start, and a read renews it;
-- the prompt would pass the entry's `max_request_tokens` less a tenth. This is counted in the
-  entry's own tokens, not in estimates: the last answer's `prompt_tokens`, less the last tail,
-  plus this stretch and tail, each estimate times `budget::factor` (about 1.5 on this PC). Haiku
-  5.5's price is five times past 100,000 tokens, tokens read from the cache count toward it, and
-  a request past it pays the higher price for all of its tokens;
+- the prompt would pass the entry's `max_request_tokens` less a tenth, or what admission lets
+  through with the answer's bound (`budget::admit_with_history`), whichever is less. It is counted
+  twice, and the larger count decides: the whole prompt's estimate, and the entry's own tokens
+  (the last answer's `prompt_tokens`, less the last tail, plus this stretch and tail). An
+  estimate is taken times the 90th percentile of the entry's tokens to its estimates over its
+  last 50 answers (about 1.5 on this PC; the budget counts with their median, but a window is
+  not the average one), and times two until the entry has answered five times. Haiku 5.5's price
+  is five times past 100,000 tokens, tokens read from the cache count toward it, and a request
+  past it pays the higher price for all of its tokens;
 - the entry's model or address changed, or its last call ended in an error, a timeout or a
   status: what its cache holds is then unknown.
 
 After a call that was sent and answered, accepted by `check` or not, its stretch joins the
 conversation. A restart only loses the cache.
+
+**A cache that does not answer.** A conversation costs less than separate calls only while what
+is sent again is read from the cache: a call that went on and read less than half of it wrote all
+of it instead, at 1.25 times. Two such calls in a row, and the entry keeps no conversation for an
+hour: its calls are the prompt with its one stretch, as before. `provider_calls.earlier` (how
+many stretches went before a call's own; NULL for a call that was no turn) beside `cached_tokens`
+shows each such call.
 
 ### What a window was shown
 
@@ -163,19 +180,29 @@ Everything that leaves the machine passes the egress gate (spec 3.3, 5.5, 6.4; m
 rule 12), and a stretch sent again passes it again:
 
 - The key is made of what the gate holds for a window: the rules' version, `Reading` (the
-  exclusion list, the sessions it excludes, and `fence_count`: what forget denied and the ranges a
-  rescan masked), retention's marker (an expiry is not in `fence_count`), the language and the
-  prompt's version. A forget, an expiry, a mute, an exclusion or a rule change gives another key:
-  nothing rendered before it is sent again.
-- The gate still runs before each call, as now (`dispatch`, `Reading::still`, `rules_still`).
+  exclusion list, the sessions it excludes, and `fence_count`: what forget denied, a record or a
+  claim, and the ranges a rescan masked), and the store's handle. A forget, a mask, an exclusion
+  or a rule change gives another key: nothing rendered before it is sent again. The language and
+  the prompt's wording need no key: a conversation goes on only with the same instructions, byte
+  for byte.
+- The gate still runs before each call, as now (`dispatch`, `Reading::still`, `rules_still`): at
+  a send the state is the window's, and every stretch sent again was rendered under an equal key.
+- What rewrites a record's text holds the worker's lock: a forget's purge, retention's expiry
+  (`retention::rows`), a restore, a rebuild. The worker that holds it steps aside by ending its
+  loop, and the conversation ends with it, so none of them runs within a conversation and
+  retention needs no marker in the key (an earlier draft of this note gave it one). Within one
+  run the stores can be closed and opened again (a damaged raw.db restored): every open of
+  raw.db has an id of its own in the key, so the next window starts again.
+- A mute changes which claims are shown, never a record's lines: it can change a tail, which is
+  made for each call, and restarts nothing (the earlier draft listed it).
 - Prompt injection (spec 3.3): each stretch's fence is the hash of its own text, the tail names
   the stretch to read after all recorded text, and the code gates do not change: a claim needs its
   quote in a line of this window, a decided one the developer's own line.
 
 What changes for the person: a window's lines are sent to the same entry again with each later
 call of its conversation, and that entry's cache holds them until five minutes (thirty at OpenAI)
-after the last call. Today they are sent once and not written to a cache. The text that says what
-leaves the machine (MUST-M23) and [prompt-cache.md](prompt-cache.md) say so when this is built.
+after the last call. Without the setting they are sent once and not written to a cache. The text
+that says what leaves the machine and [prompt-cache.md](prompt-cache.md) say so.
 
 ### The shorter window text
 

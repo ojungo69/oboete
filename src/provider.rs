@@ -377,6 +377,294 @@ pub(crate) fn refusal_note() -> Option<String> {
 /// error stops the run there, with no further call.
 pub type Gate<'a> = dyn Fn() -> Result<Option<crate::dispatch::Guard>> + 'a;
 
+/// Decision 107 (docs/curator-conversation.md): a window's three-part prompt as the next turn of
+/// an entry's conversation.
+pub struct Turn<'a> {
+    /// The prompt whole: its instructions, the window's stretch and the tail.
+    pub prompt: &'a str,
+    /// Where the stretch is in it: the instructions end where it begins, and the tail begins
+    /// where it ends.
+    pub stretch: std::ops::Range<usize>,
+    /// What the egress gate held when the stretch was rendered (`curate::talk_key`): it is sent
+    /// again only before a window of the same key.
+    pub key: &'a str,
+    /// The window's first record and the offset into it, and its last record.
+    pub from: (i64, Option<i64>),
+    pub to: i64,
+}
+
+/// Decision 107: how long after a call started the next one may still be sent what it was: the
+/// Messages API keeps a cache entry five minutes from the start of the request that wrote or read
+/// it, less a margin for the time a request takes to arrive.
+const TALK_LIFETIME_MS: i64 = 270_000;
+/// Decision 107: the share of an entry's `max_request_tokens` a conversation's prompt stays
+/// within. Haiku 5.5 bills a prompt past its 100,000 tokens at five times, every token of it,
+/// those read from the cache too.
+const TALK_SHARE: f64 = 0.9;
+/// Decision 107: a continued call that read less than this share of what it was sent again from
+/// the cache missed it, and wrote all of it instead, at 1.25 times.
+const TALK_READ_SHARE: f64 = 0.5;
+/// Decision 107: after this many misses in a row an entry keeps no conversation for
+/// `TALK_QUIET_MS`: a cache that does not answer costs more with a conversation than without.
+const TALK_MISSES: u32 = 2;
+const TALK_QUIET_MS: i64 = 3_600_000;
+/// Decision 107: the tokens an estimated token is taken for, in the size of a conversation, until
+/// an entry's own answers say (`ratio`): no entry in the owner's ledger counted twice its
+/// estimate (the median on this machine is about 1.5).
+const TALK_RATIO: f64 = 2.0;
+
+/// Decision 107 (docs/curator-conversation.md): what each entry of the curator's chain was sent
+/// in its conversation, so that the next window's call sends it again before its own stretch and
+/// the entry reads it from its prompt cache. In memory only, kept by the worker's curation phase
+/// while it runs: a worker that left starts again, and by then the cache has let go.
+#[derive(Default)]
+pub struct Talk {
+    entries: std::collections::HashMap<String, Conversation>,
+    /// Each entry's last call as a turn: its span, and the spans of the stretches that went
+    /// before the window's own (`read`). Kept apart from the conversation, which an error drops.
+    sent: std::collections::HashMap<String, (String, Vec<(i64, i64)>)>,
+    /// The misses in a row of each entry (`TALK_MISSES`), and until when one keeps none.
+    misses: std::collections::HashMap<String, u32>,
+    quiet: std::collections::HashMap<String, i64>,
+}
+
+/// One entry's conversation: what its cache may hold.
+struct Conversation {
+    /// The key of the turns in it (`Turn::key`).
+    key: String,
+    instructions: String,
+    /// The entry's model and address: another's cache holds none of it.
+    at: String,
+    /// Its stretches, the oldest first.
+    stretches: Vec<Stretch>,
+    /// When its last call started (unix ms).
+    started: i64,
+    /// What its last answer said that call's prompt was, in tokens, and the estimate of that
+    /// prompt's tail, which is not sent again.
+    tokens: Option<i64>,
+    tail: u32,
+}
+
+struct Stretch {
+    text: String,
+    from: (i64, Option<i64>),
+    to: i64,
+    /// Its estimate (`budget::estimate`).
+    est: u32,
+}
+
+/// What an entry that keeps a conversation is sent for a turn (`Talk::plan`).
+struct Planned {
+    prompt: String,
+    /// Where each block after the instructions begins: every stretch, then the tail.
+    marks: Vec<usize>,
+    /// How many stretches go before the window's own.
+    earlier: usize,
+    /// Their spans, those next to each other as one.
+    read: Vec<(i64, i64)>,
+    /// The tokens of what goes again, by the entry's last answer: what a call that reads its
+    /// cache reads. None when that answer did not say.
+    again: Option<f64>,
+    at: String,
+}
+
+/// Whether `p` keeps a conversation for `role` (decision 107), with the most tokens its prompt
+/// may be and what tells its cache from another's: an entry of the Messages API that marks no
+/// cache of its own (ours would follow its marker, and a longer one may not follow a shorter)
+/// and declares a ceiling, for the curator's windows.
+fn talks(p: &Provider, role: &str) -> Option<(f64, String)> {
+    let Provider::Openai {
+        api: Api::Anthropic,
+        extra,
+        limits,
+        model,
+        base_url,
+        ..
+    } = p
+    else {
+        return None;
+    };
+    let ceiling = f64::from(limits.max_request_tokens?);
+    // And within what admission lets through: the answer's bound counts against the ceiling
+    // (`budget::admit_with_history`), and a turn it refused as too big would not be tried alone.
+    let most = (ceiling * TALK_SHARE).min(ceiling - f64::from(budget::output_bound(p)));
+    (role == "curator" && config::cache_markers(extra) == 0)
+        .then(|| (most, format!("{model}\n{base_url}")))
+}
+
+impl Talk {
+    /// What entry `name` is sent for `turn`: its earlier stretches again when they were sent under
+    /// the same key, instructions, model and address, its last call started less than the cache's
+    /// lifetime ago, and the whole stays within `ceiling` tokens, counted twice: by the estimate,
+    /// and from the tokens its last answer reported, each estimate times a high ratio of the
+    /// entry's tokens to its estimates (`ratio`). Else its own stretch alone: a restart, which
+    /// only loses the cache. A stretch that begins where the last one does takes its place (a
+    /// window sent again, after a refused answer or a hold). None while the entry keeps none
+    /// (`TALK_MISSES`).
+    fn plan(
+        &self,
+        db: &Connection,
+        name: &str,
+        at: &str,
+        turn: &Turn,
+        ceiling: f64,
+        now: i64,
+    ) -> Result<Option<Planned>> {
+        if self.quiet.get(name).is_some_and(|until| now < *until) {
+            return Ok(None);
+        }
+        let instructions = &turn.prompt[..turn.stretch.start];
+        let stretch = &turn.prompt[turn.stretch.clone()];
+        let tail = &turn.prompt[turn.stretch.end..];
+        let held = self.entries.get(name).filter(|c| {
+            c.key == turn.key
+                && c.instructions == instructions
+                && c.at == at
+                && (0..TALK_LIFETIME_MS).contains(&(now - c.started))
+        });
+        let mut earlier: &[Stretch] = held.map_or(&[], |c| &c.stretches);
+        let mut replaced = 0;
+        if let Some((last, before)) = earlier.split_last()
+            && last.from == turn.from
+        {
+            (earlier, replaced) = (before, last.est);
+        }
+        let ratio = ratio(db, name)?;
+        let est = |text: &str| f64::from(budget::estimate(text));
+        let new = est(stretch) + est(tail);
+        let again =
+            held.and_then(|c| Some(c.tokens? as f64 - f64::from(c.tail + replaced) * ratio));
+        let estimated: f64 = earlier.iter().map(|s| f64::from(s.est)).sum();
+        let by_estimate = (est(instructions) + estimated + new) * ratio;
+        let by_tokens = again.map_or(0.0, |again| again + new * ratio);
+        if by_estimate.max(by_tokens) > ceiling {
+            earlier = &[];
+        }
+        let mut prompt = String::with_capacity(turn.prompt.len());
+        prompt.push_str(instructions);
+        let mut marks = Vec::with_capacity(earlier.len() + 2);
+        for s in earlier {
+            marks.push(prompt.len());
+            prompt.push_str(&s.text);
+        }
+        marks.push(prompt.len());
+        prompt.push_str(stretch);
+        marks.push(prompt.len());
+        prompt.push_str(tail);
+        let mut read: Vec<(i64, i64)> = Vec::new();
+        for s in earlier {
+            match read.last_mut() {
+                Some(last) if s.from.0 <= last.1 + 1 => last.1 = last.1.max(s.to),
+                _ => read.push((s.from.0, s.to)),
+            }
+        }
+        Ok(Some(Planned {
+            prompt,
+            marks,
+            earlier: earlier.len(),
+            read,
+            again: again.filter(|_| !earlier.is_empty()),
+            at: at.to_owned(),
+        }))
+    }
+
+    /// Entry `name`'s call for `span` goes out as `planned`.
+    fn sending(&mut self, name: &str, span: &str, planned: &Planned) {
+        self.sent
+            .insert(name.to_owned(), (span.to_owned(), planned.read.clone()));
+    }
+
+    /// Entry `name` answered the call that started at `started` and was sent `planned` for `turn`
+    /// (an answer kept, or one its check refused): the turn's stretch joins its conversation. A
+    /// call that went on and read too little of what it was sent again from the cache is a miss:
+    /// `TALK_MISSES` in a row, and the entry keeps no conversation for `TALK_QUIET_MS`.
+    fn answered(&mut self, name: &str, turn: &Turn, planned: &Planned, started: i64, usage: Usage) {
+        let instructions = &turn.prompt[..turn.stretch.start];
+        let mut stretches = match self.entries.remove(name) {
+            Some(c) if planned.earlier > 0 => c.stretches,
+            _ => Vec::new(),
+        };
+        stretches.truncate(planned.earlier);
+        let text = &turn.prompt[turn.stretch.clone()];
+        stretches.push(Stretch {
+            text: text.to_owned(),
+            from: turn.from,
+            to: turn.to,
+            est: budget::estimate(text),
+        });
+        // Only a call that went on says whether the cache answers: a restart reads none of it.
+        if let Some(again) = planned.again {
+            let missed = (usage.cached.unwrap_or(0) as f64) < again * TALK_READ_SHARE;
+            let misses = self.misses.entry(name.to_owned()).or_default();
+            *misses = if missed { *misses + 1 } else { 0 };
+            if *misses >= TALK_MISSES {
+                self.misses.remove(name);
+                self.quiet
+                    .insert(name.to_owned(), started.saturating_add(TALK_QUIET_MS));
+                return;
+            }
+        }
+        self.entries.insert(
+            name.to_owned(),
+            Conversation {
+                key: turn.key.to_owned(),
+                instructions: instructions.to_owned(),
+                at: planned.at.clone(),
+                stretches,
+                started,
+                tokens: usage.prompt,
+                tail: budget::estimate(&turn.prompt[turn.stretch.end..]),
+            },
+        );
+    }
+
+    /// Entry `name`'s call was sent and came to nothing (an error, a timeout, a status): what its
+    /// cache holds is not known, and its next call starts again.
+    fn failed(&mut self, name: &str) {
+        self.entries.remove(name);
+    }
+
+    /// The spans of the stretches entry `name` was sent before the window's own in its last call
+    /// as a turn, when that call was for `span`: what `curate` writes as the window op's `read`.
+    pub fn read(&self, name: &str, span: &str) -> Vec<(i64, i64)> {
+        match self.sent.get(name) {
+            Some((sent, read)) if sent == span => read.clone(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Decision 107: how far entry `provider`'s tokens may be from the estimate, for the size of a
+/// conversation: the 90th percentile of `prompt_tokens / est_tokens` over its last 50 answers
+/// that reported both (the budget counts with their median, `budget::factor`: a window is not
+/// the average one), and `TALK_RATIO` until there are 5.
+fn ratio(db: &Connection, provider: &str) -> Result<f64> {
+    let mut ratios = providers_db::token_ratios(db, provider, 50)?;
+    if ratios.len() < 5 {
+        return Ok(TALK_RATIO);
+    }
+    ratios.sort_by(f64::total_cmp);
+    Ok(ratios[ratios.len() * 9 / 10])
+}
+
+/// How oboete marks a Messages request's prompt cache.
+#[derive(Clone, Copy)]
+enum Cache<'a> {
+    /// A fenced prompt's instructions, for five minutes.
+    Short,
+    /// The same for an hour (`config::cache_hour`).
+    Hour,
+    /// Decision 107: a conversation's turn: the instructions, and its newest stretch. The blocks
+    /// after the instructions begin at these offsets: every stretch, then the tail.
+    Turn(&'a [usize]),
+}
+
+impl From<bool> for Cache<'_> {
+    fn from(hour: bool) -> Self {
+        if hour { Cache::Hour } else { Cache::Short }
+    }
+}
+
 /// The settings connection test never accepts user history or an arbitrary prompt.
 pub(crate) const PROBE_PROMPT: &str = "Return exactly this JSON object: {\"ok\":true}";
 
@@ -413,7 +701,7 @@ pub(crate) fn probe_estimate(p: &Provider) -> u32 {
                 PROBE_PROMPT,
                 &probe_schema(),
                 &probe_extra(limits),
-                false,
+                Cache::Short,
             )
             .to_string(),
         ),
@@ -896,6 +1184,8 @@ pub struct Chain<'a> {
     forced_fail: Option<String>,
     check: Option<&'a AnswerCheck<'a>>,
     gate: Option<&'a Gate<'a>>,
+    /// Decision 107: the conversations its entries keep, and the turn this run is.
+    talk: Option<(&'a mut Talk, &'a Turn<'a>)>,
     #[cfg(test)]
     isolation: Option<&'a dyn Fn() -> Result<crate::isolation::Gate>>,
 }
@@ -909,8 +1199,19 @@ impl<'a> Chain<'a> {
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
             check: None,
             gate: None,
+            talk: None,
             #[cfg(test)]
             isolation: None,
+        }
+    }
+
+    /// Decision 107 (docs/curator-conversation.md): the run is `turn`, whose prompt is the one
+    /// `run` is given, and an entry that keeps a conversation (`talks`) is sent what `talk` holds
+    /// of its earlier turns before it. Every other entry is sent the prompt as it is.
+    pub fn talk(self, talk: &'a mut Talk, turn: &'a Turn<'a>) -> Self {
+        Self {
+            talk: Some((talk, turn)),
+            ..self
         }
     }
 
@@ -963,7 +1264,6 @@ impl<'a> Chain<'a> {
         let conn = self.db;
         let forced_fail = self.forced_fail.clone();
         let mut fallbacks = Vec::new();
-        let est = budget::estimate(prompt);
         let system = system_for(role);
         let hour = config::cache_hour(role);
         // A ceiling a provider refused this request at (413): its peers with it are skipped.
@@ -971,6 +1271,23 @@ impl<'a> Chain<'a> {
         for p in self.providers {
             let name = p.name().to_string();
             let forced = forced_fail.as_deref() == Some(name.as_str());
+            // Decision 107: an entry that keeps a conversation is sent its earlier stretches
+            // before this turn's; what follows (the estimate, the reservation, the bytes sent)
+            // is of the prompt as this entry is sent it.
+            let planned = match (&self.talk, talks(p, role)) {
+                (Some((talk, turn)), Some((ceiling, at))) => {
+                    talk.plan(conn, &name, &at, turn, ceiling, db::now_ms())?
+                }
+                _ => None,
+            };
+            let prompt = planned
+                .as_ref()
+                .map_or(prompt, |planned| planned.prompt.as_str());
+            let cache = match &planned {
+                Some(planned) => Cache::Turn(&planned.marks),
+                None => Cache::from(hour),
+            };
+            let est = budget::estimate(prompt);
             let record = |outcome: &str,
                           ms: i64,
                           detail: Option<&str>,
@@ -1042,6 +1359,9 @@ impl<'a> Chain<'a> {
                         attempt: reservation.id(),
                         usd_bound: reservation.cost(p, Usage::default(), true),
                     });
+                    if let Some(planned) = &planned {
+                        providers_db::set_earlier(conn, reservation.id(), planned.earlier)?;
+                    }
                     reservation
                 }
                 Err(refusal) => {
@@ -1123,11 +1443,16 @@ impl<'a> Chain<'a> {
             };
             let (used, _) = providers_db::calls_in_a_day(conn, &name)?;
             let switch = switched(p);
+            // Decision 107: the turn goes out as planned, from now.
+            let mut began = db::now_ms();
+            if let (Some((talk, _)), Some(planned)) = (self.talk.as_mut(), &planned) {
+                talk.sending(&name, span, planned);
+            }
             let mut result = if forced {
                 drop(admission);
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
             } else {
-                ready.and_then(|()| call(p, system, prompt, schema, admission, hour))
+                ready.and_then(|()| call(p, system, prompt, schema, admission, cache))
             };
             let sent = report_sent(reservation.id(), forced, &result, observer);
             // A second request goes through the budget and the egress gate again, so nothing
@@ -1191,6 +1516,9 @@ impl<'a> Chain<'a> {
                             attempt: reservation.id(),
                             usd_bound: reservation.cost(p, Usage::default(), true),
                         });
+                        if let Some(planned) = &planned {
+                            providers_db::set_earlier(conn, reservation.id(), planned.earlier)?;
+                        }
                         reservation
                     }
                     Err(refusal) => {
@@ -1224,7 +1552,8 @@ impl<'a> Chain<'a> {
                 } else {
                     None
                 };
-                result = ready.and_then(|()| call(p, system, prompt, schema, admission, hour));
+                began = db::now_ms();
+                result = ready.and_then(|()| call(p, system, prompt, schema, admission, cache));
                 report_sent(reservation.id(), forced, &result, observer);
             }
             // The headers hold whatever the answer turns out to be.
@@ -1267,6 +1596,20 @@ impl<'a> Chain<'a> {
                     .resting(a.cool_until))
             });
             let ms = started.elapsed().as_millis() as i64;
+            // Decision 107: an answer, kept or refused by the check, leaves its stretch in the
+            // entry's cache, and it joins the conversation; a call that was sent and came to
+            // nothing leaves that cache unknown, and the conversation starts again; one that was
+            // not sent changes nothing.
+            if let (Some((talk, turn)), Some(planned)) = (self.talk.as_mut(), &planned) {
+                match &result {
+                    Ok(a) => talk.answered(&name, turn, planned, began, a.usage),
+                    Err(e) if refused.is_some() => {
+                        talk.answered(&name, turn, planned, began, e.usage)
+                    }
+                    Err(e) if e.sent && !forced => talk.failed(&name),
+                    Err(_) => {}
+                }
+            }
             match result {
                 Ok(a) => {
                     let usd = reservation.cost(p, a.usage, true);
@@ -1489,16 +1832,16 @@ fn report_sent(
     sent
 }
 
-/// `hour`: oboete's cache marker on a Messages request keeps its entry for an hour
-/// (`config::cache_hour`).
-fn call(
+/// `cache`: how oboete marks a Messages request's prompt cache (`Cache`).
+fn call<'c>(
     p: &Provider,
     system: &str,
     prompt: &str,
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
-    hour: bool,
+    cache: impl Into<Cache<'c>>,
 ) -> Result<Answer, CallError> {
+    let cache = cache.into();
     #[cfg(test)]
     if let Some(error) = OFFLINE_CALL_TEST.with(|call| call.borrow_mut().take()) {
         return Err(error);
@@ -1566,7 +1909,7 @@ fn call(
                 schema,
                 admission,
                 10,
-                hour,
+                cache,
             )
         }
         Provider::Cli {
@@ -1977,9 +2320,9 @@ fn openai_compat(
 /// One call to an HTTP entry in the API it speaks, with a caller-selected redirect policy; a call
 /// to OpenRouter asks for no reasoning (`reasoning_switch`). A model that refuses the switch is
 /// asked again without it by the caller (`refused_switch`), through the egress gate again.
-/// `hour`: a Messages request's cache marker keeps its entry for an hour (`config::cache_hour`).
+/// `cache`: how a Messages request's prompt cache is marked (`Cache`; `true` for an hour's).
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, and the policy
-fn http_call(
+fn http_call<'c>(
     api: Api,
     base_url: &str,
     key_file: Option<&Path>,
@@ -1991,8 +2334,9 @@ fn http_call(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
-    hour: bool,
+    cache: impl Into<Cache<'c>>,
 ) -> Result<Answer, CallError> {
+    let cache = cache.into();
     let mut off;
     let extra = if reasoning_switch(api, base_url, model, extra) {
         off = extra.clone();
@@ -2003,7 +2347,7 @@ fn http_call(
     };
     http_send(
         api, base_url, key_file, model, timeout_s, extra, headers, prompt, schema, admission,
-        redirects, hour,
+        redirects, cache,
     )
 }
 
@@ -2085,10 +2429,10 @@ fn http_send(
     schema: &Value,
     admission: Option<crate::dispatch::Guard>,
     redirects: u32,
-    hour: bool,
+    cache: Cache,
 ) -> Result<Answer, CallError> {
     let openai = config::openai_api(base_url);
-    let body = request(api, openai, model, prompt, schema, extra, hour);
+    let body = request(api, openai, model, prompt, schema, extra, cache);
     let url = endpoint(base_url, api);
     // ureq drops `Authorization` on a redirect, not the Messages API's `x-api-key`: none is
     // followed, so the key reaches no host but `base_url`'s.
@@ -2240,11 +2584,11 @@ fn request(
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
-    hour: bool,
+    cache: Cache,
 ) -> Value {
     match api {
         Api::Openai => openai_request(model, prompt, schema, extra, openai),
-        Api::Anthropic => anthropic_request(model, prompt, schema, extra, hour),
+        Api::Anthropic => anthropic_request(model, prompt, schema, extra, cache),
     }
 }
 
@@ -2255,16 +2599,16 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// docs/research/anthropic-messages-2026-10-09.md). No `temperature`: Haiku 5.5 refuses any but
 /// its default with a 400, and newer models refuse the field, so `extra` sets one for a model that
 /// takes it. `max_tokens`, which the API requires, comes in `extra` (`call`, `probe_extra`).
-fn anthropic_request(
+fn anthropic_request<'c>(
     model: &str,
     prompt: &str,
     schema: &Value,
     extra: &serde_json::Map<String, Value>,
-    hour: bool,
+    cache: impl Into<Cache<'c>>,
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": [{"role": "user", "content": anthropic_content(prompt, extra, hour)}],
+        "messages": [{"role": "user", "content": anthropic_content(prompt, extra, cache.into())}],
         "output_config": {"format": {"type": "json_schema", "schema": anthropic_schema(schema)}}
     });
     for (k, v) in extra {
@@ -2284,28 +2628,54 @@ fn anthropic_request(
 /// A prompt as a Messages request's content. A fenced prompt's instructions, all before the sentence
 /// that names its fence, are the same bytes for every call of its kind (`curate::FENCE_SENTENCE`,
 /// G09): they go in a block of their own that writes the prompt cache, for five minutes, for an
-/// hour when `hour` asks (`config::cache_hour`) and the entry marks nothing of its own, or as the
+/// hour when `cache` asks (`config::cache_hour`) and the entry marks nothing of its own, or as the
 /// entry's own `cache_control` asks (a longer cache must come first, and the entry's markers come
 /// before this block), so a call within that time reads them at a tenth of the input price. Any
 /// other prompt goes whole, as does one whose entry's `extra` already takes every breakpoint a
 /// request may have (Codex on #636).
-fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>, hour: bool) -> Value {
+///
+/// Decision 107 (docs/curator-conversation.md): a conversation's turn has a block for each
+/// stretch after the instructions, then its tail, and a second breakpoint on the newest stretch,
+/// for five minutes: the entry's next call reads through it and writes only its own stretch. The
+/// blocks are cut where `Talk::plan` put the stretches, never by reading the recorded text; the
+/// bytes and their order are the prompt's either way.
+fn anthropic_content(prompt: &str, extra: &serde_json::Map<String, Value>, cache: Cache) -> Value {
     let Some(n) = instructions_end(prompt)
         .filter(|_| crate::config::cache_markers(extra) < ANTHROPIC_BREAKPOINTS)
     else {
         return Value::String(prompt.to_owned());
     };
-    let cache = match extra.get("cache_control") {
+    let marker = match extra.get("cache_control") {
         Some(own) if own.is_object() => own.clone(),
-        _ if hour && crate::config::cache_markers(extra) == 0 => {
+        _ if matches!(cache, Cache::Hour) && crate::config::cache_markers(extra) == 0 => {
             json!({"type": "ephemeral", "ttl": "1h"})
         }
         _ => json!({"type": "ephemeral"}),
     };
-    json!([
-        {"type": "text", "text": &prompt[..n], "cache_control": cache},
-        {"type": "text", "text": &prompt[n..]},
-    ])
+    let mut blocks = vec![json!({"type": "text", "text": &prompt[..n], "cache_control": marker})];
+    match cache {
+        // Only as planned: the first stretch begins where the instructions end, and the marks
+        // rise within the prompt.
+        Cache::Turn(marks)
+            if marks.len() >= 2
+                && marks[0] == n
+                && marks.windows(2).all(|w| w[0] < w[1])
+                && marks.last().is_some_and(|&tail| tail < prompt.len())
+                && marks.iter().all(|&at| prompt.is_char_boundary(at)) =>
+        {
+            let ends = marks[1..].iter().copied().chain([prompt.len()]);
+            for (i, (&from, to)) in marks.iter().zip(ends).enumerate() {
+                let mut block = json!({"type": "text", "text": &prompt[from..to]});
+                // The newest stretch is the block before the tail.
+                if i + 2 == marks.len() {
+                    block["cache_control"] = json!({"type": "ephemeral"});
+                }
+                blocks.push(block);
+            }
+        }
+        _ => blocks.push(json!({"type": "text", "text": &prompt[n..]})),
+    }
+    Value::Array(blocks)
 }
 
 /// The cache breakpoints a Messages request may have, automatic caching's among them.
@@ -5729,12 +6099,26 @@ child.wait()
         answers: Vec<(&'static str, Vec<u8>)>,
         extra_headers: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
+        let mut answers = answers.into_iter();
+        serve_by(
+            answers.len(),
+            move |_| answers.next().unwrap(),
+            extra_headers,
+        )
+    }
+
+    /// `serve_each` for `n` requests, each answered by what `answer` makes of it.
+    pub(crate) fn serve_by(
+        n: usize,
+        mut answer: impl FnMut(&str) -> (&'static str, Vec<u8>) + Send + 'static,
+        extra_headers: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for (status, body) in answers {
+            for _ in 0..n {
                 let (mut conn, _) = listener.accept().unwrap();
                 let mut req = Vec::new();
                 let mut buf = [0u8; 4096];
@@ -5756,13 +6140,15 @@ child.wait()
                         break;
                     }
                 }
+                let req = String::from_utf8_lossy(&req).into_owned();
+                let (status, body) = answer(&req);
                 let head = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 conn.write_all(head.as_bytes()).ok();
                 conn.write_all(&body).ok();
-                tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
+                tx.send(req).ok();
             }
         });
         (format!("http://{addr}"), rx)
@@ -7712,6 +8098,491 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":12,"output_tok
             .unwrap();
         assert_eq!(details, ["http 400: json_validate_failed"]);
         drop(conn);
+    }
+
+    // Decision 107 (docs/curator-conversation.md, #971): the curator's windows as one
+    // conversation an entry reads from its prompt cache.
+
+    /// A Messages entry that keeps a conversation: a ceiling, Haiku 5.5's prices, calls enough.
+    fn talker(url: &str, ceiling: u32) -> Provider {
+        let mut p = stub(url.to_owned());
+        if let Provider::Openai {
+            api,
+            limits,
+            daily_budget,
+            ..
+        } = &mut p
+        {
+            *api = Api::Anthropic;
+            *daily_budget = Some(100_000);
+            limits.max_request_tokens = Some(ceiling);
+            (limits.usd_per_mtok_in, limits.usd_per_mtok_out) = (0.10, 0.50);
+        }
+        p
+    }
+
+    /// A Messages answer whose prompt was `fresh` tokens not cached, `read` from the cache and
+    /// `written` to it.
+    fn messages_answer(fresh: i64, read: i64, written: i64) -> Vec<u8> {
+        json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "{\"summary\":\"s\"}"}],
+            "usage": {"input_tokens": fresh, "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": written, "output_tokens": 4}})
+        .to_string()
+        .into_bytes()
+    }
+
+    type Parts = (String, std::ops::Range<usize>);
+
+    /// A window's three-part prompt, its one line saying `line`, and where its stretch is.
+    fn window_prompt(line: &str, known: &str, cards: usize) -> Parts {
+        let text = format!("## claude session s\nL1 [user] {line}\n");
+        crate::curate::parts("English", &text, known, "", cards, 1)
+    }
+
+    /// `parts` as the turn of a window over records `from` to `to`, under `key`.
+    fn turn_of<'a>(parts: &'a Parts, key: &'a str, from: i64, to: i64) -> Turn<'a> {
+        Turn {
+            prompt: &parts.0,
+            stretch: parts.1.clone(),
+            key,
+            from: (from, None),
+            to,
+        }
+    }
+
+    /// One run of the curator's chain as `turn`.
+    fn talk_run(
+        providers: &[Provider],
+        conn: &Connection,
+        talk: &mut Talk,
+        turn: &Turn,
+    ) -> Result<ChainResult> {
+        let span = format!("{}-{}", turn.from.0, turn.to);
+        Chain::new(providers, conn).talk(talk, turn).run(
+            "curator",
+            &span,
+            turn.prompt,
+            &json!({"type": "object"}),
+        )
+    }
+
+    /// The content of the Messages request a test server received: each block's text, and
+    /// whether it carries a breakpoint.
+    fn blocks(request: &str) -> Vec<(String, bool)> {
+        let body = request_body(request);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        content
+            .iter()
+            .map(|b| {
+                let marked = b.get("cache_control").is_some();
+                (b["text"].as_str().unwrap().to_owned(), marked)
+            })
+            .collect()
+    }
+
+    /// A three-part prompt's instructions, stretch and tail.
+    fn three(parts: &Parts) -> [String; 3] {
+        let (p, at) = parts;
+        [&p[..at.start], &p[at.clone()], &p[at.end..]].map(str::to_owned)
+    }
+
+    /// How many stretches went before each turn's own, as the ledger has them (None: no turn).
+    fn earlier(conn: &Connection) -> Vec<Option<i64>> {
+        conn.prepare("SELECT earlier FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// #971 conditions 8, 13 and 15: an entry's second turn sends its first call's instructions
+    /// and stretch again as the same blocks, byte for byte, then its own stretch, with two
+    /// breakpoints: on the instructions and on the newest stretch. The tail carries none. The
+    /// ledger says how many stretches went before each call's own, counts the whole prompt as
+    /// sent, and prices what was read at a tenth and what was written at 1.25 times. The spans
+    /// read are those of the stretches sent again, for the call's own span only.
+    #[test]
+    fn a_second_turn_sends_the_first_stretch_again_and_marks_the_newest() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answers = vec![
+            ("200 OK", messages_answer(60, 0, 1_940)),
+            ("200 OK", messages_answer(70, 1_900, 60)),
+        ];
+        let (url, requests) = serve_each(answers, "");
+        let providers = [talker(&url, 100_000)];
+        let mut talk = Talk::default();
+        let one = window_prompt("One.", "", 5);
+        let two = window_prompt("Two.", "u1: kept", 15);
+        talk_run(&providers, &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+        assert_eq!(talk.read("stub", "1-2"), []);
+        talk_run(&providers, &conn, &mut talk, &turn_of(&two, "k", 3, 4)).unwrap();
+        assert_eq!(talk.read("stub", "3-4"), [(1, 2)]);
+        assert_eq!(talk.read("stub", "1-2"), [], "another call's span");
+        assert_eq!(talk.read("another", "3-4"), []);
+        let first = requests.recv().unwrap();
+        let second = requests.recv().unwrap();
+        let ([instructions, stretch_1, tail_1], [_, stretch_2, tail_2]) =
+            (three(&one), three(&two));
+        assert_eq!(
+            blocks(&first),
+            [
+                (instructions.clone(), true),
+                (stretch_1.clone(), true),
+                (tail_1, false)
+            ]
+        );
+        assert_eq!(
+            blocks(&second),
+            [
+                (instructions, true),
+                (stretch_1, false),
+                (stretch_2, true),
+                (tail_2, false)
+            ]
+        );
+        let content = &request_body(&second)["messages"][0]["content"];
+        let five_minutes = json!({"type": "ephemeral"});
+        assert_eq!(
+            (&content[0]["cache_control"], &content[2]["cache_control"]),
+            (&five_minutes, &five_minutes)
+        );
+        let sent: String = blocks(&second).into_iter().map(|b| b.0).collect();
+        let row: (i64, i64, i64, f64) = conn
+            .query_row(
+                "SELECT earlier, est_tokens, bytes_out, usd FROM provider_calls
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (row.0, row.1, row.2),
+            (1, i64::from(budget::estimate(&sent)), sent.len() as i64)
+        );
+        assert_eq!(earlier(&conn), [Some(0), Some(1)]);
+        // 70 new tokens, 60 written at 1.25 times, 1,900 read at a tenth, and 4 of output.
+        let usd = (70.0 + 60.0 * 1.25 + 1_900.0 * 0.1) * 0.10e-6 + 4.0 * 0.50e-6;
+        assert!((row.3 - usd).abs() < 1e-12, "{} against {usd}", row.3);
+    }
+
+    /// #971 condition 9: a conversation starts again, with the turn's own stretch alone, when
+    /// the turn's key is another (the gate's state changed), its instructions are others (another
+    /// language), the entry's model or address changed, its last call started longer ago than
+    /// the cache keeps an entry or after now, or that call was sent and came to nothing. A call
+    /// that was not sent changes nothing (condition 11).
+    #[test]
+    fn a_conversation_starts_again_when_what_it_holds_may_not_go_again() {
+        // How many stretches went before the last turn's own, after `case` happened to a
+        // conversation of one turn.
+        let before_the_last = |case: &str| -> usize {
+            let home = tempfile::tempdir().unwrap();
+            let conn = providers_db::open(home.path()).unwrap();
+            let ok = || ("200 OK", messages_answer(60, 0, 1_940));
+            let failing = ("500 Internal Server Error", b"{}".to_vec());
+            let answers = match case {
+                "error" => vec![ok(), failing, ok()],
+                _ => vec![ok(), ok()],
+            };
+            let (url, requests) = serve_each(answers, "");
+            let (other_url, other_requests) = serve_each(vec![ok()], "");
+            let mut p = talker(&url, 100_000);
+            let mut talk = Talk::default();
+            let one = window_prompt("One.", "", 5);
+            talk_run(&[p.clone()], &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+            let mut two = window_prompt("Two.", "", 5);
+            let mut key = "k";
+            let started = &mut talk.entries.get_mut("stub").unwrap().started;
+            match case {
+                "none" => {}
+                "key" => key = "another",
+                "language" => {
+                    let text = "## claude session s\nL1 [user] Two.\n";
+                    two = crate::curate::parts("Japanese", text, "", "", 5, 1);
+                }
+                "model" | "address" => {
+                    let Provider::Openai {
+                        model, base_url, ..
+                    } = &mut p
+                    else {
+                        unreachable!()
+                    };
+                    if case == "model" {
+                        *model = "m2".into();
+                    } else {
+                        *base_url = other_url;
+                    }
+                }
+                "late" => *started -= TALK_LIFETIME_MS,
+                "in time" => *started -= TALK_LIFETIME_MS - 5_000,
+                "clock back" => *started += 60_000,
+                "error" => {
+                    // The entry answers 500: the call was sent and came to nothing.
+                    let failed =
+                        talk_run(&[p.clone()], &conn, &mut talk, &turn_of(&two, key, 3, 4));
+                    assert!(failed.is_err());
+                    conn.execute("DELETE FROM provider_state", []).unwrap();
+                }
+                "unsent" => {
+                    let gate = || anyhow::bail!("the gate is shut");
+                    let unsent = Chain::new(std::slice::from_ref(&p), &conn)
+                        .gate(&gate)
+                        .talk(&mut talk, &turn_of(&two, key, 3, 4))
+                        .run("curator", "3-4", &two.0, &json!({"type": "object"}));
+                    assert!(unsent.is_err());
+                }
+                other => panic!("{other}"),
+            }
+            talk_run(&[p], &conn, &mut talk, &turn_of(&two, key, 3, 4)).unwrap();
+            let all = if case == "address" {
+                other_requests
+            } else {
+                requests
+            };
+            let last = all.try_iter().last().unwrap();
+            let sent = blocks(&last);
+            assert_eq!(sent.last().unwrap().0, three(&two)[2], "{case}");
+            assert_eq!(
+                talk.read("stub", "3-4").len(),
+                usize::from(sent.len() == 4),
+                "{case}"
+            );
+            sent.len() - 3
+        };
+        for (case, earlier) in [
+            ("none", 1),
+            ("in time", 1),
+            ("unsent", 1),
+            ("key", 0),
+            ("language", 0),
+            ("model", 0),
+            ("address", 0),
+            ("late", 0),
+            ("clock back", 0),
+            ("error", 0),
+        ] {
+            assert_eq!(before_the_last(case), earlier, "{case}");
+        }
+    }
+
+    /// #971 condition 11, and a window sent again: a stretch joins its entry's conversation after
+    /// an answer the check refused, as after one kept. A window sent again, grown or not, takes
+    /// its own earlier stretch's place: no window's lines are in a prompt twice, and its op does
+    /// not read its own span.
+    #[test]
+    fn a_refused_answers_stretch_joins_and_a_window_sent_again_takes_its_place() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answers = (0..4).map(|_| ("200 OK", messages_answer(60, 1_900, 60)));
+        let (url, requests) = serve_each(answers.collect(), "");
+        let providers = [talker(&url, 100_000)];
+        let mut talk = Talk::default();
+        let one = window_prompt("One.", "", 5);
+        let two = window_prompt("Two.", "", 5);
+        let grown = window_prompt("Two, and more.", "", 5);
+        let three_ = window_prompt("Three.", "", 5);
+        talk_run(&providers, &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+        // Its answer is refused, as one none of whose quotes anchored.
+        let refuse = |_: &Value| Some("unanchored");
+        let turn = turn_of(&two, "k", 3, 4);
+        let refused = Chain::new(&providers, &conn)
+            .check(&refuse)
+            .talk(&mut talk, &turn)
+            .run("curator", "3-4", &two.0, &json!({"type": "object"}));
+        assert!(refused.is_err());
+        // The same window again, grown by a record.
+        talk_run(&providers, &conn, &mut talk, &turn_of(&grown, "k", 3, 5)).unwrap();
+        assert_eq!(talk.read("stub", "3-5"), [(1, 2)]);
+        talk_run(&providers, &conn, &mut talk, &turn_of(&three_, "k", 6, 7)).unwrap();
+        assert_eq!(
+            talk.read("stub", "6-7"),
+            [(1, 5)],
+            "next to each other: one span"
+        );
+        let sent: Vec<Vec<String>> = requests
+            .try_iter()
+            .map(|r| blocks(&r).into_iter().skip(1).map(|b| b.0).collect())
+            .collect();
+        let stretch = |p: &Parts| three(p)[1].clone();
+        assert_eq!(sent[1][..2], [stretch(&one), stretch(&two)]);
+        assert_eq!(sent[2][..2], [stretch(&one), stretch(&grown)]);
+        assert_eq!(sent[2].len(), 3);
+        assert_eq!(
+            sent[3][..3],
+            [stretch(&one), stretch(&grown), stretch(&three_)]
+        );
+        assert_eq!(earlier(&conn), [Some(0), Some(1), Some(1), Some(2)]);
+    }
+
+    /// #971 condition 10: no request of a conversation passes the entry's ceiling. A server that
+    /// counts one and a half times the estimate, as this machine's entries do, is sent windows of
+    /// many sizes; before its own answers say how it counts, an estimated token is taken for two.
+    #[test]
+    fn a_conversation_starts_again_before_its_prompt_passes_the_ceiling() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        const CEILING: u32 = 100_000;
+        let calls = 40;
+        // What the server counts of a request's first `n` blocks, and of all of them.
+        fn counted(request: &str, n: Option<usize>) -> i64 {
+            let texts: Vec<String> = blocks(request).into_iter().map(|b| b.0).collect();
+            let text = texts[..n.unwrap_or(texts.len())].concat();
+            (f64::from(budget::estimate(&text)) * 1.5).ceil() as i64
+        }
+        let (url, requests) = serve_by(
+            calls,
+            move |request| {
+                // What it was sent again it reads from its cache: all before the newest stretch.
+                let sent = blocks(request).len();
+                let read = if sent > 3 {
+                    counted(request, Some(sent - 2))
+                } else {
+                    0
+                };
+                let fresh = counted(request, None) - read;
+                ("200 OK", messages_answer(fresh, read, 0))
+            },
+            "",
+        );
+        let providers = [talker(&url, CEILING)];
+        let mut talk = Talk::default();
+        for n in 0..calls as i64 {
+            // From about 300 to about 21,000 estimated tokens a window.
+            let line = "word ".repeat(200 + (n as usize * 7_919) % 15_000);
+            let parts = window_prompt(&line, "", 5);
+            talk_run(
+                &providers,
+                &conn,
+                &mut talk,
+                &turn_of(&parts, "k", n * 2 + 1, n * 2 + 2),
+            )
+            .unwrap();
+        }
+        let most = requests
+            .try_iter()
+            .map(|r| counted(&r, None))
+            .max()
+            .unwrap();
+        assert!(most <= i64::from(CEILING), "{most}");
+        let went = earlier(&conn);
+        let restarts = went.iter().skip(1).filter(|n| **n == Some(0)).count();
+        assert!(restarts >= 2, "{went:?}");
+        assert!(went.iter().any(|n| n.is_some_and(|n| n >= 3)), "{went:?}");
+        // And it used the room it had: the request before a restart is within one window (at
+        // most about 32,000 tokens here) of the nine tenths a conversation may fill.
+        assert!(most > 55_000, "{most}");
+    }
+
+    /// Decision 107: a continued call that reads too little of what it was sent again from the
+    /// cache wrote it all instead, at 1.25 times. Two in a row, and the entry keeps no
+    /// conversation for an hour: its calls are the prompt as it is, as an entry that never kept
+    /// one gets it. A call that read its cache between two misses starts the count again.
+    #[test]
+    fn an_entry_whose_cache_does_not_answer_keeps_no_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        // What each call read from the cache: a miss, a hit, then two misses.
+        let read = [0, 0, 1_900, 0, 0, 0, 0];
+        let answers = read.map(|read| ("200 OK", messages_answer(2_000 - read, read, 0)));
+        let (url, requests) = serve_each(answers.to_vec(), "");
+        let providers = [talker(&url, 100_000)];
+        let mut talk = Talk::default();
+        let run = |talk: &mut Talk, n: i64| {
+            let parts = window_prompt(&format!("Window {n}."), "", 5);
+            talk_run(
+                &providers,
+                &conn,
+                talk,
+                &turn_of(&parts, "k", n * 2 + 1, n * 2 + 2),
+            )
+            .unwrap();
+        };
+        for n in 0..6 {
+            run(&mut talk, n);
+        }
+        // The first started one; four went on (a miss, a hit, two misses); the sixth is no turn.
+        assert_eq!(
+            earlier(&conn),
+            [Some(0), Some(1), Some(2), Some(3), Some(4), None]
+        );
+        let sent: Vec<Vec<(String, bool)>> = requests.try_iter().map(|r| blocks(&r)).collect();
+        let plain = &sent[5];
+        assert_eq!(plain.len(), 2, "its instructions and the rest");
+        assert_eq!((plain[0].1, plain[1].1), (true, false));
+        assert_eq!(talk.read("stub", "11-12"), []);
+        // An hour on, it keeps one again.
+        *talk.quiet.get_mut("stub").unwrap() -= TALK_QUIET_MS;
+        run(&mut talk, 6);
+        assert_eq!(earlier(&conn).last(), Some(&Some(0)));
+    }
+
+    /// #971 conditions 12 and 14: only an entry of the Messages API that declares a ceiling and
+    /// marks no cache of its own keeps a conversation, and only for the curator's windows. Any
+    /// other entry is sent the turn's prompt as it is, and its call is no turn in the ledger.
+    #[test]
+    fn only_a_messages_entry_with_a_ceiling_keeps_a_conversation_for_the_curator() {
+        let talker = talker("http://127.0.0.1:9", 100_000);
+        assert!(talks(&talker, "curator").is_some());
+        for role in ["summary", "judge", crate::my_work::ROLE] {
+            assert!(talks(&talker, role).is_none(), "{role}");
+        }
+        // Its prompt stays within nine tenths of its ceiling, and within what admission lets
+        // through with the answer's bound.
+        assert_eq!(talks(&talker, "curator").unwrap().0, 90_000.0);
+        let mut bounded = talker.clone();
+        let mut marked = talker.clone();
+        let mut unbounded = talker.clone();
+        let mut openai = talker.clone();
+        for (p, change) in [
+            (&mut bounded, "output"),
+            (&mut marked, "marker"),
+            (&mut unbounded, "ceiling"),
+            (&mut openai, "api"),
+        ] {
+            let Provider::Openai {
+                api, extra, limits, ..
+            } = p
+            else {
+                unreachable!()
+            };
+            match change {
+                "output" => limits.max_output_tokens = 16_000,
+                "marker" => {
+                    extra.insert("cache_control".into(), json!({"type": "ephemeral"}));
+                }
+                "ceiling" => limits.max_request_tokens = None,
+                _ => *api = Api::Openai,
+            }
+        }
+        assert_eq!(talks(&bounded, "curator").unwrap().0, 84_000.0);
+        for p in [&marked, &unbounded, &openai] {
+            assert!(talks(p, "curator").is_none());
+        }
+        let cli = Provider::Cli {
+            enabled: true,
+            name: "claude".into(),
+            cli: "claude".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 10,
+            limits: Default::default(),
+            credits: false,
+        };
+        assert!(talks(&cli, "curator").is_none());
+        // An OpenAI-compatible entry given the turn: its prompt whole, and no turn in the ledger.
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\":\"s\"}"}}]});
+        let (url, requests) = serve_once(answer.to_string().into_bytes(), "");
+        let mut talk = Talk::default();
+        let one = window_prompt("One.", "", 5);
+        talk_run(&[stub(url)], &conn, &mut talk, &turn_of(&one, "k", 1, 2)).unwrap();
+        let body = request_body(&requests.recv().unwrap());
+        assert_eq!(body["messages"][0]["content"], json!(one.0));
+        assert_eq!(earlier(&conn), [None]);
+        assert_eq!(talk.read("stub", "1-2"), []);
     }
 
     fn stub(url: String) -> Provider {

@@ -334,19 +334,20 @@ pub fn phase(
             }
         }
         let subject = format!("turn {}", r.seq);
-        let answer = summarizer(&subject, &prompt, &|v| check(v, rules), &|| {
-            let dispatch = raw.dispatch()?;
-            reading.still(raw)?;
-            crate::curate::rules_still(raw, rules)?;
-            Ok(Some(dispatch))
-        })
-        .and_then(|res| {
-            let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());
-            // The provider gate and the append fence share the ListChanged wait below. A
-            // forget after reading the turn keeps none of the answer (M5 D1 rule 12).
-            raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.fence)?;
-            Ok(())
-        });
+        let answer = summarizer
+            .ask(&subject, &prompt, &|v| check(v, rules), &|| {
+                let dispatch = raw.dispatch()?;
+                reading.still(raw)?;
+                crate::curate::rules_still(raw, rules)?;
+                Ok(Some(dispatch))
+            })
+            .and_then(|res| {
+                let op = fitted(turn.op(&res.output, rules))?.unwrap_or_else(|| skip.clone());
+                // The provider gate and the append fence share the ListChanged wait below. A
+                // forget after reading the turn keeps none of the answer (M5 D1 rule 12).
+                raw.append_ops_fenced(&[(OpKind::Turn, op)], reading.fence)?;
+                Ok(())
+            });
         let failed = match answer {
             Ok(()) => {
                 crate::providers_db::clear_turn_pending(db, &device, r.seq)?;

@@ -904,7 +904,12 @@ pub struct Raw {
     /// The rules `gates_with` named, if it was called: what a cut made to fit an op's cap leaves
     /// is scanned with them once more (`within_op_cap`).
     gate: Option<crate::redact::Rules>,
+    /// Which open of this process it is (`opened`).
+    opened: u64,
 }
+
+/// The opens of raw.db this process has made (`Raw::opened`).
+static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The raw store file, including a stopped restore's file when raw.db has not been renamed in.
 pub fn path(home: &Path) -> std::path::PathBuf {
@@ -1835,6 +1840,7 @@ fn open_within_report(
         _swap: swap,
         gated_off: false,
         gate: None,
+        opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -3091,6 +3097,13 @@ impl Raw {
     /// How many records forget denies: the derived writers' fence (rule 12).
     pub fn denied_count(&self) -> Result<i64> {
         Ok(self.conn.query_row(DENIED_COUNT, [], |r| r.get(0))?)
+    }
+
+    /// Which open of raw.db by this process this handle is: another for every open. What is kept
+    /// in memory about a store's records (a curator's conversation, decision 107) is kept for one
+    /// handle: a store opened again may be another file, a restore's.
+    pub(crate) fn opened(&self) -> u64 {
+        self.opened
     }
 
     /// What a derived writer is fenced by (`FENCE_COUNT`).

@@ -204,6 +204,12 @@ pub(crate) fn open_report(
     if crate::db::ensure_column_until(&mut conn, "provider_calls", "usd", "REAL", deadline)? {
         committed("stores_changed");
     }
+    // Decision 107 (docs/curator-conversation.md): for a call that was a conversation's turn, how
+    // many stretches went before the window's own (0: it started one); NULL for any other call.
+    if crate::db::ensure_column_until(&mut conn, "provider_calls", "earlier", "INTEGER", deadline)?
+    {
+        committed("stores_changed");
+    }
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -259,6 +265,16 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
             c.usage.reasoning,
             c.usd
         ],
+    )?;
+    Ok(())
+}
+
+/// Decision 107: call `id`, reserved for a conversation's turn, sends `earlier` stretches before
+/// the window's own.
+pub(crate) fn set_earlier(conn: &Connection, id: i64, earlier: usize) -> Result<()> {
+    conn.execute(
+        "UPDATE provider_calls SET earlier = ?2 WHERE id = ?1",
+        params![id, earlier as i64],
     )?;
     Ok(())
 }
