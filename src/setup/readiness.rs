@@ -771,6 +771,42 @@ mod tests {
         }
     }
 
+    /// Decision 108 (docs/hook-time.md): hooks with the timeouts an older `setup` wrote are read
+    /// as stale, and as current once `setup` has written them again.
+    #[test]
+    fn hooks_with_an_older_setups_timeouts_are_stale_until_written_again() {
+        let want = HookCommand {
+            exe: "oboete".into(),
+            home: None,
+        };
+        type Groups = fn(&HookCommand) -> Vec<(String, Value)>;
+        // Each agent's groups, and what `setup` wrote for a start until decision 108.
+        let agents: [(Groups, u32); 3] =
+            [(claude_groups, 10), (codex_groups, 10), (grok_groups, 5)];
+        for (agent, (groups, start)) in agents.into_iter().enumerate() {
+            let mut root = json!({});
+            native::merge_groups(&mut root, groups(&want));
+            let read = |root: &Value| grouped_hooks(&Ok(Some(root.clone())), Some(&want), groups);
+            assert_eq!(read(&root).matches_current, Some(true), "{agent}");
+            // As `setup` wrote them until then: 5 s, a start as above, a session's end 3 s.
+            for (event, groups) in root["hooks"].as_object_mut().unwrap() {
+                let secs = match event.as_str() {
+                    "SessionStart" | "SubagentStart" => start,
+                    "SessionEnd" => 3,
+                    _ => 5,
+                };
+                groups[0]["hooks"][0]["timeout"] = json!(secs);
+            }
+            let older = read(&root);
+            assert_eq!(older.matches_current, Some(false), "{agent}");
+            assert!(matches!(older.state, State::Stale), "{agent}");
+            native::merge_groups(&mut root, groups(&want));
+            let again = read(&root);
+            assert_eq!(again.matches_current, Some(true), "{agent}");
+            assert!(matches!(again.state, State::Registered), "{agent}");
+        }
+    }
+
     #[test]
     fn w6_current_command_retains_actual_comparison_errors() {
         let private = tempfile::tempdir().unwrap();
