@@ -188,6 +188,11 @@ pub struct Summary {
     /// input shrinks by 30% or more and recall drops by 0.02 or less (spec 3.5).
     #[serde(default)]
     pub shrink: crate::curate::Shrink,
+    /// Decision 107 (docs/curator-conversation.md): a window's prompt in three parts, its
+    /// instructions, its stretch and its tail, so that an entry can be sent the stretches before
+    /// it again and read them from its prompt cache. Off until it is measured.
+    #[serde(default)]
+    pub conversation: bool,
 }
 
 impl Summary {
@@ -209,6 +214,7 @@ impl Default for Summary {
             window_tokens: default_window_tokens(),
             idle_minutes: default_idle_minutes(),
             shrink: crate::curate::Shrink::Off,
+            conversation: false,
         }
     }
 }
@@ -1911,6 +1917,16 @@ enabled = false
         }
         // A table no version reads is still an error.
         assert!(parse_capture(Some("[redactions]\n")).is_err());
+    }
+
+    /// `[summary] conversation` (decision 107) is off unless a home turns it on.
+    #[test]
+    fn the_conversation_is_off_unless_asked_for() {
+        let of = |text: &str| toml::from_str::<Config>(text).unwrap().summary.conversation;
+        assert!(!of(""));
+        assert!(!of("[summary]\ncurate = true\n"));
+        assert!(of("[summary]\nconversation = true\n"));
+        assert!(!Summary::default().conversation);
     }
 
     /// `[summary] shrink` (decision 107): `true` is every tool call, `"subagents"` only a
