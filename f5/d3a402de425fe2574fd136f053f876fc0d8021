@@ -1,0 +1,35 @@
+docs/backup-points.md
+  s_d546e4e9d39962::t_61858e64068b80 23-25
+src/backup.rs
+  s_d546e4e9d39962::t_67e9fff662e109 1121,1136,1139,1141,2277-2284,2294-2298
+  s_d546e4e9d39962::t_df1f8761661321 894
+  s_d546e4e9d39962::t_30c326c7048497 1133,1135,1368-1369,1373-1384,2228
+  s_d546e4e9d39962::t_998808f9505698 2216-2217
+  s_d546e4e9d39962::t_9d1de68629f22b 2252-2254
+  s_d546e4e9d39962::t_889ea520e24f8f 127
+  s_d546e4e9d39962::t_f3f1b7204672f7 1122-1125
+  s_d546e4e9d39962::t_321ea1517c39d6 924-926
+  s_d546e4e9d39962::t_4b20344086aba6 1372
+  s_d546e4e9d39962::t_5658d5b3f9f58a 923,927-939
+  s_d546e4e9d39962::t_913dc5e49ef451 2229-2236
+  s_d546e4e9d39962::t_fa4a8f5a7064fa 1113-1116
+  s_d546e4e9d39962::t_ed404cb28d410d 1117-1120,1126-1129,1132,1134,1137-1138,1140,1142-1145,1147,1367,1371,2215,2251,2276
+src/backup/tests.rs
+  s_d546e4e9d39962::t_dae8abf3e2605e 2443-2581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f5d3a402de425fe2574fd136f053f876fc0d8021",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
