@@ -1036,7 +1036,13 @@ fn imported_full_text_reads_the_narrow_index_and_finds_the_same() {
     s.run();
     let k = crate::knowledge::open(s.home.path()).unwrap();
     let plans = |k: &Connection, text: &str| -> Vec<String> {
-        let statements = imported_fts_sql(k, &crate::forget::history::fixture::proof(), &q(text), 2 * crate::search::POOL).unwrap();
+        let statements = imported_fts_sql(
+            k,
+            &crate::forget::history::fixture::proof(),
+            &q(text),
+            2 * crate::search::POOL,
+        )
+        .unwrap();
         statements
             .iter()
             .map(|(sql, _)| {
@@ -1054,7 +1060,15 @@ fn imported_full_text_reads_the_narrow_index_and_finds_the_same() {
     let found = |k: &Connection| -> Vec<Vec<String>> {
         texts
             .iter()
-            .map(|t| imported_fts(k, &crate::forget::history::fixture::proof(), &q(t), 2 * crate::search::POOL).unwrap())
+            .map(|t| {
+                imported_fts(
+                    k,
+                    &crate::forget::history::fixture::proof(),
+                    &q(t),
+                    2 * crate::search::POOL,
+                )
+                .unwrap()
+            })
             .collect()
     };
     let covered = found(&k);
@@ -1094,7 +1108,10 @@ fn every_repositorys_timeline_reads_the_texts_of_its_page_alone() {
     let home = s.home.path();
     let k = crate::knowledge::open(home).unwrap();
     for older in [true, false] {
-        let sql = format!("EXPLAIN QUERY PLAN {}", imported_side(&crate::forget::history::fixture::proof(), false, older));
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            imported_side(&crate::forget::history::fixture::proof(), false, older)
+        );
         let mut st = k.prepare(&sql).unwrap();
         let nulls = vec![Value::Null; st.parameter_count()];
         let plan: Vec<String> = st
@@ -1249,7 +1266,13 @@ fn an_imported_hit_below_the_pool_keeps_its_place_under_a_larger_depth() {
     }
     s.run();
     let k = crate::knowledge::open(s.home.path()).unwrap();
-    let uids = imported_fts(&k, &crate::forget::history::fixture::proof(), &q("設計 worker"), 2 * crate::search::POOL).unwrap();
+    let uids = imported_fts(
+        &k,
+        &crate::forget::history::fixture::proof(),
+        &q("設計 worker"),
+        2 * crate::search::POOL,
+    )
+    .unwrap();
     assert_eq!(uids.len(), crate::search::POOL + 1);
     assert!(uids[crate::search::POOL].ends_with(":d0"));
 }
@@ -1452,7 +1475,16 @@ fn get_shows_a_card_in_full_by_its_id() {
     assert_eq!(get(home, &format!("{op_seq}.1")).unwrap(), None);
     // The timeline anchors on the ID `get` takes (Codex on #370).
     let k = crate::knowledge::open(home).unwrap();
-    assert_eq!(time_of(&s.raw, &k, Some(&crate::forget::history::fixture::proof()), &id).unwrap(), 1_000);
+    assert_eq!(
+        time_of(
+            &s.raw,
+            &k,
+            Some(&crate::forget::history::fixture::proof()),
+            &id
+        )
+        .unwrap(),
+        1_000
+    );
 }
 
 /// docs/summaries.md S10: `get` shows a session summary in full by the ID session start shows
@@ -1595,7 +1627,16 @@ fn get_and_the_anchor_read_an_imported_uids_newest_copy() {
     let text = get(s.home.path(), &doc).unwrap().unwrap();
     assert!(text.contains("Second copy.") && !text.contains("First copy."));
     let k = crate::knowledge::open(s.home.path()).unwrap();
-    assert_eq!(time_of(&s.raw, &k, Some(&crate::forget::history::fixture::proof()), &doc).unwrap(), 2_000);
+    assert_eq!(
+        time_of(
+            &s.raw,
+            &k,
+            Some(&crate::forget::history::fixture::proof()),
+            &doc
+        )
+        .unwrap(),
+        2_000
+    );
 }
 
 /// Codex on #306: a session start removed from raw is left out of the timeline before the
@@ -4399,16 +4440,38 @@ fn a_history_forget_not_yet_applied_withholds_the_imported_documents() {
     fixture::register(&home, "j1", "t1");
     let closed = s.query(&all);
     assert!(closed.withheld);
-    assert!(closed.hits.iter().all(|h| h.key != doc), "{:?}", closed.hits);
-    assert!(closed.hits.iter().any(|h| h.key == claim), "{:?}", closed.hits);
+    assert!(
+        closed.hits.iter().all(|h| h.key != doc),
+        "{:?}",
+        closed.hits
+    );
+    assert!(
+        closed.hits.iter().any(|h| h.key == claim),
+        "{:?}",
+        closed.hits
+    );
     let text = get(&home, &doc).unwrap().unwrap();
-    assert!(text.contains(WITHHELD) && !text.contains("canary"), "{text}");
+    assert!(
+        text.contains(WITHHELD) && !text.contains("canary"),
+        "{text}"
+    );
     let each = get_each(&home, std::slice::from_ref(&doc)).unwrap();
-    assert!(each[0].1.as_deref().is_some_and(|t| t.contains(WITHHELD)), "{each:?}");
+    assert!(
+        each[0].1.as_deref().is_some_and(|t| t.contains(WITHHELD)),
+        "{each:?}"
+    );
     // An id no document has is withheld too meanwhile: it cannot be told from an imported one's.
-    assert!(get(&home, "nothing-has-this").unwrap().is_some_and(|t| t.contains(WITHHELD)));
+    assert!(
+        get(&home, "nothing-has-this")
+            .unwrap()
+            .is_some_and(|t| t.contains(WITHHELD))
+    );
     // A claim is still read.
-    assert!(get(&home, &claim).unwrap().is_some_and(|t| t.contains("canary")));
+    assert!(
+        get(&home, &claim)
+            .unwrap()
+            .is_some_and(|t| t.contains("canary"))
+    );
     let items = timeline(&home, None, None, None, 50).unwrap();
     assert!(items.iter().all(|i| i.key != doc), "{items:?}");
     assert!(items.iter().any(|i| i.key == claim), "{items:?}");
@@ -4421,8 +4484,12 @@ fn a_history_forget_not_yet_applied_withholds_the_imported_documents() {
         &chrono::Utc,
     );
     assert!(around.is_err_and(|e| e.to_string().contains(WITHHELD)));
-    let newest = timeline_text(&home, None, &home, Around::Newest(10), (3, 3), &chrono::Utc).unwrap();
-    assert!(newest.contains(WITHHELD) && !newest.contains("canary title"), "{newest}");
+    let newest =
+        timeline_text(&home, None, &home, Around::Newest(10), (3, 3), &chrono::Utc).unwrap();
+    assert!(
+        newest.contains(WITHHELD) && !newest.contains("canary title"),
+        "{newest}"
+    );
     assert!(!known(&home, "github.com/o/beta").unwrap());
     assert!(known(&home, R).unwrap());
 
@@ -4430,7 +4497,11 @@ fn a_history_forget_not_yet_applied_withholds_the_imported_documents() {
     let again = s.query(&all);
     assert!(!again.withheld);
     assert!(again.hits.iter().any(|h| h.key == doc), "{:?}", again.hits);
-    assert!(get(&home, &doc).unwrap().is_some_and(|t| t.contains("canary body")));
+    assert!(
+        get(&home, &doc)
+            .unwrap()
+            .is_some_and(|t| t.contains("canary body"))
+    );
     assert!(known(&home, "github.com/o/beta").unwrap());
 }
 
@@ -4445,6 +4516,9 @@ fn an_evaluation_run_refuses_while_a_history_forget_is_not_applied() {
     let out = home.join("out");
     let questions = "{\"qid\":\"q1\",\"text\":\"canary\"}\n";
     let err = trec_run(home, questions, 10, &[RawArm::Off], &out).unwrap_err();
-    assert!(err.to_string().contains(crate::forget::history::WITHHELD), "{err}");
+    assert!(
+        err.to_string().contains(crate::forget::history::WITHHELD),
+        "{err}"
+    );
     assert!(!out.exists());
 }

@@ -53,8 +53,7 @@ pub(crate) fn imported_open(raw: &Connection, k: &Connection) -> Result<Option<A
 
 /// What a reader says where it left knowledge.db's imported documents out (`imported_open` gave no
 /// proof): they are not read until a forget's deletion is applied, which is no answer of "none".
-pub(crate) const WITHHELD: &str =
-    "Imported history is withheld until a forget's deletion reaches knowledge.db; try again shortly.";
+pub(crate) const WITHHELD: &str = "Imported history is withheld until a forget's deletion reaches knowledge.db; try again shortly.";
 
 #[cfg(test)]
 pub(crate) mod fixture;

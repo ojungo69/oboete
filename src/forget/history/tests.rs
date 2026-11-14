@@ -89,20 +89,76 @@ enum Reach {
 /// 5c's reach table: every item of `src/` whose SQL reads `imported`, `imported_fts` or
 /// `imported_files`, by file and name.
 const READERS: &[(&str, &str, Reach)] = &[
-    ("src/cards.rs", "imported_by_file", Reach::Later("the file notes of PreToolUse")),
-    ("src/consumer/imported.rs", "step", Reach::Without("the consumer that writes the rows")),
-    ("src/consumer/imported.rs", "rewind", Reach::Without("drops rows past raw.db's commits")),
-    ("src/consumer/imported.rs", "maps", Reach::Later("prompt_near, the prompt's meaning side")),
-    ("src/consumer/imported.rs", "prompt_line", Reach::Later("the prompt hooks' picks")),
-    ("src/embed_phase.rs", "doctor_facts_in", Reach::Without("doctor's counts, no text")),
-    ("src/embed_phase.rs", "QUEUE", Reach::Later("the embedding phase, which sends the text")),
-    ("src/embed_phase.rs", "read_page", Reach::Later("the embedding phase")),
-    ("src/embed_phase.rs", "current", Reach::Later("the embedding phase")),
-    ("src/forget.rs", "uid_preview", Reach::Later("forget --uid's preview")),
-    ("src/mcp.rs", "save_memory", Reach::Without("a note's op, which its append checks again")),
-    ("src/search/b.rs", "IMPORTED_SESSIONS", Reach::Later("prompt_near")),
-    ("src/search/b.rs", "imported_sessions", Reach::Later("prompt_near")),
-    ("src/search/b.rs", "imported_projects", Reach::Later("prompt_near")),
+    (
+        "src/cards.rs",
+        "imported_by_file",
+        Reach::Later("the file notes of PreToolUse"),
+    ),
+    (
+        "src/consumer/imported.rs",
+        "step",
+        Reach::Without("the consumer that writes the rows"),
+    ),
+    (
+        "src/consumer/imported.rs",
+        "rewind",
+        Reach::Without("drops rows past raw.db's commits"),
+    ),
+    (
+        "src/consumer/imported.rs",
+        "maps",
+        Reach::Later("prompt_near, the prompt's meaning side"),
+    ),
+    (
+        "src/consumer/imported.rs",
+        "prompt_line",
+        Reach::Later("the prompt hooks' picks"),
+    ),
+    (
+        "src/embed_phase.rs",
+        "doctor_facts_in",
+        Reach::Without("doctor's counts, no text"),
+    ),
+    (
+        "src/embed_phase.rs",
+        "QUEUE",
+        Reach::Later("the embedding phase, which sends the text"),
+    ),
+    (
+        "src/embed_phase.rs",
+        "read_page",
+        Reach::Later("the embedding phase"),
+    ),
+    (
+        "src/embed_phase.rs",
+        "current",
+        Reach::Later("the embedding phase"),
+    ),
+    (
+        "src/forget.rs",
+        "uid_preview",
+        Reach::Later("forget --uid's preview"),
+    ),
+    (
+        "src/mcp.rs",
+        "save_memory",
+        Reach::Without("a note's op, which its append checks again"),
+    ),
+    (
+        "src/search/b.rs",
+        "IMPORTED_SESSIONS",
+        Reach::Later("prompt_near"),
+    ),
+    (
+        "src/search/b.rs",
+        "imported_sessions",
+        Reach::Later("prompt_near"),
+    ),
+    (
+        "src/search/b.rs",
+        "imported_projects",
+        Reach::Later("prompt_near"),
+    ),
     ("src/search/b.rs", "sidecar", Reach::Proof),
     ("src/search/b.rs", "imported_fts_sql", Reach::Proof),
     ("src/search/b.rs", "imported_hit", Reach::Proof),
@@ -112,9 +168,21 @@ const READERS: &[(&str, &str, Reach)] = &[
     ("src/search/b.rs", "imported_side", Reach::Proof),
     ("src/search/b.rs", "imported_known", Reach::Proof),
     ("src/search/b.rs", "imported_time", Reach::Proof),
-    ("src/view.rs", "notes_page", Reach::Later("the viewer's feed")),
-    ("src/view.rs", "REPOS", Reach::Later("the viewer's repositories")),
-    ("src/view.rs", "REPO_NAMES", Reach::Later("the viewer's privacy page")),
+    (
+        "src/view.rs",
+        "notes_page",
+        Reach::Later("the viewer's feed"),
+    ),
+    (
+        "src/view.rs",
+        "REPOS",
+        Reach::Later("the viewer's repositories"),
+    ),
+    (
+        "src/view.rs",
+        "REPO_NAMES",
+        Reach::Later("the viewer's privacy page"),
+    ),
 ];
 
 /// Each item of `src/` (test files left out) whose SQL reads an imported table, with whether its
@@ -191,15 +259,24 @@ fn every_reader_of_the_imported_documents_is_in_the_reach_table() {
         .map(|(file, name, reach)| (((*file).to_owned(), (*name).to_owned()), reach))
         .collect();
     let unlisted: Vec<_> = found.keys().filter(|k| !listed.contains_key(*k)).collect();
-    assert!(unlisted.is_empty(), "readers missing from READERS: {unlisted:?}");
+    assert!(
+        unlisted.is_empty(),
+        "readers missing from READERS: {unlisted:?}"
+    );
     let gone: Vec<_> = listed.keys().filter(|k| !found.contains_key(*k)).collect();
-    assert!(gone.is_empty(), "READERS lists what reads no imported table: {gone:?}");
+    assert!(
+        gone.is_empty(),
+        "READERS lists what reads no imported table: {gone:?}"
+    );
     for (key, reach) in &listed {
         let proof = found[key];
         match reach {
             Reach::Proof => assert!(proof, "{key:?} is listed as taking the proof and does not"),
             Reach::Without(why) | Reach::Later(why) => {
-                assert!(!proof, "{key:?} takes the proof: list it as Proof, not as {why:?}")
+                assert!(
+                    !proof,
+                    "{key:?} takes the proof: list it as Proof, not as {why:?}"
+                )
             }
         }
     }
