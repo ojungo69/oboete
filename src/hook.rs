@@ -3953,34 +3953,85 @@ pub(crate) fn compact(v: &Value) -> String {
     }
 }
 
+/// The markers that open and close a key block, in ASCII lower case, as `clip` looks for a block
+/// the cut leaves open.
+const KEY_OPENS: &str = "-----begin";
+const KEY_CLOSES: &str = "-----end";
+
+/// How often `read_whole` reads a text again once its masks are in, as a scan's rescan does.
+/// Still finding after them, the text is one mask.
+const READ_PASSES: usize = 64;
+
 /// `s` with what the rules find in all of it masked, as capture's scan finds it in a live prompt
 /// (#994): a home's rules read an imported prompt as it came, before the bundled rules mask its
 /// window and before the cut, so a value the cut falls inside, one that ends far past it, one
 /// whose rule needs the text after it and one that holds a value the bundled rules mask are
-/// each one mask by then. Under no rule of the home's, and while redaction is off, `s` as it
-/// is: the bundled rules alone read the window, as they did.
+/// each one mask by then. The text is read again with those masks in, until nothing new is
+/// found, so a value a rule finds only behind another rule's mask is one too. Under no rule of
+/// the home's, and while redaction is off, `s` as it is: the bundled rules alone read the
+/// window, as they did.
 fn read_whole<'a>(s: &'a str, rules: &redact::Rules) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
     if rules.is_off() || rules.counts().0 == 0 {
         return Cow::Borrowed(s);
     }
-    let mut found = redact::ranges(s, rules);
-    // One span for all of the text: a value that is the whole prompt, or more matches of one of
-    // the home's rules than a scan holds (`redact::ranges`; a bundled rule's are a span each),
-    // which nothing here tells apart. Either way it is one mask, as capture stores a live prompt
-    // with that many.
-    if found == [(0, s.len())] {
-        return Cow::Borrowed(redact::MASK);
+    let mut text = Cow::Borrowed(s);
+    for _ in 0..READ_PASSES {
+        let found = redact::ranges(&text, rules);
+        // One span for all of the text: a value that is the whole prompt, or more matches of one
+        // of the home's rules than a scan holds (`redact::ranges`; a bundled rule's are a span
+        // each), which nothing here tells apart. Either way it is one mask, as capture stores a
+        // live prompt with that many.
+        if found == [(0, text.len())] {
+            return Cow::Borrowed(redact::MASK);
+        }
+        let parts = beside_open_headers(&text, found);
+        if parts.is_empty() {
+            return text;
+        }
+        let next = redact::masked_part(&text, 0..text.len(), &parts);
+        // A rule that matches its own mask: nothing new to hide.
+        if next == *text {
+            return text;
+        }
+        text = Cow::Owned(next);
     }
-    // A span that holds a key block's header is left as it is: the bundled rules mask a whole
-    // block, and `clip` must see the header of one the cut leaves open, which a rule of the
-    // home's could mask. shortcut: what else such a span holds is gated only as the kept text
-    // is; split the span around the header if a home's rule is found to wrap one.
-    found.retain(|&(start, end)| !s[start..end].contains("-----BEGIN"));
-    if found.is_empty() {
-        return Cow::Borrowed(s);
+    Cow::Borrowed(redact::MASK)
+}
+
+/// `found` without the characters of each marker that opens a key block and that a range of it
+/// holds with no closing marker after it: `clip` must see the header of a block the cut leaves
+/// open, which a rule of the home's could mask in whole or in part (its `BEGIN` alone, or a value
+/// of the home's the header stands in), and what such a block holds would then be kept. The rest
+/// of the range is masked. A range that holds the block to its closing marker is masked whole,
+/// as the bundled rules' own match of a block is.
+fn beside_open_headers(text: &str, found: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let opens: Vec<usize> = lower.match_indices(KEY_OPENS).map(|(at, _)| at).collect();
+    if opens.is_empty() {
+        return found;
     }
-    Cow::Owned(redact::masked_part(s, 0..s.len(), &found))
+    let mut parts = Vec::new();
+    for (start, end) in found {
+        let mut from = start;
+        for &open in &opens {
+            let close = open + KEY_OPENS.len();
+            if close <= from || end <= open {
+                continue;
+            }
+            if close <= end && lower[close..end].contains(KEY_CLOSES) {
+                continue;
+            }
+            if from < open {
+                parts.push((from, open));
+            }
+            from = close.min(end);
+        }
+        if from < end {
+            parts.push((from, end));
+        }
+    }
+    parts
 }
 
 /// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
@@ -3990,12 +4041,31 @@ fn read_whole<'a>(s: &'a str, rules: &redact::Rules) -> std::borrow::Cow<'a, str
 pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
-    let s = &without_blocks(s, false);
-    let total = s.chars().count();
-    let s = &read_whole(s, rules);
-    if total <= MAX_FIELD {
-        return redact::redact_unless_off(s, rules);
+    let mut s = without_blocks(s, false);
+    // Under a rule of the home's the blocks go to the last one before the rules read: a mask
+    // put in a tag would keep the caller's gate from taking out a block that only a later
+    // removal finds (tags that close into one once a block between them is gone).
+    if !rules.is_off() && rules.counts().0 > 0 {
+        loop {
+            let next = without_blocks(&s, false);
+            if next == s {
+                break;
+            }
+            s = next;
+        }
     }
+    let s = &s;
+    let total = s.chars().count();
+    if total <= MAX_FIELD {
+        // Not cut: under a rule of the home's it is masked as capture masks a live prompt, by
+        // all of the rules at once, so that no mask takes the text another rule needs.
+        return if rules.is_off() || rules.counts().0 == 0 {
+            redact::redact_unless_off(s, rules)
+        } else {
+            redact::scan(s, rules).0
+        };
+    }
+    let s = &read_whole(s, rules);
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
     let masked = redact::redact_unless_off(&window, rules);
     let mut cut = masked
@@ -4015,9 +4085,9 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     }
     // A value a rule of the home's still finds with the cut inside it goes whole, as a key block
     // the cut leaves open does: the caller gates what is kept with the home's rules, and the
-    // start of a value is no finding to them. `read_whole` masked the others; this is one it
-    // left for its key header, or one a rule finds only behind another's mask. Under no rule of
-    // the home's the cut is where it was.
+    // start of a value is no finding to them. `read_whole` masked the others; this is one a
+    // rule finds only behind a mask the bundled rules put in the window just now. Under no rule
+    // of the home's the cut is where it was.
     if !rules.is_off()
         && rules.counts().0 > 0
         && let Some((start, _)) = redact::ranges(&masked, rules)
@@ -4029,12 +4099,15 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
     let mut head = redact::redact_unless_off(&masked[..cut], rules);
-    // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
+    // A key block the cut leaves open goes, in whatever case its markers are written, unless
+    // redaction is off (owner decision 43): what is kept ends at the first header that no
+    // footer follows, so a second open block after it does not keep the first one's lines.
+    let lower = head.to_ascii_lowercase();
+    let closed = lower.rfind(KEY_CLOSES).unwrap_or(0);
     if !rules.is_off()
-        && let Some(begin) = head.rfind("-----BEGIN")
-        && !head[begin..].contains("-----END")
+        && let Some(open) = lower[closed..].find(KEY_OPENS)
     {
-        head.truncate(begin);
+        head.truncate(closed + open);
     }
     format!("{head}\n…[clipped, {total} chars in full]")
 }

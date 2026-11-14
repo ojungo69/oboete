@@ -590,6 +590,12 @@ fn a_prompt_is_gated_with_the_homes_rules_too() {
         "ship [REDACTED] {}\n…[clipped, 11017 chars in full]",
         "a".repeat(7_984)
     );
+    // A block whose footer is past the window is one mask: the rules read it to its footer,
+    // where the bundled rules alone, reading the window, dropped it from its header.
+    masked[6] = format!(
+        "{}[REDACTED]\n…[clipped, 13054 chars in full]",
+        "a".repeat(7_000)
+    );
     assert_eq!(bodies(&ruled, home.path()), masked);
     // Owner decision 43: while redaction is off, a prompt is kept as typed.
     let (home, off) = home_with("[redaction]\nenabled = false\n");
@@ -658,6 +664,9 @@ fn the_homes_rules_read_all_of_an_imported_prompt_as_it_came() {
     let chain = "[[redaction.extra_rules]]\nid = \"foo\"\nregex = 'foo'\n\
                  [[redaction.extra_rules]]\nid = \"tok\"\n\
                  regex = '\\[REDACTED\\]token-([0-9]{6})'\n";
+    let behind = "[[redaction.extra_rules]]\nid = \"foo\"\nregex = 'foo'\n\
+                  [[redaction.extra_rules]]\nid = \"tok\"\n\
+                  regex = '\\[REDACTED\\]tok\\{[^}]*\\}'\n";
     let a = |n: usize| "a".repeat(n);
     // The rule, the prompt, and what is stored of it.
     let cases: Vec<(&str, String, String)> = vec![
@@ -690,7 +699,19 @@ fn the_homes_rules_read_all_of_an_imported_prompt_as_it_came() {
         (
             chain,
             format!("{}footoken-123456 {}", a(7_983), "b".repeat(3_000)),
-            String::new(),
+            format!(
+                "{}[REDACTED][REDACTED]\n…[clipped, 10999 chars in full]",
+                a(7_983)
+            ),
+        ),
+        // The same that ends past the window: the text is read again with the first masks in.
+        (
+            behind,
+            format!("{}footok{{{}}} done", a(7_980), "s".repeat(5_000)),
+            format!(
+                "{}[REDACTED] done\n…[clipped, 12993 chars in full]",
+                a(7_980)
+            ),
         ),
     ];
     for (n, (rule, text, stored)) in cases.into_iter().enumerate() {
@@ -705,16 +726,91 @@ fn the_homes_rules_read_all_of_an_imported_prompt_as_it_came() {
         let docs = docs(&raw);
         let body = &docs.iter().find(|d| d.source_id == "p41").unwrap().body;
         let end = &body[body.len().saturating_sub(60)..];
-        if stored.is_empty() {
-            // The second rule's value: no digit of it, whatever masks stand for the rest.
-            let head = body.strip_suffix("\n…[clipped, 10999 chars in full]");
-            assert!(
-                head.is_some_and(|head| !head.contains(|c: char| c.is_ascii_digit())),
-                "{n}: {end}"
-            );
-        } else {
-            assert_eq!(body, &stored, "{n}: {end}");
-        }
+        assert_eq!(body, &stored, "{n}: {end}");
+    }
+}
+
+/// What a rule of the home's finds at a key block's header hides no block the cut leaves open
+/// (the review of #998). `clip` drops such a block from its header on, so the read of all of the
+/// prompt leaves the header's marker as it is: a rule that matches its `BEGIN` alone, or a value
+/// of the home's the header stands in, masked the marker, and what the block held was kept. The
+/// marker is found in whatever case it is written, also under no rule of the home's. A value of
+/// the home's that holds a block to its footer is one mask, and what follows it stays.
+#[test]
+fn a_rule_of_the_homes_at_a_key_blocks_header_hides_no_open_block() {
+    let open = |header: &str| {
+        format!(
+            "{}{header}\nabcDEF123456789\n{}",
+            "a".repeat(7_000),
+            "z".repeat(6_000)
+        )
+    };
+    let upper = "-----BEGIN PRIVATE KEY-----";
+    let lower = "-----begin private key-----";
+    let rule = |id: &str, regex: &str| {
+        format!("[[redaction.extra_rules]]\nid = \"{id}\"\nregex = '{regex}'\n")
+    };
+    let vault = rule("vault", r"vault\{[^}]*\}");
+    let dropped = format!("{}\n…[clipped, 13044 chars in full]", "a".repeat(7_000));
+    let wrapped = format!(
+        "x vault{{a{upper}\n{}\n-----END PRIVATE KEY-----z}} {}",
+        "B".repeat(70),
+        "c".repeat(9_000)
+    );
+    // The home's rules, the prompt, and what is stored of it.
+    let cases: Vec<(String, String, String)> = vec![
+        (rule("word", "BEGIN"), open(upper), dropped.clone()),
+        (String::new(), open(lower), dropped.clone()),
+        // Two blocks the cut leaves open: what is kept ends at the first, under no rule too.
+        (
+            String::new(),
+            format!(
+                "{}{upper}\nabcDEF123456789\n{upper}\nghiJKL123456789\n{}",
+                "a".repeat(7_000),
+                "z".repeat(6_000)
+            ),
+            format!("{}\n…[clipped, 13088 chars in full]", "a".repeat(7_000)),
+        ),
+        (
+            rule("header", "-----begin [a-z ]+-----"),
+            open(lower),
+            dropped.clone(),
+        ),
+        (
+            vault.clone(),
+            format!(
+                "{}vault{{topsecret{upper}\n{}}} done",
+                "a".repeat(7_900),
+                "B".repeat(6_000)
+            ),
+            format!(
+                "{}[REDACTED]\n…[clipped, 13949 chars in full]",
+                "a".repeat(7_900)
+            ),
+        ),
+        (
+            vault,
+            wrapped.clone(),
+            format!(
+                "x [REDACTED] {}\n…[clipped, {} chars in full]",
+                "c".repeat(8_000 - 13),
+                wrapped.chars().count()
+            ),
+        ),
+    ];
+    for (n, (rules, text, stored)) in cases.into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        prompt(&src, 41, &text);
+        let (home, ruled) = home_with(&rules);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        raw.gates_with(&ruled.rules);
+        claude_mem(&mut raw, &src, &ruled).unwrap();
+        let docs = docs(&raw);
+        let body = &docs.iter().find(|d| d.source_id == "p41").unwrap().body;
+        let end = &body[body.len().saturating_sub(70)..];
+        assert_eq!(body, &stored, "{n}: {end}");
     }
 }
 
@@ -779,6 +875,36 @@ fn a_prompt_read_whole_masks_too_many_matches_and_drops_an_open_key_block() {
         .unwrap()
         .body;
     assert_eq!(kept, start);
+}
+
+/// A private block that only a third removal of blocks finds is no prompt under a rule of the
+/// home's that matches its tag, as under none: the blocks go to the last one before the rules
+/// read all of the prompt. A mask put in the tag kept the gate's own removal from finding the
+/// block, and what it held was stored (seen in the review of #998, by the reading that found
+/// the key block's marker).
+#[test]
+fn a_block_found_late_goes_before_a_rule_can_mask_its_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("claude-mem.db");
+    claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+    let nested = "<pri<pri<private>a</private>vate>b</private>vate>all of it</private>";
+    prompt(&src, 41, nested);
+    prompt(&src, 42, &format!("{nested} then {}", "c".repeat(9_000)));
+    let rule = "[[redaction.extra_rules]]\nid = \"word\"\nregex = 'private'\n";
+    for rules in [rule, ""] {
+        let (home, settings) = home_with(rules);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        raw.gates_with(&settings.rules);
+        claude_mem(&mut raw, &src, &settings).unwrap();
+        let docs = docs(&raw);
+        assert!(docs.iter().all(|d| d.source_id != "p41"), "{rules}");
+        let long = &docs.iter().find(|d| d.source_id == "p42").unwrap().body;
+        assert!(
+            long.starts_with("then ccc") && !long.contains("all of it"),
+            "{rules}: {}",
+            &long[..60]
+        );
+    }
 }
 
 /// A harness notification is told before the home's rules run: a rule that masks its opening

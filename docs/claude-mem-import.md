@@ -119,17 +119,29 @@ it with the bundled rules, so that its check for a key block the cut leaves open
 header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
 prompt was masked with the bundled rules alone. Before the bundled rules mask the window, the
 home's rules read all of the prompt as it came (`hook::read_whole`, #994), as capture's scan
-reads a live prompt, and what they find is masked there. So a value the cut falls inside, one
-that ends far past it, one whose rule needs the text after it and one that holds a value the
-bundled rules mask are each one mask before the cut (their parts used to stay), and the cut
-keeps 8,000 characters of the masked text. A value a rule finds only behind another rule's
-mask, with the cut inside it, ends what is kept where it starts, as before. A prompt in which
+reads a live prompt, and what they find is masked there; the prompt is read again with those
+masks in until nothing new is found, as a scan's rescan does. So a value the cut falls inside,
+one that ends far past it, one whose rule needs the text after it, one that holds a value the
+bundled rules mask and one a rule finds only behind another rule's mask are each one mask
+before the cut (their parts used to stay), and the cut keeps 8,000 characters of the masked
+text. A prompt that is not cut is masked as capture masks a live one, by all of the rules at
+once (`redact::scan`). A prompt in which
 one of the home's rules matches more times than a scan holds, or that is one value whole, is one
 mask, as capture stores a live prompt with that many; a bundled rule's matches are a mask each,
-however many. A span that holds a key
-block's header is left to the bundled rules and to the check for a key block the cut leaves
-open, so that no rule of the home's hides a header. Under no rule of the home's nothing is read
-before the bundled rules, and what is stored is what was stored. A mask the cut falls inside is
+however many. The marker that opens a key block (`-----BEGIN`) is left as it is where a rule of
+the home's finds it with no closing marker after it in the same match, and the rest of that
+match is masked: the check for a key block the cut leaves open must see the header, and a rule
+that matched its `BEGIN` alone, or a value the header stood in, would hide it. That check, and
+this, find the markers in whatever case they are written (2026-11-14; upper case alone was
+found), and what is kept ends at the first header that no footer follows (the last header was
+looked at alone, so a second open block kept the first one's lines). A block whose footer is
+past the window is one mask under a rule of the home's, which reads it to its footer; under
+none it is dropped from its header, as before. Under a rule of the home's the `<private>`-style
+blocks are taken out until none is left before the rules read: a mask put in a tag would keep
+the gate's own removal from finding a block that only a later removal finds. Under no rule of
+the home's nothing is read
+before the bundled rules, and what is stored is what was stored, but for a key block written in
+lower case, or a first of two, that the cut leaves open, which now goes. A mask the cut falls inside is
 kept whole (2026-11-14; its first characters used to stay). While
 `[capture] store_prompts` is off no prompt's text is
 stored, as a live prompt's is not: the rows are counted with the empty ones (`empty`) and come in
