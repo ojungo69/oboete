@@ -573,27 +573,18 @@ pub enum Noted {
 pub const IMPORT_BATCH: usize = 500;
 
 /// Where an import of records stands in its source (D6), written with each batch as a `migration`
-/// op. `key` is `oboete-v1:<device_id>` or `transcript:<agent>:<session>`; `through` is the last
-/// v1 event id or settled transcript event ordinal, excluding synthetic end-of-file events.
-/// v1's `row` fingerprints its event at `through`, whose id v1 reuses when its newest events are
-/// deleted.
+/// op. `key` is `transcript:<agent>:<session>`, or `oboete-v1:<device_id>` in the ops the v1
+/// migration wrote before decision 99 (2026-11-12) removed it; `through` is the last settled
+/// transcript event ordinal, excluding synthetic end-of-file events, or v1's last event id. Those
+/// ops also hold a `row`, the fingerprint of v1's event at `through`, which is read past: the op's
+/// text is kept as it was written.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     pub key: String,
     pub through: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row: Option<V1Row>,
     /// SHA-256 of the settled transcript events through this checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct V1Row {
-    pub id: i64,
-    pub ts: i64,
-    /// The SHA-256 of v1's session id (`migrate::v1_row`): the op is stored text.
-    pub session_id: String,
 }
 
 /// Whether an import must leave an item out because the owner forgot it (spec 8.4, A104): the
@@ -6769,6 +6760,7 @@ impl Raw {
     /// The `source_id`s of `source`'s documents imported so far, on any device: what an import
     /// skips (D5). An op whose `source_id` is missing or not text, which this version cannot read,
     /// is passed over as the consumer passes it (OpenCodeReview on #305).
+    #[cfg(test)]
     pub fn import_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
         self.source_ids("import", source)
     }
@@ -6840,31 +6832,6 @@ impl Raw {
         migration_checkpoints_in(&self.conn, prefix)
     }
 
-    /// The sessions of `source`'s records, its `touch` records left out (D6: the sessions a v1
-    /// pass checks oboete.db still holds).
-    pub fn sessions_of(&self, source: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare(
-            "SELECT DISTINCT session FROM records WHERE type = 'event' AND source = ?1
-               AND kind != 'touch' AND session IS NOT NULL ORDER BY session",
-        )?;
-        let rows = st.query_map([source], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// The (session, repo) labels of `source`'s `touch` records (D6): the `session_repos` rows a
-    /// v1 pass has recorded.
-    pub fn touches(
-        &self,
-        source: &str,
-    ) -> Result<std::collections::HashSet<(String, Option<String>)>> {
-        let mut st = self.conn.prepare(
-            "SELECT session, repo FROM records WHERE type = 'event' AND source = ?1
-               AND kind = 'touch'",
-        )?;
-        let rows = st.query_map([source], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// The time of each (agent, session)'s earliest record that neither the transcript import
     /// wrote nor labels a v1 repository (`touch`): where that session's transcript import stops
     /// (D6).
@@ -6914,6 +6881,7 @@ impl Raw {
     }
 
     /// Notify only after each bounded batch commits; earlier counts survive a later error.
+    #[cfg(test)]
     pub(crate) fn append_imports_counted(
         &mut self,
         docs: Vec<ImportDoc>,

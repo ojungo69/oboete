@@ -783,13 +783,11 @@ pub struct AgentStats {
 pub(crate) struct Preview {
     pub key: String,
     pub candidates: ImportStats,
-    pub v1: Option<crate::migrate::Preview>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Outcome {
     pub stats: ImportStats,
-    pub v1: Option<crate::migrate::Outcome>,
 }
 
 #[derive(Debug)]
@@ -800,13 +798,10 @@ pub(crate) struct Failure {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Committed {
-    V1(crate::migrate::Committed),
-    Transcripts {
-        agent: String,
-        events: u64,
-        bytes: u64,
-    },
+pub(crate) struct Committed {
+    pub agent: String,
+    pub events: u64,
+    pub bytes: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -917,10 +912,9 @@ fn run_with_output(
     out: &mut impl Write,
 ) -> std::result::Result<Outcome, Failure> {
     let mut outcome = Outcome::default();
-    let mut code = FailureCode::InvalidSource;
+    let mut code = FailureCode::Refused;
     let result = (|| {
-        let v1 = home.join("oboete.db");
-        crate::migrate::check_source(home, &v1)?;
+        refuse_v1_store(home)?;
         code = FailureCode::Busy;
         let _lock = crate::import::lock(home)?;
         // A confirm is of what its preview read: the same agents' folders. What else the
@@ -935,53 +929,6 @@ fn run_with_output(
             anyhow::ensure!(same, FailureCode::Stale);
         }
         let before_config = plan.as_ref().map(|p| p.config.clone());
-        let mut raw = None;
-        if v1.try_exists()? {
-            let expected_v1 = plan
-                .as_ref()
-                .and_then(|p| p.preview.v1.as_ref())
-                .map(|p| p.key.as_str());
-            if plan.is_some() {
-                anyhow::ensure!(expected_v1.is_some(), FailureCode::Stale);
-            }
-            let migrated =
-                crate::migrate::run_holding(home, &v1, &mut raw, expected_v1, &mut |c| {
-                    committed(&Committed::V1(c.clone()))
-                });
-            match migrated {
-                Ok(migrated) => {
-                    outcome.v1 = Some(migrated);
-                    if let Some(settings) =
-                        &outcome.v1.as_ref().context("v1 outcome absent")?.settings
-                    {
-                        for line in crate::migrate::settings_lines(&settings.missing) {
-                            writeln!(out, "{line}")?;
-                        }
-                    }
-                    writeln!(
-                        out,
-                        "v1 migration: {}",
-                        serde_json::to_string(
-                            &outcome.v1.as_ref().context("v1 outcome absent")?.stats
-                        )?
-                    )?;
-                }
-                Err(failed) => {
-                    outcome.v1 = Some(*failed.outcome);
-                    code = failed.code;
-                    if let Some(settings) =
-                        &outcome.v1.as_ref().context("v1 outcome absent")?.settings
-                    {
-                        for line in crate::migrate::settings_lines(&settings.missing) {
-                            writeln!(out, "{line}")?;
-                        }
-                    }
-                    return Err(failed.cause);
-                }
-            }
-        } else if plan.as_ref().is_some_and(|p| p.preview.v1.is_some()) {
-            anyhow::bail!(FailureCode::Stale);
-        }
         // Recheck after acquiring the same lock every settings writer uses; hold the selected
         // capture settings steady until the last transcript batch has committed.
         let _config = crate::settings::config_lock(home)?;
@@ -995,26 +942,22 @@ fn run_with_output(
         code = FailureCode::InvalidConfig;
         Settings::load(home)?;
         code = FailureCode::Stale;
-        if raw.is_none() {
-            let destination = if plan.is_some() {
-                raw::read_only(home)?
-            } else {
-                None
-            };
-            if let Some(plan) = &plan {
-                anyhow::ensure!(
-                    plan.destination == crate::preview::preview_key(home, &"destination")?,
-                    FailureCode::Stale
-                );
-            }
-            crate::migrate::check_source(home, &v1)?;
-            code = FailureCode::Failed;
-            raw = Some(match destination {
-                Some(held) => held.into_writer(home)?,
-                None => raw::open(home)?,
-            });
+        let destination = if plan.is_some() {
+            raw::read_only(home)?
+        } else {
+            None
+        };
+        if let Some(plan) = &plan {
+            anyhow::ensure!(
+                plan.destination == crate::preview::preview_key(home, &"destination")?,
+                FailureCode::Stale
+            );
         }
         code = FailureCode::Failed;
+        let mut raw = Some(match destination {
+            Some(held) => held.into_writer(home)?,
+            None => raw::open(home)?,
+        });
         crate::forget::reconcile_or_say(home, raw.as_mut().context("transcript raw absent")?)?;
         import_files(
             home,
@@ -1037,13 +980,9 @@ fn run_with_output(
 }
 
 pub(crate) fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<PreviewPlan> {
+    refuse_v1_store(home)?;
     let destination = crate::preview::preview_key(home, &"destination")?;
     let config = crate::preview::config_bytes(home)?;
-    let path = home.join("oboete.db");
-    let v1 = path
-        .try_exists()?
-        .then(|| crate::migrate::preview(home, &path))
-        .transpose()?;
     let mut files = bound_files(roots)?;
     #[cfg(test)]
     if let Some(hook) = AFTER_BOUND.with_borrow_mut(Option::take) {
@@ -1070,7 +1009,6 @@ pub(crate) fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<Previ
             roots,
             &files,
             config.as_deref().map(crate::forget::hash),
-            &v1,
             &candidates,
         ),
     )?;
@@ -1079,11 +1017,7 @@ pub(crate) fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<Previ
         FailureCode::Stale
     );
     Ok(PreviewPlan {
-        preview: Preview {
-            key,
-            candidates,
-            v1,
-        },
+        preview: Preview { key, candidates },
         roots: (roots.iter())
             .map(|(agent, root)| ((*agent).to_owned(), root.to_path_buf()))
             .collect(),
@@ -1093,8 +1027,20 @@ pub(crate) fn preview_plan(home: &Path, roots: &[(&str, &Path)]) -> Result<Previ
     })
 }
 
+/// Refuses an import while the home holds a store of oboete v1 (`<home>/oboete.db`), which this
+/// build no longer migrates (decision 99, 2026-11-12): its events moved later by an older build
+/// would come again beside the transcripts' copies of them. The store is not opened.
+fn refuse_v1_store(home: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !home.join("oboete.db").try_exists()?,
+        "{}; nothing was imported",
+        crate::setup::V1_STORE
+    );
+    Ok(())
+}
+
 /// Import stable transcripts locally, with the time cut and transactional checkpoints of A60
-/// and D6. Preview reads only the transcripts, settings and v1 store, and creates nothing.
+/// and D6. Preview reads only the transcripts and settings, and creates nothing.
 pub fn import(
     home: &Path,
     roots: &[(&str, &Path)],
@@ -1113,6 +1059,7 @@ pub fn import(
                 }
             });
     }
+    refuse_v1_store(home)?;
     let mut stats = ImportStats::default();
     import_files(home, roots, &mut None, &mut stats, out, &mut |_| {}, None)?;
     Ok(stats)
@@ -1128,10 +1075,9 @@ fn import_files(
     mut files: Option<&mut [BoundFile]>,
 ) -> Result<()> {
     let yes = raw.is_some();
-    let v1 = home.join("oboete.db");
     let cut = match raw.as_ref() {
         Some(raw) => raw.earliest_by_session()?,
-        None => preview_cut(&v1)?,
+        None => HashMap::new(),
     };
     let mut checkpoints = match raw.as_ref() {
         Some(raw) => raw.migration_checkpoints("transcript:")?,
@@ -1283,7 +1229,6 @@ fn import_files(
             let mut checkpoint = Checkpoint {
                 key: key.clone(),
                 through: seen,
-                row: None,
                 prefix: checkpoints.get(&key).and_then(|c| c.prefix.clone()),
             };
             let namespace = session.clone();
@@ -1355,7 +1300,7 @@ fn import_files(
                         break;
                     }
                     if raw.is_some() {
-                        committed(&Committed::Transcripts {
+                        committed(&Committed {
                             agent: (*agent).to_owned(),
                             events: stats.events,
                             bytes: stats.bytes,
@@ -1395,7 +1340,7 @@ fn import_files(
                 match append_batch(raw, &mut batch, &checkpoint, &settings, stats) {
                     Ok(()) => {
                         if raw.is_some() {
-                            committed(&Committed::Transcripts {
+                            committed(&Committed {
                                 agent: (*agent).to_owned(),
                                 events: stats.events,
                                 bytes: stats.bytes,
@@ -1492,20 +1437,6 @@ fn append_batch(
         .map(|c| c.event.body.len() as u64)
         .sum::<u64>();
     Ok(())
-}
-
-fn preview_cut(v1: &Path) -> Result<HashMap<(String, String), i64>> {
-    if !v1.exists() {
-        return Ok(HashMap::new());
-    }
-    crate::preview::with_preview_v1(v1, |conn, _| {
-        let mut st = conn.prepare(
-            "SELECT s.agent, e.session_id, MIN(e.ts) FROM events e
-             JOIN sessions s ON s.id = e.session_id GROUP BY s.agent, e.session_id",
-        )?;
-        let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    })
 }
 
 fn transcript_files(root: &Path, agent: &str) -> Result<Vec<PathBuf>> {

@@ -1,4 +1,4 @@
-//! Fixed retained-runtime categories and evaluation copies; metadata only, never file contents.
+//! The home's evaluation copies (`<home>/eval`); metadata only, never file contents.
 //! ponytail: reuse native directory name buffers and top-level bindings. Stream enumeration
 //! if large directories or deep paths make those remaining buffers the memory bottleneck.
 
@@ -12,8 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::super::{DiagnosticDirectory, EntryKind, EntryMetadata};
-use super::{CheckState, Count, PreviewCopyError, error_state, stability};
-use crate::migrate::{OldFileCategory, old_category};
+use super::{CheckState, PreviewCopyError, error_state, stability};
 
 type Observed<T> = std::result::Result<T, CheckState>;
 
@@ -40,14 +39,6 @@ impl Bytes {
 }
 
 #[derive(Serialize)]
-struct CategoryChecks {
-    category: OldFileCategory,
-    present: Flag,
-    targets: Count,
-    bytes: Bytes,
-}
-
-#[derive(Serialize)]
 struct EvaluationChecks {
     present: Flag,
     bytes: Bytes,
@@ -56,7 +47,6 @@ struct EvaluationChecks {
 #[derive(Serialize)]
 pub(super) struct RetainedChecks {
     pub(super) state: CheckState,
-    categories: [CategoryChecks; 7],
     evaluation_copies: EvaluationChecks,
 }
 
@@ -64,12 +54,6 @@ impl RetainedChecks {
     fn unknown(state: CheckState) -> Self {
         Self {
             state,
-            categories: OldFileCategory::ALL.map(|category| CategoryChecks {
-                category,
-                present: Flag::unknown(state),
-                targets: Count::unknown(state),
-                bytes: Bytes::unknown(state),
-            }),
             evaluation_copies: EvaluationChecks {
                 present: Flag::unknown(state),
                 bytes: Bytes::unknown(state),
@@ -79,11 +63,6 @@ impl RetainedChecks {
 
     fn refresh_state(&mut self) {
         let mut state = CheckState::Known;
-        for row in &self.categories {
-            for next in [row.present.state, row.targets.state, row.bytes.state] {
-                state = stability(state, next);
-            }
-        }
         for next in [
             self.evaluation_copies.present.state,
             self.evaluation_copies.bytes.state,
@@ -142,19 +121,6 @@ fn hash_entry(hash: &mut Sha256, path: &OsStr, metadata: &EntryMetadata) {
     hash.update(modified.subsec_nanos().to_le_bytes());
 }
 
-struct CategorySnapshot {
-    targets: Observed<Vec<Binding>>,
-    bytes: Observed<Tree>,
-}
-impl CategorySnapshot {
-    fn empty() -> Self {
-        Self {
-            targets: Ok(Vec::new()),
-            bytes: Ok(Tree::default()),
-        }
-    }
-}
-
 struct EvaluationSnapshot {
     target: Observed<Option<Binding>>,
     bytes: Observed<Tree>,
@@ -176,14 +142,12 @@ struct HomeBinding {
 
 struct Scan {
     home: Option<HomeBinding>,
-    categories: [CategorySnapshot; 7],
     evaluation: EvaluationSnapshot,
 }
 impl Scan {
     fn empty(home: Option<HomeBinding>) -> Self {
         Self {
             home,
-            categories: std::array::from_fn(|_| CategorySnapshot::empty()),
             evaluation: EvaluationSnapshot::empty(),
         }
     }
@@ -203,27 +167,6 @@ fn difference<T: PartialEq>(before: &Observed<T>, after: &Observed<T>) -> Option
         (Err(before), Err(after)) => Some(stability(*before, *after)),
         (Err(state), _) | (_, Err(state)) => Some(*state),
         _ => None,
-    }
-}
-
-fn possible(name: &OsStr) -> [Option<OldFileCategory>; 2] {
-    let name = name.to_string_lossy();
-    [old_category(&name, false), old_category(&name, true)]
-}
-
-fn slot(category: OldFileCategory) -> usize {
-    OldFileCategory::ALL
-        .iter()
-        .position(|candidate| *candidate == category)
-        .expect("the fixed category list is exhaustive")
-}
-
-fn fail_old(scan: &mut Scan, name: &OsStr, state: CheckState) {
-    // Type was unavailable: every possible native category is affected, not just dir=false.
-    for category in possible(name).into_iter().flatten() {
-        let row = &mut scan.categories[slot(category)];
-        fail(&mut row.targets, state);
-        fail(&mut row.bytes, state);
     }
 }
 
@@ -352,28 +295,6 @@ fn tree(parent: &DiagnosticDirectory, leaf: &OsStr, metadata: EntryMetadata) -> 
     Ok(result)
 }
 
-fn append_tree(total: &mut Observed<Tree>, next: Result<Tree>) {
-    let next = match next {
-        Ok(next) => next,
-        Err(error) => {
-            fail(total, error_state(&error));
-            return;
-        }
-    };
-    if let Ok(current) = total {
-        let Some(bytes) = current.bytes.checked_add(next.bytes) else {
-            *total = Err(CheckState::Unavailable);
-            return;
-        };
-        let mut fingerprint = Sha256::new();
-        fingerprint.update(b"oboete:retained-forest:v1\0");
-        fingerprint.update(current.fingerprint);
-        fingerprint.update(next.fingerprint);
-        current.bytes = bytes;
-        current.fingerprint = fingerprint.finalize().into();
-    }
-}
-
 fn eval_target(
     directory: &DiagnosticDirectory,
     name: &OsStr,
@@ -415,36 +336,17 @@ fn recheck_top(
         Ok(after) => after,
         Err(error) => {
             let state = error_state(&error.into());
-            fail_old(scan, name, state);
-            if name == "eval" {
-                fail(&mut scan.evaluation.target, state);
-                fail(&mut scan.evaluation.bytes, state);
-            }
+            fail(&mut scan.evaluation.target, state);
+            fail(&mut scan.evaluation.bytes, state);
             return;
         }
     };
-    let selected_before =
-        old_category(&name.to_string_lossy(), before.kind == EntryKind::Directory);
-    let selected_after = old_category(&name.to_string_lossy(), after.kind == EntryKind::Directory);
-    for category in possible(name).into_iter().flatten() {
-        let row = &mut scan.categories[slot(category)];
-        let was = selected_before == Some(category);
-        let now = selected_after == Some(category);
-        if was != now || (was && (before.kind != after.kind || before.identity != after.identity)) {
-            fail(&mut row.targets, CheckState::Changed);
-            fail(&mut row.bytes, CheckState::Changed);
-        } else if was && *before != after {
-            fail(&mut row.bytes, CheckState::Changed);
-        }
-    }
-    if name == "eval" {
-        let target = eval_target(directory, name, &after);
-        if let Some(state) = difference(&scan.evaluation.target, &target) {
-            fail(&mut scan.evaluation.target, state);
-            fail(&mut scan.evaluation.bytes, state);
-        } else if matches!(target, Ok(Some(_))) && *before != after {
-            fail(&mut scan.evaluation.bytes, CheckState::Changed);
-        }
+    let target = eval_target(directory, name, &after);
+    if let Some(state) = difference(&scan.evaluation.target, &target) {
+        fail(&mut scan.evaluation.target, state);
+        fail(&mut scan.evaluation.bytes, state);
+    } else if matches!(target, Ok(Some(_))) && *before != after {
+        fail(&mut scan.evaluation.bytes, CheckState::Changed);
     }
 }
 
@@ -465,9 +367,7 @@ fn capture(home: &Path) -> Observed<Scan> {
             identity: directory.identity()?,
             resolved: directory.resolved_path().to_owned(),
         }));
-        let relevant = |name: &OsString| {
-            name == "eval" || possible(name).into_iter().any(|kind| kind.is_some())
-        };
+        let relevant = |name: &OsString| name == "eval";
         let names: Vec<_> = sorted_names(&mut directory)?
             .into_iter()
             .filter(relevant)
@@ -478,48 +378,19 @@ fn capture(home: &Path) -> Observed<Scan> {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     let state = error_state(&error.into());
-                    fail_old(&mut scan, name, state);
-                    if name == "eval" {
-                        fail(&mut scan.evaluation.target, state);
-                        fail(&mut scan.evaluation.bytes, state);
-                    }
+                    fail(&mut scan.evaluation.target, state);
+                    fail(&mut scan.evaluation.bytes, state);
                     continue;
                 }
             };
-            if let Some(category) = old_category(
-                &name.to_string_lossy(),
-                metadata.kind == EntryKind::Directory,
-            ) {
-                let row = &mut scan.categories[slot(category)];
-                if let Ok(targets) = &mut row.targets {
-                    targets.push(Binding::new(name, &metadata));
-                }
-                if row.bytes.is_ok() {
-                    append_tree(&mut row.bytes, tree(&directory, name, metadata.clone()));
-                }
-            }
-            if name == "eval" {
-                scan.evaluation = eval_snapshot(&directory, name, &metadata);
-            }
+            scan.evaluation = eval_snapshot(&directory, name, &metadata);
             entries.push((name.clone(), metadata));
         }
         let after: Vec<_> = sorted_names(&mut directory)?
             .into_iter()
             .filter(relevant)
             .collect();
-        for category in OldFileCategory::ALL {
-            let belonging = |name: &&OsString| possible(name).contains(&Some(category));
-            if names
-                .iter()
-                .filter(belonging)
-                .ne(after.iter().filter(belonging))
-            {
-                let row = &mut scan.categories[slot(category)];
-                fail(&mut row.targets, CheckState::Changed);
-                fail(&mut row.bytes, CheckState::Changed);
-            }
-        }
-        if names.iter().any(|name| name == "eval") != after.iter().any(|name| name == "eval") {
+        if names != after {
             fail(&mut scan.evaluation.target, CheckState::Changed);
             fail(&mut scan.evaluation.bytes, CheckState::Changed);
         }
@@ -538,31 +409,6 @@ fn bytes(value: &Observed<Tree>) -> Bytes {
             value: Some(tree.bytes),
         },
         Err(state) => Bytes::unknown(*state),
-    }
-}
-
-fn row(category: OldFileCategory, snapshot: &CategorySnapshot) -> CategoryChecks {
-    let (present, targets) = match &snapshot.targets {
-        Ok(targets) => (
-            Flag {
-                state: CheckState::Known,
-                value: Some(!targets.is_empty()),
-            },
-            match i64::try_from(targets.len()) {
-                Ok(value) => Count {
-                    state: CheckState::Known,
-                    value: Some(value),
-                },
-                Err(_) => Count::unknown(CheckState::Unavailable),
-            },
-        ),
-        Err(state) => (Flag::unknown(*state), Count::unknown(*state)),
-    };
-    CategoryChecks {
-        category,
-        present,
-        targets,
-        bytes: bytes(&snapshot.bytes),
     }
 }
 
@@ -586,9 +432,6 @@ impl Observation {
         };
         let mut checks = RetainedChecks {
             state: CheckState::Known,
-            categories: std::array::from_fn(|index| {
-                row(OldFileCategory::ALL[index], &scan.categories[index])
-            }),
             evaluation_copies: EvaluationChecks {
                 present: match &scan.evaluation.target {
                     Ok(target) => Flag {
@@ -608,18 +451,6 @@ impl Observation {
         let after = capture(&self.home);
         match (&self.before, &after) {
             (Ok(before), Ok(after)) if before.home == after.home => {
-                for (index, row) in checks.categories.iter_mut().enumerate() {
-                    let before = &before.categories[index];
-                    let after = &after.categories[index];
-                    if let Some(state) = difference(&before.targets, &after.targets) {
-                        row.present = Flag::unknown(stability(row.present.state, state));
-                        row.targets = Count::unknown(stability(row.targets.state, state));
-                        row.bytes = Bytes::unknown(stability(row.bytes.state, state));
-                    }
-                    if let Some(state) = difference(&before.bytes, &after.bytes) {
-                        row.bytes = Bytes::unknown(stability(row.bytes.state, state));
-                    }
-                }
                 let row = &mut checks.evaluation_copies;
                 if let Some(state) = difference(&before.evaluation.target, &after.evaluation.target)
                 {

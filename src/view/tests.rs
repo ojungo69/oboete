@@ -343,7 +343,7 @@ fn w5c_preparation_refuses_unpinned_and_replaced_resident_homes() {
 fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked_replacement() {
     use std::os::unix::fs::PermissionsExt;
 
-    for kind in ["recurate", "finish"] {
+    {
         let (_, home, started) = listening();
         let p = home.path();
         crate::raw::open(p)
@@ -351,19 +351,8 @@ fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked
             .append(&crate::raw::test_event("synthetic original queued home"))
             .unwrap();
         crate::worker::run_once(p).unwrap();
-        if kind == "finish" {
-            drop(crate::db::open(p).unwrap());
-        }
-        let files = if kind == "finish" {
-            vec!["config.toml", "raw.db", "knowledge.db", "oboete.db"]
-        } else {
-            vec!["config.toml", "raw.db", "knowledge.db"]
-        };
-        let operation = if kind == "finish" {
-            json!({"kind":"finish"})
-        } else {
-            json!({"kind":"recurate","scope":{"kind":"queued"}})
-        };
+        let files = ["config.toml", "raw.db", "knowledge.db"];
+        let operation = json!({"kind":"recurate","scope":{"kind":"queued"}});
         let preview = w5b_post(
             &started.viewer,
             "/api/maintenance/preview",
@@ -371,11 +360,9 @@ fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked
         );
         assert_eq!(preview.status, 200);
         let preview: Value = serde_json::from_slice(&preview.body).unwrap();
-        assert_eq!(preview["kind"], kind);
+        assert_eq!(preview["kind"], "recurate");
         assert_eq!(preview["no_model_request"], true);
-        if kind == "recurate" {
-            assert_eq!(preview["preparation"]["last"]["phase"], "prepared");
-        }
+        assert_eq!(preview["preparation"]["last"]["phase"], "prepared");
         assert!(
             preview["preview_key"]
                 .as_str()
@@ -387,13 +374,7 @@ fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked
         for name in &files {
             assert!(p.join(name).is_file(), "missing {name} before replacement");
         }
-        for name in [
-            "raw.db-wal",
-            "knowledge.db-wal",
-            "oboete.db-wal",
-            "oboete.db-shm",
-            "forget.log",
-        ] {
+        for name in ["raw.db-wal", "knowledge.db-wal", "forget.log"] {
             assert!(!p.join(name).exists(), "{name} would change consent");
         }
         assert!(!crate::backup::dir(p).unwrap().join("forget.log").exists());
@@ -429,13 +410,7 @@ fn w5c_confirmed_maintenance_keeps_the_original_resident_home_after_a_hardlinked
             crate::worker::file_id(std::fs::metadata(p.join("state/view.lock"))),
             original_lock
         );
-        for name in [
-            "raw.db-wal",
-            "knowledge.db-wal",
-            "oboete.db-wal",
-            "oboete.db-shm",
-            "forget.log",
-        ] {
+        for name in ["raw.db-wal", "knowledge.db-wal", "forget.log"] {
             assert!(!p.join(name).exists(), "replacement introduced {name}");
         }
         assert!(!crate::backup::dir(p).unwrap().join("forget.log").exists());
@@ -560,86 +535,18 @@ fn w6_agent_registrations_ui_preserves_drafts_and_reads_without_posts() {
     assert!(status.success(), "readonly registrations UI check failed");
 }
 
+/// Decision 99 (2026-11-12): the doctor route names a store of oboete v1 by its presence and
+/// reads nothing of it, its provider calls among them.
 #[test]
-fn w6d_doctor_uses_the_exact_legacy_checkpoint_across_raw_devices() {
-    let home = tempfile::tempdir().unwrap();
-    let p = home.path();
-    let mut raw = crate::raw::open(p).unwrap();
-    raw.append_ops(&[
-        (
-            crate::raw::OpKind::Migration,
-            json!({"key":"oboete-v1:private-v1","through":1}),
-        ),
-        (
-            crate::raw::OpKind::Migration,
-            json!({"key":"oboete-v1:private-v1","through":3}),
-        ),
-        (
-            crate::raw::OpKind::Migration,
-            json!({"key":"oboete-v1:private-v1:suffix","through":99}),
-        ),
-    ])
-    .unwrap();
-    let writer = rusqlite::Connection::open(p.join("raw.db")).unwrap();
-    writer
-        .execute(
-            "UPDATE ops SET device='private-remote-device' WHERE op_seq=2",
-            [],
-        )
-        .unwrap();
-    let v1 = rusqlite::Connection::open(p.join("oboete.db")).unwrap();
-    v1.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE meta(key TEXT,value TEXT);
-             INSERT INTO meta VALUES('device_id','private-v1');
-             CREATE TABLE sessions(id INTEGER);
-             CREATE TABLE events(id INTEGER);
-             INSERT INTO events VALUES(1),(3),(5),(9);
-             CREATE TABLE observations(id INTEGER);
-             CREATE TABLE summaries(id INTEGER);
-             CREATE TABLE provider_calls(id INTEGER PRIMARY KEY,provider TEXT,outcome TEXT,ms INTEGER,detail TEXT);"
-        ).unwrap();
-    let before = crate::backup::tests::w5b_files(p);
-    let v = Viewer::new(p, None, 4321, Token::Run("t0k".into()));
-    let headers = [
-        HOST,
-        TOKEN,
-        ("Origin", "http://127.0.0.1:4321"),
-        ("Content-Type", "application/json"),
-        ("Content-Length", "2"),
-    ];
-    let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
-    let report = json_of(&answer);
-    assert_eq!(
-        report["checks"]["legacy"]["remaining_events"]["value"], 2,
-        "Doctor did not use the native exact checkpoint on all Raw devices"
-    );
-    assert_eq!(
-        report["checks"]["legacy"]["remaining_events"]["state"],
-        "known"
-    );
-    assert_eq!(report["checks"]["legacy"]["events"]["value"], 4);
-    let text = String::from_utf8(answer.body).unwrap();
-    assert!(!text.contains("private-v1") && !text.contains("private-remote-device"));
-    assert_eq!(crate::backup::tests::w5b_files(p), before);
-}
-
-#[test]
-fn w6d_doctor_reads_legacy_counts_and_keeps_call_details_private() {
+fn w6d_doctor_route_names_a_v1_store_without_reading_it() {
     let home = tempfile::tempdir().unwrap();
     let p = home.path();
     let v1 = rusqlite::Connection::open(p.join("oboete.db")).unwrap();
     v1.execute_batch(
             "PRAGMA journal_mode=WAL;
-             CREATE TABLE sessions(id INTEGER);
              CREATE TABLE events(id INTEGER);
-             CREATE TABLE observations(id INTEGER);
-             CREATE TABLE summaries(id INTEGER);
              CREATE TABLE provider_calls(id INTEGER PRIMARY KEY,provider TEXT,outcome TEXT,ms INTEGER,detail TEXT);
-             INSERT INTO sessions VALUES(1);
              INSERT INTO events VALUES(1),(3),(5);
-             INSERT INTO observations VALUES(1),(2);
-             INSERT INTO summaries VALUES(1);
              INSERT INTO provider_calls VALUES(1,'private-v1-provider-canary','ok',25,'private-v1-detail-canary');"
         ).unwrap();
     let before = crate::backup::tests::w5b_files(p);
@@ -653,20 +560,9 @@ fn w6d_doctor_reads_legacy_counts_and_keeps_call_details_private() {
     ];
     let answer = request(&v, "POST", "/api/doctor", &headers, b"{}");
     let report = json_of(&answer);
-    let legacy = &report["checks"]["legacy"];
-    assert_eq!(
-        legacy["events"]["value"], 3,
-        "readonly Doctor has no native legacy counts"
-    );
-    for (name, count) in [
-        ("sessions", 1),
-        ("events", 3),
-        ("observations", 2),
-        ("summaries", 1),
-    ] {
-        assert_eq!(legacy[name], json!({"state":"known","value":count}));
-    }
-    assert_eq!(legacy["recent"]["calls"], json!([{"outcome":"ok","ms":25}]));
+    assert_eq!(report["stores"]["legacy"]["file"], "present");
+    assert_eq!(report["stores"]["legacy"]["wal"], "present");
+    assert!(report["checks"].get("legacy").is_none(), "{report}");
     let text = String::from_utf8(answer.body).unwrap();
     assert!(
         !text.contains("private-v1-provider-canary") && !text.contains("private-v1-detail-canary")

@@ -9546,3 +9546,57 @@ fn its_prompt_writes_in_the_language_set() {
         );
     }
 }
+
+/// Row 30-1: a v1 session that touched an excluded repository, which only its `touch` record
+/// (v1's `session_repos` row) tells, reaches no curator, as a live one does not; before the
+/// exclusion it would.
+#[test]
+fn an_excluded_repo_through_a_v1_touch_reaches_no_curator() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = crate::capture::Settings {
+        source: "oboete-v1",
+        ..crate::capture::Settings::default()
+    };
+    let prompt = |session: &str, ts: i64, text: &str| {
+        crate::capture::imported(
+            "claude",
+            "UserPromptSubmit",
+            &serde_json::json!({"session_id": session, "prompt": text}),
+            ts,
+            "github.com/o/open",
+            None,
+            &settings,
+        )
+    };
+    let mut events = prompt("x", 110, "Secret plan.");
+    events.extend(prompt("y", 210, "Open work."));
+    let touch = crate::capture::imported(
+        "claude",
+        "Touch",
+        &serde_json::json!({"session_id": "x"}),
+        100,
+        "github.com/o/secret",
+        None,
+        &settings,
+    );
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    raw.append_imported_under(&events, &[], &settings, None)
+        .unwrap();
+    raw.append_imported_under(&touch, &[], &settings, None)
+        .unwrap();
+    let rules = crate::redact::Rules::default();
+    let sent = |raw: &crate::raw::Raw| {
+        let reading = Reading::now(raw, Reads::Source("oboete-v1".into())).unwrap();
+        let span = Span::records(1, raw.max_seq().unwrap());
+        span_windows(raw, &span, WINDOW_TOKENS, &rules, &reading)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.text)
+            .collect::<String>()
+    };
+    let before = sent(&raw);
+    assert!(before.contains("Secret plan.") && before.contains("Open work."));
+    raw.exclude("github.com/o/secret", false).unwrap();
+    let after = sent(&raw);
+    assert!(!after.contains("Secret plan.") && after.contains("Open work."));
+}

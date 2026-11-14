@@ -6,8 +6,7 @@ use crate::capture::Captured;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Under the home. Not `spool/`: v1 left a directory of that name, which `migrate --finish`
-/// deletes (U1).
+/// Under the home. Not `spool/`: v1 left a directory of that name (U1).
 const DIR: &str = "unwritten";
 /// U5: nothing more is kept once the files hold this much.
 const BOUND: u64 = 64 << 20;

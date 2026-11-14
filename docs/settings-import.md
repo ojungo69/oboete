@@ -1,20 +1,19 @@
 # History import in the viewer
 
-The history import section uses the same transcript and v1 migration backends as
-the CLI. Claude Code and Codex use their native saved transcript folders. A v1
-source is an explicit local path; leaving it empty chooses the older `oboete.db`
-in the viewer's memory home. The destination is always that memory home.
+The history import section uses the same transcript backend as the CLI. Claude
+Code and Codex use their native saved transcript folders. The destination is
+always the viewer's memory home. The v1 migration and its finish, which this
+section also offered, were removed in #958 (decision 99, 2026-11-12): while the
+memory home holds an `oboete.db`, a store of oboete v1, a transcript preview is
+refused with `maintenance_v1_store` and the store is not opened.
 
 Preview is an explicit action and reads existing source copies without creating
 destination stores, configuration, identity or lock files. It reports candidates,
-selected bytes, waiting/refused files and settings copy/preserve/default effects.
-These totals precede native checkpoint, duplicate and forgotten-record checks.
-Transcript preview also includes any conditional v1 pass and its settings effects;
-transcript-only counts never authorize an undisclosed migration.
+selected bytes and waiting/refused files. These totals precede native checkpoint,
+duplicate and forgotten-record checks.
 
-Confirmation binds the current operation, source identity/content/file set,
-effective settings and effects. A changed v1 source or setting requires a new
-preview. Native import/config locks, no-replace settings copy, checkpoint and
+Confirmation binds the current operation, source identity/content/file set and
+effective settings. A changed setting requires a new preview. Native import/config locks, no-replace settings copy, checkpoint and
 forget checks remain. Earlier committed batches stay committed if a later file
 or batch fails; an explicit rerun uses the existing checkpoint/deny rules.
 

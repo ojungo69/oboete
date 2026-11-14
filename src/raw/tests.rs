@@ -1410,6 +1410,56 @@ fn device_id_stays_with_the_file_and_changes_on_a_copy() {
     assert_eq!(open(copy.path()).unwrap().device(), other.device());
 }
 
+/// A Windows store from before #122 holds its creation time as its identity.
+#[cfg(windows)]
+#[test]
+fn a_windows_store_with_the_old_identity_keeps_its_device_id() {
+    let home = tempfile::tempdir().unwrap();
+    let raw = open(home.path()).unwrap();
+    let first = raw.device().to_owned();
+    let path = home.path().join("raw.db");
+    let legacy = crate::db::legacy_store_file(&path).unwrap();
+    raw.conn
+        .execute("UPDATE meta SET value=?1 WHERE key='store_file'", [&legacy])
+        .unwrap();
+    drop(raw);
+    let raw = open(home.path()).unwrap();
+    assert_eq!(raw.device(), first);
+    let now: String = raw
+        .conn
+        .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(now, crate::db::store_file(&path));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_store_is_private_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("home");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // An existing store created world-readable is tightened too.
+    std::fs::write(dir.join("raw.db"), b"").unwrap();
+    std::fs::set_permissions(dir.join("raw.db"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut raw = open(&dir).unwrap();
+    raw.append(&test_event("one")).unwrap();
+    drop(raw);
+    let raw = open(&dir).unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    for f in ["raw.db", "raw.db-wal", "raw.db-shm"] {
+        let path = dir.join(f);
+        if path.exists() {
+            assert_eq!(mode(&path), 0o600, "{f}");
+        }
+    }
+    drop(raw);
+}
+
 #[test]
 fn a_page_is_bounded_in_bytes_and_always_holds_one_record() {
     let home = tempfile::tempdir().unwrap();
@@ -2340,11 +2390,6 @@ fn v1_checkpoint(through: i64) -> Checkpoint {
     Checkpoint {
         key: "oboete-v1:d1".into(),
         through,
-        row: Some(V1Row {
-            id: through,
-            ts: 7,
-            session_id: "s1".into(),
-        }),
         prefix: None,
     }
 }
@@ -2519,14 +2564,12 @@ fn an_imported_batch_lands_with_its_ledger_and_checkpoint() {
     assert_eq!(ops[0].kind, OpKind::Migration);
     assert_eq!(
         ops[0].body,
-        serde_json::json!({"key": "oboete-v1:d1", "through": 42, "from_seq": 2, "to_seq": 3,
-                "row": {"id": 42, "ts": 7, "session_id": "s1"}})
+        serde_json::json!({"key": "oboete-v1:d1", "through": 42, "from_seq": 2, "to_seq": 3})
     );
-    // A transcript's checkpoint has no row; one with nothing to record holds the last seq.
+    // A checkpoint with nothing to record holds the last seq.
     let t = Checkpoint {
         key: "transcript:claude:s1".into(),
         through: 9,
-        row: None,
         prefix: None,
     };
     assert!(raw.append_imported(&[], "v9", Some(&t)).unwrap().is_empty());
@@ -3224,4 +3267,123 @@ fn a_window_whose_text_is_taken_keeps_what_it_read() {
         json!({"outcome": "curated", "from_seq": 6, "to_seq": 7, "read": [[1, 3]],
                 "forgotten": "j"})
     );
+}
+
+/// Slice 4a (Codex on #489): a repository excluded before a rule that masks part of its key is
+/// still never recorded by an import of `oboete-v1` records, its events and its `touch` records
+/// alike: the import matches the list as its labels are made now.
+#[test]
+fn a_rule_added_after_a_repository_was_excluded_keeps_its_v1_records_out() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    raw.exclude_capture(("repo", "github.com/o/acme-482915"), false)
+        .unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    let settings = crate::capture::Settings {
+        source: "oboete-v1",
+        ..crate::capture::Settings::load(home.path()).unwrap()
+    };
+    let imported = |event: &str, session: &str, ts: i64, repo: &str, prompt: &str| {
+        crate::capture::imported(
+            "claude",
+            event,
+            &serde_json::json!({"session_id": session, "prompt": prompt}),
+            ts,
+            repo,
+            None,
+            &settings,
+        )
+    };
+    let mut events = imported(
+        "UserPromptSubmit",
+        "s1",
+        110,
+        "github.com/o/acme-482915",
+        "canary-4a",
+    );
+    events.extend(imported(
+        "UserPromptSubmit",
+        "s2",
+        210,
+        "github.com/o/open",
+        "Open work.",
+    ));
+    let touch = imported("Touch", "s2", 200, "github.com/o/acme-482915", "");
+    raw.append_imported_under(&events, &[], &settings, None)
+        .unwrap();
+    raw.append_imported_under(&touch, &[], &settings, None)
+        .unwrap();
+    let repos: std::collections::BTreeSet<Option<String>> = raw
+        .after(raw.device(), 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| match r.item {
+            Item::Event(e) => Some(e.repo),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(repos, [Some("github.com/o/open".to_owned())].into());
+}
+
+/// D6, A104: an `oboete-v1` event and a document that `denied` refuses are left out of their
+/// imports; the others land.
+#[test]
+fn an_import_leaves_a_denied_v1_event_and_document_out() {
+    let forgotten = format!("x {DENIED_IN_TESTS} y");
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let settings = crate::capture::Settings {
+        source: "oboete-v1",
+        ..crate::capture::Settings::default()
+    };
+    let mut events = Vec::new();
+    for (ts, text) in [(110, forgotten.as_str()), (120, "kept")] {
+        events.extend(crate::capture::imported(
+            "claude",
+            "UserPromptSubmit",
+            &serde_json::json!({"session_id": "s1", "prompt": text}),
+            ts,
+            "r",
+            None,
+            &settings,
+        ));
+    }
+    assert_eq!(
+        raw.append_imported_under(&events, &[], &settings, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    let doc = |id: &str, title: &str, body: &str| ImportDoc {
+        uid: format!("d1e5:{id}"),
+        source: "oboete-v1:d1e5".into(),
+        source_id: id.into(),
+        kind: "decision".into(),
+        repo: "r".into(),
+        session: "s1".into(),
+        ts: 130,
+        title: title.into(),
+        body: body.into(),
+    };
+    raw.append_imports(vec![
+        doc("o1", "Forgotten", &forgotten),
+        doc("o2", "Kept", "Kept."),
+    ])
+    .unwrap();
+    let bodies: Vec<String> = raw
+        .after(raw.device(), 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| match r.item {
+            Item::Event(e) if e.kind == "prompt" => Some(e.body),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bodies, [serde_json::json!({"prompt": "kept"}).to_string()]);
+    let keys = raw.import_keys("oboete-v1:d1e5").unwrap();
+    assert_eq!(keys, ["o2".to_owned()].into_iter().collect());
 }

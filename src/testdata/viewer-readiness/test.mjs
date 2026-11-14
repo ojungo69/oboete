@@ -227,11 +227,10 @@ const diagnosticReport={complete:false,unhealthy:['raw_damaged'],inventory:repor
   source_stability:'known',remaining:'none',
   raw:{integrity:'damaged',max_seq:absent,max_op_seq:absent,curated_through:absent,parking:{state:'absent'}},
   knowledge:{integrity:'known',rewinds:{count:count(0),last_at_ms:null},gaps:{state:'known',rows:[]}},
-  legacy:{integrity:'absent'},embeddings:{state:'off'},
+  embeddings:{state:'off'},
   providers:{integrity:'absent'},
   disk:{state:'known',free_bytes:0,low_space:true},
-  retained:{state:'known',categories:[{category:'memory_database',present:{state:'known',value:true},targets:count(1),bytes:count(0)}],
-    evaluation_copies:{present:{state:'known',value:false},bytes:count(0)}}
+  retained:{state:'known',evaluation_copies:{present:{state:'known',value:true},bytes:count(0)}}
 }};
 const diagnosticResponse=(value,status=200)=>({ok:status===200,status,headers:{get:()=> 'application/json'},json:async()=>value});
 const firstDiagnostic=ctx.doctorUi.runDoctor();
@@ -243,8 +242,9 @@ await firstDiagnostic;
 shown=text(diagnostics);
 assert(shown.includes('Saved records are damaged')&&shown.includes('Available bytes 0'),
   'known problems and an established zero remain visible');
-assert(shown.includes('logical bytes 0')&&shown.includes('present yes'),
+assert(shown.includes('Evaluation copies: present yes; logical bytes 0.'),
   'retained empty files are distinct from missing and unknown');
+assert(!shown.includes('oboete.db'),'a home without a store of oboete v1 is not told of one');
 assert(!shown.includes('does not implement every diagnostic'),'remaining none hides the obsolete unimplemented notice');
 assert.equal(diagnosticDraft.value,'keep this unsaved value');
 assert(panel.contains(diagnosticDraft),'diagnostics replaces only its section');
@@ -275,8 +275,12 @@ diagnostics=panel.querySelector('.doctor-diagnostics');
 assert(text(diagnostics).includes('response was lost'),
   'returning to Settings retains the matching lost-response state');
 diagnosticReport.inventory=report('matching');
+diagnosticReport.stores={legacy:{file:'present',wal:'absent'}};
 const freshInventory=ctx.doctorUi.runDoctor();
 diagnosticRequests.shift().resolve(diagnosticResponse(diagnosticReport));await freshInventory;
+assert(text(diagnostics).includes('oboete.db, a store of oboete v1: main file')
+  &&text(diagnostics).includes('This version no longer moves it'),
+  'a store of oboete v1 is named in one line, by its presence');
 assert(text(diagnostics).includes('Agent files in this diagnostic check'),
   'the result renders its own captured agent inventory');
 assert(text(diagnostics).includes('Hook trust: matching'),

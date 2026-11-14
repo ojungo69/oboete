@@ -12,7 +12,6 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FailureCode {
     Stale,
-    InvalidSource,
     InvalidConfig,
     Busy,
     Refused,
@@ -88,8 +87,8 @@ pub(crate) enum PreviewCopyError {
 impl std::fmt::Display for PreviewCopyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Changed => "v1 changed during preview",
-            Self::Cleanup => "remove the private v1 preview copy",
+            Self::Changed => "a store changed during preview",
+            Self::Cleanup => "remove the private preview copy",
         })
     }
 }
@@ -133,7 +132,7 @@ pub(crate) fn with_preview_files<T>(
 ) -> Result<T> {
     use std::io::{Read, Seek};
     let scratch = crate::provider::scratch_dir()
-        .map_err(|_| anyhow::anyhow!("cannot create a private v1 preview directory"))?;
+        .map_err(|_| anyhow::anyhow!("cannot create a private preview directory"))?;
     let result = (|| {
         for (index, mut source) in std::iter::once(db).chain(wal).enumerate() {
             let path = scratch.0.join(if index == 0 {
@@ -154,7 +153,7 @@ pub(crate) fn with_preview_files<T>(
                 &mut (&mut source.file).take(source.stamp.2.saturating_add(1)),
                 &mut copy,
             )
-            .context("copy v1 for preview")?;
+            .context("copy a store for preview")?;
             drop(copy);
             let metadata = source.file.metadata()?;
             if bytes != source.stamp.2
@@ -175,14 +174,14 @@ pub(crate) fn with_preview_files<T>(
 }
 
 /// SQLite may create sidecars even on a read-only open. Only open a stable private DB/WAL copy.
-/// Deliberately schema-neutral: transcript's legacy time-cut preview needs only two tables.
+/// Deliberately schema-neutral: a restore's preview reads raw.db and knowledge.db through it.
 pub(crate) fn with_preview_v1<T>(
     from: &Path,
     inspect: impl FnOnce(&Connection, &str) -> Result<T>,
 ) -> Result<T> {
     let parent = from
         .parent()
-        .context("v1 store has no parent")?
+        .context("store has no parent")?
         .join(".")
         .canonicalize()?;
     anyhow::ensure!(
@@ -219,7 +218,7 @@ pub(crate) fn with_preview_v1<T>(
         .collect::<Result<Vec<_>>>()?;
     anyhow::ensure!(
         opened.iter().map(|s| &s.stamp).eq(before.iter()),
-        "v1 changed during preview"
+        "a store changed during preview"
     );
     let version = crate::forget::hash(&serde_json::to_vec(&before)?);
     let mut opened = opened.into_iter();
@@ -227,7 +226,7 @@ pub(crate) fn with_preview_v1<T>(
     with_preview_files(db, opened.next(), |conn| {
         anyhow::ensure!(
             before == versions()? && from.canonicalize()? == source,
-            "v1 changed during preview"
+            "a store changed during preview"
         );
         inspect(conn, &version)
     })
@@ -241,9 +240,8 @@ pub(crate) fn config_bytes(home: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// v1's store, read only (spec 7.4: the old store is left byte for byte), with the stores' busy
-/// wait. Never `immutable`, which skips the WAL, where the newest events are, and assumes no one
-/// writes: v1's hooks may write meanwhile.
+/// A store, read only, with the stores' busy wait: a preview's private copy of one. Never
+/// `immutable`, which skips the WAL, where the newest events are.
 pub fn open_v1(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", path.display()))?;

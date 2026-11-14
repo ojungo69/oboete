@@ -803,8 +803,8 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value, took: &mut To
 /// tokens, a missing one the memory.
 fn forked(payload: &Value) -> bool {
     use std::io::BufRead;
-    // Opened without waiting and read only as a regular file, as `migrate::finish_open` opens one:
-    // a FIFO at the path would hold the hook until a writer came (CodeRabbit on #847).
+    // Opened without waiting and read only as a regular file: a FIFO at the path would hold the
+    // hook until a writer came (CodeRabbit on #847).
     let open = |path: &str| {
         let mut options = std::fs::OpenOptions::new();
         options.read(true);

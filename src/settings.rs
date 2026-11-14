@@ -1299,9 +1299,8 @@ pub fn set_view_port(home: &Path, port: u16) -> anyhow::Result<()> {
 
 /// Decision 81: the computer's language written as `[summary] language` into a config.toml that
 /// has none (`oboete setup`), so a later change of the computer's locale changes no summary's
-/// language. A value already there is kept, and a home with no config.toml is left without one:
-/// `oboete migrate` copies v1's settings only into a home that has none. The language written, if
-/// any.
+/// language. A value already there is kept, and a home with no config.toml is left without one.
+/// The language written, if any.
 pub fn pin_language(home: &Path) -> anyhow::Result<Option<String>> {
     let _config = config_lock(home)?;
     let path = home.join("config.toml");

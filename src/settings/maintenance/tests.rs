@@ -97,98 +97,76 @@ fn w5c_cached_status_and_replay_apply_current_display_rules_only_to_labels() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let canary = "synthetic-private-session";
-    for operation in [
-        Operation::Finish {},
-        Operation::Recurate {
-            scope: curate::RecurationScope::Queued {},
-        },
+    let operation = Operation::Recurate {
+        scope: curate::RecurationScope::Queued {},
+    };
+    std::fs::write(home.join("config.toml"), "providers = []\n").unwrap();
+    let maintenance = Maintenance::with_roots(home.join("claude"), home.join("codex"));
+    let id = "a".repeat(64);
+    let key = "b".repeat(64);
+    let mut hash = Sha256::new();
+    hash.update(b"oboete:maintenance-request:v1\0");
+    hash.update(serde_json::to_vec(&operation).unwrap());
+    hash.update([0]);
+    hash.update(key.as_bytes());
+    let outcome = json!({"preview":{"preview_key":key,"scope":{"kind":"queued"},
+            "plan":{"windows":1,"long_sessions":[{"label":canary,"characters":513}]}}});
+    let cached = json!({"code":null,"outcome":outcome});
+    maintenance.state.lock().unwrap().last = Some(Run {
+        operation_id: id.clone(),
+        kind: "recurate",
+        agent: None,
+        phase: "complete",
+        stage: "complete",
+        progress: Progress::default(),
+        committed: true,
+        result: Some(cached.clone()),
+        fingerprint: format!("{:x}", hash.finalize()),
+        consent: None,
+    });
+    let request = serde_json::to_vec(&json!({"operation":operation,
+            "preview_key":key,"operation_id":id,"confirmed":true}))
+    .unwrap();
+    assert!(maintenance.show(home).to_string().contains(canary));
+    for config in [
+        "[redaction]\nextra_rules = [{id = 'display', regex = 'synthetic-private-session|^[0-9a-f]{64}$'}]\n",
+        "invalid = [toml",
     ] {
-        std::fs::write(home.join("config.toml"), "providers = []\n").unwrap();
-        let maintenance = Maintenance::with_roots(home.join("claude"), home.join("codex"));
-        let id = "a".repeat(64);
-        let key = "b".repeat(64);
-        let mut hash = Sha256::new();
-        hash.update(b"oboete:maintenance-request:v1\0");
-        hash.update(serde_json::to_vec(&operation).unwrap());
-        hash.update([0]);
-        hash.update(key.as_bytes());
-        let outcome = if matches!(operation, Operation::Finish { .. }) {
-            json!({"operation":"finish","import":{"records":7,
-                    "deleted_session_labels":[canary],"uncertain_identifier_labels":[canary]},
-                    "deletion":{"removed":1,"targets":[{"label":canary,"state":"removed","bytes":42}]}})
-        } else {
-            json!({"preview":{"preview_key":key,"scope":{"kind":"queued"},
-                    "plan":{"windows":1,"long_sessions":[{"label":canary,"characters":513}]}}})
-        };
-        let cached = json!({"code":null,"outcome":outcome});
-        maintenance.state.lock().unwrap().last = Some(Run {
-            operation_id: id.clone(),
-            kind: if matches!(operation, Operation::Finish { .. }) {
-                "finish"
-            } else {
-                "recurate"
-            },
-            agent: None,
-            phase: "complete",
-            stage: "complete",
-            progress: Progress::default(),
-            committed: true,
-            result: Some(cached.clone()),
-            fingerprint: format!("{:x}", hash.finalize()),
-            consent: None,
-        });
-        let request = serde_json::to_vec(&json!({"operation":operation,
-                "preview_key":key,"operation_id":id,"confirmed":true}))
-        .unwrap();
-        assert!(maintenance.show(home).to_string().contains(canary));
-        for config in [
-            "[redaction]\nextra_rules = [{id = 'display', regex = 'synthetic-private-session|^[0-9a-f]{64}$'}]\n",
-            "invalid = [toml",
-        ] {
-            std::fs::write(home.join("config.toml"), config).unwrap();
-            let shown = maintenance.show(home);
-            assert!(
-                !shown.to_string().contains(canary),
-                "cached maintenance labels bypass current display rules"
-            );
-            let replay = maintenance
-                .start(executable::CommandCaller::Worker, home, &request)
-                .unwrap();
-            assert_eq!(shown, replay);
-            assert_eq!(shown["last"]["operation_id"], id);
-            assert_eq!(shown["last"]["phase"], "complete");
-            assert_eq!(shown["last"]["committed"], true);
-            if matches!(operation, Operation::Finish { .. }) {
-                assert_eq!(shown["last"]["result"]["outcome"]["import"]["records"], 7);
-                assert_eq!(
-                    shown["last"]["result"]["outcome"]["deletion"]["targets"][0]["bytes"],
-                    42
-                );
-            } else {
-                assert_eq!(
-                    shown["last"]["result"]["outcome"]["preview"]["preview_key"],
-                    key
-                );
-                assert_eq!(
-                    shown["last"]["result"]["outcome"]["preview"]["plan"]["long_sessions"][0]["characters"],
-                    513
-                );
-            }
-            assert_eq!(
-                maintenance
-                    .state
-                    .lock()
-                    .unwrap()
-                    .last
-                    .as_ref()
-                    .unwrap()
-                    .result
-                    .as_ref(),
-                Some(&cached)
-            );
-        }
-        assert_eq!(std::fs::read_dir(home).unwrap().count(), 1);
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        let shown = maintenance.show(home);
+        assert!(
+            !shown.to_string().contains(canary),
+            "cached maintenance labels bypass current display rules"
+        );
+        let replay = maintenance
+            .start(executable::CommandCaller::Worker, home, &request)
+            .unwrap();
+        assert_eq!(shown, replay);
+        assert_eq!(shown["last"]["operation_id"], id);
+        assert_eq!(shown["last"]["phase"], "complete");
+        assert_eq!(shown["last"]["committed"], true);
+        assert_eq!(
+            shown["last"]["result"]["outcome"]["preview"]["preview_key"],
+            key
+        );
+        assert_eq!(
+            shown["last"]["result"]["outcome"]["preview"]["plan"]["long_sessions"][0]["characters"],
+            513
+        );
+        assert_eq!(
+            maintenance
+                .state
+                .lock()
+                .unwrap()
+                .last
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref(),
+            Some(&cached)
+        );
     }
+    assert_eq!(std::fs::read_dir(home).unwrap().count(), 1);
 }
 
 fn fixture() -> (tempfile::TempDir, Maintenance, PathBuf, PathBuf) {
@@ -561,26 +539,45 @@ fn a_normal_old_guard_cannot_clear_a_reused_id() {
     assert_eq!(finished["last"]["phase"], "complete");
 }
 
+/// Decision 99 (2026-11-12): the v1 migration's operations are gone; a request for one is a bad
+/// request, and nothing is created.
 #[test]
-fn a_missing_default_v1_source_is_distinct_and_creates_no_store() {
+fn a_v1_or_finish_operation_is_a_bad_request() {
     let (_root, maintenance, home, _source) = fixture();
-    for from in [Value::Null, json!("")] {
-        let body = serde_json::to_vec(&json!({"operation":{"kind":"v1","from":from}})).unwrap();
-        let refused = maintenance.preview(None, &home, &body).unwrap_err();
-        assert_eq!(refused.code, "maintenance_source_missing");
-        assert!(!home.exists());
+    for operation in [json!({"kind":"v1","from":null}), json!({"kind":"finish"})] {
+        let body = serde_json::to_vec(&json!({"operation":operation})).unwrap();
         assert_eq!(
-            maintenance.show(&home),
-            json!({"available":false,"active":null,"last":null})
+            maintenance.preview(None, &home, &body).unwrap_err().code,
+            "bad_request"
+        );
+        let start = serde_json::to_vec(&json!({"operation":operation,
+            "preview_key":"b".repeat(64),"operation_id":"a".repeat(64),"confirmed":true}))
+        .unwrap();
+        assert_eq!(
+            maintenance
+                .start(executable::CommandCaller::Worker, &home, &start)
+                .unwrap_err()
+                .code,
+            "bad_request"
         );
     }
-    let body = serde_json::to_vec(
-        &json!({"operation":{"kind":"v1","from":home.join("explicit-missing.db")}}),
-    )
-    .unwrap();
-    assert_eq!(
-        maintenance.preview(None, &home, &body).unwrap_err().code,
-        "maintenance_preview_failed"
-    );
     assert!(!home.exists());
+}
+
+/// Decision 99 (2026-11-12): a transcript preview in a home that holds a store of oboete v1 is
+/// refused with a code of its own, and the store is left as it was.
+#[test]
+fn a_transcript_preview_names_a_v1_store_in_its_refusal() {
+    let (_root, maintenance, home, _source) = fixture();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("oboete.db"), b"not opened").unwrap();
+    let body =
+        serde_json::to_vec(&json!({"operation":{"kind":"transcripts","agent":"codex"}})).unwrap();
+    let refused = maintenance.preview(None, &home, &body).unwrap_err();
+    assert_eq!(refused.code, "maintenance_v1_store");
+    assert_eq!(
+        std::fs::read(home.join("oboete.db")).unwrap(),
+        b"not opened"
+    );
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
 }
