@@ -155,7 +155,16 @@ struct FileVersion {
     hash: String,
 }
 fn version(path: &Path) -> Result<Option<FileVersion>> {
-    let metadata = match std::fs::symlink_metadata(path) {
+    // config.toml is read through a symlink everywhere else (a dotfile manager's link); a store,
+    // a kept file, a log, a segment or its seal that is a symlink is refused (the forget log's
+    // writer opens it with O_NOFOLLOW).
+    let follow = path.file_name().is_some_and(|name| name == "config.toml");
+    let metadata = if follow {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    };
+    let metadata = match metadata {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
@@ -223,7 +232,7 @@ fn preview_paths(home: &Path, backup: &Path) -> Result<Vec<PathBuf>> {
         .into_iter()
         .chain(segments(backup, Kind::Ops)?)
     {
-        paths.push(PathBuf::from(format!("{}.sha256", segment.path.display())));
+        paths.push(seal_of(&segment.path));
         paths.push(segment.path);
     }
     paths.sort();
@@ -891,7 +900,7 @@ pub(crate) struct Point {
 /// one.
 fn note_point(dir: &Path, point: &Point) -> Result<()> {
     use std::io::Seek;
-    let _points = points_lock(dir)?;
+    let _points = points_lock(dir, crate::db::OPEN_WRITE_WAIT);
     let path = dir.join(POINTS);
     let torn = match std::fs::File::open(&path) {
         Ok(mut f) if f.metadata()?.len() > 0 => {
@@ -923,25 +932,49 @@ fn note_point(dir: &Path, point: &Point) -> Result<()> {
 /// The hold on a backup directory's points, around an append and from a rewrite's read to its
 /// rename: the directory may be shared by homes whose workers do not hold each other's locks, and
 /// a point one notes while another rewrites would otherwise be lost. Nothing else is taken while
-/// it is held.
-fn points_lock(dir: &Path) -> Result<std::fs::File> {
+/// it is held. None, with a line on stderr, when the directory cannot give it or another keeps
+/// it past `wait`: the points are then written without it, as they were before there was one.
+/// What that can lose is a point, a choice of where to go back to, and never a record or a
+/// restore; a point of this device past what raw.db holds, which another home's rewrite brought
+/// back, is dropped again by the next export (B6) (#999).
+fn points_lock(dir: &Path, wait: std::time::Duration) -> Option<std::fs::File> {
     let path = dir.join("points.jsonl.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    lock.lock()
-        .with_context(|| format!("lock {}", path.display()))?;
-    Ok(lock)
+    let held = || -> Result<Option<std::fs::File>> {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        let until = std::time::Instant::now() + wait;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(Some(lock)),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
+    };
+    let why = match held() {
+        Ok(Some(lock)) => return Some(lock),
+        Ok(None) => "another keeps it".to_owned(),
+        Err(e) => format!("{e:#}"),
+    };
+    eprintln!(
+        "oboete: {} not held ({why}): the backup points are written without it",
+        path.display()
+    );
+    None
 }
 
 /// The points a backup directory names, in the order they were noted; a line that does not read
 /// as one is skipped (B1).
 pub(crate) fn points(dir: &Path) -> Result<Vec<Point>> {
-    match std::fs::read_to_string(dir.join(POINTS)) {
-        Ok(text) => Ok(text
+    // Read as bytes: a line that is not UTF-8 is one that does not read as a point.
+    match std::fs::read(dir.join(POINTS)) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()),
@@ -1030,40 +1063,62 @@ fn raw_read(home: &Path) -> Result<(rusqlite::Connection, String)> {
     Ok((conn, device))
 }
 
+/// What `oboete backup list` and the `restore --to` preview show for a count raw.db cannot give:
+/// the points and the restore need no raw.db, so a damaged one does not hide them.
+const UNKNOWN_AFTER: &str =
+    "raw.db cannot be read now, so how many records and ops it holds past a point is shown as ?";
+
 /// docs/backup-points.md B4: what going back to `point` keeps and takes, for its preview.
 pub(crate) fn point_preview(home: &Path, point: &Point) -> Result<String> {
-    let (conn, device) = raw_read(home)?;
-    // Rows, not seq distance: a damaged segment a restore skipped leaves a gap (cubic on #880).
-    let count = |sql: &str, at: i64| -> Result<i64> {
-        Ok(conn.query_row(sql, rusqlite::params![device, at], |r| r.get(0))?)
+    let counts = || -> Result<(i64, i64, i64)> {
+        let (conn, device) = raw_read(home)?;
+        // Rows, not seq distance: a damaged segment a restore skipped leaves a gap (cubic on #880).
+        let count = |sql: &str, at: i64| -> Result<i64> {
+            Ok(conn.query_row(sql, rusqlite::params![device, at], |r| r.get(0))?)
+        };
+        let records = count(
+            "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2",
+            point.records,
+        )?;
+        let ops = count(
+            "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2",
+            point.ops,
+        )?;
+        let gates = count(
+            "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2
+               AND type IN ('forget', 'exclusion')",
+            point.ops,
+        )?;
+        Ok((records, ops, gates))
     };
-    let records = count(
-        "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2",
-        point.records,
-    )?;
-    let ops = count(
-        "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2",
-        point.ops,
-    )?;
-    let gates = count(
-        "SELECT COUNT(*) FROM ops WHERE device = ?1 AND op_seq > ?2
-           AND type IN ('forget', 'exclusion')",
-        point.ops,
-    )?;
+    let (records, ops, gates, unknown) = match counts() {
+        // The gates' ops after the point are kept, not taken back.
+        Ok((records, ops, gates)) => (
+            records.to_string(),
+            (ops - gates).max(0).to_string(),
+            gates.to_string(),
+            String::new(),
+        ),
+        Err(_) => (
+            "?".to_owned(),
+            "?".to_owned(),
+            "?".to_owned(),
+            format!("{UNKNOWN_AFTER}.\n"),
+        ),
+    };
     Ok(format!(
         "Going back to the backup point of {}:\n\
          - keeps the records through seq {} and the ops through op {};\n\
-         - takes back the {records} record(s) and {} op(s) after them: \
+         - takes back the {records} record(s) and {ops} op(s) after them: \
          the corrections, mutes, imports, summaries and work states made after the point go with them;\n\
          - keeps the {gates} forget and exclusion op(s) made after the point: forgotten text stays gone, \
          and excluded repositories stay excluded.\n\
+         {unknown}\
          raw.db and knowledge.db as they are now, and the backup segments past the point, are set aside on disk, not deleted.\n\
          To go back to it, run: oboete restore --to {} --yes",
         point_time(point.at),
         point.records,
         point.ops,
-        // The gates' ops after the point are kept, not taken back.
-        (ops - gates).max(0),
         point_time(point.at),
     ))
 }
@@ -1071,25 +1126,34 @@ pub(crate) fn point_preview(home: &Path, point: &Point) -> Result<String> {
 /// docs/backup-points.md B2: this device's points, newest first: every one of the last 24 hours
 /// and the newest of each day before that, or all of them.
 pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
-    let (dir, _, mine) = my_points(home)?;
+    let (dir, device, mine) = my_points(home)?;
     if mine.is_empty() {
         return Ok(vec![format!(
             "no backup point yet in {}: the next backup makes one (`oboete backup run`)",
             dir.display()
         )]);
     }
-    let (conn, device) = raw_read(home)?;
-    let seqs = |sql: &str| -> Result<Vec<i64>> {
-        let mut st = conn.prepare(sql)?;
-        let rows = st.query_map([&device], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let held = || -> Result<(Vec<i64>, Vec<i64>)> {
+        let (conn, _) = raw_read(home)?;
+        let seqs = |sql: &str| -> Result<Vec<i64>> {
+            let mut st = conn.prepare(sql)?;
+            let rows = st.query_map([&device], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        Ok((
+            seqs("SELECT seq FROM records WHERE device = ?1 ORDER BY seq")?,
+            seqs("SELECT op_seq FROM ops WHERE device = ?1 ORDER BY op_seq")?,
+        ))
     };
-    let records = seqs("SELECT seq FROM records WHERE device = ?1 ORDER BY seq")?;
-    let ops = seqs("SELECT op_seq FROM ops WHERE device = ?1 ORDER BY op_seq")?;
+    let held = held().ok();
     let after = |all: &[i64], at: i64| all.len() - all.partition_point(|&s| s <= at);
+    let shown = |n: Option<usize>| n.map_or_else(|| "?".to_owned(), |n| n.to_string());
     let day = |at: i64| point_time(at)[..10].to_owned();
     let since = crate::db::now_ms() - 86_400_000;
     let mut lines = Vec::new();
+    if held.is_none() {
+        lines.push(format!("{UNKNOWN_AFTER}:"));
+    }
     let mut days = std::collections::HashSet::new();
     for p in mine.iter().rev() {
         let newest_of_day = days.insert(day(p.at));
@@ -1098,9 +1162,9 @@ pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
                 "{}  through seq {} ({} after) and op {} ({} after)",
                 point_time(p.at),
                 p.records,
-                after(&records, p.records),
+                shown(held.as_ref().map(|(records, _)| after(records, p.records))),
                 p.ops,
-                after(&ops, p.ops)
+                shown(held.as_ref().map(|(_, ops)| after(ops, p.ops)))
             ));
         }
     }
@@ -1111,8 +1175,8 @@ pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
 /// `keep` refuses (and any line that does not read as a point), when there are such.
 fn keep_points(dir: &Path, device: &str, keep: impl Fn(&Point) -> bool) -> Result<()> {
     let kept = || -> Result<Option<String>> {
-        let text = match std::fs::read_to_string(dir.join(POINTS)) {
-            Ok(text) => text,
+        let text = match std::fs::read(dir.join(POINTS)) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(e).with_context(|| format!("read {}", dir.join(POINTS).display()));
@@ -1136,7 +1200,7 @@ fn keep_points(dir: &Path, device: &str, keep: impl Fn(&Point) -> bool) -> Resul
     if kept()?.is_none() {
         return Ok(());
     }
-    let _points = points_lock(dir)?;
+    let _points = points_lock(dir, crate::db::OPEN_WRITE_WAIT);
     let Some(kept) = kept()? else {
         return Ok(());
     };
@@ -1199,10 +1263,7 @@ fn set_aside_report<'a>(
 ) -> Result<()> {
     for s in segs {
         let mut first = true;
-        for path in [
-            s.path.clone(),
-            PathBuf::from(format!("{}.sha256", s.path.display())),
-        ] {
+        for path in [s.path.clone(), seal_of(&s.path)] {
             if path.exists() {
                 let name = path
                     .file_name()
@@ -1309,9 +1370,17 @@ pub fn verify(dir: &Path) -> Result<Vec<Problem>> {
     Ok(out)
 }
 
+/// The checksum beside segment `seg`, built on the path's own bytes: a directory whose path is not
+/// UTF-8 would lose them through `display`.
+fn seal_of(seg: &Path) -> PathBuf {
+    let mut path = seg.as_os_str().to_owned();
+    path.push(".sha256");
+    path.into()
+}
+
 /// Why a segment cannot be trusted, if it cannot.
 fn damage(seg: &Path) -> Option<String> {
-    let sum_path = PathBuf::from(format!("{}.sha256", seg.display()));
+    let sum_path = seal_of(seg);
     let Ok(sum) = std::fs::read_to_string(&sum_path) else {
         return Some("no checksum".into());
     };
@@ -1477,6 +1546,7 @@ fn walk_dir(
     // In name order, a device's in the order it wrote them: a purge that stops between two stops
     // at the same one each time.
     segments.sort();
+    let mut unread = None;
     for (path, aside) in segments {
         let name = path.file_name().and_then(|n| n.to_str()).context("name")?;
         let seal_path = dir.join(format!("{name}.sha256"));
@@ -1502,7 +1572,17 @@ fn walk_dir(
                     seal_line(&sha, name).as_bytes(),
                 )?;
             }
-            if let (Some(text), _) = judge(&read_whole(&data)?) {
+            // One its seal vouches for that does not read whole is left as it is, as a restore
+            // trusts it by its seal; the segments after it are still walked, and the walk fails at
+            // its end, so that a purge it may hold the text for is not taken as done.
+            let text = match read_whole(&data) {
+                Ok(text) => text,
+                Err(e) => {
+                    unread.get_or_insert(e.context(format!("read {}", path.display())));
+                    continue;
+                }
+            };
+            if let (Some(text), _) = judge(&text) {
                 if apply {
                     replace(dir, name, &sha, text.as_bytes())?;
                 }
@@ -1541,7 +1621,7 @@ fn walk_dir(
     if apply {
         std::fs::File::open(dir)?.sync_all()?;
     }
-    Ok(())
+    unread.map_or(Ok(()), Err)
 }
 
 /// docs/retention.md, step 2: each record segment, live or set aside, that may hold an owed record
@@ -1756,8 +1836,9 @@ fn op_line(line: &str) -> Option<(serde_json::Value, raw::OpKind, serde_json::Va
 }
 
 /// Each op of every ops segment, live or set aside, as `purge_ops` reads it, with no file
-/// changed: a segment or a line that cannot be read is passed over (`purge_ops` removes it when it
-/// cannot judge it).
+/// changed: a line that cannot be read, or a segment no seal vouches for that cannot be, is passed
+/// over (`purge_ops` removes it when it cannot judge it); a segment its seal vouches for that
+/// cannot be read whole fails the walk once the segments after it are read, as `purge_ops` does.
 pub(crate) fn each_op(home: &Path, f: &mut raw::EachOp) -> Result<()> {
     let f = std::cell::RefCell::new(f);
     walk(

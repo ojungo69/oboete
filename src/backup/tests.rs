@@ -686,6 +686,48 @@ fn w5b_preview_refuses_aliases_and_does_not_guess_unreadable_mixed_device_metada
     assert_eq!(w5b_files(p), before);
 }
 
+/// A home whose config.toml is a symlink (a dotfile manager's setup, which every other command
+/// reads through) can be previewed and restored; a store file that is a symlink is still refused.
+/// Before, the preview refused the symlinked config.toml as "not a regular file", so neither
+/// `oboete restore` nor `oboete rebuild` could start.
+#[cfg(unix)]
+#[test]
+fn a_restore_starts_in_a_home_whose_config_toml_is_a_symlink() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 3, 3);
+    let target = elsewhere.path().join("config.toml");
+    if p.join("config.toml").exists() {
+        std::fs::rename(p.join("config.toml"), &target).unwrap();
+    } else {
+        std::fs::write(&target, "").unwrap();
+    }
+    std::os::unix::fs::symlink(&target, p.join("config.toml")).unwrap();
+    let shown = preview_maintenance(p, MaintenanceOperation::Restore).unwrap();
+    crate::worker::restore_report(
+        p,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .map_err(|f| f.code)
+    .unwrap();
+    assert!(p.join("config.toml").is_symlink());
+
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 3, 3);
+    let moved = elsewhere.path().join("raw.db");
+    std::fs::rename(p.join("raw.db"), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, p.join("raw.db")).unwrap();
+    let refused = preview_restore(p).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("not a regular file"),
+        "{refused:#}"
+    );
+}
+
 #[test]
 fn w5b_partial_staging_is_disclosed_and_is_not_finished_by_preview() {
     let home = tempfile::tempdir().unwrap();
@@ -949,6 +991,77 @@ fn a_damaged_raw_db_is_quarantined_and_rebuilt_from_its_segments() {
         .path;
     overwrite(&seg, 10, &[0xA5; 16]);
     assert_eq!(verify(&p.join("backups")).unwrap().len(), 1); // the checksum names it
+}
+
+/// A segment's checksum is found beside it in a backup directory whose path is not UTF-8. Before,
+/// the checksum's path was rebuilt from the segment's displayed path, so every segment there read
+/// as having no checksum, and a restore found none it could use.
+#[cfg(unix)]
+#[test]
+fn a_segments_checksum_is_found_in_a_backup_directory_whose_path_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().join(std::ffi::OsStr::from_bytes(b"h\xffome"));
+    std::fs::create_dir(&p).unwrap();
+    segmented(&p, 10, 5);
+    let problems: Vec<String> = verify(&p.join("backups"))
+        .unwrap()
+        .into_iter()
+        .map(|x| x.what)
+        .collect();
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// A sealed segment that does not read whole (its seal matches, its bytes are no zstd) does not
+/// stop a purge before the segments after it: they are purged, the segment and its seal stay on
+/// disk (a restore trusts it by its seal), and the purge still fails, so the forget is not taken
+/// as done. Before, the purge stopped at it and the text of a later segment stayed.
+#[test]
+fn a_sealed_segment_that_does_not_read_whole_stops_no_later_segments_purge() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 5, 5);
+    let mut raw = raw::open(p).unwrap();
+    let dev = raw.device().to_owned();
+    raw.append_ops(&[(
+        raw::OpKind::Correction,
+        serde_json::json!({"uid": "u1", "body": "zsecretq"}),
+    )])
+    .unwrap();
+    drop(raw);
+    export(p).unwrap();
+    let dir = p.join("backups");
+    // In name order before every other segment.
+    let bad = name("0", 1, 1, Kind::Ops);
+    let garbage = b"not a zstd frame";
+    std::fs::write(dir.join(&bad), garbage).unwrap();
+    std::fs::write(
+        dir.join(format!("{bad}.sha256")),
+        seal_line(&hex(&Sha256::digest(garbage)), &bad),
+    )
+    .unwrap();
+    let mine = || -> Vec<Segment> {
+        segments(&dir, Kind::Ops)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.device == dev)
+            .collect()
+    };
+    assert!(
+        mine()
+            .iter()
+            .any(|s| read_segment(&s.path).unwrap().contains("zsecretq"))
+    );
+    let jobs = std::collections::HashMap::from([("u1".to_owned(), "j1".to_owned())]);
+    assert!(purge_ops(p, &jobs, &raw::Judge::default()).is_err());
+    assert!(
+        mine()
+            .iter()
+            .all(|s| !read_segment(&s.path).unwrap().contains("zsecretq")),
+        "the later segment still holds the forgotten text"
+    );
+    assert!(dir.join(&bad).exists() && dir.join(format!("{bad}.sha256")).exists());
+    assert!(each_op(p, &mut |_, _, _, _, _| {}).is_err());
 }
 
 /// docs/store-format.md: a refused open is never damage, whatever context names it.
@@ -1411,6 +1524,72 @@ fn an_export_notes_a_point_only_when_it_writes() {
     drop(raw);
     export(p).unwrap(); // ops only
     assert_eq!(cursors(&dir), [(5, 0), (10, 0), (10, 2)]);
+}
+
+/// docs/backup-points.md B1: a line of points.jsonl that is not UTF-8 (what a power loss can
+/// leave on a backup disk) is skipped like any line that does not read as a point. Before, the
+/// whole file failed to read, so every export and `oboete backup list` stopped.
+#[test]
+fn a_points_line_that_is_not_utf8_is_skipped_and_exports_go_on() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 10, 5);
+    let dir = p.join("backups");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(POINTS))
+        .unwrap();
+    f.write_all(b"\xff\xfe torn\n").unwrap();
+    drop(f);
+    let cursors = |dir: &Path| -> Vec<(i64, i64)> {
+        points(dir)
+            .unwrap()
+            .iter()
+            .map(|x| (x.records, x.ops))
+            .collect()
+    };
+    assert_eq!(cursors(&dir), [(5, 0), (10, 0)]);
+    assert_eq!(list_points(p, false).unwrap().len(), 2);
+    let mut raw = raw::open(p).unwrap();
+    raw.append_ops(&[window(10), claim("a")]).unwrap();
+    drop(raw);
+    export(p).unwrap();
+    assert_eq!(cursors(&dir), [(5, 0), (10, 0), (10, 2)]);
+}
+
+/// docs/backup-points.md B2 and B4: with raw.db removed or damaged, `oboete backup list` and the
+/// `restore --to` preview still print the points, with what raw.db holds past them shown as
+/// unknown: the points and the restore need no raw.db. Before, both failed on raw.db, so no
+/// point's exact time, which `--yes` needs, could be read when the store was damaged.
+#[test]
+fn backup_list_and_the_point_preview_show_the_points_when_raw_db_cannot_be_read() {
+    for damaged in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5);
+        if damaged {
+            damage_raw(p);
+        } else {
+            for f in ["raw.db", "raw.db-wal", "raw.db-shm"] {
+                let _ = std::fs::remove_file(p.join(f));
+            }
+        }
+        let lines = list_points(p, false).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.ends_with("through seq 10 (? after) and op 0 (? after)")),
+            "{lines:?}"
+        );
+        assert_eq!(lines.len(), 3, "{lines:?}"); // the note and the two points
+        let point = point_at(p, crate::db::now_ms()).unwrap();
+        let preview = point_preview(p, &point).unwrap();
+        assert!(
+            preview.contains("keeps the records through seq 10 and the ops through op 0"),
+            "{preview}"
+        );
+        assert!(preview.contains("takes back the ? record(s)"), "{preview}");
+    }
 }
 
 /// A store of three points: A (5 records, no op), B (A and two ops) and C, past B with a mute
@@ -2544,8 +2723,16 @@ fn a_point_noted_while_the_points_are_rewritten_is_kept() {
     let (tx, rx) = std::sync::mpsc::channel();
     BETWEEN_POINTS.with_borrow_mut(|hook| {
         *hook = Some(Box::new(move || {
-            let writer = std::thread::spawn(move || note_point(&shared, &noted).unwrap());
-            // Time for the other writer's append, which nothing then holds back.
+            // The rewrite keeps the hold from its read to its rename: no other handle has it now
+            // (#999: the wait below alone passed with no hold, when the writer was slow to start).
+            assert!(points_lock(&shared, std::time::Duration::ZERO).is_none());
+            let (begun, started) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                begun.send(()).unwrap();
+                note_point(&shared, &noted).unwrap()
+            });
+            started.recv().unwrap();
+            // Time for the append the writer has begun, which only the hold keeps back.
             std::thread::sleep(std::time::Duration::from_millis(300));
             tx.send(writer).unwrap();
         }));
@@ -2554,6 +2741,54 @@ fn a_point_noted_while_the_points_are_rewritten_is_kept() {
     BETWEEN_POINTS.with_borrow_mut(|hook| *hook = None);
     rx.recv().unwrap().join().unwrap();
     assert_eq!(points(&dir).unwrap(), [mine(5), other]);
+}
+
+/// docs/backup-points.md B1: in a backup directory that cannot give the points' hold (the lock
+/// file's name is a directory here), a point is still noted and a rewrite with points to drop is
+/// still done, as before there was a hold. With the hold required, the point was given up, and a
+/// restore with points to drop stopped before its swap (#999).
+#[test]
+fn points_are_written_where_their_hold_cannot_be_had() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().to_owned();
+    std::fs::create_dir(dir.join("points.jsonl.lock")).unwrap();
+    let mine = |records| Point {
+        at: 1,
+        device: "a".into(),
+        records,
+        ops: 0,
+    };
+    note_point(&dir, &mine(5)).unwrap();
+    note_point(&dir, &mine(10)).unwrap();
+    keep_points(&dir, "a", |p| p.records <= 5).unwrap();
+    assert_eq!(points(&dir).unwrap(), [mine(5)]);
+}
+
+/// A hold another handle keeps is waited for no longer than asked, and then gone without: a worker
+/// does not wait on another home's, perhaps on another machine, for as long as that one keeps it
+/// (#999). The wait had no end.
+#[test]
+fn a_points_hold_another_keeps_is_waited_for_no_longer_than_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().to_owned();
+    let held = points_lock(&dir, std::time::Duration::ZERO).expect("free");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn({
+        let dir = dir.clone();
+        move || {
+            let had = points_lock(&dir, std::time::Duration::from_millis(50)).is_some();
+            // The test may have given up on the answer.
+            let _ = tx.send(had);
+        }
+    });
+    // Far past the wait asked for: one that waits while the hold is kept does not answer.
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(false)
+    );
+    drop(held);
+    waiter.join().unwrap();
+    assert!(points_lock(&dir, std::time::Duration::ZERO).is_some());
 }
 
 /// docs/backup-points.md B6: points with none to drop are left as they are without the lock, so

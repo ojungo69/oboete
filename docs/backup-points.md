@@ -22,12 +22,16 @@ back, because forget and retention already rewrite the segments.
   from 2025), so a cut by record time would not be a prefix of the store. The line is appended and
   synced after the segments are sealed. The append, and each rewrite that drops points (B6), holds
   `points.jsonl.lock` in the backup directory, so a point another home sharing the directory notes
-  meanwhile is kept. A torn or unreadable line is skipped. A lost `points.jsonl`
+  meanwhile is kept. A hold the directory cannot give, or that another keeps past a write's wait
+  (10 s), is gone without, with a line on stderr: a point may then be lost, never a record or a
+  restore (#999). A torn or unreadable line is skipped. A lost `points.jsonl`
   loses the points and no record: `oboete restore` with no point replays every segment, as before.
 - B2. **`oboete backup list`** prints this device's points, newest first: each one's time (UTC, in
   the form `--to` takes), the seq and op seq it keeps through, and how many records and ops raw.db
   holds past it. It prints every point of the last 24 hours and the newest point of each day before
-  that; `--all` prints them all. It reads only `points.jsonl` and raw.db, and changes nothing.
+  that; `--all` prints them all. It reads only `points.jsonl` and raw.db, and changes nothing. When
+  raw.db cannot be read (missing or damaged), it still prints the points, with the counts past them
+  shown as `?` and a line that says why.
 - B3. **`oboete backup run`** exports now, under the worker's lock: it asks a running worker to step
   aside, as `restore` and `rebuild` do. Before the lock goes it indexes what hooks wrote meanwhile,
   as a restore's drain does, with no model call, whether the export went well or not; a failed
@@ -38,7 +42,7 @@ back, because forget and retention already rewrite the segments.
   or `YYYY-MM-DD HH:MM` taken as UTC. With no point of this device at or before the time, it refuses
   and names `oboete backup list`. Without `--yes` it changes nothing and prints a preview: the
   point's time, seq and op seq, the records and ops that stay and those that go (rows counted in
-  raw.db), and the command that goes back to it. `--yes` takes the point at exactly the time given,
+  raw.db, shown as `?` when raw.db cannot be read), and the command that goes back to it. `--yes` takes the point at exactly the time given,
   as the preview prints it, so a backup made in between cannot change which point it goes back to.
   The restore checks under its locks that the point is still listed (B6), and refuses if it is
   not. With `--yes` it restores as `oboete restore` does: the current raw.db and knowledge.db are
