@@ -3631,7 +3631,20 @@ fn headless_command(
     prompt: &str,
     schema_text: &str,
 ) -> Result<(Command, Option<String>), CallError> {
-    headless_command_at(cli, Path::new(cli), model, dir, system, prompt, schema_text)
+    let program = cli_program(cli);
+    headless_command_at(cli, &program, model, dir, system, prompt, schema_text)
+}
+
+/// The program to start for `cli`: its name, which `Command` looks up on `PATH`, but on Windows,
+/// where that finds `cli.exe` alone, the launcher on `PATH` (npm's `cli.cmd` too), or the name when
+/// there is none (the spawn's error then says it is not found).
+pub(crate) fn cli_program(cli: &str) -> std::path::PathBuf {
+    let found = if cfg!(windows) {
+        crate::setup::launcher(cli)
+    } else {
+        None
+    };
+    found.unwrap_or_else(|| cli.into())
 }
 
 /// `system`: what the CLI is told it is, for its role (`system_for`), as safe as `CURATOR_SYSTEM`.
@@ -4169,7 +4182,7 @@ fn codex_rest_now(credits: bool) -> Option<i64> {
     if UNDER_UNTIL.load(Ordering::Relaxed) > now {
         return None;
     }
-    let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT)?;
+    let read = codex_limits(cli_program("codex").as_os_str(), CODEX_LIMITS_TIMEOUT)?;
     // Only a reading under the lines without credits is kept: one that rests nothing because of
     // them is read again before the next call, when they may be spent.
     let rest = codex_rest(&read, now, false);

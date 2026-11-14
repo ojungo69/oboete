@@ -1911,3 +1911,57 @@ fn setup_asks_in_a_terminal_or_takes_yes() {
     assert!(!answer(false, true, "n\n"));
     assert!(!answer(false, true, ""));
 }
+
+/// On Windows the launcher of a CLI to start is its `.exe`, then npm's `.cmd`, and last the
+/// extensionless sh script npm puts beside them, which Windows cannot start: it was taken first,
+/// so `claude mcp` could not start, and a curator started by a bare name never found a `.cmd`
+/// (the audit of 2026-11). A directory earlier on `PATH` comes first, as Windows looks; elsewhere
+/// the launcher is the name itself.
+#[test]
+fn a_windows_launcher_is_the_exe_then_the_cmd_before_the_sh_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let at = |name: &str| Some(dir.path().join(name));
+    std::fs::write(dir.path().join("claude"), "#!/bin/sh\n").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude"));
+    std::fs::write(dir.path().join("claude.cmd"), "@echo off\r\n").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude.cmd"));
+    assert_eq!(launcher_in(&path, "claude", false), at("claude"));
+    std::fs::write(dir.path().join("claude.exe"), "").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude.exe"));
+    let later = tempfile::tempdir().unwrap();
+    std::fs::write(later.path().join("codex.exe"), "").unwrap();
+    std::fs::write(dir.path().join("codex.cmd"), "").unwrap();
+    let both = std::env::join_paths([dir.path(), later.path()]).unwrap();
+    assert_eq!(launcher_in(&both, "codex", true), at("codex.cmd"));
+    assert_eq!(launcher_in(&both, "grok", true), None);
+}
+
+/// A `.cmd` launcher found on `PATH` starts, with arguments as oboete gives a curator CLI (JSON
+/// with quotes and braces, and an empty one): Rust runs it through cmd.exe and refuses an
+/// argument it cannot escape there.
+#[cfg(windows)]
+#[test]
+fn a_cmd_launcher_on_the_path_starts_with_a_curators_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("oboete-fake.cmd"), "@echo launched\r\n").unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let found = launcher_in(&path, "oboete-fake", true).unwrap();
+    let out = std::process::Command::new(&found)
+        .args([
+            "--settings",
+            r#"{"disableAllHooks":true,"enabledPlugins":{"a@b":false}}"#,
+        ])
+        .args(["--setting-sources", ""])
+        .args([
+            "--json-schema",
+            r#"{"type":"object","properties":{"a":{"type":"string"}}}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("launched"),
+        "{out:?}"
+    );
+}

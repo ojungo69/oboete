@@ -47,7 +47,11 @@ impl Gate {
 pub fn gate(db: &Connection, cli: &str) -> Result<Gate> {
     match cli {
         "claude" => Ok(Gate::Passed),
-        "codex" => gate_codex(db, Path::new("codex"), &crate::config::home_dir()),
+        "codex" => gate_codex(
+            db,
+            &crate::provider::cli_program("codex"),
+            &crate::config::home_dir(),
+        ),
         _ => Ok(Gate::NotProven),
     }
 }
