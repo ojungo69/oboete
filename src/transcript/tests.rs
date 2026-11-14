@@ -1,7 +1,6 @@
 use super::*;
 use crate::capture::{self, Settings};
 use crate::raw::{self, Event, Item};
-use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -198,6 +197,9 @@ fn only_lines_before_the_sessions_first_raw_record_are_imported() {
     }
 }
 
+/// D6: the head of a session that oboete v1 trimmed comes back from its transcript. The
+/// transcript import stops at the session's earliest `oboete-v1` record (`earliest_by_session`),
+/// which counts a v1 `touch` record not, so the one turn at that boundary is held by both sources.
 #[test]
 fn a_trimmed_v1_head_comes_back() {
     for (agent, fixture, session, first_prompt, boundary_prompt) in [
@@ -220,39 +222,28 @@ fn a_trimmed_v1_head_comes_back() {
         let (claude, codex) = fixtures(dir.path());
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let path = home.join("oboete.db");
-        let v1 = Connection::open(&path).unwrap();
-        v1.pragma_update(None, "journal_mode", "WAL").unwrap();
-        v1.execute_batch(
-            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL, repo TEXT NOT NULL,
-                   cwd TEXT, started_at INTEGER NOT NULL, last_event_at INTEGER NOT NULL);
-                 CREATE TABLE session_repos(session_id TEXT NOT NULL, repo TEXT NOT NULL,
-                   PRIMARY KEY(session_id, repo)) WITHOUT ROWID;
-                 CREATE TABLE events(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
-                   event TEXT NOT NULL, ts INTEGER NOT NULL, payload TEXT NOT NULL);
-                 CREATE TABLE observations(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
-                   ts INTEGER, kind TEXT, title TEXT, body TEXT, uid TEXT);
-                 CREATE TABLE summaries(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
-                   ts INTEGER, body TEXT, uid TEXT);
-                 CREATE TABLE prompts(id INTEGER PRIMARY KEY, session_id TEXT, repo TEXT,
-                   ts INTEGER, body TEXT, uid TEXT);
-                 INSERT INTO meta VALUES('device_id', 'd1e5');",
-        )
-        .unwrap();
-        v1.execute(
-            "INSERT INTO sessions VALUES(?1, ?2, '/work', '/work', 0, 0)",
-            params![session, agent],
-        )
-        .unwrap();
-        v1.execute("INSERT INTO session_repos VALUES(?1, '/work')", [session])
-            .unwrap();
+        let v1 = Settings {
+            source: "oboete-v1",
+            ..Settings::default()
+        };
+        // v1's records of the session's later turns as the v1 migration stored them: v1's hook
+        // kept each turn's shaped body, stamped later than its transcript entry (spec 7.4), and
+        // its `session_repos` row became a `touch` record at the session's start.
+        let mut stored = capture::imported(
+            agent,
+            "Touch",
+            &serde_json::json!({"session_id": session}),
+            0,
+            "/work",
+            Some("/work"),
+            &v1,
+        );
         let (lines, _) = events(fixture, agent);
         let mid = lines
             .iter()
             .position(|e| e["payload"]["prompt"] == boundary_prompt)
             .unwrap();
-        let clock = Connection::open_in_memory().unwrap();
+        let clock = rusqlite::Connection::open_in_memory().unwrap();
         let mut first_ts = 0;
         for (i, line) in lines[mid..].iter().enumerate() {
             let ts: i64 = clock
@@ -265,45 +256,49 @@ fn a_trimmed_v1_head_comes_back() {
             if i == 0 {
                 first_ts = ts + 1;
             }
-            let captured = capture::imported(
+            let event = line["event"].as_str().unwrap();
+            let hook = capture::imported(
                 agent,
-                line["event"].as_str().unwrap(),
+                event,
                 &line["payload"],
                 ts,
                 "/work",
                 Some("/work"),
                 &Settings::default(),
             );
-            let body = &captured[0].event.body;
-            // The hook stamps a turn later than its transcript entry does (spec 7.4).
-            v1.execute(
-                "INSERT INTO events(session_id, event, ts, payload) VALUES(?1, ?2, ?3, ?4)",
-                params![session, line["event"].as_str().unwrap(), ts + 1, body],
-            )
-            .unwrap();
+            let kept: Value = serde_json::from_str(&hook[0].event.body).unwrap();
+            let mut payload = serde_json::json!({"session_id": session});
+            for (v1, hook) in [
+                ("prompt", "prompt"),
+                ("source", "source"),
+                ("tool", "tool_name"),
+                ("input", "tool_input"),
+                ("output", "tool_response"),
+                ("assistant", "last_assistant_message"),
+                ("summary", "compact_summary"),
+                ("reason", "reason"),
+            ] {
+                if let Some(value) = kept.get(v1) {
+                    payload[hook] = value.clone();
+                }
+            }
+            stored.extend(capture::imported(
+                agent,
+                event,
+                &payload,
+                ts + 1,
+                "/work",
+                Some("/work"),
+                &v1,
+            ));
         }
-        drop(v1);
-        let before = std::fs::read(&path).unwrap();
+        raw::open(&home)
+            .unwrap()
+            .append_imported_under(&stored, &[], &v1, None)
+            .unwrap();
         let root = if agent == "claude" { &claude } else { &codex };
-        let before_preview = snapshot(&home);
-        let preview = import(&home, &[(agent, root)], false, &mut Vec::new()).unwrap();
-        assert_eq!(
-            preview.agents[agent].events,
-            if agent == "claude" { 6 } else { 8 }
-        );
-        assert!(
-            snapshot(&home) == before_preview,
-            "preview changed v1's files"
-        );
-        let mut out = Vec::new();
-        let stats = import(&home, &[(agent, root)], true, &mut out).unwrap();
+        let stats = import(&home, &[(agent, root)], true, &mut Vec::new()).unwrap();
         assert!(stats.agents[agent].events > 2);
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("[summary] curate is not set")
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
         let got = records(&home);
         assert!(
             got.iter()
@@ -1063,10 +1058,7 @@ fn typed_transcript_refusal_keeps_independent_commits_and_reruns() {
     assert_eq!(result.code, crate::preview::FailureCode::Refused);
     let stats = &result.outcome.stats.agents["codex"];
     assert_eq!((stats.events, stats.refused), (8, 1));
-    assert!(matches!(
-        progress.last(),
-        Some(Committed::Transcripts { events: 8, .. })
-    ));
+    assert!(matches!(progress.last(), Some(Committed { events: 8, .. })));
     let again = run(&home, &roots, None, &mut |_| {}).unwrap_err();
     let stats = &again.outcome.stats.agents["codex"];
     assert_eq!((stats.events, stats.refused), (0, 1));
@@ -1111,8 +1103,8 @@ fn a_forget_between_a_files_batches_refuses_that_file_and_the_next_is_read() {
     let of_big = |home: &Path| records(home).iter().filter(|e| e.session == "big").count();
     // How many of the session's events the store held once the forget was registered.
     let mut forgot = None;
-    let result = run(&home, &[("codex", &root)], None, &mut |c| {
-        if forgot.is_none() && matches!(c, Committed::Transcripts { .. }) {
+    let result = run(&home, &[("codex", &root)], None, &mut |_| {
+        if forgot.is_none() {
             // The hook's record is the store's first.
             let (device, seq) = {
                 let raw = raw::open(&home).unwrap();
@@ -1372,14 +1364,12 @@ fn a_confirm_leaves_the_next_bound_file_for_later_when_it_changes_after_a_commit
     let home = dir.path().join("home");
     let roots = [("codex", root.as_path())];
     let shown = preview_plan(&home, &roots).unwrap();
-    let done = run(&home, &roots, Some(shown), &mut |c| {
-        if matches!(c, Committed::Transcripts { .. }) {
-            std::fs::write(
-                &next,
-                text.replace("Try again with 100ms", "Try again with 200ms"),
-            )
-            .unwrap();
-        }
+    let done = run(&home, &roots, Some(shown), &mut |_| {
+        std::fs::write(
+            &next,
+            text.replace("Try again with 100ms", "Try again with 200ms"),
+        )
+        .unwrap();
     })
     .unwrap();
     let codex = &done.stats.agents["codex"];
@@ -1424,7 +1414,7 @@ fn a_killed_import_resumes_without_duplicates_or_gaps() {
         );
         assert_eq!(killed.outcome.stats.agents["codex"].events, landed as u64);
         assert!(
-            matches!(progress.last(), Some(Committed::Transcripts { events, .. }) if *events == landed as u64)
+            matches!(progress.last(), Some(Committed { events, .. }) if *events == landed as u64)
         );
         import(&home, &[("codex", &root)], true, &mut Vec::new()).unwrap();
         let got = records(&home);
@@ -1519,8 +1509,11 @@ fn a_masked_session_cannot_bypass_the_cut_or_leak_through_its_checkpoint() {
     );
 }
 
+/// Decision 99 (2026-11-12): a home that holds a store of oboete v1 is not imported into, by a
+/// confirm, the CLI's `--yes`, its dry run or the viewer's preview, which say why; the store is
+/// not opened and nothing in the home or beside it changes.
 #[test]
-fn preview_reads_wal_events_without_changing_the_home_or_a_symlink_target() {
+fn an_import_refuses_a_home_with_a_v1_store() {
     #[cfg(unix)]
     let variants = [false, true];
     #[cfg(not(unix))]
@@ -1535,35 +1528,30 @@ fn preview_reads_wal_events_without_changing_the_home_or_a_symlink_target() {
         } else {
             home.join("oboete.db")
         };
-        let v1 = Connection::open(&path).unwrap();
-        v1.pragma_update(None, "journal_mode", "WAL").unwrap();
-        v1.execute_batch(
-            "CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL);
-                 CREATE TABLE events(session_id TEXT NOT NULL, ts INTEGER NOT NULL);
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-        )
-        .unwrap();
-        v1.execute("INSERT INTO sessions VALUES(?1, 'codex')", [CODEX_SESSION])
-            .unwrap();
-        v1.execute(
-            "INSERT INTO events VALUES(?1, ?2)",
-            params![CODEX_SESSION, CODEX_MS + 8_000],
-        )
-        .unwrap();
+        std::fs::write(&path, b"not opened: not even a database").unwrap();
         #[cfg(unix)]
         if link {
             std::os::unix::fs::symlink(&path, home.join("oboete.db")).unwrap();
         }
+        let roots = [("codex", codex.as_path())];
         let before = snapshot(dir.path());
-        let stats = import(&home, &[("codex", &codex)], false, &mut Vec::new()).unwrap();
-        assert_eq!(
-            (stats.agents["codex"].events, stats.agents["codex"].cut),
-            (4, 4)
-        );
+        let said = |error: anyhow::Error| {
+            let text = format!("{error:#}");
+            assert!(text.contains(crate::setup::V1_STORE), "{text}");
+            assert!(text.contains("nothing was imported"), "{text}");
+        };
+        for yes in [false, true] {
+            said(import(&home, &roots, yes, &mut Vec::new()).unwrap_err());
+        }
+        said(preview_plan(&home, &roots).err().unwrap());
+        let refused = run(&home, &roots, None, &mut |_| {}).unwrap_err();
+        assert_eq!(refused.code, crate::preview::FailureCode::Refused);
+        said(refused.cause);
         assert!(
             snapshot(dir.path()) == before,
-            "preview changed a source or destination file"
+            "a refused import changed a source or destination file"
         );
+        assert!(!raw::exists(&home));
     }
 }
 

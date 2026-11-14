@@ -87,18 +87,17 @@ fn entry_digest_keeps_non_utf8_names_distinct_from_lossy_replacements() {
 fn same_byte_descendant_name_or_identity_change_keeps_top_target_facts() {
     for replace_identity in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let cache = root.path().join("cache");
-        std::fs::create_dir(&cache).unwrap();
-        let item = cache.join("item");
+        let eval = root.path().join("eval");
+        std::fs::create_dir(&eval).unwrap();
+        let item = eval.join("item");
         std::fs::write(&item, b"same").unwrap();
-        let initial = DiagnosticDirectory::open(&cache)
+        let initial = DiagnosticDirectory::open(&eval)
             .unwrap()
             .entry_metadata(OsStr::new("item"), false)
             .unwrap();
         let before = Observation::begin(root.path());
         let mut checks = before.checks();
-        let index = slot(OldFileCategory::Cache);
-        assert_eq!(checks.categories[index].bytes.value, Some(4));
+        assert_eq!(checks.evaluation_copies.bytes.value, Some(4));
         let name = if replace_identity {
             let replacement = root.path().join("replacement");
             std::fs::write(&replacement, b"same").unwrap();
@@ -106,10 +105,10 @@ fn same_byte_descendant_name_or_identity_change_keeps_top_target_facts() {
             std::fs::rename(replacement, &item).unwrap();
             "item"
         } else {
-            std::fs::rename(&item, cache.join("other")).unwrap();
+            std::fs::rename(&item, eval.join("other")).unwrap();
             "other"
         };
-        let after = DiagnosticDirectory::open(&cache)
+        let after = DiagnosticDirectory::open(&eval)
             .unwrap()
             .entry_metadata(OsStr::new(name), false)
             .unwrap();
@@ -123,41 +122,31 @@ fn same_byte_descendant_name_or_identity_change_keeps_top_target_facts() {
             before.finish(&mut checks),
             Some(CheckState::Changed)
         ));
-        let row = &checks.categories[index];
+        let row = &checks.evaluation_copies;
         assert!(matches!(row.present.state, CheckState::Known));
         assert_eq!(row.present.value, Some(true));
-        assert!(matches!(row.targets.state, CheckState::Known));
-        assert_eq!(row.targets.value, Some(1));
         assert!(matches!(row.bytes.state, CheckState::Changed));
         assert_eq!(row.bytes.value, None);
-        assert_eq!(
-            checks.categories[slot(OldFileCategory::Logs)].bytes.value,
-            Some(0)
-        );
     }
 }
 
 #[test]
 fn same_byte_top_level_identity_change_still_invalidates_targets() {
     let root = tempfile::tempdir().unwrap();
-    let item = root.path().join("memory.db");
-    std::fs::write(&item, b"same").unwrap();
+    let eval = root.path().join("eval");
+    std::fs::create_dir(&eval).unwrap();
     let before = Observation::begin(root.path());
     let mut checks = before.checks();
     let replacement = root.path().join("replacement");
-    std::fs::write(&replacement, b"same").unwrap();
-    std::fs::rename(&item, root.path().join("retired")).unwrap();
-    std::fs::rename(replacement, &item).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::rename(&eval, root.path().join("retired")).unwrap();
+    std::fs::rename(replacement, &eval).unwrap();
     assert!(matches!(
         before.finish(&mut checks),
         Some(CheckState::Changed)
     ));
-    let row = &checks.categories[slot(OldFileCategory::MemoryDatabase)];
+    let row = &checks.evaluation_copies;
     assert!(matches!(row.present.state, CheckState::Changed));
-    assert!(matches!(row.targets.state, CheckState::Changed));
     assert!(matches!(row.bytes.state, CheckState::Changed));
-    assert_eq!(
-        (row.present.value, row.targets.value, row.bytes.value),
-        (None, None, None)
-    );
+    assert_eq!((row.present.value, row.bytes.value), (None, None));
 }

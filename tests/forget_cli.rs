@@ -292,11 +292,7 @@ fn v1_record(home: &Path, body: &str) -> String {
 
 fn v1_record_in_session(home: &Path, body: &str, sid: &str) -> String {
     let source = v1_source_event(home, body, sid);
-    ok(run(
-        home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
+    v1_import(home, &source, None);
     ok(run(home, &["worker", "--idle-ms", "0"], ""));
     let hits = ok(run(
         home,
@@ -333,6 +329,152 @@ fn v1_source_event(home: &Path, body: &str, sid: &str) -> std::path::PathBuf {
     .unwrap();
     drop(db);
     source
+}
+
+/// What the v1 migration (`oboete migrate --from`, which decision 99 of 2026-11-12 removed) wrote
+/// into raw.db for the events of the v1 store `source` past its checkpoint: each event's record,
+/// its native identity (`import_origins`) and the batch's `migration` op, the same rows and values.
+/// A worker pass opens the store first, as the migration's own open did: a replaced file gets its
+/// new device and the surviving request logs are applied. The fixtures' v1 events are prompts.
+/// `masked` names a session whose label a redaction rule (`session-mask`) masks, as the migration
+/// gated labels. The records written.
+fn v1_import(home: &Path, source: &Path, masked: Option<&str>) -> usize {
+    use sha2::{Digest, Sha256};
+    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    // `forget::origin`: a native identity, versioned and hashed.
+    let identity = |source: &str, id: &str| {
+        format!(
+            "v1:{}",
+            hash(serde_json::to_string(&(source, id)).unwrap().as_bytes())
+        )
+    };
+    ok(run(home, &["worker", "--idle-ms", "0"], ""));
+    let v1 = rusqlite::Connection::open(source).unwrap();
+    let key = format!(
+        "oboete-v1:{}",
+        v1.query_row::<String, _, _>("SELECT value FROM meta WHERE key='device_id'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    );
+    let mut db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let tx = db.transaction().unwrap();
+    let through: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(json_extract(body,'$.through')),0) FROM ops
+             WHERE type='migration' AND json_extract(body,'$.key')=?1",
+            [&key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut events = v1
+        .prepare(
+            "SELECT e.id, e.ts, e.session_id, e.event, e.payload, s.agent, s.repo, s.cwd
+             FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.id > ?1 ORDER BY e.id",
+        )
+        .unwrap()
+        .query_map([through], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let Some(last) = events.last().map(|e| (e.0, e.1, hash(e.2.as_bytes()))) else {
+        return 0;
+    };
+    // The migration appended a batch in (ts, id) order.
+    events.sort_by_key(|e| e.1);
+    let device: String = tx
+        .query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let next = |tx: &rusqlite::Transaction| -> i64 {
+        tx.query_row(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM records WHERE device=?1",
+            [&device],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let from_seq = next(&tx);
+    for (id, ts, session, event, stored, agent, repo, cwd) in &events {
+        assert_eq!(
+            event, "UserPromptSubmit",
+            "a fixture event this helper cannot write"
+        );
+        let prompt: serde_json::Value = serde_json::from_str(stored).unwrap();
+        let body = serde_json::json!({"prompt": prompt["prompt"]}).to_string();
+        let label = if masked == Some(session.as_str()) {
+            "[REDACTED]"
+        } else {
+            session.as_str()
+        };
+        let seq = next(&tx);
+        tx.execute(
+            "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, cwd, source, body)
+             VALUES(?1, ?2, 'event', ?3, 'prompt', ?4, ?5, ?6, ?7, 'oboete-v1', ?8)",
+            rusqlite::params![device, seq, ts, agent, label, repo, cwd, body.as_bytes()],
+        )
+        .unwrap();
+        if label != session {
+            tx.execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, 'session', 'user:session-mask', 0, ?3, ?4, 'fixture')",
+                rusqlite::params![device, seq, session.len() as i64, now],
+            )
+            .unwrap();
+        }
+        // The v1 event's fingerprint and the identity the migration hashed into its origin.
+        let row = format!(
+            r#"{{"id":{id},"ts":{ts},"session_id":"{}"}}"#,
+            hash(session.as_bytes())
+        );
+        let native = format!("[{row},\"{}\"]:0", hash(stored.as_bytes()));
+        tx.execute(
+            "INSERT INTO import_origins(device, seq, origin, native_session, ambiguous)
+             VALUES(?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![
+                device,
+                seq,
+                identity(&key, &native),
+                identity(agent, session)
+            ],
+        )
+        .unwrap();
+    }
+    let to_seq = next(&tx) - 1;
+    let op_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(op_seq),0)+1 FROM ops WHERE device=?1",
+            [&device],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let checkpoint = format!(
+        r#"{{"key":"{key}","through":{},"row":{{"id":{},"ts":{},"session_id":"{}"}},"from_seq":{from_seq},"to_seq":{to_seq}}}"#,
+        last.0, last.0, last.1, last.2
+    );
+    tx.execute(
+        "INSERT INTO ops(device, op_seq, type, ts, body, batch) VALUES(?1, ?2, 'migration', ?3, ?4, ?2)",
+        rusqlite::params![device, op_seq, now, checkpoint],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    events.len()
 }
 
 /// Historical v1 requests use the published bodyless Request/log schema. Read only native
@@ -421,49 +563,6 @@ fn mixed_transcript_record(home: &Path, sid: &str, ts: i64, body: &str) -> Strin
         "SELECT device,seq FROM records WHERE source='transcript' AND kind='prompt' ORDER BY seq DESC LIMIT 1",
         [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
     format!("{device}:{seq}")
-}
-
-#[test]
-fn transcript_forget_blocks_cross_source_v1_migration_before_commit_or_checkpoint() {
-    let home = tempfile::tempdir().unwrap();
-    let home = home.path();
-    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let id = record(home, CANARY);
-    ok(run(home, &["forget", "--record", &id, "--yes"], ""));
-    let source = v1_source_event(home, CANARY, "fixture-native-session");
-    let imported = run(home, &["migrate", "--from", source.to_str().unwrap()], "");
-    assert!(
-        !imported.status.success(),
-        "v1 revived a denied transcript: {imported:?}"
-    );
-    assert!(
-        String::from_utf8_lossy(&imported.stderr).contains(
-            "this import overlaps a forget without a verified cross-source event identity"
-        )
-    );
-    assert!(String::from_utf8_lossy(&imported.stderr).contains("this batch was not imported"));
-    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
-    let committed: i64 = db.query_row("SELECT (SELECT COUNT(*) FROM records WHERE source='oboete-v1')+
-        (SELECT COUNT(*) FROM ops WHERE type='migration' AND json_extract(body,'$.key') LIKE 'oboete-v1:%')",
-        [], |r| r.get(0)).unwrap();
-    assert_eq!(
-        committed, 0,
-        "cross-source refusal committed rows or a checkpoint"
-    );
-    drop(db);
-    assert!(
-        !ok(run(
-            home,
-            &["search", "--all", "--raw", "only", "--", CANARY],
-            ""
-        ))
-        .contains(CANARY)
-    );
-    let later = record(home, "distinct-transcript-event-after-refused-v1-785");
-    assert!(
-        ok(run(home, &["get", &later], ""))
-            .contains("distinct-transcript-event-after-refused-v1-785")
-    );
 }
 
 #[test]
@@ -1170,12 +1269,7 @@ fn cross_device_denial_survives_backups(alias: bool) {
         db.execute("DELETE FROM ops WHERE type='migration'", [])
             .unwrap();
         drop(db);
-        let imported = ok(run(
-            &home,
-            &["migrate", "--from", source.to_str().unwrap()],
-            "",
-        ));
-        assert!(imported.contains("\"records\":1"), "{imported}");
+        assert_eq!(v1_import(&home, &source, None), 1);
         let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
         let (device, seq): (String, i64) = db
             .query_row(
@@ -1295,15 +1389,6 @@ fn cross_device_denial_survives_backups(alias: bool) {
     }
     lose_raw_and_request_logs(&home, "device-b-two");
     ok(run(&home, &["restore"], ""));
-    let retried = ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(
-        retried.contains("\"records\":0"),
-        "the target-free denial was lost: {retried}"
-    );
     let projects = home.join("claude/projects/synthetic");
     std::fs::create_dir_all(&projects).unwrap();
     let line = |time: &str, prompt: &str| {
@@ -1642,7 +1727,7 @@ fn concurrent_first_hooks_keep_records_and_another_sessions_forget_takes_none() 
 }
 
 #[test]
-fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event() {
+fn an_old_backup_does_not_bring_back_a_forgotten_v1_event() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
@@ -1667,8 +1752,7 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
     )
     .unwrap();
     drop(db);
-    let args = ["migrate", "--from", source.to_str().unwrap()];
-    ok(run(&home, &args, ""));
+    v1_import(&home, &source, None);
     ok(run(&home, &["worker", "--idle-ms", "0"], ""));
     // An ordinary restore before deletion must preserve the source identity too.
     ok(run(&home, &["restore"], ""));
@@ -1684,12 +1768,6 @@ fn an_old_backup_and_changed_capture_rules_do_not_reimport_a_forgotten_v1_event(
     ok(run(&home, &["restore"], ""));
     assert!(ok(run(&home, &["get", &keep], "")).contains("unrelated-persisted-opal-731"));
     assert!(!String::from_utf8_lossy(&run(&home, &["get", id], "").stdout).contains(CANARY));
-    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='amethyst',regex='amethyst'}]\n").unwrap();
-    let imported = ok(run(&home, &args, ""));
-    assert!(
-        imported.contains("\"events\":1,\"records\":0"),
-        "a forgotten source identity returned under changed capture rules: {imported}"
-    );
     assert!(ok(run(&home, &["forget", "--status"], "")).contains("physical purge pending"));
 }
 
@@ -1751,11 +1829,11 @@ fn restored_v1_session_refusal(mask_session: bool) {
         std::fs::write(home.join("config.toml"),
             "[summary]\ncurate = false\n[redaction]\nextra_rules = [{id='session-mask',regex='forgotten-cut-session'}]\n").unwrap();
     }
-    ok(run(
+    v1_import(
         &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
+        &source,
+        mask_session.then_some("forgotten-cut-session"),
+    );
     ok(run(&home, &["worker", "--idle-ms", "0"], ""));
     let hits = ok(run(
         &home,
@@ -2580,9 +2658,8 @@ fn the_home_log_alone_restores_a_forget_the_backup_directory_missed() {
     assert!(!found.contains(CANARY), "{found}");
 }
 
-/// D1 F2: raw.db goes back to a copy from before the forget, a hook takes the seqs again and the
-/// source is imported again: the import reads the logs first, so the forgotten record stays out,
-/// and the new record reads.
+/// D1 F2: raw.db goes back to a copy from before the forget and a hook takes the seqs again: the
+/// hook's store reads the logs first, so the forgotten record stays out, and the new record reads.
 #[test]
 fn raw_db_gone_back_keeps_the_new_record_and_not_the_forgotten_one() {
     let root = tempfile::tempdir().unwrap();
@@ -2597,13 +2674,6 @@ fn raw_db_gone_back_keeps_the_new_record_and_not_the_forgotten_one() {
         let _ = std::fs::remove_file(home.join(f));
     }
     std::fs::copy(&old, home.join("raw.db")).unwrap();
-    let source = home.join("native-source.db");
-    let imported = ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(imported.contains("\"records\":0"), "{imported}");
     let fresh = hook_record(&home, "a-new-record-after-the-rollback-5521");
     assert!(ok(run(&home, &["get", &fresh], "")).contains("a-new-record-after-the-rollback-5521"));
     assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
@@ -2626,10 +2696,18 @@ fn an_import_stops_when_a_surviving_forget_request_cannot_be_applied() {
         let _ = std::fs::remove_file(home.join(f));
     }
     std::fs::copy(&old, home.join("raw.db")).unwrap();
+    let projects = home.join("claude/projects/synthetic");
+    std::fs::create_dir_all(&projects).unwrap();
+    let line = serde_json::json!({
+        "type":"user", "sessionId":"unrelated-transcript-session", "cwd":"/synthetic",
+        "timestamp":"2026-09-01T00:00:00.000Z",
+        "message":{"role":"user", "content":"unrelated-transcript-prompt-5531"}
+    });
+    std::fs::write(projects.join("unrelated.jsonl"), format!("{line}\n")).unwrap();
+    let import = ["import", "transcripts", "--agent", "claude", "--yes"];
     let lock = rusqlite::Connection::open(home.join("raw.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let source = home.join("native-source.db");
-    let mut child = command(&home, &["migrate", "--from", source.to_str().unwrap()])
+    let mut child = command(&home, &import)
         .stdin(Stdio::null())
         .spawn()
         .unwrap();
@@ -2643,11 +2721,7 @@ fn an_import_stops_when_a_surviving_forget_request_cannot_be_applied() {
         !out.status.success(),
         "the import continued after failing to apply the surviving request: {error}"
     );
-    ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
+    ok(run(&home, &import, ""));
     assert!(!String::from_utf8_lossy(&run(&home, &["get", &id], "").stdout).contains(CANARY));
 }
 
@@ -2655,7 +2729,7 @@ fn an_import_stops_when_a_surviving_forget_request_cannot_be_applied() {
 /// does not make the same home's forget requests foreign, including a request registered after
 /// the first replacement and reconciled into a copy taken before it.
 #[test]
-fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
+fn replacing_raw_db_twice_keeps_both_forgets() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
@@ -2685,13 +2759,6 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
     );
     historical_v1_forget(&home, &second);
     replace();
-    let source = home.join("native-source.db");
-    let imported = ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(imported.contains("\"records\":0"), "{imported}");
     assert_eq!(
         ok(run(&home, &["forget", "--status"], "")).lines().count(),
         2
@@ -2709,311 +2776,6 @@ fn replacing_raw_db_twice_keeps_both_forgets_and_blocks_reimport() {
         ok(run(&home, &["get", &fresh], ""))
             .contains("unrelated-record-after-two-replacements-382")
     );
-}
-
-/// --finish imports before its confirmation prompt. A rolled-back raw must apply surviving
-/// request logs before that commit, not wait for a worker to hide the new native alias later.
-#[test]
-fn migrate_finish_reconciles_surviving_logs_before_committing_native_records() {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    std::fs::create_dir(&home).unwrap();
-    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
-    let keep = hook_record(&home, "unrelated-before-finish-record-751");
-    let snapshot = root.path().join("raw-before-native-import.db");
-    std::fs::copy(home.join("raw.db"), &snapshot).unwrap();
-    let id = v1_record(&home, CANARY);
-    std::fs::copy(home.join("native-source.db"), home.join("oboete.db")).unwrap();
-    historical_v1_forget(&home, &id);
-    for file in ["raw.db-wal", "raw.db-shm"] {
-        let _ = std::fs::remove_file(home.join(file));
-    }
-    let staged = home.join("raw.db.copy");
-    std::fs::copy(snapshot, &staged).unwrap();
-    std::fs::rename(staged, home.join("raw.db")).unwrap();
-    let mut child = command(&home, &["migrate", "--finish"]).spawn().unwrap();
-    let prompt = b"Delete these files? Type yes to delete them: ";
-    let mut child = FinishChild::new(&mut child, prompt);
-    // finish flushes this prompt after read_pass has committed, then blocks on our answer.
-    // Inspect that exact public CLI boundary before allowing any end-of-command work.
-    let said = child
-        .wait_for_prompt(std::time::Duration::from_secs(20))
-        .unwrap();
-    let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
-    let committed: i64 = db.query_row(
-        "SELECT COUNT(*) FROM records WHERE type='event' AND source='oboete-v1' AND kind='prompt'",
-        [], |r| r.get(0)).unwrap();
-    let denied: i64 = db
-        .query_row("SELECT COUNT(*) FROM denied_records", [], |r| r.get(0))
-        .unwrap();
-    drop(db);
-    child
-        .child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"no\n")
-        .unwrap();
-    let result = child
-        .wait_for_exit(std::time::Duration::from_secs(20))
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(
-        said.ends_with(prompt),
-        "finish never reached its post-import confirmation"
-    );
-    assert_eq!(
-        committed, 0,
-        "--finish committed a forgotten native record before its confirmation"
-    );
-    assert_eq!(
-        denied, 1,
-        "the surviving request was not reconciled before import"
-    );
-    assert!(
-        home.join("oboete.db").exists(),
-        "a no answer deleted the source"
-    );
-    ok(run(&home, &["worker", "--idle-ms", "0"], ""));
-    assert!(
-        !ok(run(
-            &home,
-            &["search", "--all", "--raw", "only", "--", CANARY],
-            ""
-        ))
-        .contains(CANARY)
-    );
-    assert!(ok(run(&home, &["get", &keep], "")).contains("unrelated-before-finish-record-751"));
-    assert_eq!(
-        ok(run(&home, &["forget", "--status"], "")).lines().count(),
-        1
-    );
-}
-
-/// Only the finish confirmation test needs a live child while it inspects the committed DB.
-/// Drain both pipes, bound its waits, and reap/join on every failure, including unwinding.
-struct FinishChild<'a> {
-    child: &'a mut std::process::Child,
-    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
-    signal: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
-}
-
-impl<'a> FinishChild<'a> {
-    fn new(child: &'a mut std::process::Child, prompt: &[u8]) -> Self {
-        use std::io::Read;
-        let (send, signal) = std::sync::mpsc::channel();
-        let mut held = Self {
-            child,
-            stdout: None,
-            stderr: None,
-            signal,
-        };
-        let mut stdout = held.child.stdout.take().expect("piped stdout");
-        let prompt = prompt.to_vec();
-        held.stdout = Some(std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let mut byte = [0];
-            let mut found = false;
-            loop {
-                match stdout.read(&mut byte) {
-                    Ok(0) => {
-                        let _ = send.send(Err("stdout closed before confirmation".into()));
-                        break;
-                    }
-                    Ok(_) => {
-                        out.push(byte[0]);
-                        if !found && out.ends_with(&prompt) {
-                            found = true;
-                            let _ = send.send(Ok(out.clone()));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send.send(Err(format!("stdout read failed: {e}")));
-                        break;
-                    }
-                }
-            }
-            out
-        }));
-        let mut stderr = held.child.stderr.take().expect("piped stderr");
-        held.stderr = Some(std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let _ = stderr.read_to_end(&mut out);
-            out
-        }));
-        held
-    }
-
-    fn wait_for_prompt(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
-        match self.signal.recv_timeout(timeout) {
-            Ok(Ok(out)) => Ok(out),
-            Ok(Err(why)) => Err(self.failure(&why)),
-            Err(why) => Err(self.failure(&format!("confirmation wait failed: {why}"))),
-        }
-    }
-
-    fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<Output, String> {
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => {
-                    let (stdout, stderr) = self.join_readers();
-                    return Ok(Output {
-                        status,
-                        stdout,
-                        stderr,
-                    });
-                }
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Ok(None) => return Err(self.failure("child did not exit after its answer")),
-                Err(e) => return Err(self.failure(&format!("child wait failed: {e}"))),
-            }
-        }
-    }
-
-    fn join_readers(&mut self) -> (Vec<u8>, Vec<u8>) {
-        let join = |reader: Option<std::thread::JoinHandle<Vec<u8>>>| {
-            reader
-                .and_then(|reader| reader.join().ok())
-                .unwrap_or_default()
-        };
-        (join(self.stdout.take()), join(self.stderr.take()))
-    }
-
-    fn failure(&mut self, why: &str) -> String {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let (stdout, stderr) = self.join_readers();
-        format!(
-            "{why}\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&stdout),
-            String::from_utf8_lossy(&stderr)
-        )
-    }
-}
-
-impl Drop for FinishChild<'_> {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.join_readers();
-    }
-}
-
-/// Real owned children emit a wrong prompt and stall or close their output. A failure must
-/// report both pipes and reap them; a panic after the expected prompt must reap them too.
-#[cfg(any(unix, windows))]
-#[test]
-fn finish_prompt_wait_cleans_up_wrong_or_stalled_owned_children() {
-    use std::time::{Duration, Instant};
-    const PROMPT: &[u8] = b"synthetic expected confirmation: ";
-    // On a loaded Windows runner a PowerShell child has written nothing within 20 s. The eof and
-    // panic children end the wait as soon as they write, so only a child that never starts
-    // reaches START; the stall child marks `ready` once both pipes are written, so STALL times
-    // the stall alone.
-    const START: Duration = Duration::from_secs(120);
-    const STALL: Duration = Duration::from_secs(2);
-    for mode in ["stall", "eof", "panic"] {
-        let home = tempfile::tempdir().unwrap();
-        let mut child = finish_fixture_command(mode)
-            .env("HOME", home.path())
-            .env("USERPROFILE", home.path())
-            .env("CODEX_HOME", home.path().join("codex"))
-            .env("CLAUDE_CONFIG_DIR", home.path().join("claude"))
-            .current_dir(home.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        if mode == "panic" {
-            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut held = FinishChild::new(&mut child, PROMPT);
-                held.wait_for_prompt(START).unwrap();
-                panic!("synthetic failure while holding the finish child");
-            }));
-            let failed = failed.expect_err("the synthetic panic did not run");
-            assert_eq!(
-                failed.downcast_ref::<&str>(),
-                Some(&"synthetic failure while holding the finish child")
-            );
-        } else {
-            let mut held = FinishChild::new(&mut child, PROMPT);
-            let timeout = if mode == "stall" {
-                let started = Instant::now();
-                while !home.path().join("ready").exists() {
-                    assert!(started.elapsed() < START, "the stall child did not start");
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                STALL
-            } else {
-                START
-            };
-            let failed = held.wait_for_prompt(timeout).unwrap_err();
-            assert!(failed.contains("synthetic wrong prompt"), "{failed}");
-            assert!(failed.contains("synthetic child stderr"), "{failed}");
-            assert!(held.stdout.is_none() && held.stderr.is_none());
-        }
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "{mode} child was not reaped"
-        );
-    }
-}
-
-/// Fixed native builtins own the pipes: no test-binary lookup, environment fixture flag,
-/// shell descendants, or owner profile is needed to keep a child waiting on piped stdin.
-#[cfg(unix)]
-fn finish_fixture_command(mode: &str) -> Command {
-    let script = match mode {
-        "panic" => {
-            "printf '%s' 'synthetic expected confirmation: '; printf '%s\\n' 'synthetic child stderr' >&2; IFS= read -r answer"
-        }
-        "eof" => {
-            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2"
-        }
-        "stall" => {
-            "printf '%s' 'synthetic wrong prompt: '; printf '%s\\n' 'synthetic child stderr' >&2; : > ready; IFS= read -r answer"
-        }
-        _ => panic!("unknown synthetic child mode"),
-    };
-    let mut command = Command::new("/bin/sh");
-    command.env_clear().args(["-c", script]);
-    command
-}
-
-#[cfg(windows)]
-fn finish_fixture_command(mode: &str) -> Command {
-    let script = match mode {
-        "panic" => {
-            "[Console]::Out.Write('synthetic expected confirmation: '); [Console]::Error.WriteLine('synthetic child stderr'); [void][Console]::In.ReadLine()"
-        }
-        "eof" => {
-            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr')"
-        }
-        "stall" => {
-            "[Console]::Out.Write('synthetic wrong prompt: '); [Console]::Error.WriteLine('synthetic child stderr'); [IO.File]::WriteAllText('ready', ''); [void][Console]::In.ReadLine()"
-        }
-        _ => panic!("unknown synthetic child mode"),
-    };
-    let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot");
-    let executable = std::path::PathBuf::from(&system_root)
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut command = Command::new(executable);
-    command.env_clear().env("SystemRoot", system_root).args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]);
-    command
 }
 
 /// F1 after F2: record backups carry the same home's identity after its appending device
@@ -3054,13 +2816,6 @@ fn restoring_a_copied_stores_backup_keeps_its_forget_log() {
         ok(run(&home, &["forget", "--status"], "")).lines().count(),
         1
     );
-    let source = home.join("native-source.db");
-    let imported = ok(run(
-        &home,
-        &["migrate", "--from", source.to_str().unwrap()],
-        "",
-    ));
-    assert!(imported.contains("\"records\":0"), "{imported}");
 }
 
 /// D1 limit (F3): raw.db, both request logs and the backups made since the forget lost (an older

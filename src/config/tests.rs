@@ -1169,3 +1169,59 @@ fn the_summary_language_follows_the_computer_unless_set() {
         );
     }
 }
+
+/// R05, A106: a home can still hold the config.toml oboete v1 wrote: it loads with its providers
+/// in order, their models, and the key files by path.
+#[test]
+fn a_v1_config_loads() {
+    let home = tempfile::tempdir().unwrap();
+    let text = r#"gemini = "after-subscriptions"
+
+[[providers]]
+kind = "openai"
+name = "groq"
+base_url = "https://api.groq.com/openai/v1"
+key_file = "/k/GROQ_KEY.md"
+model = "llama-3.3-70b-versatile"
+
+[[providers]]
+kind = "cli"
+name = "codex"
+cli = "codex"
+model = "gpt-5.5"
+
+[embedding]
+provider = "workers-ai"
+account_id = "acct"
+key_file = "/k/CF_WORKERS_AI_KEY.md"
+"#;
+    std::fs::write(home.path().join("config.toml"), text).unwrap();
+    let cfg = load(home.path()).unwrap();
+    let chain: Vec<(&str, Option<&str>, Option<&Path>)> = cfg
+        .providers
+        .iter()
+        .map(|p| match p {
+            Provider::Openai {
+                name,
+                model,
+                key_file,
+                ..
+            } => (name.as_str(), Some(model.as_str()), key_file.as_deref()),
+            Provider::Cli { name, model, .. } => (name.as_str(), model.as_deref(), None),
+        })
+        .collect();
+    assert_eq!(
+        chain[..2],
+        [
+            (
+                "groq",
+                Some("llama-3.3-70b-versatile"),
+                Some(Path::new("/k/GROQ_KEY.md"))
+            ),
+            ("codex", Some("gpt-5.5"), None),
+        ]
+    );
+    assert_eq!(chain.last().map(|c| c.0), Some("gemini"));
+    assert_eq!(cfg.embedding.key_file, Path::new("/k/CF_WORKERS_AI_KEY.md"));
+    assert!(!cfg.summary.curate);
+}

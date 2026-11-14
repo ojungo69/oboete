@@ -37,10 +37,10 @@ fn doctor_names_a_cli_curator_that_is_always_skipped() {
 #[test]
 fn doctor_reports_past_a_store_it_cannot_read() {
     let home = tempfile::tempdir().unwrap();
-    for db in ["knowledge.db", "oboete.db", "providers.db"] {
+    for db in ["knowledge.db", "providers.db"] {
         std::fs::write(
             home.path().join(db),
-            "not a database, one of three damaged stores",
+            "not a database, one of two damaged stores",
         )
         .unwrap();
     }
@@ -50,35 +50,21 @@ fn doctor_reports_past_a_store_it_cannot_read() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    for db in ["knowledge.db", "oboete.db", "providers.db"] {
+    for db in ["knowledge.db", "providers.db"] {
         assert!(text.contains(&format!("cannot read {db}")), "{db}: {text}");
     }
     assert!(text.contains("providers (chain order):"), "{text}");
     assert!(!out.status.success());
 }
 
-/// The legacy oboete.db section counts each of its tables, and a readable store is healthy and
-/// left as it was (doctor opens it read only, spec 7.4). Its lines, v1's calls among them, say
-/// they are v1's (#542).
+/// Decision 99 (2026-11-12): a store of oboete v1 is one line that says this build no longer
+/// migrates it, with a build that still does. Doctor does not open it: it is left as it was, and
+/// one that is not a database is not "cannot read".
 #[test]
-fn doctor_counts_the_tables_of_a_legacy_store() {
+fn doctor_names_a_v1_store_in_one_line_and_leaves_it_as_it_was() {
     let home = tempfile::tempdir().unwrap();
     let db = home.path().join("oboete.db");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO meta VALUES('device_id', 'd1');
-             CREATE TABLE sessions(id TEXT); CREATE TABLE events(id INTEGER);
-             CREATE TABLE observations(id INTEGER); CREATE TABLE summaries(id INTEGER);
-             INSERT INTO sessions VALUES('a'), ('b');
-             INSERT INTO events VALUES(1), (2), (3);
-             INSERT INTO observations VALUES(1);
-             CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER, provider TEXT,
-               outcome TEXT, ms INTEGER, detail TEXT);
-             INSERT INTO provider_calls VALUES(1, 1000, 'v1-embedder', 'ok', 12, NULL);",
-        )
-        .unwrap();
+    std::fs::write(&db, "not a database: doctor never opens it").unwrap();
     let bytes = std::fs::read(&db).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
         .args(["--home", &home.path().to_string_lossy(), "doctor"])
@@ -86,27 +72,47 @@ fn doctor_counts_the_tables_of_a_legacy_store() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
-    let at = |start: &str| {
-        lines
-            .iter()
-            .position(|l| l.starts_with(start))
-            .unwrap_or_else(|| panic!("no {start:?} line in {text}"))
-    };
-    assert_eq!(
-        lines[at("  v1 (")],
-        "  v1 (kept until `oboete migrate --finish`): sessions 2 | raw events 3 | observations 1 | summaries 0"
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("oboete.db")).collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        lines[0].starts_with("  oboete.db: a store of oboete v1, which this build no longer migrates: migrate it with the trial build v0.1.0-trial.2, "),
+        "{text}"
     );
-    assert_eq!(
-        lines[at("  v1's last provider calls:") + 1],
-        "    v1-embedder ok 12ms"
+    assert!(
+        lines[0].ends_with("(`oboete migrate`, then `oboete migrate --finish`)"),
+        "{text}"
     );
-    assert!(!text.contains("cannot read oboete.db"), "{text}");
-    assert_eq!(
-        lines[at("  v1 events not migrated yet:")],
-        "  v1 events not migrated yet: 3 (`oboete migrate` imports them)"
-    );
+    assert!(!text.contains("cannot read"), "{text}");
+    assert!(!text.contains("v1 events not migrated"), "{text}");
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
+}
+
+/// The home's evaluation copies (`<home>/eval`), which forget does not reach, are one line with
+/// their size: the bytes of the files under it, at any depth.
+#[test]
+fn doctor_names_the_evaluation_copies_with_their_size() {
+    let home = tempfile::tempdir().unwrap();
+    let eval = home.path().join("eval");
+    std::fs::create_dir_all(eval.join("run-1")).unwrap();
+    std::fs::write(eval.join("a.jsonl"), "x".repeat(300)).unwrap();
+    std::fs::write(eval.join("run-1").join("b.db"), "y".repeat(200)).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .args(["--home", &home.path().to_string_lossy(), "doctor"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.contains("evaluation copies"))
+        .unwrap_or_else(|| panic!("no evaluation copies line in {text}"));
+    assert_eq!(
+        line,
+        format!(
+            "  evaluation copies, which forget does not reach: {} (500 bytes)",
+            eval.display()
+        )
+    );
 }
 
 /// #542: doctor shows the home's own provider calls from providers.db, whatever their role, with

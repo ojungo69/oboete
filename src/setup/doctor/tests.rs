@@ -162,52 +162,30 @@ fn w6d_unknown_runtime_leaf_is_incomplete_without_inventing_a_failure() {
 }
 
 #[test]
-fn w6d_retained_metadata_has_fixed_categories_and_native_byte_totals() {
+fn w6d_retained_metadata_counts_evaluation_copies_and_nothing_else() {
     let root = tempfile::tempdir().unwrap();
     let empty = serde_json::to_value(doctor_report(root.path())).unwrap();
-    let rows = empty["checks"]["retained"]["categories"]
-        .as_array()
-        .unwrap();
-    assert_eq!(rows.len(), 7);
-    for row in rows {
-        assert_eq!(row["present"]["value"], false);
-        assert_eq!(row["targets"]["value"], 0);
-        assert_eq!(row["bytes"]["value"], 0);
-    }
-    for (name, size) in [
-        ("oboete.db", 4),
-        ("memory.db", 3),
-        ("memory.db-wal", 5),
-        ("pre-snapshot.db", 6),
-    ] {
+    let retained = &empty["checks"]["retained"];
+    assert_eq!(retained["state"], "known");
+    assert_eq!(retained["evaluation_copies"]["present"]["value"], false);
+    assert_eq!(retained["evaluation_copies"]["bytes"]["value"], 0);
+    // v1's old files are no longer a category of their own (decision 99, 2026-11-12).
+    for (name, size) in [("memory.db", 3), ("pre-snapshot.db", 6)] {
         std::fs::write(root.path().join(name), vec![b'x'; size]).unwrap();
     }
-    for (name, size) in [
-        ("pre-rollout-private", 7),
-        ("spool", 0),
-        ("cache", 8),
-        ("logs", 9),
-        ("eval", 10),
-    ] {
+    for (name, size) in [("cache", 8), ("eval", 10)] {
         let directory = root.path().join(name);
         std::fs::create_dir(&directory).unwrap();
-        if size > 0 {
-            std::fs::write(
-                directory.join("private-child-never-public"),
-                vec![b'y'; size],
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            directory.join("private-child-never-public"),
+            vec![b'y'; size],
+        )
+        .unwrap();
     }
     let report = serde_json::to_value(doctor_report(root.path())).unwrap();
     let retained = &report["checks"]["retained"];
     assert_eq!(retained["state"], "known");
-    for (index, expected) in [4, 8, 6, 7, 0, 8, 9].into_iter().enumerate() {
-        let row = &retained["categories"][index];
-        assert_eq!(row["present"]["value"], true);
-        assert_eq!(row["bytes"]["value"], expected);
-        assert_eq!(row["targets"]["value"], if index == 1 { 2 } else { 1 });
-    }
+    assert!(retained.get("categories").is_none(), "{retained}");
     assert_eq!(retained["evaluation_copies"]["present"]["value"], true);
     assert_eq!(retained["evaluation_copies"]["bytes"]["value"], 10);
     assert!(!report.to_string().contains("private-child-never-public"));
@@ -216,7 +194,8 @@ fn w6d_retained_metadata_has_fixed_categories_and_native_byte_totals() {
 #[test]
 fn w6d_retained_growth_invalidates_only_affected_bytes() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("memory.db");
+    std::fs::create_dir(root.path().join("eval")).unwrap();
+    let path = root.path().join("eval/copy");
     std::fs::write(&path, b"one").unwrap();
     AFTER_COLLECTION.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
@@ -226,14 +205,12 @@ fn w6d_retained_growth_invalidates_only_affected_bytes() {
     let report = serde_json::to_value(doctor_report(root.path())).unwrap();
     let retained = &report["checks"]["retained"];
     assert_eq!(retained["state"], "changed");
-    let row = &retained["categories"][1];
+    let row = &retained["evaluation_copies"];
     assert_eq!(row["present"]["value"], true);
-    assert_eq!(row["targets"]["value"], 1);
     assert_eq!(
         row["bytes"],
         serde_json::json!({"state":"changed","value":null})
     );
-    assert_eq!(retained["categories"][0]["bytes"]["value"], 0);
     assert_eq!(report["checks"]["raw"]["integrity"], "absent");
     assert_eq!(report["checks"]["source_stability"], "changed");
 }
@@ -249,24 +226,17 @@ fn w6d_retained_symlinks_count_the_link_without_walking_its_target() {
     std::fs::create_dir(&target).unwrap();
     std::fs::write(target.join("never-count-this"), [0u8; 1000]).unwrap();
     symlink(&target, home.join("eval")).unwrap();
-    symlink(&target, home.join("memory.db")).unwrap();
-    symlink(&target, home.join("cache")).unwrap();
-    std::fs::create_dir(home.join("spool")).unwrap();
-    symlink(&target, home.join("spool/nested")).unwrap();
     let own = std::fs::symlink_metadata(home.join("eval")).unwrap().len();
     let report = serde_json::to_value(doctor_report(&home)).unwrap();
     let retained = &report["checks"]["retained"];
     assert_eq!(retained["state"], "known");
-    assert_eq!(retained["categories"][1]["bytes"]["value"], own);
-    assert_eq!(retained["categories"][4]["bytes"]["value"], own);
-    assert_eq!(retained["categories"][5]["present"]["value"], false);
     assert_eq!(retained["evaluation_copies"]["present"]["value"], true);
     assert_eq!(retained["evaluation_copies"]["bytes"]["value"], own);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn w6d_retained_matching_fifo_is_metadata_only_without_a_data_open() {
+fn w6d_retained_fifo_named_eval_is_metadata_only_without_a_data_open() {
     use std::{
         io::Read,
         os::{
@@ -275,7 +245,7 @@ fn w6d_retained_matching_fifo_is_metadata_only_without_a_data_open() {
         },
     };
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("pre-only-metadata.db");
+    let path = root.path().join("eval");
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: owned synthetic path, no existing file.
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
@@ -288,14 +258,9 @@ fn w6d_retained_matching_fifo_is_metadata_only_without_a_data_open() {
         unsafe { libc::inotify_add_watch(watcher.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) } >= 0
     );
     let report = serde_json::to_value(doctor_report(root.path())).unwrap();
-    assert_eq!(
-        report["checks"]["retained"]["categories"][2]["targets"]["value"],
-        1
-    );
-    assert_eq!(
-        report["checks"]["retained"]["categories"][2]["bytes"]["value"],
-        0
-    );
+    let row = &report["checks"]["retained"]["evaluation_copies"];
+    assert_eq!(row["present"]["value"], false);
+    assert_eq!(row["bytes"]["value"], 0);
     assert!(
         matches!(watcher.read(&mut [0u8;64]),Err(error) if error.kind()==ErrorKind::WouldBlock)
     );
@@ -1383,71 +1348,30 @@ fn w6d_unknown_card_or_summary_waiting_counts_leave_the_report_incomplete() {
     assert_eq!(complete(), true);
 }
 
-fn legacy_fixture(home: &Path) -> Connection {
-    let conn = Connection::open(home.join("oboete.db")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE meta(key TEXT,value TEXT);
-             INSERT INTO meta VALUES('device_id','owned-v1');
-             CREATE TABLE events(id INTEGER);
-             INSERT INTO events VALUES(1),(2),(3);",
-    )
-    .unwrap();
-    conn
-}
-
+/// Decision 99 (2026-11-12): a store of oboete v1 is named by its presence only. Doctor neither
+/// opens nor counts it, and the report is neither unhealthy nor incomplete for it.
 #[test]
-fn w6d_absent_raw_establishes_zero_through_but_damaged_raw_does_not() {
+fn w6d_a_v1_store_is_named_by_its_presence_only() {
     let home = tempfile::tempdir().unwrap();
-    let _legacy = legacy_fixture(home.path());
-    let absent = serde_json::to_value(doctor_report(home.path())).unwrap();
-    assert_eq!(absent["checks"]["legacy"]["remaining_events"]["value"], 3);
-    assert_eq!(
-        absent["checks"]["legacy"]["remaining_events"]["state"],
-        "known"
-    );
-    std::fs::write(home.path().join("raw.db"), b"owned damaged fixture").unwrap();
-    let damaged = serde_json::to_value(doctor_report(home.path())).unwrap();
-    assert_eq!(
-        damaged["checks"]["legacy"]["remaining_events"]["state"],
-        "damaged"
-    );
-    assert_eq!(
-        damaged["checks"]["legacy"]["remaining_events"]["value"],
-        serde_json::Value::Null
-    );
-    assert_eq!(damaged["checks"]["legacy"]["events"]["value"], 3);
-}
-
-#[test]
-fn w6d_raw_change_invalidates_remaining_but_keeps_legacy_counts() {
-    let home = tempfile::tempdir().unwrap();
-    let _legacy = legacy_fixture(home.path());
-    let mut raw = crate::raw::open(home.path()).unwrap();
-    raw.append_ops(&[(
-        crate::raw::OpKind::Migration,
-        serde_json::json!({"key":"oboete-v1:owned-v1","through":1}),
-    )])
-    .unwrap();
-    let source = home.path().join("raw.db");
-    AFTER_COLLECTION.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
-            let writer = Connection::open(source).unwrap();
-            writer
-                .execute_batch("UPDATE ops SET body=json_set(body,'$.through',2);")
-                .unwrap();
-        }));
-    });
+    let store = home.path().join("oboete.db");
+    std::fs::write(&store, b"not a database: never opened").unwrap();
     let report = serde_json::to_value(doctor_report(home.path())).unwrap();
-    assert_eq!(report["checks"]["raw"]["integrity"], "changed");
     assert_eq!(
-        report["checks"]["legacy"]["remaining_events"]["state"],
-        "changed"
+        report["stores"]["legacy"],
+        serde_json::json!({"file":"present","wal":"absent"})
     );
+    assert!(report["checks"].get("legacy").is_none(), "{report}");
+    assert_eq!(report["unhealthy"], serde_json::json!([]));
+    assert_eq!(report["checks"]["source_stability"], "known");
     assert_eq!(
-        report["checks"]["legacy"]["remaining_events"]["value"],
-        serde_json::Value::Null
+        std::fs::read(&store).unwrap(),
+        b"not a database: never opened"
     );
-    assert_eq!(report["checks"]["legacy"]["events"]["value"], 3);
+    let names: Vec<_> = std::fs::read_dir(home.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["oboete.db"]);
 }
 
 #[test]
@@ -1478,28 +1402,6 @@ fn w6d_an_observed_change_stays_changed_after_the_original_file_returns() {
         report["checks"]["source_stability"], "changed",
         "Doctor forgot a change already observed during collection"
     );
-}
-
-#[test]
-fn w6d_late_legacy_creation_is_changed_instead_of_absent() {
-    let home = tempfile::tempdir().unwrap();
-    let source = home.path().join("oboete.db");
-    AFTER_COLLECTION.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
-            let writer = Connection::open(source).unwrap();
-            writer
-                .execute_batch("CREATE TABLE events(id INTEGER); INSERT INTO events VALUES(1);")
-                .unwrap();
-        }));
-    });
-    let report = serde_json::to_value(doctor_report(home.path())).unwrap();
-    assert_eq!(report["checks"]["legacy"]["events"]["state"], "changed");
-    assert_eq!(
-        report["checks"]["legacy"]["events"]["value"],
-        serde_json::Value::Null
-    );
-    assert_eq!(report["checks"]["raw"]["integrity"], "absent");
-    assert_eq!(report["checks"]["source_stability"], "changed");
 }
 
 #[test]

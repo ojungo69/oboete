@@ -9122,3 +9122,133 @@ fn grok_camelcase_fields_and_resume_without_injection() {
     assert_eq!(hook(&dir, "grok", "PreToolUse", &g_tool), "");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// MUST-M9: `oboete-v1` records move neither the manifest's facts nor its count of records not
+/// yet curated.
+#[test]
+fn imported_v1_records_never_move_the_manifest_or_backlog() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let live = |text: &str, ts: i64| crate::raw::Event {
+        session: "L".into(),
+        kind: "prompt".into(),
+        repo: Some("github.com/o/r".into()),
+        ts,
+        body: json!({"prompt": text}).to_string(),
+        ..crate::raw::test_event("")
+    };
+    raw.append(&live("Live prompt.", 1_000)).unwrap();
+    crate::worker::run_once(home.path()).unwrap();
+    let settings = crate::capture::Settings::default();
+    // The backlog's age in minutes moves with the clock between the two reads.
+    let age = regex::Regex::new(r"/ \d+ min").unwrap();
+    let manifest = |raw: &crate::raw::Raw| {
+        crate::hook::start_text_read(
+            home.path(),
+            Some(raw),
+            "github.com/o/r",
+            "",
+            "L",
+            &settings,
+            true,
+            false,
+        )
+        .unwrap()
+        .map(|m| age.replace_all(&m.text, "/ _ min").into_owned())
+    };
+    let before = manifest(&raw);
+    assert!(
+        before
+            .as_deref()
+            .is_some_and(|m| m.contains("Live prompt.")),
+        "{before:?}"
+    );
+    // A v1 prompt and failed tool call, with the hook fields the v1 migration made of v1's.
+    let v1 = crate::capture::Settings {
+        source: "oboete-v1",
+        ..crate::capture::Settings::default()
+    };
+    let mut records = Vec::new();
+    for (event, ts, payload) in [
+        (
+            "UserPromptSubmit",
+            2_100,
+            json!({"session_id": "s1", "prompt": "Old prompt."}),
+        ),
+        (
+            "PostToolUseFailure",
+            2_200,
+            json!({"session_id": "s1", "tool_name": "Bash", "tool_input": "make",
+                "tool_response": "boom"}),
+        ),
+    ] {
+        records.extend(crate::capture::imported(
+            "claude",
+            event,
+            &payload,
+            ts,
+            "github.com/o/r",
+            None,
+            &v1,
+        ));
+    }
+    assert_eq!(records.len(), 2);
+    raw.append_imported_under(&records, &[], &v1, None).unwrap();
+    crate::worker::run_once(home.path()).unwrap();
+    assert_eq!(manifest(&raw), before);
+}
+
+/// D5: the documents of oboete v1 the v1 migration stored as import ops (`oboete-v1:<device>`),
+/// under their uids, are resolved by the worker and never injected at a session's start.
+#[test]
+fn imported_v1_documents_resolve_and_are_never_injected() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let doc = |uid: &str, id: &str, kind: &str, title: &str, body: &str| crate::raw::ImportDoc {
+        uid: uid.into(),
+        source: "oboete-v1:d1e5".into(),
+        source_id: id.into(),
+        kind: kind.into(),
+        repo: "github.com/o/r".into(),
+        session: "s1".into(),
+        ts: 110,
+        title: title.into(),
+        body: body.into(),
+    };
+    raw.append_imports(vec![
+        doc("d1e5:o1", "o1", "decision", "Tabs", "We use tabs."),
+        doc(
+            "claude-mem:abc:o5",
+            "o2",
+            "decision",
+            "Imported",
+            "From claude-mem.",
+        ),
+        doc("d1e5:s1", "s1", "summary", "", "Request: tabs"),
+        doc("d1e5:p1", "p1", "prompt", "", "use tabs"),
+    ])
+    .unwrap();
+    drop(raw);
+    crate::worker::run_once(home.path()).unwrap();
+    let k = crate::knowledge::open(home.path()).unwrap();
+    let resolved: i64 = k
+        .query_row("SELECT count(*) FROM imported", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(resolved, 4);
+    let raw = crate::raw::open(home.path()).unwrap();
+    let settings = crate::capture::Settings::default();
+    let shown = crate::hook::start_text_read(
+        home.path(),
+        Some(&raw),
+        "github.com/o/r",
+        "",
+        "s1",
+        &settings,
+        true,
+        false,
+    )
+    .unwrap()
+    .map(|s| s.text)
+    .unwrap_or_default();
+    assert!(!shown.contains("We use tabs."), "{shown}");
+}

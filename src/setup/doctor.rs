@@ -46,7 +46,6 @@ pub(crate) struct DoctorReport {
 struct Checks {
     raw: RawChecks,
     knowledge: KnowledgeChecks,
-    legacy: LegacyChecks,
     embeddings: EmbeddingChecks,
     providers: LedgerChecks,
     backups: BackupChecks,
@@ -64,7 +63,6 @@ enum UnhealthyCode {
     LowFreeSpace,
     RawDamaged,
     KnowledgeDamaged,
-    LegacyDamaged,
     ProvidersDamaged,
     BackupChecksumMissing,
     BackupChecksumMismatch,
@@ -102,18 +100,6 @@ impl Checks {
                     && self.knowledge.rewinds.count.value.is_some_and(|count| {
                         count == 0 || self.knowledge.rewinds.last_at_ms.is_some()
                     });
-        let legacy = matches!(self.legacy.integrity, CheckState::Absent)
-            || [
-                self.legacy.integrity,
-                self.legacy.sessions.state,
-                self.legacy.events.state,
-                self.legacy.observations.state,
-                self.legacy.summaries.state,
-                self.legacy.remaining_events.state,
-            ]
-            .into_iter()
-            .all(|state| matches!(state, CheckState::Known))
-                && self.legacy.recent.complete();
         let embedding = matches!(self.embeddings.state, CheckState::Off | CheckState::Absent)
             || [
                 self.embeddings.state,
@@ -128,7 +114,6 @@ impl Checks {
             .into_iter()
             .all(|state| matches!(state, CheckState::Known));
         raw && knowledge
-            && legacy
             && embedding
             && self.providers.complete()
             && self.backups.complete()
@@ -147,7 +132,6 @@ impl Checks {
         for (state, code) in [
             (self.raw.integrity, UnhealthyCode::RawDamaged),
             (self.knowledge.integrity, UnhealthyCode::KnowledgeDamaged),
-            (self.legacy.integrity, UnhealthyCode::LegacyDamaged),
             (self.providers.integrity, UnhealthyCode::ProvidersDamaged),
         ] {
             if matches!(state, CheckState::Damaged) {
@@ -163,7 +147,6 @@ impl Checks {
 enum Database {
     Raw,
     Knowledge,
-    Legacy,
     Providers,
 }
 
@@ -423,7 +406,6 @@ fn database_path(home: &Path, database: Database) -> Result<Option<PathBuf>> {
     let path = match database {
         Database::Raw => return raw_path(home),
         Database::Knowledge => home.join("knowledge.db"),
-        Database::Legacy => home.join("oboete.db"),
         Database::Providers => home.join("providers.db"),
     };
     match super::diagnostic_metadata(&path) {
@@ -954,69 +936,6 @@ impl RecentCalls {
     }
 }
 
-#[derive(Serialize)]
-struct LegacyChecks {
-    integrity: CheckState,
-    sessions: Count,
-    events: Count,
-    observations: Count,
-    summaries: Count,
-    recent: RecentCalls,
-    remaining_events: Count,
-    #[serde(skip)]
-    remaining_dependency: bool,
-}
-
-impl LegacyChecks {
-    fn unknown(state: CheckState) -> Self {
-        Self {
-            integrity: state,
-            sessions: Count::unknown(state),
-            events: Count::unknown(state),
-            observations: Count::unknown(state),
-            summaries: Count::unknown(state),
-            recent: RecentCalls { state, calls: None },
-            remaining_events: Count::unknown(state),
-            remaining_dependency: false,
-        }
-    }
-}
-
-fn recent_calls(conn: &Connection) -> RecentCalls {
-    let result = (|| -> Result<Option<Vec<CallSummary>>> {
-        if !has_columns(
-            conn,
-            "provider_calls",
-            &["id", "provider", "outcome", "ms", "detail"],
-        )? {
-            return Ok(None);
-        }
-        Ok(Some(
-            crate::migrate::legacy_call_rows_in(conn)?
-                .into_iter()
-                .map(|row| CallSummary {
-                    outcome: call_outcome(&row.outcome),
-                    ms: (row.ms >= 0).then_some(row.ms),
-                })
-                .collect(),
-        ))
-    })();
-    match result {
-        Ok(Some(calls)) => RecentCalls {
-            state: CheckState::Known,
-            calls: Some(calls),
-        },
-        Ok(None) => RecentCalls {
-            state: CheckState::SchemaMissing,
-            calls: None,
-        },
-        Err(error) => RecentCalls {
-            state: error_state(&error),
-            calls: None,
-        },
-    }
-}
-
 fn call_outcome(outcome: &str) -> &'static str {
     match outcome {
         "ok" => "ok",
@@ -1038,127 +957,13 @@ fn call_outcome(outcome: &str) -> &'static str {
     }
 }
 
-fn legacy_through(
-    raw: std::result::Result<Option<&Connection>, CheckState>,
-    key: &str,
-) -> std::result::Result<i64, CheckState> {
-    let Some(raw) = raw? else {
-        return Ok(0);
-    };
-    if !has_columns(raw, "ops", &["op_seq", "type", "body"]).map_err(|error| error_state(&error))? {
-        return Err(CheckState::SchemaMissing);
-    }
-    let mut checkpoints =
-        crate::raw::migration_checkpoints_in(raw, key).map_err(|error| error_state(&error))?;
-    Ok(checkpoints
-        .remove(key)
-        .map_or(0, |checkpoint| checkpoint.through))
-}
-
-fn remaining_events(
-    conn: &Connection,
-    raw: std::result::Result<Option<&Connection>, CheckState>,
-) -> (Count, bool) {
-    let key = match has_columns(conn, "meta", &["key", "value"]) {
-        Ok(false) => return (Count::unknown(CheckState::SchemaMissing), false),
-        Err(error) => return (Count::unknown(error_state(&error)), false),
-        Ok(true) => match crate::migrate::legacy_key_in(conn) {
-            Ok(Some(key)) => key,
-            Ok(None) => return (Count::unknown(CheckState::Unavailable), false),
-            Err(error) => return (Count::unknown(error_state(&error)), false),
-        },
-    };
-    match has_columns(conn, "events", &["id"]) {
-        Ok(false) => return (Count::unknown(CheckState::SchemaMissing), false),
-        Err(error) => return (Count::unknown(error_state(&error)), false),
-        Ok(true) => {}
-    }
-    let through = match legacy_through(raw, &key) {
-        Ok(through) => through,
-        Err(state) => return (Count::unknown(state), true),
-    };
-    let count = match crate::migrate::legacy_remaining_in(conn, through) {
-        Ok(value) => Count {
-            state: CheckState::Known,
-            value: Some(value),
-        },
-        Err(error) => Count::unknown(error_state(&error)),
-    };
-    (count, true)
-}
-
-fn legacy_queries(
-    conn: &Connection,
-    raw: std::result::Result<Option<&Connection>, CheckState>,
-) -> LegacyChecks {
-    let integrity = match crate::db::quick_check(conn, "oboete.db") {
-        Ok(()) => CheckState::Known,
-        Err(error) if error.downcast_ref::<rusqlite::Error>().is_none() => CheckState::Damaged,
-        Err(error) => error_state(&error),
-    };
-    if !matches!(integrity, CheckState::Known) {
-        return LegacyChecks::unknown(integrity);
-    }
-    let [sessions, events, observations, summaries] = crate::migrate::legacy_counts_in(conn);
-    let (remaining_events, remaining_dependency) = remaining_events(conn, raw);
-    LegacyChecks {
-        integrity,
-        sessions: count(conn, "sessions", &[], || Ok(sessions?)),
-        events: count(conn, "events", &[], || Ok(events?)),
-        observations: count(conn, "observations", &[], || Ok(observations?)),
-        summaries: count(conn, "summaries", &[], || Ok(summaries?)),
-        recent: recent_calls(conn),
-        remaining_events,
-        remaining_dependency,
-    }
-}
-
-fn raw_and_legacy(
-    home: &Path,
-    raw_before: &Result<Vec<SourceStamp>>,
-    legacy_before: &Result<Vec<SourceStamp>>,
-) -> (RawChecks, LegacyChecks) {
-    let mut legacy_result = None;
-    let raw_result = copy_checks(home, Database::Raw, raw_before, |conn| {
-        let checks = raw_queries(conn);
-        let evidence = if matches!(checks.integrity, CheckState::Known) {
-            Ok(Some(conn))
-        } else {
-            Err(checks.integrity)
-        };
-        legacy_result = Some(copy_checks(home, Database::Legacy, legacy_before, |v1| {
-            legacy_queries(v1, evidence)
-        }));
-        checks
-    });
-    let raw_failure = raw_result.as_ref().err().copied();
-    let raw = raw_result.unwrap_or_else(RawChecks::unknown);
-    let mut legacy = legacy_result
-        .unwrap_or_else(|| {
-            copy_checks(home, Database::Legacy, legacy_before, |v1| {
-                let evidence = match raw_failure {
-                    Some(CheckState::Absent) => Ok(None),
-                    Some(state) => Err(state),
-                    None => Err(CheckState::Unavailable),
-                };
-                legacy_queries(v1, evidence)
-            })
-        })
-        .unwrap_or_else(LegacyChecks::unknown);
-    if let Some(state) = raw_failure
-        && !matches!(state, CheckState::Absent)
-        && legacy.remaining_dependency
-    {
-        legacy.remaining_events = Count::unknown(state);
-    }
-    (raw, legacy)
-}
-
 #[derive(Serialize)]
 struct Stores {
     raw: StorePresence,
     raw_restored: StorePresence,
     knowledge: StorePresence,
+    /// `oboete.db`, a store of oboete v1, by its metadata only: this build no longer opens or
+    /// migrates it (decision 99, 2026-11-12).
     legacy: StorePresence,
     providers: StorePresence,
 }
@@ -1216,7 +1021,6 @@ fn store(home: &Path, name: &str) -> StorePresence {
 pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
     let raw_before = observed(home, Database::Raw);
     let knowledge_before = observed(home, Database::Knowledge);
-    let legacy_before = observed(home, Database::Legacy);
     let providers_before = observed(home, Database::Providers);
     let config_before = config_stamp(home);
     #[cfg(test)]
@@ -1272,7 +1076,8 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
     if let Some(hook) = BEFORE_COPY.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let (mut raw, mut legacy) = raw_and_legacy(home, &raw_before, &legacy_before);
+    let mut raw = copy_checks(home, Database::Raw, &raw_before, raw_queries)
+        .unwrap_or_else(RawChecks::unknown);
     let mut knowledge = copy_checks(home, Database::Knowledge, &knowledge_before, |conn| {
         let checks = knowledge_queries(conn);
         if embedding_on {
@@ -1306,7 +1111,6 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
     let mut source_stability = if [
         raw.integrity,
         knowledge.integrity,
-        legacy.integrity,
         providers.integrity,
         embeddings.state,
         backups.state,
@@ -1323,9 +1127,6 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
     };
     if let Some(state) = recheck(home, Database::Raw, &raw_before) {
         raw = RawChecks::unknown(state);
-        if legacy.remaining_dependency {
-            legacy.remaining_events = Count::unknown(state);
-        }
         if backup_device_dependency {
             backups.through_seq = Count::unknown(state);
             backups.through_op_seq = Count::unknown(state);
@@ -1337,10 +1138,6 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
         if embedding_on {
             embeddings = EmbeddingChecks::unknown(state);
         }
-        source_stability = stability(source_stability, state);
-    }
-    if let Some(state) = recheck(home, Database::Legacy, &legacy_before) {
-        legacy = LegacyChecks::unknown(state);
         source_stability = stability(source_stability, state);
     }
     if let Some(state) = recheck(home, Database::Providers, &providers_before) {
@@ -1379,7 +1176,6 @@ pub(crate) fn doctor_report(home: &Path) -> DoctorReport {
     let checks = Checks {
         raw,
         knowledge,
-        legacy,
         embeddings,
         providers,
         backups,

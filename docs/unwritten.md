@@ -18,7 +18,8 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   (the home every time: a keep killed after making the directory left its entry unsynced): the
   rename is the only copy's entry. A temporary file found
   under the keep lock is a keep's that was killed before its rename, and is removed. Not `spool/`: v1
-  left a directory of that name, and `oboete migrate --finish` deletes it.
+  left a directory of that name, which `oboete migrate --finish` deleted (the command was removed in
+  #958).
 - **U2. When.** A hook whose store does not open within its 2 s, or whose append fails, keeps the
   events it built. Built without a store, they lack two things the store gives: an event whose
   agent names no session is named for its device when it is written back (`own_session`), and

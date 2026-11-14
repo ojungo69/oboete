@@ -2674,12 +2674,32 @@ const LOW_FREE_BYTES: u64 = 100 * 1024 * 1024;
 const UNMANAGED_IDLE: &str = "no hook starts one ([worker] autostart = false); it leaves when idle, for \
      what manages it to start again";
 
+/// What doctor and a transcript import say of a home's `oboete.db`, a store of oboete v1, which
+/// this build no longer migrates (decision 99, 2026-11-12). The store is not opened.
+pub(crate) const V1_STORE: &str = "oboete.db: a store of oboete v1, which this build no longer migrates: \
+     migrate it with the trial build v0.1.0-trial.2, the last that does (`oboete migrate`, then `oboete migrate --finish`)";
+
+/// The bytes of `path`, a directory's being those of everything under it, symbolic links not
+/// followed.
+fn size(path: &Path) -> Result<u64> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    let mut total = 0;
+    for entry in std::fs::read_dir(path)? {
+        total += size(&entry?.path())?;
+    }
+    Ok(total)
+}
+
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     println!("oboete {} at {}", crate::VERSION, exe.display());
-    let db_path = home.join("oboete.db");
-    let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    println!("home {} (db {} KB)", home.display(), size / 1024);
+    let raw_bytes = std::fs::metadata(crate::raw::path(home))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("home {} (raw.db {} KB)", home.display(), raw_bytes / 1024);
     // First, before anything that needs the disk: MUST-M16 is about a disk that is full.
     let mut unhealthy = Vec::new();
     let (kept, refused) = crate::unwritten::counts(home).unwrap_or_else(|e| {
@@ -2904,57 +2924,22 @@ pub fn doctor(home: &Path) -> Result<()> {
         (Ok(worker), _) if !worker.autostart => println!("  worker: {UNMANAGED_IDLE}"),
         _ => {}
     }
-    if db_path.exists() {
+    if home.join("oboete.db").exists() {
+        println!("  {V1_STORE}");
+    }
+    let eval = home.join("eval");
+    if eval.is_dir() {
         section(
             &mut unhealthy,
-            "oboete.db",
-            (|| -> Result<()> {
-                // Read only: v1's open writes its schema and a new device id into a copy.
-                let conn = crate::preview::open_v1(&db_path)?;
-                // A table that cannot be read makes the section unhealthy, not a count of 0; the
-                // readable counts and the calls below are still shown.
-                let counts = crate::migrate::legacy_counts_in(&conn);
-                let shown = counts
-                    .each_ref()
-                    .map(|c| c.as_ref().map_or("unreadable".into(), i64::to_string));
-                // #542: v1's lines say so, or they read as the home's own.
+            "eval",
+            size(&eval).map(|bytes| {
                 println!(
-                    "  v1 (kept until `oboete migrate --finish`): sessions {} | raw events {} | observations {} | summaries {}",
-                    shown[0], shown[1], shown[2], shown[3]
+                    "  evaluation copies, which forget does not reach: {} ({bytes} bytes)",
+                    eval.display()
                 );
-                let rows: Vec<String> = crate::migrate::legacy_call_rows_in(&conn)?
-                    .into_iter()
-                    .map(|row| {
-                        format!(
-                            "{} {} {}ms {}",
-                            row.provider,
-                            row.outcome,
-                            row.ms,
-                            row.detail.chars().take(60).collect::<String>()
-                        )
-                    })
-                    .collect();
-                if !rows.is_empty() {
-                    println!("  v1's last provider calls:");
-                    for r in rows {
-                        println!("    {r}");
-                    }
-                }
-                counts.into_iter().try_for_each(|c| c.map(drop))?;
-                Ok(())
-            })(),
+            }),
         );
     }
-    // Milestone 4 Task 9: what the cut-over (spec 7.4) leaves to do.
-    section(
-        &mut unhealthy,
-        "oboete.db",
-        crate::migrate::doctor(home).map(|lines| {
-            for l in lines {
-                println!("  {l}");
-            }
-        }),
-    );
     if home.join("providers.db").exists() {
         section(
             &mut unhealthy,

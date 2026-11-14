@@ -2308,7 +2308,6 @@ fn a_restore_that_lost_a_batch_drops_its_checkpoint() {
         let checkpoint = |through| raw::Checkpoint {
             key: "oboete-v1:d1".into(),
             through,
-            row: None,
             prefix: None,
         };
         // Records 6-8, 9-10 and 11-12, a segment each.
@@ -2333,6 +2332,104 @@ fn a_restore_that_lost_a_batch_drops_its_checkpoint() {
             assert_eq!(checkpoints["oboete-v1:d1"].through, through);
         }
     }
+}
+
+/// A57, D6: `oboete-v1` records that hold no event, the `touch` records at their session's start
+/// that keep a v1 session's repositories known, come back with a restore as they were.
+#[test]
+fn v1_touch_records_survive_a_restore() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let settings = crate::capture::Settings {
+        source: "oboete-v1",
+        ..crate::capture::Settings::default()
+    };
+    let prompt = serde_json::json!({"session_id": "s1", "prompt": "one"});
+    let mut records = crate::capture::imported(
+        "claude",
+        "UserPromptSubmit",
+        &prompt,
+        110,
+        "github.com/o/r",
+        None,
+        &settings,
+    );
+    for repo in ["github.com/o/lib", "github.com/o/r"] {
+        records.extend(crate::capture::imported(
+            "claude",
+            "Touch",
+            &serde_json::json!({"session_id": "s1"}),
+            100,
+            repo,
+            None,
+            &settings,
+        ));
+    }
+    let mut raw = raw::open(p).unwrap();
+    raw.append_imported_under(&records, &[], &settings, None)
+        .unwrap();
+    let touches = |p: &Path| {
+        let conn = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+        let mut st = conn
+            .prepare(
+                "SELECT session, repo, ts FROM records
+                 WHERE source = 'oboete-v1' AND kind = 'touch' ORDER BY repo",
+            )
+            .unwrap();
+        st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    drop(raw);
+    let before = touches(p);
+    let label = |repo: &str| ("s1".to_owned(), repo.to_owned(), 100);
+    assert_eq!(before, [label("github.com/o/lib"), label("github.com/o/r")]);
+    export(p).unwrap();
+    damage_raw(p);
+    crate::worker::run_once(p).unwrap();
+    assert_eq!(touches(p), before);
+}
+
+/// A checkpoint op of the shape the v1 migration wrote (removed by decision 99, 2026-11-12), with
+/// its `row`, is read by this build, and a restore from the op segments puts it back byte for byte.
+#[test]
+fn an_old_v1_checkpoint_op_is_read_and_restored_unchanged() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 5, 5); // records 1-5
+    let mut raw = raw::open(p).unwrap();
+    let body = serde_json::json!({"key": "oboete-v1:d1", "through": 5,
+        "row": {"id": 5, "ts": 7, "session_id": "cd".repeat(32)}, "from_seq": 1, "to_seq": 5});
+    raw.append_ops(&[(raw::OpKind::Migration, body)]).unwrap();
+    let stored = |p: &Path| -> String {
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT body FROM ops WHERE type = 'migration'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let text = stored(p);
+    assert!(text.contains("\"row\":{"), "{text}");
+    assert_eq!(
+        raw.migration_checkpoints("oboete-v1:").unwrap()["oboete-v1:d1"].through,
+        5
+    );
+    drop(raw);
+    export(p).unwrap();
+    damage_raw(p);
+    crate::worker::run_once(p).unwrap();
+    let restored = raw::open(p).unwrap();
+    assert_eq!(stored(p), text);
+    let checkpoints = restored.migration_checkpoints("oboete-v1:").unwrap();
+    assert_eq!(checkpoints["oboete-v1:d1"].through, 5);
 }
 
 #[test]

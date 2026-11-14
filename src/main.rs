@@ -38,7 +38,6 @@ mod manifest;
 mod mcp;
 mod mem_search;
 mod memory_lookup;
-mod migrate;
 mod model_fetch;
 mod my_work;
 mod my_work_focus;
@@ -437,17 +436,6 @@ enum Cmd {
         #[arg(long)]
         files: bool,
     },
-    /// Move v1's store (oboete.db) into Design B (spec 7.4): its events as records, its documents
-    /// as imported documents, its settings into a home that has none. v1's store is never written;
-    /// run it again to import what v1 wrote since
-    Migrate {
-        /// v1's store (default: <home>/oboete.db)
-        #[arg(long, conflicts_with = "finish")]
-        from: Option<PathBuf>,
-        /// Import once more, then list v1's old files and delete them if you answer yes
-        #[arg(long)]
-        finish: bool,
-    },
     /// Evaluation (milestone 4 D12): each claim's label and evidence rows, whether each still
     /// reads in its record, as JSON: what M6's harness checks a cited span against
     #[command(hide = true)]
@@ -795,31 +783,6 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             raw.gates_with(&settings.rules);
             let stats = import::claude_mem_with(&mut raw, &db, &settings, files)?;
             println!("{}", serde_json::to_string(&stats)?);
-            Ok(())
-        }
-        Cmd::Migrate { from, finish } => {
-            let from = from.unwrap_or_else(|| home.join("oboete.db"));
-            if finish {
-                let mut out = std::io::stdout().lock();
-                return migrate::finish(&home, std::io::stdin().lock(), &mut out);
-            }
-            let outcome = match migrate::run(&home, &from, None, &mut |_| {}) {
-                Ok(outcome) => outcome,
-                Err(failure) => {
-                    if let Some(settings) = &failure.outcome.settings {
-                        for line in migrate::settings_lines(&settings.missing) {
-                            println!("{line}");
-                        }
-                    }
-                    return Err(failure.cause);
-                }
-            };
-            if let Some(settings) = &outcome.settings {
-                for line in migrate::settings_lines(&settings.missing) {
-                    println!("{line}");
-                }
-            }
-            println!("{}", serde_json::to_string(&outcome.stats)?);
             Ok(())
         }
         Cmd::Cite { uids } => {
