@@ -287,9 +287,11 @@ fn unquote(token: &str) -> &str {
     }
 }
 
+/// The GitHub repository a remote names, as the command gives it or as a push's `To` line prints
+/// it, without an SSH remote's user (`github.com:o/r.git`).
 fn github_repo(remote: &str) -> Option<String> {
     static REMOTE: LazyLock<Regex> = LazyLock::new(|| {
-        js_regex(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$").unwrap()
+        js_regex(r"^(?:https://github\.com/|(?:git@)?github\.com:|ssh://(?:git@)?github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$").unwrap()
     });
     let found = REMOTE.captures(remote.trim_matches(whitespace))?;
     Some(format!("{}/{}", &found[1], &found[2]))
@@ -362,9 +364,16 @@ fn commit_subjects(command: &str) -> Vec<Option<String>> {
         .map(|(index, start)| {
             let invocation =
                 &command[*start..starts.get(index + 1).copied().unwrap_or(command.len())];
-            let text = if let Some(found) = SUBSTITUTED.captures(invocation) {
+            // Git's subject is the first `-m`: a heredoc's only where it starts no later than a
+            // quoted message (whose pattern takes a heredoc's opener at the same place).
+            let inline = INLINE.captures(invocation);
+            let text = if let Some(found) = SUBSTITUTED.captures(invocation).filter(|found| {
+                inline
+                    .as_ref()
+                    .is_none_or(|inline| found.get_match().start() <= inline.get_match().start())
+            }) {
                 found[1].to_owned()
-            } else if let Some(found) = INLINE.captures(invocation) {
+            } else if let Some(found) = inline {
                 ESCAPE
                     .replace_all(
                         found.get(1).or_else(|| found.get(2)).unwrap().as_str(),
@@ -472,16 +481,20 @@ struct Branch {
     pub heads: Vec<String>,
 }
 
-/// The arguments of the command's first `git push`, unquoted.
-fn push_arguments(command: &str) -> Vec<&str> {
+/// The arguments of each `git push` of the command, unquoted.
+fn push_arguments(command: &str) -> Vec<Vec<&str>> {
     static PUSH: LazyLock<Regex> =
         LazyLock::new(|| git_pattern(r#"push((?:[ \t]+(?:"[^"]*"|'[^']*'|[^\s;&|)]+))*)"#));
-    PUSH.captures(command)
-        .and_then(|found| found.get(1))
-        .map_or("", |found| found.as_str())
-        .split(whitespace)
-        .filter(|token| !token.is_empty())
-        .map(unquote)
+    PUSH.captures_iter(command)
+        .map(|found| {
+            found
+                .get(1)
+                .map_or("", |found| found.as_str())
+                .split(whitespace)
+                .filter(|token| !token.is_empty())
+                .map(unquote)
+                .collect()
+        })
         .collect()
 }
 
@@ -553,22 +566,30 @@ fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<
     } else {
         Vec::new()
     };
-    // A dry run prints the lines a push does and pushes nothing. shortcut: only the command's
-    // first `git push` is read for it; read each push's own if a dry run is followed by a push.
-    if arguments
-        .iter()
-        .any(|argument| ["-n", "--dry-run"].contains(argument))
-    {
+    // A dry run prints the lines a push does and pushes nothing: a command whose pushes are all
+    // dry runs pushed nothing, and the push its arguments name is its first that is no dry run.
+    // shortcut: a dry run's lines are read as pushed when another push of the command is real,
+    // which holds where both name the same refs; tell the pushes' `To` blocks apart if not.
+    let dry = |tokens: &Vec<&str>| {
+        tokens
+            .iter()
+            .any(|token| ["-n", "--dry-run"].contains(token))
+    };
+    if !arguments.is_empty() && arguments.iter().all(dry) {
         return Vec::new();
     }
-    let target = runs.then(|| push_target(arguments)).flatten();
+    let target = (arguments.into_iter())
+        .find(|tokens| !dry(tokens))
+        .and_then(push_target);
+    // The repository of the last `To` line, and whether there was one: a ref line under a `To` of
+    // another host has none, and only one under no `To` takes the repository the command names.
     let mut repo = None;
     // The ref lines `git fetch` and `git pull` print under `From`, until a push's `To`.
     let mut fetched = false;
     let mut pushes = Vec::new();
     for line in out.split('\n') {
         if let Some(found) = REMOTE.captures(line) {
-            repo = github_repo(&found[1]);
+            repo = Some(github_repo(&found[1]));
             fetched = false;
             continue;
         }
@@ -587,7 +608,7 @@ fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<
                     branch: branch.to_owned(),
                     repo: repo
                         .clone()
-                        .or_else(|| target.as_ref().and_then(|target| target.repo.clone())),
+                        .unwrap_or_else(|| target.as_ref().and_then(|target| target.repo.clone())),
                     heads: found
                         .get(1)
                         .map(|head| head.as_str().to_owned())
@@ -1042,15 +1063,13 @@ fn product_key(product: &Product) -> Option<String> {
             product.checkout.as_deref().unwrap_or("")
         ))
     } else {
-        // A link the gate changed is its title alone (my_work): one for each field and title.
+        // A link the gate changed is its title alone (my_work): one for each field and title,
+        // the pair as JSON so that no colon in either makes it another's.
         // shortcut: two such links of one field and title (an untitled link's is its host) are
         // one; key them by their place in the field if both are to be shown.
         (product.url.clone().or_else(|| product.path.clone())).or_else(|| {
-            Some(format!(
-                "field:{}:{}",
-                product.field.as_ref()?,
-                product.title
-            ))
+            let pair = serde_json::to_string(&(product.field.as_ref()?, &product.title)).ok()?;
+            Some(format!("field:{pair}"))
         })
     }
 }

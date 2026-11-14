@@ -1270,9 +1270,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   `codex exec '<ask>'`, is recorded when it ends, after that agent's opening ask. So a tool's
   input is compared at its call's start (`typed::written_at`), in O3 as in C3. The hook keeps a
   shell call's start at its PreToolUse (Claude Code's and Codex's `Bash`, Grok's
-  `run_terminal_command`), under the call's id, and puts it in the call's record as `started`;
-  an imported call's start is its call's line time, which leaves the line's identity as it was. A
-  tool's record after a batch's last ask is read for its start up to a day after that ask.
+  `run_terminal_command` or `run_terminal_cmd`), under the call's id, and puts it in the call's
+  record as `started`; an imported call's start is its call's line time, which leaves the line's
+  identity as it was. A tool's record after a batch's last ask is read for its start up to a day
+  after that ask.
 - **The link**: a conversation to decide whose sender is decided in the same batch is linked to
   it; a sender that belongs to an open request links that request, which is then shown with the
   requests other proven links name (A4). The line keeps the direction: `- C1 sent C2's opening ask

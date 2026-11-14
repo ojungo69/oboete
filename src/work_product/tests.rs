@@ -609,6 +609,8 @@ fn github_remotes_name_their_owner_and_repository() {
         "git@github.com:o/r.git",
         "ssh://git@github.com/o/r",
         " https://github.com/o/r.git/ ",
+        "github.com:o/r.git",
+        "ssh://github.com/o/r.git",
     ] {
         assert_eq!(github_repo(remote).as_deref(), Some("o/r"), "{remote}");
     }
@@ -1293,6 +1295,23 @@ fn a_commit_message_from_a_heredoc_in_m_takes_its_first_line() {
     assert_eq!(titles, ["abc1234 Fix the \"parser\""]);
 }
 
+/// With two `-m`, the first is the subject, as git takes it, also when the second is a heredoc:
+/// a quiet commit is found by that subject in `git log`'s line. The heredoc's first line was the
+/// subject, and the commit `git log` printed was dropped.
+#[test]
+fn a_commit_with_two_m_takes_the_first_as_its_subject() {
+    let message = "-m \"Summary\" -m \"$(cat <<'EOF'\nDetails\nEOF\n)\"";
+    let logged = bash(
+        &format!("git commit -q {message} && git log --oneline -1"),
+        json!({ "stdout": "abc1234 Summary" }),
+    );
+    let titles: Vec<&str> = logged.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["abc1234 Summary"]);
+    let rtk = bash(&format!("rtk git commit {message}"), json!("ok abc1234\n"));
+    let titles: Vec<&str> = rtk.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["abc1234 Summary"]);
+}
+
 /// A tag push and a dry run push no branch. A tag's name was recorded as a pushed branch, and a
 /// dry run's lines as a push.
 #[test]
@@ -1306,6 +1325,97 @@ fn a_tag_push_or_a_dry_run_pushes_no_branch() {
         assert!(
             bash(&command, json!({ "stderr": new_branch })).is_empty(),
             "{flag}"
+        );
+    }
+}
+
+/// A command that runs a dry run and then the push records the push, and one whose pushes are
+/// all dry runs records none. Only the command's first `git push` was read: a dry run before the
+/// push hid it.
+#[test]
+fn a_dry_run_before_a_push_leaves_the_push() {
+    let branches = |command: &str, out: &str| -> Vec<(Option<String>, Option<String>)> {
+        (bash(command, json!({ "stderr": out })).into_iter())
+            .map(|p| (p.branch, p.url))
+            .collect()
+    };
+    let new_branch = |name: &str| {
+        format!("To https://github.com/o/r.git\n * [new branch]      {name} -> {name}")
+    };
+    assert_eq!(
+        branches(
+            "git push -n origin feat && git push origin feat",
+            &format!("{}\n{}", new_branch("feat"), new_branch("feat"))
+        ),
+        [(
+            Some("feat".to_owned()),
+            Some("https://github.com/o/r/tree/feat".to_owned())
+        )]
+    );
+    // A quiet push after a dry run is the one whose arguments name the branch.
+    assert_eq!(
+        branches("git push --dry-run origin a && git push -q origin feat", ""),
+        [(Some("feat".to_owned()), None)]
+    );
+    assert!(
+        branches(
+            "git push -n origin a && git push --dry-run origin b",
+            &format!("{}\n{}", new_branch("a"), new_branch("b"))
+        )
+        .is_empty()
+    );
+}
+
+/// A push whose `To` names a host that is not GitHub has no link, though the command's first
+/// push named a GitHub URL: only a ref line under no `To` takes the repository the command names.
+/// The branch pushed to the other host took GitHub's link.
+#[test]
+fn a_push_to_another_host_has_no_github_link() {
+    let out = "To https://github.com/o/r.git\n * [new branch]      a -> a\nTo gitlab.com:o/r.git\n * [new branch]      b -> b";
+    for command in [
+        "git push https://github.com/o/r.git a && git push mirror b",
+        "git push origin a && git push mirror b",
+    ] {
+        let merged = merge(vec![bash(command, json!({ "stderr": out }))], 60);
+        let links: Vec<(&str, Option<&str>)> = (merged.iter())
+            .map(|p| (p.title.as_str(), p.url.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            [("a", Some("https://github.com/o/r/tree/a")), ("b", None)],
+            "{command}"
+        );
+    }
+    // The same branch pushed to both keeps GitHub's link through the merge.
+    let both = "To https://github.com/o/r.git\n   1111111..2222222  feat -> feat\nTo gitlab.com:o/r.git\n   1111111..2222222  feat -> feat";
+    let merged = merge(
+        vec![bash(
+            "git push https://github.com/o/r.git feat && git push mirror feat",
+            json!({ "stderr": both }),
+        )],
+        60,
+    );
+    let links: Vec<Option<&str>> = merged.iter().map(|p| p.url.as_deref()).collect();
+    assert_eq!(links, [Some("https://github.com/o/r/tree/feat")]);
+}
+
+/// A push over SSH links to GitHub by its `To` line, which git prints without the remote's user
+/// (`github.com:o/r.git`). That line named no GitHub repository, so the push had no link.
+#[test]
+fn a_push_over_ssh_links_to_github() {
+    for (command, to) in [
+        ("git push origin feat", "github.com:o/r.git"),
+        ("git push git@github.com:o/r.git feat", "github.com:o/r.git"),
+        ("git push origin feat", "ssh://github.com/o/r.git"),
+    ] {
+        let out = format!("To {to}\n * [new branch]      feat -> feat");
+        let links: Vec<Option<String>> = (bash(command, json!({ "stderr": out })).into_iter())
+            .map(|p| p.url)
+            .collect();
+        assert_eq!(
+            links,
+            [Some("https://github.com/o/r/tree/feat".to_owned())],
+            "{command} {to}"
         );
     }
 }
@@ -1484,6 +1594,8 @@ fn links_shown_as_titles_alone_are_kept_by_field_and_title() {
                 titled("work_products", "Report", 1),
                 titled("deck_url", "Report", 1),
             ],
+            // A colon in the field or the title makes no pair another's.
+            vec![titled("a:b", "c", 0), titled("a", "b:c", 0)],
         ],
         60,
     );
@@ -1495,7 +1607,9 @@ fn links_shown_as_titles_alone_are_kept_by_field_and_title() {
         [
             (Some("work_products"), "Report"),
             (Some("work_products"), "Deck"),
-            (Some("deck_url"), "Report")
+            (Some("deck_url"), "Report"),
+            (Some("a:b"), "c"),
+            (Some("a"), "b:c")
         ]
     );
 }
