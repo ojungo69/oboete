@@ -389,8 +389,9 @@ Slice 3:
   again from raw; a rewind drops every device's rows and marks each it has a checkpoint of
   (`subagent_rebuild`), as a device's lost tombstone may have taken another device's record (the
   manifest makes the device's alone again); every device raw holds is read.
-- **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, which
-  takes the read fence), in the page's read (`my_work::listed`) alone: `my_work::reviewing`, which
+- **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, in
+  the read fence the page's read holds from its first read), in the page's read (`my_work::listed`)
+  alone: `my_work::reviewing`, which
   the owner's actions read under the reviews' lock, reads none, as a purge holds the read fence
   while it waits for that lock. Its conversations are every request's, whatever the range, as Mark
   finished looks a subagent up (the page reads all and filters itself): the consumer's checkpoints

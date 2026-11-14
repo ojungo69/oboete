@@ -469,7 +469,9 @@ dropped; one the previous review kept keeps its quote, found then. A mask in a q
 shown: it stands for nothing. The outcome block, which claude-mem never shows, is not asked for.
 
 P5. **On the card.** The newest two reviews of a request are its readings (claude-mem keeps 20:
-As built 4b). The card shows "<percent>% · reviewed <time>" or "Completed <date>" for shipped,
+As built 4b). The card shows "<percent>% · reviewed <time>" or "Completed <date>" for shipped, a
+recorded ship's date the day of its time (`completed_at`) in the viewer's time zone, as the
+review's time is, while `completed` keeps its UTC day for #731's comparison,
 nothing before a review (As built 4b), and "at this pace, about <date>" when the two readings rise
 below 100. Reviews are at least an hour
 apart, so two readings minutes apart cannot project today. A review newer than the request's
