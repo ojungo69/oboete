@@ -219,9 +219,24 @@ fn kind_for_url(url: &str, fallback: &str) -> String {
 
 fn parse(value: &Value) -> Cow<'_, Value> {
     match value.as_str() {
-        Some(text) => Cow::Owned(serde_json::from_str(text).unwrap_or(Value::Null)),
+        Some(text) => Cow::Owned(
+            serde_json::from_str(text)
+                .ok()
+                .or_else(|| uncut(text))
+                .unwrap_or(Value::Null),
+        ),
         None => Cow::Borrowed(value),
     }
+}
+
+/// JSON text that capture cut over its cap (spec 2.4) read as JSON again: the marker between the
+/// kept head and tail, whose line breaks are its own, becomes text of the string it fell in.
+/// shortcut: a cut between two strings or inside an escape stays unread, as before; read the
+/// head and the tail apart if such answers are found to lose a product.
+fn uncut(text: &str) -> Option<Value> {
+    let (head, rest) = text.split_once("\n…[cut: ")?;
+    let (size, tail) = rest.split_once(" bytes in full]…\n")?;
+    serde_json::from_str(&format!("{head}\\n…[cut: {size} bytes in full]…\\n{tail}")).ok()
 }
 
 fn truthy(value: &Value) -> bool {
@@ -272,13 +287,29 @@ fn unquote(token: &str) -> &str {
     }
 }
 
+/// The GitHub repository a remote names, as the command gives it or as a push's `To` line prints
+/// it, without an SSH remote's user (`github.com:o/r.git`).
 fn github_repo(remote: &str) -> Option<String> {
     static REMOTE: LazyLock<Regex> = LazyLock::new(|| {
-        js_regex(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$").unwrap()
+        js_regex(r"^(?:https://github\.com/|(?:git@)?github\.com:|ssh://(?:git@)?github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$").unwrap()
     });
     let found = REMOTE.captures(remote.trim_matches(whitespace))?;
     Some(format!("{}/{}", &found[1], &found[2]))
 }
+
+/// What a branch's name holds that a link's path cannot hold as it is: the URL standard's path
+/// set, and `%`. Its slashes stay, as GitHub's tree links keep them.
+const BRANCH_PATH: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 fn git_url(product: &Product) -> Option<String> {
     let repo = product.repo.as_deref().filter(|repo| !repo.is_empty())?;
@@ -290,7 +321,7 @@ fn git_url(product: &Product) -> Option<String> {
     } else {
         Some(format!(
             "https://github.com/{repo}/tree/{}",
-            product.branch.as_deref()?
+            percent_encoding::utf8_percent_encode(product.branch.as_deref()?, BRANCH_PATH)
         ))
     }
 }
@@ -316,6 +347,11 @@ fn commit_subjects(command: &str) -> Vec<Option<String>> {
     });
     static HEREDOC: LazyLock<Regex> =
         LazyLock::new(|| js_regex(r#"\s-F\s+-\s*<<-?\s*['"]?\w+['"]?\n([^\n]*)"#).unwrap());
+    // Claude Code's form, `-m "$(cat <<'EOF'` with the message on the lines after it: the
+    // heredoc's first line is the subject, a double quote in it too.
+    static SUBSTITUTED: LazyLock<Regex> = LazyLock::new(|| {
+        js_regex(r#"\s-[a-zA-Z]*m\s+"\$\(\s*cat\s*<<-?\s*['"]?\w+['"]?\n([^\n]*)"#).unwrap()
+    });
     static ESCAPE: LazyLock<Regex> =
         LazyLock::new(|| js_regex(r"\\([^\r\n\u{2028}\u{2029}])").unwrap());
     let starts = COMMIT
@@ -328,7 +364,16 @@ fn commit_subjects(command: &str) -> Vec<Option<String>> {
         .map(|(index, start)| {
             let invocation =
                 &command[*start..starts.get(index + 1).copied().unwrap_or(command.len())];
-            let text = if let Some(found) = INLINE.captures(invocation) {
+            // Git's subject is the first `-m`: a heredoc's only where it starts no later than a
+            // quoted message (whose pattern takes a heredoc's opener at the same place).
+            let inline = INLINE.captures(invocation);
+            let text = if let Some(found) = SUBSTITUTED.captures(invocation).filter(|found| {
+                inline
+                    .as_ref()
+                    .is_none_or(|inline| found.get_match().start() <= inline.get_match().start())
+            }) {
+                found[1].to_owned()
+            } else if let Some(found) = inline {
                 ESCAPE
                     .replace_all(
                         found.get(1).or_else(|| found.get(2)).unwrap().as_str(),
@@ -436,18 +481,24 @@ struct Branch {
     pub heads: Vec<String>,
 }
 
-fn push_target(command: &str) -> Option<Branch> {
+/// The arguments of each `git push` of the command, unquoted.
+fn push_arguments(command: &str) -> Vec<Vec<&str>> {
     static PUSH: LazyLock<Regex> =
         LazyLock::new(|| git_pattern(r#"push((?:[ \t]+(?:"[^"]*"|'[^']*'|[^\s;&|)]+))*)"#));
-    let found = PUSH.captures(command);
-    let tokens = found
-        .as_ref()
-        .and_then(|found| found.get(1))
-        .map_or("", |found| found.as_str())
-        .split(whitespace)
-        .filter(|token| !token.is_empty())
-        .map(unquote)
-        .collect::<Vec<_>>();
+    PUSH.captures_iter(command)
+        .map(|found| {
+            found
+                .get(1)
+                .map_or("", |found| found.as_str())
+                .split(whitespace)
+                .filter(|token| !token.is_empty())
+                .map(unquote)
+                .collect()
+        })
+        .collect()
+}
+
+fn push_target(tokens: Vec<&str>) -> Option<Branch> {
     if tokens
         .iter()
         .any(|token| ["-d", "--delete", "--tags", "--mirror", "--all"].contains(token))
@@ -467,6 +518,7 @@ fn push_target(command: &str) -> Option<Branch> {
                 .next()
                 .unwrap_or("")
         })
+        .filter(|branch| !branch.starts_with("refs/tags/"))
         .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch))
         .filter(|branch| *branch != "HEAD")
         .unwrap_or("")
@@ -478,11 +530,12 @@ fn push_target(command: &str) -> Option<Branch> {
     })
 }
 
+/// `branch` in `branches`, in place of the entry of its name in its repository or in none (a
+/// branch the command created, then pushed): a push of it to another remote is one more entry.
 fn set_branch(branches: &mut Vec<Branch>, branch: Branch) {
-    if let Some(known) = branches
-        .iter_mut()
-        .find(|known| known.branch == branch.branch)
-    {
+    if let Some(known) = branches.iter_mut().find(|known| {
+        known.branch == branch.branch && (known.repo.is_none() || known.repo == branch.repo)
+    }) {
         *known = branch;
     } else {
         branches.push(branch);
@@ -492,6 +545,7 @@ fn set_branch(branches: &mut Vec<Branch>, branch: Branch) {
 fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<Branch> {
     static PUSH: LazyLock<Regex> = LazyLock::new(|| git_pattern(r"push\b"));
     static REMOTE: LazyLock<Regex> = LazyLock::new(|| js_regex(r"^To (\S+)$").unwrap());
+    static FETCH: LazyLock<Regex> = LazyLock::new(|| js_regex(r"^From \S+$").unwrap());
     static REF: LazyLock<Regex> = LazyLock::new(|| {
         js_regex(&format!(
             r"^\s*[ +*=]?\s*(?:{SHA}\.\.\.?({SHA})|\[new branch\])\s+(\S+)\s+->\s+(\S+)"
@@ -500,17 +554,50 @@ fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<
     });
     static REJECTED: LazyLock<Regex> =
         LazyLock::new(|| js_regex(r"(?m)\[rejected\]|failed to push|^fatal:").unwrap());
+    static TAG: LazyLock<Regex> =
+        LazyLock::new(|| js_regex(r"^\s*\*?\s*\[new tag\]\s+\S+\s+->\s+(\S+)").unwrap());
     let runs = PUSH.is_match(command);
     let recorded = response["gitOperation"]["push"]["branch"].as_str();
     if !runs && recorded.is_none_or(str::is_empty) {
         return Vec::new();
     }
-    let target = runs.then(|| push_target(command)).flatten();
+    let arguments = if runs {
+        push_arguments(command)
+    } else {
+        Vec::new()
+    };
+    // A dry run prints the lines a push does and pushes nothing: a command whose pushes are all
+    // dry runs pushed nothing, and the push its arguments name is its first that is no dry run.
+    // shortcut: a dry run's lines are read as pushed when another push of the command is real,
+    // which holds where both name the same refs; tell the pushes' `To` blocks apart if not.
+    let dry = |tokens: &Vec<&str>| {
+        tokens
+            .iter()
+            .any(|token| ["-n", "--dry-run"].contains(token))
+    };
+    if !arguments.is_empty() && arguments.iter().all(dry) {
+        return Vec::new();
+    }
+    let target = (arguments.into_iter())
+        .find(|tokens| !dry(tokens))
+        .and_then(push_target);
+    // The repository of the last `To` line, and whether there was one: a ref line under a `To` of
+    // another host has none, and only one under no `To` takes the repository the command names.
     let mut repo = None;
+    // The ref lines `git fetch` and `git pull` print under `From`, until a push's `To`.
+    let mut fetched = false;
     let mut pushes = Vec::new();
     for line in out.split('\n') {
         if let Some(found) = REMOTE.captures(line) {
-            repo = github_repo(&found[1]);
+            repo = Some(github_repo(&found[1]));
+            fetched = false;
+            continue;
+        }
+        if FETCH.is_match(line) {
+            fetched = true;
+            continue;
+        }
+        if fetched {
             continue;
         }
         if let Some(found) = REF.captures(line) {
@@ -521,7 +608,7 @@ fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<
                     branch: branch.to_owned(),
                     repo: repo
                         .clone()
-                        .or_else(|| target.as_ref().and_then(|target| target.repo.clone())),
+                        .unwrap_or_else(|| target.as_ref().and_then(|target| target.repo.clone())),
                     heads: found
                         .get(1)
                         .map(|head| head.as_str().to_owned())
@@ -532,11 +619,17 @@ fn pushes_from(command: &str, response: &Value, out: &str, failed: bool) -> Vec<
         }
     }
     let branch = recorded.or_else(|| target.as_ref().map(|target| target.branch.as_str()));
-    // A failed call pushed only the refs its output names (CodeRabbit on #650).
+    // A failed call pushed only the refs its output names (CodeRabbit on #650), and a name the
+    // output shows as a new tag is no branch.
     if pushes.is_empty()
         && !failed
         && !js_lines(out).any(|line| REJECTED.is_match(line))
         && let Some(branch) = branch.filter(|branch| !branch.is_empty())
+        && !js_lines(out).any(|line| {
+            TAG.captures(line).is_some_and(|found| {
+                found[1].strip_prefix("refs/tags/").unwrap_or(&found[1]) == branch
+            })
+        })
     {
         pushes.push(Branch {
             branch: branch.to_owned(),
@@ -564,6 +657,12 @@ fn created_branches_from(command: &str, out: &str) -> Vec<Branch> {
         .collect()
 }
 
+fn creates_pull_request(command: &str) -> bool {
+    static CREATE: LazyLock<Regex> =
+        LazyLock::new(|| js_regex(r"(?:^|[;&|(\n])\s*(?:rtk\s+)?gh\s+pr\s+create\b").unwrap());
+    CREATE.is_match(command)
+}
+
 fn pull_request_from(
     command: &str,
     response: &Value,
@@ -571,16 +670,26 @@ fn pull_request_from(
     at: Option<i64>,
     source: Option<Source>,
 ) -> Vec<Product> {
-    static CREATE: LazyLock<Regex> =
-        LazyLock::new(|| js_regex(r"(?:^|[;&|(\n])\s*(?:rtk\s+)?gh\s+pr\s+create\b").unwrap());
     static PRINTED: LazyLock<Regex> =
         LazyLock::new(|| js_regex(r"(?m)^https://github\.com/[\w.-]+/[\w.-]+/pull/\d+$").unwrap());
     static TITLE: LazyLock<Regex> =
         LazyLock::new(|| js_regex(r#"--title\s+(?:"([^"]+)"|'([^']+)')"#).unwrap());
-    if !CREATE.is_match(command) {
+    if !creates_pull_request(command) {
         return Vec::new();
     }
-    let printed = js_lines(out).find_map(|line| PRINTED.find(line));
+    // Without the empty lines, as `\r\n` is two breaks here.
+    let lines = js_lines(out)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    // The pull request gh names on the line after `already exists:` is the one the branch had
+    // already, which this call did not make, whether or not the call failed.
+    let existing = |url: &str| {
+        (lines.windows(2))
+            .any(|pair| pair[0].trim_end().ends_with("already exists:") && pair[1] == url)
+    };
+    let printed = (lines.iter())
+        .filter_map(|line| PRINTED.find(line))
+        .find(|found| !existing(found.as_str()));
     let recorded = response["gitOperation"]["pr"]
         .get("url")
         .filter(|value| !value.is_null());
@@ -589,7 +698,9 @@ fn pull_request_from(
     } else {
         printed.and_then(|found| safe_web_url(found.as_str()))
     };
-    let Some(url) = url else { return Vec::new() };
+    let Some(url) = url.filter(|url| !existing(url)) else {
+        return Vec::new();
+    };
     let title = TITLE
         .captures(command)
         .and_then(|found| short(found.get(1).or_else(|| found.get(2))?.as_str()))
@@ -624,23 +735,34 @@ pub(crate) fn from_command(
     for branch in created.into_iter().chain(pushes.iter().cloned()) {
         set_branch(&mut branches, branch);
     }
+    // A branch's push, its push to GitHub first where it went to several remotes.
+    let pushed_to = |branch: &str| {
+        (pushes.iter())
+            .filter(|push| push.branch == branch)
+            .min_by_key(|push| push.repo.is_none())
+    };
     let mut products = Vec::new();
     for commit in commits_from(command, response, out) {
         let pushed = commit
             .branch
-            .as_ref()
+            .as_deref()
             .filter(|branch| !branch.is_empty())
-            .and_then(|branch| pushes.iter().find(|push| push.branch == *branch))
+            .and_then(pushed_to)
             .or_else(|| {
-                pushes.iter().find(|push| {
-                    push.heads
-                        .iter()
-                        .any(|head| head.starts_with(sha_key(&commit.sha)))
-                })
+                (pushes.iter())
+                    .filter(|push| {
+                        push.heads
+                            .iter()
+                            .any(|head| head.starts_with(sha_key(&commit.sha)))
+                    })
+                    .min_by_key(|push| push.repo.is_none())
             })
             .or_else(|| {
-                (commit.branch.as_deref().is_none_or(str::is_empty) && pushes.len() == 1)
-                    .then(|| &pushes[0])
+                let first = pushes.first()?;
+                (commit.branch.as_deref().is_none_or(str::is_empty)
+                    && pushes.iter().all(|push| push.branch == first.branch))
+                .then(|| pushed_to(&first.branch))
+                .flatten()
             });
         products.push(Product {
             kind: "commit".to_owned(),
@@ -693,15 +815,16 @@ fn publisher(tool: &str) -> Option<&'static str> {
     (PUBLISHERS.iter()).find_map(|(pattern, kind)| pattern.is_match(tool).then_some(*kind))
 }
 
-/// Whether a tool record's body may hold work product: a publishing tool's call, or a `Bash` call
-/// that runs `gh pr create` or git's commit, push or branch creation, as claude-mem picks the
-/// calls it reads (`readProductRecords`).
+/// Whether a tool record's body may hold work product: a publishing tool's call, or a shell call
+/// (`hook::SHELLS`: Claude Code's and Codex's `Bash`, Grok's) that runs `gh pr create` or git's
+/// commit, push or branch creation, as claude-mem picks the calls it reads (`readProductRecords`)
+/// and as the patterns that read them find it (`checkout -B`, `gh  pr create`).
 pub(crate) fn may_make(body: &str) -> bool {
     let Ok(record) = serde_json::from_str::<Value>(body) else {
         return false;
     };
     let tool = record["tool"].as_str().unwrap_or("");
-    if tool != "Bash" {
+    if !crate::hook::SHELLS.contains(&tool) {
         return publisher(tool).is_some();
     }
     let input = parse(&record["input"]);
@@ -713,6 +836,8 @@ pub(crate) fn may_make(body: &str) -> bool {
             && ["commit", "push", "checkout -b", "switch -c"]
                 .iter()
                 .any(|word| command.contains(word)))
+        || creates_pull_request(command)
+        || !created_branches_from(command, "").is_empty()
 }
 
 pub(crate) fn from_tool_use(
@@ -727,7 +852,7 @@ pub(crate) fn from_tool_use(
     let input = parse(input);
     let raw = response;
     let response = parse(response);
-    if tool == "Bash"
+    if crate::hook::SHELLS.contains(&tool)
         && let Some(command) = input["command"].as_str()
     {
         let out = output_text(raw, &response);
@@ -932,9 +1057,20 @@ fn product_key(product: &Product) -> Option<String> {
             .as_deref()
             .filter(|branch| !branch.is_empty())
     {
-        Some(format!("branch:{branch}"))
+        // One for each checkout (#652): a branch of the name in another repository is another.
+        Some(format!(
+            "branch:{}:{branch}",
+            product.checkout.as_deref().unwrap_or("")
+        ))
     } else {
-        product.url.clone().or_else(|| product.path.clone())
+        // A link the gate changed is its title alone (my_work): one for each field and title,
+        // the pair as JSON so that no colon in either makes it another's.
+        // shortcut: two such links of one field and title (an untitled link's is its host) are
+        // one; key them by their place in the field if both are to be shown.
+        (product.url.clone().or_else(|| product.path.clone())).or_else(|| {
+            let pair = serde_json::to_string(&(product.field.as_ref()?, &product.title)).ok()?;
+            Some(format!("field:{pair}"))
+        })
     }
 }
 
@@ -996,7 +1132,10 @@ pub(crate) fn merge(lists: Vec<Vec<Product>>, limit: usize) -> Vec<Product> {
     products
         .into_iter()
         .filter_map(|mut product| {
-            if !seen.insert(product_key(&product)) {
+            // A product with no key is one of its own.
+            if let Some(key) = product_key(&product)
+                && !seen.insert(key)
+            {
                 return None;
             }
             if (product.kind == "commit" || product.kind == "branch")

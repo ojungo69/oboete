@@ -609,6 +609,8 @@ fn github_remotes_name_their_owner_and_repository() {
         "git@github.com:o/r.git",
         "ssh://git@github.com/o/r",
         " https://github.com/o/r.git/ ",
+        "github.com:o/r.git",
+        "ssh://github.com/o/r.git",
     ] {
         assert_eq!(github_repo(remote).as_deref(), Some("o/r"), "{remote}");
     }
@@ -824,8 +826,25 @@ fn url_kinds_follow_github_deployments_and_file_extensions() {
     ] {
         assert_eq!(kind_for_url(url, "link"), expected, "{url}");
     }
-    for (extension, kind) in FILE_KINDS {
-        assert_eq!(file_kind(&format!("/w/report{extension}")), Some(*kind));
+    for (path, kind) in [
+        ("/w/report.png", "image"),
+        ("/w/report.jpg", "image"),
+        ("/w/report.jpeg", "image"),
+        ("/w/report.webp", "image"),
+        ("/w/report.gif", "image"),
+        ("/w/report.svg", "image"),
+        ("/w/report.mp4", "video"),
+        ("/w/report.mov", "video"),
+        ("/w/report.webm", "video"),
+        ("/w/report.pdf", "document"),
+        ("/w/report.docx", "document"),
+        ("/w/report.pptx", "deck"),
+        ("/w/report.key", "deck"),
+        ("/w/report.xlsx", "spreadsheet"),
+        ("/w/report.csv", "spreadsheet"),
+        ("/w/report.html", "page"),
+    ] {
+        assert_eq!(file_kind(path), Some(kind), "{path}");
     }
     for path in ["/w/app.rs", "/w/data.json", "/w/.png"] {
         assert_eq!(file_kind(path), None);
@@ -957,9 +976,17 @@ fn work_product_fields_keep_overrides_aliases_and_indices_across_fields() {
             ("deck", "example.com", Some(5))
         ]
     );
-    for (field, kind) in LEGACY_KINDS {
-        let fields = Map::from_iter([(field.to_string(), json!("https://example.com/report"))]);
-        assert_eq!(from_fields(&fields, None, None)[0].kind, *kind);
+    for (field, kind) in [
+        ("docs_url", "documentation"),
+        ("documentation_url", "documentation"),
+        ("promo_url", "promotion"),
+        ("announcement_url", "promotion"),
+        ("pr_url", "pull-request"),
+        ("deck_url", "deck"),
+        ("artifact_url", "artifact"),
+    ] {
+        let fields = Map::from_iter([(field.to_owned(), json!("https://example.com/report"))]);
+        assert_eq!(from_fields(&fields, None, None)[0].kind, kind, "{field}");
     }
     assert!(is_work_product_field("custom_url"));
     assert!(!is_work_product_field("custom_URL"));
@@ -1195,4 +1222,394 @@ fn a_failed_call_makes_only_what_its_output_confirms() {
         .into();
     let artifact = |failed| from_tool_use("Artifact", &json!({}), &answer, None, None, failed);
     assert_eq!((artifact(false).len(), artifact(true).len()), (1, 0));
+}
+
+/// A branch's GitHub link holds its name percent-encoded, its slashes kept: a `#`, `?` or `%`
+/// in it made the link another page (`tree/fix/` with a fragment).
+#[test]
+fn a_branch_link_encodes_what_a_path_cannot_hold() {
+    for (branch, link) in [
+        ("fix/#923", "fix/%23923"),
+        ("wip/50%?x", "wip/50%25%3Fx"),
+        ("feat/日本", "feat/%E6%97%A5%E6%9C%AC"),
+    ] {
+        let products = bash(
+            &format!("git push -q https://github.com/o/r.git '{branch}'"),
+            json!({ "stdout": "" }),
+        );
+        let url = format!("https://github.com/o/r/tree/{link}");
+        assert_eq!(products[0].url.as_deref(), Some(url.as_str()), "{branch}");
+    }
+}
+
+/// A Bash answer over the output cap is stored as its head and tail around capture's marker,
+/// which is no longer JSON: its stdout and stderr are read still, whichever part holds the
+/// commit's line. It was read as the escaped text, where no line starts a commit.
+#[test]
+fn a_bash_answer_that_capture_cut_still_names_its_commit() {
+    let noise = "hook: checked a file\n".repeat(2000);
+    for (stdout, stderr) in [
+        (
+            format!("{noise}[main abc1234] Fix the parser"),
+            String::new(),
+        ),
+        (
+            "[main abc1234] Fix the parser\n 1 file changed".to_owned(),
+            noise.clone(),
+        ),
+    ] {
+        let answer =
+            json!({ "stdout": stdout, "stderr": stderr, "interrupted": false }).to_string();
+        let (stored, _, cut) =
+            crate::redact::scan_capped(&answer, 8192, &crate::redact::Rules::default());
+        assert!(cut.is_some() && stored.contains("…[cut: "));
+        let products = from_tool_use(
+            "Bash",
+            &json!(json!({ "command": "git commit -m 'Fix the parser'" }).to_string()),
+            &json!(stored),
+            None,
+            None,
+            false,
+        );
+        let titles: Vec<&str> = products.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["abc1234 Fix the parser"]);
+    }
+}
+
+/// Claude Code's commit message `-m "$(cat <<'EOF' … EOF)"` has the heredoc's first line as its
+/// subject, double quotes and all. Its subject was the opener `$(cat <<'EOF'`, and a commit that
+/// only `git log` printed was not found.
+#[test]
+fn a_commit_message_from_a_heredoc_in_m_takes_its_first_line() {
+    let message = "\"$(cat <<'EOF'\nFix the \"parser\"\n\nBody line.\nEOF\n)\"";
+    let rtk = bash(
+        &format!("rtk git add -A && rtk git commit -m {message}"),
+        json!("ok abc1234\n"),
+    );
+    assert_eq!(rtk[0].title, "abc1234 Fix the \"parser\"");
+    let logged = bash(
+        &format!("git commit -q -m {message} && git log --oneline -1"),
+        json!({ "stdout": "abc1234 Fix the \"parser\"" }),
+    );
+    let titles: Vec<&str> = logged.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["abc1234 Fix the \"parser\""]);
+}
+
+/// With two `-m`, the first is the subject, as git takes it, also when the second is a heredoc:
+/// a quiet commit is found by that subject in `git log`'s line. The heredoc's first line was the
+/// subject, and the commit `git log` printed was dropped.
+#[test]
+fn a_commit_with_two_m_takes_the_first_as_its_subject() {
+    let message = "-m \"Summary\" -m \"$(cat <<'EOF'\nDetails\nEOF\n)\"";
+    let logged = bash(
+        &format!("git commit -q {message} && git log --oneline -1"),
+        json!({ "stdout": "abc1234 Summary" }),
+    );
+    let titles: Vec<&str> = logged.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["abc1234 Summary"]);
+    let rtk = bash(&format!("rtk git commit {message}"), json!("ok abc1234\n"));
+    let titles: Vec<&str> = rtk.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["abc1234 Summary"]);
+}
+
+/// A tag push and a dry run push no branch. A tag's name was recorded as a pushed branch, and a
+/// dry run's lines as a push.
+#[test]
+fn a_tag_push_or_a_dry_run_pushes_no_branch() {
+    let new_tag = "To https://github.com/o/r.git\n * [new tag]         v1.0 -> v1.0";
+    assert!(bash("git push origin v1.0", json!({ "stderr": new_tag })).is_empty());
+    assert!(bash("git push -q origin refs/tags/v1.0", json!({ "stdout": "" })).is_empty());
+    let new_branch = "To https://github.com/o/r.git\n * [new branch]      feat -> feat";
+    for flag in ["--dry-run", "-n"] {
+        let command = format!("git push {flag} origin feat");
+        assert!(
+            bash(&command, json!({ "stderr": new_branch })).is_empty(),
+            "{flag}"
+        );
+    }
+}
+
+/// A command that runs a dry run and then the push records the push, and one whose pushes are
+/// all dry runs records none. Only the command's first `git push` was read: a dry run before the
+/// push hid it.
+#[test]
+fn a_dry_run_before_a_push_leaves_the_push() {
+    let branches = |command: &str, out: &str| -> Vec<(Option<String>, Option<String>)> {
+        (bash(command, json!({ "stderr": out })).into_iter())
+            .map(|p| (p.branch, p.url))
+            .collect()
+    };
+    let new_branch = |name: &str| {
+        format!("To https://github.com/o/r.git\n * [new branch]      {name} -> {name}")
+    };
+    assert_eq!(
+        branches(
+            "git push -n origin feat && git push origin feat",
+            &format!("{}\n{}", new_branch("feat"), new_branch("feat"))
+        ),
+        [(
+            Some("feat".to_owned()),
+            Some("https://github.com/o/r/tree/feat".to_owned())
+        )]
+    );
+    // A quiet push after a dry run is the one whose arguments name the branch.
+    assert_eq!(
+        branches("git push --dry-run origin a && git push -q origin feat", ""),
+        [(Some("feat".to_owned()), None)]
+    );
+    assert!(
+        branches(
+            "git push -n origin a && git push --dry-run origin b",
+            &format!("{}\n{}", new_branch("a"), new_branch("b"))
+        )
+        .is_empty()
+    );
+}
+
+/// A push whose `To` names a host that is not GitHub has no link, though the command's first
+/// push named a GitHub URL: only a ref line under no `To` takes the repository the command names.
+/// The branch pushed to the other host took GitHub's link.
+#[test]
+fn a_push_to_another_host_has_no_github_link() {
+    let out = "To https://github.com/o/r.git\n * [new branch]      a -> a\nTo gitlab.com:o/r.git\n * [new branch]      b -> b";
+    for command in [
+        "git push https://github.com/o/r.git a && git push mirror b",
+        "git push origin a && git push mirror b",
+    ] {
+        let merged = merge(vec![bash(command, json!({ "stderr": out }))], 60);
+        let links: Vec<(&str, Option<&str>)> = (merged.iter())
+            .map(|p| (p.title.as_str(), p.url.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            [("a", Some("https://github.com/o/r/tree/a")), ("b", None)],
+            "{command}"
+        );
+    }
+    // The same branch pushed to both keeps GitHub's link through the merge.
+    let both = "To https://github.com/o/r.git\n   1111111..2222222  feat -> feat\nTo gitlab.com:o/r.git\n   1111111..2222222  feat -> feat";
+    let merged = merge(
+        vec![bash(
+            "git push https://github.com/o/r.git feat && git push mirror feat",
+            json!({ "stderr": both }),
+        )],
+        60,
+    );
+    let links: Vec<Option<&str>> = merged.iter().map(|p| p.url.as_deref()).collect();
+    assert_eq!(links, [Some("https://github.com/o/r/tree/feat")]);
+}
+
+/// A push over SSH links to GitHub by its `To` line, which git prints without the remote's user
+/// (`github.com:o/r.git`). That line named no GitHub repository, so the push had no link.
+#[test]
+fn a_push_over_ssh_links_to_github() {
+    for (command, to) in [
+        ("git push origin feat", "github.com:o/r.git"),
+        ("git push git@github.com:o/r.git feat", "github.com:o/r.git"),
+        ("git push origin feat", "ssh://github.com/o/r.git"),
+    ] {
+        let out = format!("To {to}\n * [new branch]      feat -> feat");
+        let links: Vec<Option<String>> = (bash(command, json!({ "stderr": out })).into_iter())
+            .map(|p| p.url)
+            .collect();
+        assert_eq!(
+            links,
+            [Some("https://github.com/o/r/tree/feat".to_owned())],
+            "{command} {to}"
+        );
+    }
+}
+
+/// One command that pushes a branch to GitHub and to another host keeps both pushes, so its
+/// commit and its branch keep GitHub's link. The last push replaced the first, and with it the
+/// repository both linked to.
+#[test]
+fn a_branch_pushed_to_two_remotes_keeps_the_github_link() {
+    let pushes = "To https://github.com/o/r.git\n   1111111..2222222  feat -> feat\nTo gitlab.com:o/r.git\n   1111111..2222222  feat -> feat";
+    for (command, commit) in [
+        (
+            "git commit -m 'Fix A' && git push origin feat && git push mirror feat",
+            "[feat abc1234] Fix A",
+        ),
+        (
+            "rtk git commit -m 'Fix A' && rtk git push origin feat && rtk git push mirror feat",
+            "ok abc1234",
+        ),
+    ] {
+        let products = bash(command, json!(format!("{commit}\n{pushes}")));
+        let merged = merge(vec![products], 60);
+        let links: Vec<(&str, Option<&str>)> = (merged.iter())
+            .map(|p| (p.kind.as_str(), p.url.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("commit", Some("https://github.com/o/r/commit/abc1234")),
+                ("branch", Some("https://github.com/o/r/tree/feat"))
+            ],
+            "{command}"
+        );
+    }
+}
+
+/// The ref lines `git pull` and `git fetch` print under `From` are no push: the branch the
+/// command pushed is recorded, and nothing fetched. A fetched `origin/main` was recorded as
+/// pushed, and it hid the push the command made.
+#[test]
+fn fetched_refs_are_no_push_and_leave_the_real_one() {
+    let fetched = "From https://github.com/o/r\n   a1b2c3d..e4f5a6b  main       -> origin/main\n * [new branch]      x          -> origin/x\nSuccessfully rebased and updated refs/heads/feat.";
+    let branches = |out: String| -> Vec<(Option<String>, Option<String>)> {
+        (bash("git pull --rebase && git push -q origin feat", json!(out)).into_iter())
+            .map(|p| (p.branch, p.url))
+            .collect()
+    };
+    assert_eq!(
+        branches(fetched.to_owned()),
+        [(Some("feat".to_owned()), None)]
+    );
+    let pushed =
+        format!("{fetched}\nTo https://github.com/o/r.git\n   1111111..2222222  feat -> feat");
+    assert_eq!(
+        branches(pushed),
+        [(
+            Some("feat".to_owned()),
+            Some("https://github.com/o/r/tree/feat".to_owned())
+        )]
+    );
+}
+
+/// Grok's shell calls make work product as Claude Code's do: they are kept as calls that may
+/// make something, and read for commits. Only a tool named `Bash` was.
+#[test]
+fn groks_shell_calls_make_work_product() {
+    for tool in ["run_terminal_command", "run_terminal_cmd"] {
+        let input = json!({ "command": "git commit -m 'Fix A'" }).to_string();
+        let body = json!({ "tool": tool, "input": input, "output": "", "failed": false });
+        assert!(may_make(&body.to_string()), "{tool}");
+        let products = from_tool_use(
+            tool,
+            &json!(input),
+            &json!("[main abc1234] Fix A\n 1 file changed"),
+            None,
+            None,
+            false,
+        );
+        let titles: Vec<&str> = products.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["abc1234 Fix A"], "{tool}");
+    }
+}
+
+/// A call is kept for reading whenever the patterns that read it would find something in its
+/// command: `checkout -B`, `switch -C` and `gh pr create` spaced otherwise were dropped before
+/// they were read.
+#[test]
+fn every_command_the_patterns_read_is_kept_for_reading() {
+    for (command, kind) in [
+        ("git checkout -B fix/x", "branch"),
+        ("git switch -C fix/x", "branch"),
+        ("git checkout\t-b fix/x", "branch"),
+        ("gh  pr create --fill", "pull-request"),
+    ] {
+        let input = json!({ "command": command }).to_string();
+        let body = json!({ "tool": "Bash", "input": input, "output": "", "failed": false });
+        assert!(may_make(&body.to_string()), "{command}");
+        let products = bash(command, json!("https://github.com/o/r/pull/7"));
+        assert_eq!(products[0].kind, kind, "{command}");
+    }
+}
+
+/// The pull request gh names after `already exists:` is one the branch had already, not this
+/// call's, whether or not the call failed; a call that failed after it created one keeps it.
+/// The existing one was recorded as the request's.
+#[test]
+fn a_pull_request_that_already_existed_is_not_this_calls() {
+    let exists = "a pull request for branch \"x\" into branch \"main\" already exists:\nhttps://github.com/o/r/pull/7";
+    let pr = |command: &str, out: &str, failed: bool| {
+        from_tool_use(
+            "Bash",
+            &json!({ "command": command }),
+            &json!(out),
+            None,
+            None,
+            failed,
+        )
+    };
+    assert!(pr("gh pr create --fill", exists, true).is_empty());
+    assert!(pr("gh pr create --fill || true", exists, false).is_empty());
+    assert!(pr("gh pr create --fill", &exists.replace('\n', "\r\n"), true).is_empty());
+    let created = pr(
+        "gh pr create --fill && gh pr merge --auto",
+        "https://github.com/o/r/pull/8\nGraphQL: Auto merge is not allowed for this repository",
+        true,
+    );
+    assert_eq!(
+        created[0].url.as_deref(),
+        Some("https://github.com/o/r/pull/8")
+    );
+}
+
+/// Branches of one name in two checkouts are two products, each with its own link; one
+/// checkout's created branch and its push are still one. One of the two was dropped.
+#[test]
+fn same_named_branches_of_two_checkouts_are_both_kept() {
+    let branch = |checkout: &str, repo: Option<&str>| Product {
+        kind: "branch".to_owned(),
+        title: "main".to_owned(),
+        branch: Some("main".to_owned()),
+        repo: repo.map(str::to_owned),
+        checkout: Some(checkout.to_owned()),
+        at: Some(1),
+        ..Product::default()
+    };
+    let merged = merge(
+        vec![vec![
+            branch("a", Some("o/a")),
+            branch("b", Some("o/b")),
+            branch("a", None),
+        ]],
+        60,
+    );
+    let repos: Vec<Option<&str>> = merged.iter().map(|p| p.repo.as_deref()).collect();
+    assert_eq!(repos, [Some("o/a"), Some("o/b")]);
+}
+
+/// Links the gate changed, which reach the merge as their titles alone, are kept one for each
+/// field and title. All but the newest were dropped, as if they were one link.
+#[test]
+fn links_shown_as_titles_alone_are_kept_by_field_and_title() {
+    let titled = |field: &str, title: &str, at: i64| Product {
+        kind: "link".to_owned(),
+        title: title.to_owned(),
+        field: Some(field.to_owned()),
+        at: Some(at),
+        ..Product::default()
+    };
+    let merged = merge(
+        vec![
+            vec![
+                titled("work_products", "Report", 3),
+                titled("work_products", "Deck", 2),
+            ],
+            vec![
+                titled("work_products", "Report", 1),
+                titled("deck_url", "Report", 1),
+            ],
+            // A colon in the field or the title makes no pair another's.
+            vec![titled("a:b", "c", 0), titled("a", "b:c", 0)],
+        ],
+        60,
+    );
+    let kept: Vec<(Option<&str>, &str)> = (merged.iter())
+        .map(|p| (p.field.as_deref(), p.title.as_str()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (Some("work_products"), "Report"),
+            (Some("work_products"), "Deck"),
+            (Some("deck_url"), "Report"),
+            (Some("a:b"), "c"),
+            (Some("a"), "b:c")
+        ]
+    );
 }

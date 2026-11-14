@@ -528,15 +528,20 @@ sheets, HTML) its observations name as modified, and what an agent attached to a
 newest first, at most 60; a commit links to GitHub once a recorded push sent its branch there.
 
 - **The parsing** is claude-mem's, ported (`src/work_product.rs`): the same patterns over a
-  recorded `Bash` call's command and output, a publishing tool's input and answer, a card's
-  `files_modified` and a work item's fields, the same merge.
+  recorded shell call's command and output (Claude Code's and Codex's `Bash`, Grok's
+  `run_terminal_command` or `run_terminal_cmd`), a publishing tool's input and answer, a card's
+  `files_modified` and a work item's fields, the same merge. An answer capture cut over its cap
+  is read as JSON still, the cut's marker inside the string it fell in.
 - **Where the calls are**: a tool record's text is in no index (#317), so the `products` consumer
   keeps where each live call that may have made something is (`product_calls`: device, seq, time,
   agent, session), picked as claude-mem picks the calls it reads, and nothing it said. My Work
   reads those records from raw.db when a request's page opens, a device's 100 at a time (and for
   each card in the list since X23's slice 2b): a forgotten or expired record is
   no call, and what it made goes with it. A call that failed makes only what its output confirms:
-  no branch inferred from its command alone, and no publishing tool's link (Codex on #650).
+  no branch inferred from its command alone, and no publishing tool's link (Codex on #650). A
+  pull request gh names as one that already exists is no call's, failed or not; a tag push, a
+  dry run (a command's push after one is still read) and the refs `git fetch` or `git pull`
+  print are no pushed branch, and a branch pushed to a host that is not GitHub has no link.
 - **The route**, `GET /api/my-work/product?request=<id>`, with the token, as every route: the
   request named by its id as `GET /api/my-work` shows it; one not read is 404, none named 400.
   The list of requests carries only each card's first three that are not commits or branches, and
