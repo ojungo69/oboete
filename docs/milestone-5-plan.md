@@ -1451,6 +1451,160 @@ settings-coverage.md の「Stop recording a repository or folder」（W3）と�
 - 画面の文言は日英で、`TEXT` の鍵は一つにつき一度だけ定義する（4b の途中で既存の「記録」の見出しを上書き
   しかけた）。
 
+### Slice 5 の決定（2026-11-15。決定 109・110）
+
+決定 109（2026-11-14）: repo の forget は、その repo の work state、保存した note、取り込んだ履歴も消す。
+決定 110（同日）: 保存に失敗した記録の置き場（`unwritten/` と `unwritten/bad/`）も forget の届く所にする。
+今の repo の forget（3b-2、要求の版 5）は records 表の event だけを選ぶ（`scope_records`）。work state op・
+note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6 は「repo の forget は取り込み文書と work state
+にも同じ規則で届く」予定と書くが、まだ作られていない。
+
+規模の前提（ある利用者の store、件数だけ）: 1 つの repo の取り込み文書が約 10 万件（claude-mem 由来と v1 由来）、
+ラベル 507 個、work state op は store 全体で自前 1,034 件・取り込み 1,110 件、note は 8 件。uid ごとの Forget op（D5）を 10 万件足すと、`forgotten_set`
+を引く 5 か所（curate・worker・claims・embed_phase・検索）が毎回 10 万件を読み、検索は全文検索の行を
+`depth + forgotten.len()` 件読む（`search/b.rs`）。だから D5 の形には展開しない。
+
+#### 5a: 対象と preview
+
+- **対象**（repo キー R、登録時刻 S）: 既にあるものは、records の解決と同じく store の全端末の、preview の時点の
+  もの（CodeRabbit on #1011）。後から届くものを止める境界は 5d（records と同じ規則）で、選ぶ条件とは分ける。
+  - 自前の work state op（`source` 無し、`body.repo == R`）と note（Import op、`source == "oboete-note"`、
+    `body.repo == R`）。
+  - 取り込み文書（Import op と ImportFiles）と取り込みの work state で、ラベルが R の読むラベルの集合 Λ(R)
+    にあるもの。Λ(R) は読み手が R の取り込み履歴を選ぶ規則の和: repo キーの末尾の名前（`import::imported_scope`
+    / `imported_match`、D13）と、R の checkout の名前（`import::names_of`、決定 52。session start はこちらで
+    取り込み履歴を選ぶ）。checkout は、R の record が持つ各 cwd と、forget を R の checkout の中で実行したときは
+    その cwd（viewer は cwd を持たないので record の cwd だけ）。名前の対応は checkout から名前への向きしか
+    無く、repo キーから checkout は引けない: record も無く、中で forget も実行しない checkout の名前は入らない
+    ので、preview は使った checkout と名前を出し、その checkout の中で実行すれば入ることを示す（CodeRabbit on
+    #1011）。v1 由来の文書が持つ R 自身も入る。最終の集合は knowledge.db ではなく raw.db の op で確かめる
+    （knowledge.db は遅れも欠けもある）。赤いテスト: フォルダの名前が repo の名前と違う checkout で session
+    start が見せる取り込み履歴を、R の forget が取り残さない（record の cwd から、と、record の無い checkout の
+    中で実行した forget から）。
+- **preview**（spec 6.2 の「Preview first」）: 種類ごとに数える。raw records、自前の work state（list 数と件数）、
+  note、取り込み文書（一意な uid の数と op の数、ラベルごと）、ImportFiles、未保存の event（5e）。
+  末尾の名前が同じ別の repo も同じ claude-mem のラベルを読むときは、そのラベルと「その repo からも消える」
+  ことを出す（forget は戻せない）。
+- **token**: 今は target・records・copies・denied だけ。対象の identity 集合のダイジェスト、Λ(R)、端末ごとの
+  境界、未保存の event の一覧を足し、登録の transaction の中でもう一度計算して比べる（件数だけの一致では
+  通さない）。
+- `Preview::validate` は records が空の repo を拒む。records が 0 件でも、5a の対象か未保存の event が
+  あれば通す。
+
+#### 5b: 要求の版 6 と、一括の拒否
+
+- 要求の版 6: `Target::Repo`、records は空、新しい欄で Λ(R) を固定する。版 5 のページ（records）と同じ
+  transaction で登録する。records が 0 件の repo でも版 6 は 1 本登録される。版 1〜5 の行の表現と checksum
+  は変えず、古い行が読めることをテストで固定する（`deny_unknown_fields`）。
+- **一括の拒否**: 対象の identity（文書と ImportFiles は取り込み元の `source:source_id`、取り込みの work state
+  は種類を区別した `source:source_id`、自前の work state と note は op の identity）を、本文を持たない一括の
+  control op にページで書き、そこから索引つきの拒否表を作る。N 個の Forget op、N 個の job、検索ごとの
+  集合の展開にはしない（識別子の保持は O(N) で受け入れる）。本文を消した後も拒否の identity は残る。
+  ラベルと時刻の scope（`denied_scopes`、kind を足す）は、まだ取り込んでいない、後から届く履歴を止める
+  補助にだけ使う。
+- **先に比べる安い形**: 書き換えた後の body に `source` / `source_id` を残す形（`{"forgotten": job, "source": …,
+  "source_id": …}`）なら、既存の重複判定（`source_ids`・`work_state_keys`）がそのまま再取り込みを止め、backup の
+  行にも残るので、control op と拒否表が要らないかもしれない。代わりに `Judge` と `forgotten_op` がこの形を
+  「purge 済み」と読めないと写しごと消してしまう。purge・backup の書き換え・segments だけの復元の後も拒否が残り、
+  検索ごとの集合を作らない方を選ぶ。ImportFiles は文書の時刻を持たず、claude-mem で project が移ると同じ行が別のラベルで
+  届くので、取り込み済みのものはラベルと時刻ではなく identity で止める。
+- **削除の世代**: 同じ transaction で raw.db の削除の世代を進める（5c）。
+- **store の形式**: 版 6 を知らない binary は版 6 の行を飛ばし（規則 9）、忘れた文書を見せる。だから
+  `docs/store-format.md` の「home が得る形式」の型どおり、最初の版 6 の登録が、それを書く transaction で home を
+  7 に上げる（hide op の 4、My Work op の 5、subagent_stop の 6 と同じ。復元と rebuild が持ち帰るときも 7）。
+  binary を入れただけでは上がらないので、版 6 の forget をするまでは前の binary に戻せる。
+
+#### 5c: 読み手を登録の時点から止める（spec 6.2 の手順 1）
+
+- knowledge.db の `imported` を読む SQL は 8 ファイル・約 46 か所で、共通の読み口が無い。行ごとに scope の
+  条件を足すと漏れと LIMIT の後での除外が起きやすく、10 万件の行が全文検索に残る。だから行ではなく、
+  読みの入口で止める。
+- **世代のガード**: `dispatch::reading`（回答を組み立てる間の forget の登録を止める共有 lock）を取った後、
+  knowledge.db の snapshot を始めるときに、raw.db の削除の世代と knowledge.db の適用済みの世代を比べる。
+  合わなければ、その投影を使う取り込み履歴の読みと送信をしない（「削除の反映待ち」）。hook は持ち時間の
+  中でその部分を省く。古い行を読まず、「0 件」とも扱わない。hook の read-only 接続と長く開いている接続も
+  対象にする。
+- **世代は数ではない**: segments だけの復元で数は戻り、古い knowledge.db の値と偶然合う。だから世代は版 6 の
+  job の集合のダイジェストにする。
+- **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
+  `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
+  適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ
+  atomic commit は仮定しない。rebuild と復元は適用済みの世代を確かめ直す。
+- **到達表**: 検索・get・session start・viewer・timeline・cards・埋め込み・curator への送信・My Work の各入口から
+  SQL までの表を作り、ガードを通ることを確かめる。通常時は世代の照合 1 回だけで、10 万件を
+  `depth + forgotten.len()` に足さない。同じ表に、Import op から作られて文面を持つもの（`cards.rs` の 2 か所、
+  要約など）を載せ、元を消しても残るものが無いようにする。
+- **測った時間（2026-11-15、ある利用者の store、1 つの repo の分）**: ガードは消し終わるまで全 repo の取り込み
+  履歴を閉じるので、閉じる長さを測った。
+  - knowledge.db の写しで、対象の取り込みの行 62,915 件とその全文検索の行、ファイルの行 81,095 件、ベクトルの key
+    62,915 件とベクトル 62,914 件を 1 つの transaction で消すのに 18.1 秒（文が 7.6 秒、commit が 10.5 秒）。分単位
+    ではないので、上の「消し終わるまで閉じる」形にする。消すのは forget のコマンド自身で（worker は再開の役）、
+    閉じたままのときは doctor に出す。
+  - 登録で対象を選ぶのは、raw.db の 527,539 op のうち対象の Import op 105,896 件（uid 62,915 個）。Import op の
+    repo には索引が無く全体を走査して、cache が冷えていると 8.2 秒、温まっていると 0.7 秒。登録は排他の lock の
+    中で選び直すので、Import op の repo に部分索引を足す（索引だけなら古い binary も読めるので FORMAT は上げない、
+    `docs/store-format.md`）。work state op（1,140 件）は既存の `ops_work_state` で 0.01 秒。
+- **raw.db の読み手**（`work_state_in`、`native_work_writes`、`imported_list_fields`、`work_state_keys`）は
+  拒否表を見る。`work_state_keys` は本文の source_id だけでなく拒否の identity も重複として扱う（purge で
+  本文が消えると source_id が消え、次の取り込みで戻るため）。
+
+#### 5d: 後から届くものと、派生物
+
+- 取り込み（文書・files・work state）は投入の前に拒否表と scope を見て除き、`append_import_items`、
+  `append_imported_ops`、`append_note`、`append_ops_from` の transaction の中でも確かめ直す。確かめた後に
+  forget が入った batch は対象を除いてやり直し、関係のない文書を詰まらせない。
+- 同じ fingerprint の note の保存し直し、project が移った同じ source_id、`--files` による再投入も止める。
+- My Work が忘れた work state op を参照していれば、provenance の op 参照から派生物も隠して purge する。
+- DENIED_COUNT/FENCE_COUNT、`Reading`、viewer の版とキャッシュの失効に、新しい拒否を反映する。
+
+#### 5e: purge と backup
+
+- repo の要求は record ジョブ（`records_due` / `record_jobs_with_text`）。一括の対象は job ごとにページで
+  走査し、文書の数だけ ops 全体を読み直さない。
+- step 2: 対象の ImportDoc・ImportFiles・WorkState の本文を `{"forgotten": job}` に書き換える（op_seq・type・
+  batch はそのまま）。拒否の identity を先に残し、secure_delete と WAL の truncate が済むまで進めない。
+- step 3: knowledge.db を 1 回だけ rebuild する。5c の先の削除は物理の削除の代わりにしない。古い knowledge.db
+  の写しから対象のベクトルが戻らないようにする。
+- step 4: `Judge::verdict` を、op の identity と scope で判定する共有の判定に広げる（今は `holds_uid` に
+  入らない WorkState が素通りする）。raw.db に無い backup だけの op、古い raw.db の写し、退避した segment も
+  同じに判定し、segment と seal の置き換えは既存の中断に強い手順を使う。
+- held と status は、raw.db の本文だけでなく knowledge.db・backup・unwritten への再出現も見て、step 5 の後でも
+  要る step からやり直す。
+
+#### 5f: 決定 110（unwritten/ と bad/）
+
+- 別の PR。`scope_tombstoned`（session・repo・range）の判定を共有し、対象の未保存の event を preview と purge
+  に入れる。records が空でも対象の event があれば登録できる。
+- 読めるファイルは、既存の `append_kept` の書き戻しを worker から進めて消す（忘れた event は行を作らずに
+  消費し、関係のない event は普通に保存する）。ファイルの hash・配列の位置・途中の進み・id の無い古い
+  ファイルの意味は保つ（受け取りの記録はファイル全体の hash なので、JSON を書き直すと重複か欠けが起きる）。
+- 読める bad のファイルも同じ判定。関係のない不正な event のせいで流しきれないファイルを一部だけ消すときは、
+  元の受け取りと event の位置を保つ版つきの形式で、消した位置を本文の無い空き場所にする（event を間引いて
+  書き直さない）。
+- lock は `write-back.lock` と短い `keep.lock`。流す間ずっと `keep.lock` を持たない。purge の後に遅れて保存
+  された対象は D5 の held と同じく物理の削除をやり直し、`append_kept` の scope の拒否で読み手には戻らない。
+- 読めない・版が分からないファイルは、どの repo のものか推して消さず、「判定できない」と preview・結果・
+  doctor に出す（消せたとは言わない）。消すのは別の明示の操作にする。symlink と reparse はたどらない。
+- `docs/unwritten.md` の U4・U5（oboete は消さない）と U8（forget の対象外）を改める。
+
+#### 順番と完了条件
+
+main は PR の合間に利用者の PC に入るので、読み手が除く前に登録ができてはならない。だから登録の入口は最後に開く:
+1. 5c の世代のガードと 5d の取り込みの拒否（入口なし: 版 6 の要求はまだ作れない）。到達表を先に作る。
+2. 5e の purge と backup の腕（版 6 の job を、テストで直に作って確かめる）。
+3. 5a・5b（preview・版 6・一括の拒否・FORMAT 7）で登録の入口を開ける。最初の赤いテスト: forget → purge →
+   取り込みを再実行 → 文書も work state も戻らない。登録の直後・knowledge.db の削除の途中・その commit の直後で
+   止めて、どの読み手も対象を返さないこと。ある規模の合成データで、通常の検索の取得件数・SQL の回数・メモリが
+   忘れた件数に比例しないこと。step ごとに止めて再開するテスト、segments だけからの復元、片方のログが無い場合。
+4. 5f（決定 110）は独立した PR。
+- 109 は「tombstone・全読み手のガード・再導入の拒否」がそろった単位で出す。物理の purge を後の PR に分ける間は
+  「physical purge pending」と正しく出す。どれもセキュリティの範囲: 赤いテストを先に、Codex のレビューと
+  別のエンジンのセキュリティレビュー、owner の store の写しでの件数と時間の実測。
+- 未決（owner に聞く）: 名前が重なる repo（この store では、記録のある repo のうち末尾の名前が同じものが 14 組、
+  そのうち 6 組は claude-mem のラベルにも当たる）の取り込み履歴を、preview で示した上で両方から消すか、重なる
+  ラベルだけは消さずに残すか。
+- 未決（後で決める）: 読めない bad のファイルを消す明示の操作を作るか。
+
 ## 実装順序と完了条件
 
 | Slice | 対象と再利用する処理 | 完了条件 |
