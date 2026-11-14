@@ -1087,6 +1087,40 @@ fn a_prompt_not_cut_is_gated_as_on_main_under_the_homes_rules() {
     }
 }
 
+/// A value of the home's that a bundled rule's match holds in all of the prompt is a find of the
+/// home's, though that rule masks nothing in the window: `uri-userinfo-password` needs the `@`
+/// after the password, past the window, so `vault{` and the start of what it holds were stored
+/// (CodeRabbit on #998's ee4798a7, where a find of the home's that a bundled one held was none).
+#[test]
+fn a_value_of_the_homes_a_bundled_match_holds_past_the_window_is_masked() {
+    let text = format!(
+        "{} postgres://user:vault{{{}}}@host",
+        "a".repeat(7_900),
+        "1".repeat(15_000)
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("claude-mem.db");
+    claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+    prompt(&src, 41, &text);
+    let (home, settings) =
+        home_with("[[redaction.extra_rules]]\nid = \"vault\"\nregex = 'vault\\{[^}]*\\}'\n");
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    raw.gates_with(&settings.rules);
+    claude_mem(&mut raw, &src, &settings).unwrap();
+    let docs = docs(&raw);
+    let body = &docs.iter().find(|d| d.source_id == "p41").unwrap().body;
+    assert!(
+        body.starts_with(&"a".repeat(7_900)),
+        "{:.60}",
+        &body[7_850..]
+    );
+    assert!(
+        !body.contains("vault{") && !body.contains("11111"),
+        "{}",
+        &body[7_890..]
+    );
+}
+
 /// Two edges of the read of all of a prompt. A prompt with more matches of one rule than a
 /// scan holds is one mask, as capture stores a live prompt with that many: `redact::ranges`
 /// then gives one span for all of the text, which is not told from a value that is the whole

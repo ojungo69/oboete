@@ -128,15 +128,16 @@ what was kept took the word `generic-api-key` needs, and a value it masks on a l
 without its allowlisted end was stored). So a value the cut falls inside, one that ends far past
 it, one whose rule needs the text after it, one that holds a value the bundled rules mask and
 one a rule finds only behind another rule's mask are each masked where the kept text shows them
-(their parts used to stay). Where the home's rules find nothing in a long prompt that the
-bundled rules alone do not, what is kept is what is kept under none of them. A prompt that is not cut is
+(their parts used to stay). Where the home's own rules find nothing in a long prompt up to the
+end of the window, what is kept is what is kept under none of them; a value of theirs that a
+bundled rule's match holds is a find of theirs, since that rule may need what follows the cut. A prompt that is not cut is
 masked as before, by the bundled rules and then the home's gate on what they masked (2026-11-14:
 read with all of the rules at once, a rule of the home's that holds a mask lost the value the
 gate finds, so such a prompt keeps what follows a bundled mask in a value of the home's, as
 before: #1005). A prompt in which one of the home's rules matches
 more times than a scan holds, or that is one value whole, is one mask, as capture stores a live
 prompt with that many; a bundled rule's matches are a mask each, however many. So is a prompt
-in which the home's rules find something more and whose bundled masks cannot be put on it as
+in which the home's own rules find something and whose bundled masks cannot be put on it as
 the runs the gate gives of them, a mask that a rescan puts beside another counted as one: the
 looks again of a scan (#537, `curl-auth-user`) mask a value those runs do not hold. A
 `[REDACTED]` the prompt holds after a value is its own (2026-11-14: such a prompt was one mask,

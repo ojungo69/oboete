@@ -4058,9 +4058,9 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
 /// untouched text and put on the text as runs before anything is masked, as `redact::joined_with`
 /// gates a text's views, so that no mask takes the context another rule needs: a mask of the
 /// home's put in before the bundled rules read what is kept took the word `generic-api-key`
-/// needs, and a value it masks was stored (the review of #998). Where the home's rules find
-/// nothing the bundled rules alone do not, it is `head[..kept]`, as under no rule of the home's.
-/// Where they do, one mask when the gate masks all of the head, when the rules find the text one
+/// needs, and a value it masks was stored (the review of #998). Where the home's own rules find
+/// nothing in all of the text up to the end of the window, it is `head[..kept]`, as under no rule
+/// of the home's. Where they do, one mask when the gate masks all of the head, when the rules find the text one
 /// value (`whole_runs`), or when what the bundled rules masked is not the text with the runs
 /// `redact::hidden` gives masked: the looks again of a scan (`curl-auth-user`, #537) mask a value
 /// the gate's runs do not hold.
@@ -4075,23 +4075,22 @@ fn ruled_head(
 ) -> String {
     let one = || redact::MASK.to_owned();
     let bundled = redact::Rules::default();
-    // What the rules find in what is kept, as the gate reads it, and in all of the text up to the
-    // end of the window (what is kept is in it). Where the home's rules find nothing there that
-    // the bundled rules alone do not, what is kept is what it is under no rule of the home's.
-    let gate = redact::hidden(&head[..kept], rules);
-    let whole = whole_runs(s, rules).map(|runs| {
-        runs.into_iter()
-            .filter(|&(at, _)| at < window.len())
-            .collect::<Vec<_>>()
-    });
-    if !adds(gate.as_deref(), || redact::hidden(&head[..kept], &bundled))
-        && !adds(whole.as_deref(), || whole_runs(s, &bundled))
-    {
+    // What the rules find in all of the text up to the end of the window (what is kept is in it).
+    // Where the home's own rules find nothing there, what is kept is what it is under none of
+    // them, and the caller's gate reads it as it reads it then. A value of the home's that a
+    // bundled rule's match holds in all of the text is a find of the home's: the bundled rule may
+    // need what follows the cut and mask nothing in the window (the review of #998).
+    let whole = whole_runs(s, rules);
+    if !whole.home.iter().any(|&(at, _)| at < window.len()) {
         return head[..kept].to_owned();
     }
-    let (Some(gate), Some(whole)) = (gate, whole) else {
+    let (Some(gate), Some(runs)) = (redact::hidden(&head[..kept], rules), whole.runs) else {
         return one();
     };
+    let whole: Vec<_> = runs
+        .into_iter()
+        .filter(|&(at, _)| at < window.len())
+        .collect();
     let (Some(first), Some(second)) = (
         redact::hidden(window, &bundled),
         redact::hidden(&masked[..cut], &bundled),
@@ -4123,46 +4122,35 @@ fn ruled_head(
     redact::masked_part(s, 0..end, &redact::merged_runs(runs))
 }
 
-/// Whether the runs the rules with the home's give (`None`: all of the text) hold one that the
-/// bundled rules' alone (`bundled`, read only when needed) do not cover.
-fn adds(
-    home: Option<&[(usize, usize)]>,
-    bundled: impl FnOnce() -> Option<Vec<(usize, usize)>>,
-) -> bool {
-    match home {
-        Some([]) => false,
-        Some(home) => bundled().is_some_and(|runs| {
-            let runs = redact::merged_runs(runs);
-            home.iter()
-                .any(|&(x, y)| !runs.iter().any(|&(a, b)| a <= x && y <= b))
-        }),
-        None => bundled().is_some(),
-    }
-}
-
 /// How often `whole_runs` reads a text again once its masks are in, as a scan's rescan does.
 /// Still finding after them, the text is one mask.
 const READ_PASSES: usize = 64;
 
 /// What the rules find in all of `s` as it came, as capture's scan finds it in a live prompt
 /// (#994), as runs of `s`: read again with its masks in until nothing new is found, so a value a
-/// rule finds only behind another rule's mask is one too. `None` for one span of all of the text
-/// (a value that is the whole text, or more matches of one of the home's rules than a scan holds:
-/// `redact::ranges`; a bundled rule's are a span each) or still finding after `READ_PASSES`: the
-/// text is one mask, as capture stores a live prompt with that many.
-fn whole_runs(s: &str, rules: &redact::Rules) -> Option<Vec<(usize, usize)>> {
+/// rule finds only behind another rule's mask is one too. Its runs are `None` for one span of all
+/// of the text (a value that is the whole text, or more matches of one rule than a scan holds:
+/// `redact::ranges`) or still finding after `READ_PASSES`: the text is one mask, as capture stores
+/// a live prompt with that many. What the home's own rules found is kept either way.
+fn whole_runs(s: &str, rules: &redact::Rules) -> Whole {
     let (mut text, mut from) = (s.to_owned(), sources(s.len(), &[]));
-    let mut runs = Vec::new();
+    let (mut runs, mut home) = (Vec::new(), Vec::new());
     for _ in 0..READ_PASSES {
-        let found = redact::ranges(&text, rules);
+        let (found, homes) = redact::ranges_with_home(&text, rules);
+        let homes = homes.iter().map(|&(a, b)| hull(&from[a..b]));
         if found == [(0, text.len())] {
-            return None;
+            home.extend(homes);
+            return Whole { runs: None, home };
         }
         let next = redact::masked_part(&text, 0..text.len(), &found);
         // Nothing found, or a rule matching its own mask: nothing new to hide.
         if next == text {
-            return Some(runs);
+            return Whole {
+                runs: Some(runs),
+                home,
+            };
         }
+        home.extend(homes);
         runs.extend(found.iter().map(|&(a, b)| hull(&from[a..b])));
         from = sources(text.len(), &found)
             .into_iter()
@@ -4170,7 +4158,13 @@ fn whole_runs(s: &str, rules: &redact::Rules) -> Option<Vec<(usize, usize)>> {
             .collect();
         text = next;
     }
-    None
+    Whole { runs: None, home }
+}
+
+/// What `whole_runs` finds, as runs of the text: all of it, and what the home's own rules found.
+struct Whole {
+    runs: Option<Vec<(usize, usize)>>,
+    home: Vec<(usize, usize)>,
 }
 
 /// The smallest range of a text that holds each of `from`'s.

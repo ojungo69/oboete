@@ -9297,3 +9297,45 @@ fn aligned_puts_one_mask_or_more_on_a_run_and_nothing_else() {
     let from = aligned(part, &[(1, 7)], "a[REDACTED][REDACTED][RED").unwrap();
     assert_eq!((from[20], from[21]), ((1, 7), (7, 8)));
 }
+
+/// A long prompt whose read of all of it ends in one span (a `curl` line with more `-u` than a
+/// scan looks again for), with a value of the home's that the cut falls inside and that ends past
+/// the window: one mask. The read could not tell what the home's rules found, and what is kept
+/// under none of them was kept, with the value's start (OpenCodeReview on #998's ee4798a7). Under
+/// a rule that finds nothing, what is kept is what is kept under none.
+#[test]
+fn a_prompt_whose_read_ends_in_one_span_is_one_mask_where_a_rule_of_the_homes_finds() {
+    let home = tempfile::tempdir().unwrap();
+    let rules = |rule: &str| {
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[redaction]\nextra_rules = [{{ id = \"r\", regex = '{rule}' }}]\n"),
+        )
+        .unwrap();
+        crate::capture::Settings::load(home.path()).unwrap().rules
+    };
+    let users: String = (0..70)
+        .map(|i| format!("-u user{i}:Pw{i}xN3kL7 "))
+        .collect();
+    let text = format!(
+        "{}vault{{{}}} {}\ncurl {users}https://h.test\n",
+        "a".repeat(7_900),
+        "s".repeat(5_000),
+        "b ".repeat(1_000)
+    );
+    let bundled = redact::Rules::default();
+    assert!(
+        whole_runs(&text, &bundled).runs.is_none(),
+        "the read ends in one span"
+    );
+    let kept = clip(&text, &rules(r"vault\{[^}]*\}"));
+    assert!(
+        !kept.contains("vault{") && !kept.contains("sssss"),
+        "{}",
+        &kept[kept.len().saturating_sub(120)..]
+    );
+    assert_eq!(
+        clip(&text, &rules("zz-never-[0-9]{9}")),
+        clip(&text, &bundled)
+    );
+}

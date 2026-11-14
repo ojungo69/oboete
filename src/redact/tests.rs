@@ -3306,7 +3306,7 @@ fn the_matching_code_is_the_one_its_number_names() {
             MATCHING,
             short_hash(&[code, &crates.join("\n")].concat()).as_str()
         ),
-        ("2", "c9aaa31c0db6b844")
+        ("2", "b20580f461fefa5d")
     );
 }
 
