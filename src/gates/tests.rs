@@ -1295,3 +1295,24 @@ fn a_body_over_the_cap_is_dropped_not_cut_and_goes_through_the_gate() {
     assert_eq!(g.dropped, [("c1".to_string(), "over_cap")]);
     assert!(!g.kept[0].0.body.contains(&token), "{}", g.kept[0].0.body);
 }
+
+/// A pick or a bare acceptance is not a paste when a tool line holds its few characters: "1" is
+/// in most tool output ("exit status 1") and "ok" is in "token", and a pick that answered the
+/// reply before it, or an "ok" that did, was lowered to proposed as pasted. Its decision comes
+/// from the reply it answers.
+#[test]
+fn a_pick_or_a_bare_ok_a_tool_line_holds_still_decides() {
+    let options = "Two ways:\n1. **Cache the parsed files**\n2. **Parse in parallel**";
+    let picked = window(&[
+        user("Build the importer."),
+        tool("exit status 1", false),
+        reply(options),
+        user("1"),
+    ]);
+    assert_eq!(one(&picked, "decided", "user", "1"), is("decided", "user"));
+    let accepted = window(&[reply(PROPOSAL), tool("token ok", false), user("ok")]);
+    assert_eq!(
+        one(&accepted, "decided", "user", "ok"),
+        is("decided", "user")
+    );
+}

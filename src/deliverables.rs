@@ -1123,7 +1123,12 @@ pub(crate) fn run(
     db: &mut Option<Connection>,
     aside: &dyn Fn() -> bool,
 ) -> Result<bool> {
-    if !crate::config::load_capture(home).is_ok_and(|c| c.capture.deliverables) {
+    let on = match crate::config::load_capture(home) {
+        Ok(c) => c.capture.deliverables,
+        // A config.toml that does not read decides nothing: the checkpoint stays.
+        Err(_) => return Ok(false),
+    };
+    if !on && db.is_none() && !home.join(DB).exists() {
         return Ok(false);
     }
     let db = match db {
@@ -1132,6 +1137,15 @@ pub(crate) fn run(
     };
     let device = raw.device().to_owned();
     let newest = raw.max_seq()?;
+    // Off, the checkpoint follows the newest record, as the first run puts it: what is recorded
+    // while it is off is not copied once it is on again (no history is copied).
+    if !on {
+        if checkpoint(db, &device)?.is_some_and(|c| c.seq < newest) {
+            db.execute("DELETE FROM subagent_scan WHERE device = ?1", [&device])?;
+            set_checkpoint(db, raw, newest, time_at(raw, newest)?)?;
+        }
+        return Ok(false);
+    }
     let from = match checkpoint(db, &device)? {
         Some(c) if still_there(raw, &c)? => {
             // One kept before raw.db's file was takes the file now, once, also when no record

@@ -254,7 +254,9 @@ pub fn check(
         let is_bare = bare(&d.quote)
             || pick.is_some()
             || speaker == "user" && letters(&unsaid(turn_said(line, &d.quote))) == 0;
-        let paste = speaker == "user" && pasted(&norm(span), &tools);
+        // A bare quote's or a pick's few characters are in most tool text ("1", "ok" in "token"):
+        // its decision comes from the reply it answers, not from its words.
+        let paste = speaker == "user" && !is_bare && pasted(&norm(span), &tools);
         let own_words = speaker == "user" && !asked && !is_bare && !paste;
         let answers = speaker == "user"
             && is_bare

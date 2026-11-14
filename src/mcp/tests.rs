@@ -2845,3 +2845,54 @@ fn a_name_or_a_key_that_is_only_a_private_block_is_refused() {
             .is_empty()
     );
 }
+
+/// `""` is a left-out argument in search's type and orderBy and in get's id, and an empty ids is
+/// one in get, as repo, since, until and timeline's anchor already were: models fill the
+/// arguments they leave out so. They were refused (`unknown type ""`, `unknown order ""`,
+/// "provide exactly one of id or ids").
+#[test]
+fn an_empty_string_is_a_left_out_argument_in_search_and_get() {
+    let (_s, server, uid) = seeded("Use the trigram tokenizer.");
+    let plain = body(
+        server
+            .search(Parameters(args("trigram", None, None)))
+            .unwrap(),
+    );
+    let empty = server
+        .search(Parameters(SearchArgs {
+            kind: Some(String::new()),
+            order_by: Some(" ".into()),
+            ..args("trigram", None, None)
+        }))
+        .unwrap();
+    let error = empty.is_error;
+    let text = body(empty);
+    assert_ne!(error, Some(true), "{text}");
+    assert_eq!(text, plain);
+    let one = body(
+        server
+            .get(Parameters(GetArgs {
+                id: Some(uid[..12].into()),
+                ..Default::default()
+            }))
+            .unwrap(),
+    );
+    let with_empty_ids = server
+        .get(Parameters(GetArgs {
+            id: Some(uid[..12].into()),
+            ids: Some(vec![]),
+        }))
+        .unwrap();
+    assert_ne!(with_empty_ids.is_error, Some(true));
+    assert_eq!(body(with_empty_ids), one);
+    let beside_ids = server
+        .get(Parameters(GetArgs {
+            id: Some(String::new()),
+            ids: Some(vec![uid[..12].into()]),
+        }))
+        .unwrap();
+    let error = beside_ids.is_error;
+    let text = body(beside_ids);
+    assert_ne!(error, Some(true), "{text}");
+    assert!(text.contains("Use the trigram tokenizer"), "{text}");
+}
