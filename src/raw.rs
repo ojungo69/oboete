@@ -714,10 +714,14 @@ fn check_cross_source_forget(conn: &Connection, session: &str, source: &str) -> 
         params![session, source],
         |r| r.get(0),
     )?;
-    anyhow::ensure!(
-        !unverified,
-        "this import overlaps a forget without a verified cross-source event identity: this batch was not imported"
-    );
+    // A refusal for a forget's sake, as the two of `append_imported_with` are: an importer of
+    // many sources goes on to the next one.
+    if unverified {
+        return Err(ForgetRefusal(
+            "this import overlaps a forget without a verified cross-source event identity: this batch was not imported",
+        )
+        .into());
+    }
     Ok(())
 }
 
