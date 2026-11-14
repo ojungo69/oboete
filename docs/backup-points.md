@@ -20,7 +20,9 @@ back, because forget and retention already rewrite the segments.
   what the backups held at that moment. It does not use the records' own times: an import's records
   keep their source's times on new seqs (the owner's store has 575,009 imported records, the oldest
   from 2025), so a cut by record time would not be a prefix of the store. The line is appended and
-  synced after the segments are sealed. A torn or unreadable line is skipped. A lost `points.jsonl`
+  synced after the segments are sealed. The append, and each rewrite that drops points (B6), holds
+  `points.jsonl.lock` in the backup directory, so a point another home sharing the directory notes
+  meanwhile is kept. A torn or unreadable line is skipped. A lost `points.jsonl`
   loses the points and no record: `oboete restore` with no point replays every segment, as before.
 - B2. **`oboete backup list`** prints this device's points, newest first: each one's time (UTC, in
   the form `--to` takes), the seq and op seq it keeps through, and how many records and ops raw.db
