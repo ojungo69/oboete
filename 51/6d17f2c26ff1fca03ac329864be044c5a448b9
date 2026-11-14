@@ -1,0 +1,46 @@
+docs/claude-mem-parity.md
+  s_d546e4e9d39962::t_80d6b509f85f14 190-194
+  s_d546e4e9d39962::t_cde2df4328bab4 331
+README.ja.md
+  s_d546e4e9d39962::t_a9109a7e0f478c 224-229
+README.md
+  s_d546e4e9d39962::t_1b912417ecd2c8 326-331
+docs/milestone-2-plan.md
+  s_d546e4e9d39962::t_607c52e03eada5 229,245
+docs/milestone-3-plan.md
+  s_d546e4e9d39962::t_6ccf2f341301d4 42,88,149,152
+docs/milestone-4-plan.md
+  s_d546e4e9d39962::t_b3a8d9b433904a 56,217,221,358,365-366,413,420-421,465,472-473,513-514,631-632
+docs/pr-b.md
+  s_d546e4e9d39962::t_2138395935dc43 3-4,25,64
+docs/pr-c.md
+  s_d546e4e9d39962::t_49fe3bf6b32c1b 3-4,48,60
+docs/pr-d.md
+  s_d546e4e9d39962::t_64adeae46fa607 3-4
+docs/pr-e0.md
+  s_d546e4e9d39962::t_b0559ace7ad39a 3-4,108
+docs/resident.md
+  s_d546e4e9d39962::t_abbfa681cdd541 160-167
+docs/settings-coverage.md
+  s_d546e4e9d39962::t_37d6e413b90a8d 81,274
+docs/settings-onboarding.md
+  s_d546e4e9d39962::t_52543dcb334663 49
+docs/spec.md
+  s_d546e4e9d39962::t_8c03de7de17567 8,26,181,1091,1094,1098,1107,1110,1124,1131,1133,1198-1199,1644,1657,1659,1661,1670-1671,1679-1680,1687,1696-1697,1710,1721,1761,1767,1772,1774,1826
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "516d17f2c26ff1fca03ac329864be044c5a448b9",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
