@@ -328,9 +328,9 @@ const U: &str = "-u";
 #[test]
 fn a_credential_before_a_value_a_greedy_rule_passes_over_is_masked_where_it_is_stored() {
     // Since #985 curl-user reads a credential wherever it stands; what #537's looks still add
-    // is a value gitleaks' rule takes and curl-user passes over, as a password that starts
-    // with the placeholder curl-user knows. The made-up value here is one.
-    let pw = format!("パスワード{}", "N3kL7pW2");
+    // is a value gitleaks' rule takes and curl-user passes over, as the placeholder curl-user
+    // knows with Japanese after it. The made-up value here is one.
+    let pw = format!("パスワード{}", "暗号鍵七三九");
     for last in ["bob:pass", "a:b"] {
         for tail in [" && echo ok", ""] {
             let line = format!("curl {U} admin:{pw} https://h.test {U} {last}{tail}");
@@ -359,8 +359,8 @@ fn a_credential_before_a_value_a_greedy_rule_passes_over_is_masked_where_it_is_s
     // quote follows it, and the rule does not take it) and one before a passed-over value,
     // they do; two credentials at a field's end did so before #537 too.
     for line in [
-        format!("curl {U} admin:{pw} {U} bob:pass {U} ops:{pw}9"),
-        format!("curl {U} admin:{pw} {U} ops:{pw}9"),
+        format!("curl {U} admin:{pw} {U} bob:pass {U} ops:{pw}九"),
+        format!("curl {U} admin:{pw} {U} ops:{pw}九"),
     ] {
         let e = one(
             "UserPromptSubmit",
