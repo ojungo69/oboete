@@ -879,9 +879,10 @@ fn codex_thread(payload: &Value) -> String {
     }
 }
 
-/// The shell tools whose call may start another agent and wait for it (#692): Claude Code's and
-/// Codex's, and Grok's by the name its hooks show and by its id.
-const SHELLS: &[&str] = &["Bash", "run_terminal_command", "run_terminal_cmd"];
+/// The shell tools whose call may start another agent and wait for it (#692), and may make work
+/// product (`work_product::may_make`): Claude Code's and Codex's, and Grok's by the name its hooks
+/// show and by its id. Each takes its command as `command`.
+pub(crate) const SHELLS: &[&str] = &["Bash", "run_terminal_command", "run_terminal_cmd"];
 
 /// The session value that keeps a shell call's start (#692): its call's id hashed, as the id is
 /// the agent's text.
