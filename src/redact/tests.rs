@@ -2995,7 +2995,7 @@ fn a_rescan_finds_nothing_new_where_capture_looked_again() {
     let pw = looks_only("暗号鍵七三九");
     for line in [
         format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
-        format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} a:b"),
+        format!("curl {U} \"admin:{pw}\" {U} ops:{pw}九 https://h.test {U} a:b"),
         format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass"),
     ] {
         let (stored, found) = scan(&line, &rules);
