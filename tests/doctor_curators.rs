@@ -87,6 +87,34 @@ fn doctor_names_a_v1_store_in_one_line_and_leaves_it_as_it_was() {
     assert_eq!(std::fs::read(&db).unwrap(), bytes);
 }
 
+/// The home's evaluation copies (`<home>/eval`), which forget does not reach, are one line with
+/// their size: the bytes of the files under it, at any depth.
+#[test]
+fn doctor_names_the_evaluation_copies_with_their_size() {
+    let home = tempfile::tempdir().unwrap();
+    let eval = home.path().join("eval");
+    std::fs::create_dir_all(eval.join("run-1")).unwrap();
+    std::fs::write(eval.join("a.jsonl"), "x".repeat(300)).unwrap();
+    std::fs::write(eval.join("run-1").join("b.db"), "y".repeat(200)).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .args(["--home", &home.path().to_string_lossy(), "doctor"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.contains("evaluation copies"))
+        .unwrap_or_else(|| panic!("no evaluation copies line in {text}"));
+    assert_eq!(
+        line,
+        format!(
+            "  evaluation copies, which forget does not reach: {} (500 bytes)",
+            eval.display()
+        )
+    );
+}
+
 /// #542: doctor shows the home's own provider calls from providers.db, whatever their role, with
 /// no v1 store beside them.
 #[test]
