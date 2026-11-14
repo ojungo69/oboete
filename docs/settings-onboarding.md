@@ -46,7 +46,7 @@ excerpts and explain remaining restrictions in plain language. Do not infer logi
 free quota, credentials or a passing isolation check from a launch file.
 
 Private Linux acceptance uses a genuinely missing configuration, a single explicit
-None-tier/resident-off Save, separate Codex wiring and read-only diagnostics, then
+None-tier choice with resident off, which saves at once, separate Codex wiring and read-only diagnostics, then
 the generated native hook and a no-inference FTS drain before JA/EN UI search.
 Invalid-settings recovery retains an exact 0600 copy and the earlier searchable
 record and agent files. A separate browser transport injection covers initial

@@ -187,6 +187,11 @@ each milestone and new features are added here.
 
 ## The 60 differences
 
+The `#` of a row below is the Id of the row of the table above that it continues. When a later
+claude-mem version changes a row again, it returns under the same Id in that version's section, so
+N4 (three times), X10, X14 and 60 (twice each) each appear more than once. A citation such as "row
+X14" names the table's row; the sections below say what each version added to it.
+
 ### Before the switch (planned)
 
 | # | Difference | Size |
@@ -323,7 +328,7 @@ By decision 50 each of these is closed before claude-mem's removal is proposed.
 |---|---|---|
 | 2 | **Controlling the always-on worker: stop, restart, status, stuck-worker replacement.** claude-mem has commands to stop, restart and check its worker, and a launcher replaces one that is old or fails two health probes. oboete's resident worker (decision 36) is replaced when the binary changes, steps aside for a command that needs its lock, and doctor says whether it runs; stop and restart commands and a watchdog for a hung worker come after the switch. Built: `oboete worker status`, `stop` and `restart`, and the worker's watchdog (docs/resident.md R14 and R15). | M |
 | 16 | **Sessions list, one-session page and category filter in the viewer.** A sessions tab, a page per session and filter chips by kind are in claude-mem's source under development, not in the installed 13.28.0. oboete's page has one timeline per repository. In scope by decision 37. Built since: the page has a sessions view, and session summaries are shown as cards in the page. | M |
-| 17 | **Readable 'what this session did' summaries.** claude-mem writes a structured summary of each session (request, what was learned, what was completed, next steps) that can be searched and read in the page. oboete writes a short digest shown only at the next session start; it is not searchable or listed in the page (built since: the page lists session summaries as cards). | M |
+| 17 | **Readable 'what this session did' summaries.** claude-mem writes a structured summary of each session (request, what was learned, what was completed, next steps) that can be searched and read in the page. oboete wrote a short digest shown only at the next session start, not searchable or listed in the page. Built since (docs/summaries.md): session summaries with the same six fields replace the digest; `search` and `get` reach them (`get S<op seq>`), they show at session start, and the page lists them as cards. | M |
 | 21 | **No way to say 'these two are the same project'.** Joining two projects and naming one by hand are in claude-mem's source under development, not in the installed 13.28.0, which names a project by its folder. oboete keys a repository by its origin URL, so a rename on GitHub or a remote added later splits its memory; `oboete repo alias` (appendix B, 30-4; planned, not built) joins them. | M |
 | 23 | **The 22 slash-command skills that come with the claude-mem plugin.** The claude-mem plugin brings 21 slash-command skills (22 upstream, with /handoff). oboete ships none. Decision 37: the memory ones (search, timeline report, how it works, handoff) come to oboete where needed. | M |
 

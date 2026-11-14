@@ -226,7 +226,7 @@ Rules (spec 2.1-2.4, D9, D15):
 - Envelopes are not typed prompts: today's list plus the teammate message (`Another Claude session sent a message:`).
 - Images and binary content become `{kind, mime, bytes, sha256}`.
 - The curator's sessions are skipped (`SKIP_ENV`, the environment marker set on curator CLIs, `src/hook.rs:20`).
-- Repo labels keep today's rules and tests: one key for every way to clone, no userinfo (`one_key_for_every_way_to_clone_and_no_secrets`, #30 row 3); an alias only from the owner's settings (#30 row 4); the repos a session touches are recorded from tool working directories and file paths (`sessions_record_every_repo_and_idless_events_stay_on_this_device`, #30 rows 5 and 20; no test of that name exists now), as a `session_repos` table in `knowledge.db` kept by the FTS consumer (Task 6).
+- Repo labels keep today's rules and tests: one key for every way to clone, no userinfo (`one_key_for_every_way_to_clone_and_no_secrets`, #30 row 3); an alias only from the owner's settings (#30 row 4); the repos a session touches are recorded from tool working directories and file paths (`sessions_record_every_repo_and_idless_events_stay_on_this_device`, #30 rows 5 and 20; no test of that name exists now), as a `session_repos` table in `knowledge.db` kept by the FTS consumer (Task 6; built as a view over `raw_docs`).
 - Git fields from files (D9): `.git` may be a file (`gitdir: …`) in a worktree.
 
 - [ ] **Step 1: Failing tests** (in `src/capture.rs`): a 100,000-character tool output is kept whole and a token past today's 12,000-character window is masked; `<private>` blocks go and an unclosed one hides the rest; envelopes, the teammate message among them, are recorded as `envelope`, never `prompt`; images become markers in each shape agents send; replies come from the payload or Codex's transcript; git fields come from files in a main checkout, a linked worktree, after `pack-refs`, and detached.
@@ -242,7 +242,7 @@ Rules (spec 2.1-2.4, D9, D15):
 **Files:**
 - Modify: `src/redact.rs`
 - Modify: `src/capture.rs` (call the scan, apply D4's cap)
-- Modify: `src/config.rs` (`[redaction] extra_rules`, `allowlist`; `[capture] max_output_bytes`, `store_prompts`, `tool_output = "full" | "head-tail"`)
+- Modify: `src/config.rs` (`[redaction] extra_rules`, `allowlist`; `[capture] max_output_bytes`, `store_prompts`, `tool_output = "full" | "head-tail"`; built: `max_output_bytes` is the code constant `capture::MAX_FIELD_BYTES`, not a setting, D4)
 - Test: `src/redact.rs`, `src/capture.rs`
 
 **Interfaces** (in two PRs: **3a** the full scan, the ledger and the cap on the built-in rules; **3b** the settings):

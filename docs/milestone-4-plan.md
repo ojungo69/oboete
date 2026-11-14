@@ -53,7 +53,7 @@ The restatement links that recuration adds (`curate::restate`, #261) quote the s
 
 **D2. One pair rule for every surface.** Each surface ranks its own list of delivered claims. `claims::units` gives each claim of that list with the chain of later claims that ended it as one unit, the later claim directly before the earlier one, and `claims::place` fits whole units into the surface's places. The pair takes two places of the limit. If only one place is left, both go to the one-line index. Each claim is shown with its date. A constant `LINKS_END_DECISIONS` (false) is the switch that spec 3.4 waits for: once curator links pass M3's control line, the PR that records that result sets it, and the earlier claim then leaves delivery as it does from the tips (#295 row 1). It is a constant, not a setting, because it follows a measurement, not a preference. Every surface reads `claims::delivered`: SessionStart, the manifest, the shortlist, per-prompt injection, re-injection after compaction and search's first rank. Every surface that shows a limited number of claims places them with `units` and `place` (#295 rows 2-3).
 
-**D3. The SessionStart packet's manifest part is stored; its delivered part is read (amends spec 4.1).** The worker keeps the manifest row per checkout, as it does today. The hook reads it, and it reads the delivered claims, the global preferences and the fresh digest from knowledge.db's indexes at SessionStart. It also reads the owner corrections that raw.db holds past the claims consumer's checkpoint and applies their status to what it shows, as the manifest read already checks tombstones not yet applied. So a claim the owner retracted since the worker's last run is never shown, and no packet rebuild is needed after each op (`consumer/manifest.rs` explains why decisions are read at SessionStart today). A stored packet replaces the live read only if M22's scale check shows that the live read pushes SessionStart past the read-hook line. The plan's first PR (#300) changed spec 4.1's first bullet to say so (A89). The per-prompt shortlist stays a worker product (D9), because its first stage needs vectors, which a hook never computes. The manifest's other-sessions line (MUST-M8: agent, branch, minutes ago, at most 5, the reader left out) and its `N events / T min not yet curated` (MUST-M9) are computed when the text is read, not stored, since T is measured at read time and a stored list keeps naming sessions as active on a checkout left idle. The stored ruleset carries a format tag, so rows built before are rebuilt at the worker's next pass (Task 8).
+**D3. The SessionStart packet's manifest part is stored; its delivered part is read (amends spec 4.1).** The worker keeps the manifest row per checkout, as it does today. The hook reads it, and it reads the delivered claims, the global preferences and the fresh digest from knowledge.db's indexes at SessionStart (replaced since: the session summary replaced the digest, spec 4.4). It also reads the owner corrections that raw.db holds past the claims consumer's checkpoint and applies their status to what it shows, as the manifest read already checks tombstones not yet applied. So a claim the owner retracted since the worker's last run is never shown, and no packet rebuild is needed after each op (`consumer/manifest.rs` explains why decisions are read at SessionStart today). A stored packet replaces the live read only if M22's scale check shows that the live read pushes SessionStart past the read-hook line. The plan's first PR (#300) changed spec 4.1's first bullet to say so (A89). The per-prompt shortlist stays a worker product (D9), because its first stage needs vectors, which a hook never computes. The manifest's other-sessions line (MUST-M8: agent, branch, minutes ago, at most 5, the reader left out) and its `N events / T min not yet curated` (MUST-M9) are computed when the text is read, not stored, since T is measured at read time and a stored list keeps naming sessions as active on a checkout left idle. The stored ruleset carries a format tag, so rows built before are rebuilt at the worker's next pass (Task 8).
 
 **D4. SessionStart's content, in spec 4.4's order.** It shows the explicit global preferences (`claims::global`); the manifest; delivered decisions, preferences, open items and lessons (kinds of spec 4.4; fixes, changes and repo facts are for search), about 10 with bodies, chosen by overlap with the manifest's files, last prompt and last failing command (so a lesson about the checkout's failing command gets its body, MUST-M21) and then by recency, and listed newest first (spec 4.4), the rest as one line each (`uid`, kind, date, first words); a line naming the `get`, `search` and `timeline` tools; the digest, only if fresh (replaced since: the session summary replaced the digest, spec 4.4, and SessionStart shows the recent-context block of cards and session summaries). A checkout with claims but no manifest row (a new branch, a dirty manifest, a tombstone not yet applied) still gets its preferences and delivered claims. Today it gets nothing.
 
@@ -214,11 +214,11 @@ As built in #304; D6 and D13 are the record.
 - Modify: `src/raw.rs` (`OpKind::Exclusion`; `Raw::{exclude, exclusions, sessions_in, imported_counts}`, read directly, no consumer; `raw::is_live`; the continuity reads take the window's kind)
 - Modify: `src/provider.rs` (`provider::Gate`, asked before each call, a retry too)
 - Modify: `src/digest.rs` (no longer exists), `src/consumer/claims.rs`, `src/worker.rs` (digests and claims leave excluded sessions out; the curator and digester closures pass the gate)
-- Modify: `src/embed.rs` (v1's `oboete reindex` asks the exclusion list before each request and stops while any repository is on it)
+- Modify: `src/embed.rs` (v1's `oboete reindex` asks the exclusion list before each request and stops while any repository is on it; built since: `oboete reindex` no longer exists)
 - Modify: `src/consumer/manifest.rs` (facts from `hook` and `replay` records only; the not-yet-curated count leaves parked records out)
 - Modify: `src/setup.rs` (doctor: `imported, not curated: N records (oboete-v1: a, transcript: b)`, from `curate::parked_line`)
 - Modify: `src/main.rs` (`Recurate { source: Option<String>, .. }`; `oboete exclude [<repo>] [--undo]`, the current checkout's repository when none is named)
-- Test: `src/curate.rs`, `src/raw.rs`, `src/digest.rs`, `src/embed.rs`, `src/provider.rs`, `src/consumer/manifest.rs`
+- Test: `src/curate.rs`, `src/raw.rs`, `src/digest.rs` (no longer exists), `src/embed.rs`, `src/provider.rs`, `src/consumer/manifest.rs`
 
 **Interfaces:**
 - A parked span is a window op with outcome `skipped` and reason `imported:<source>`: the M2 coverage check counts it, and `recurate --skipped` does not take it.
@@ -355,12 +355,14 @@ As built in #309, whose description lists where it differs from the steps below;
 - [ ] **Step 11: Doctor.** Generation, waiting per kind, skipped per reason, last error, requests and USD against the cap.
 - [ ] **Step 12: Spec.** Made in this plan's PR: 4.10 and 7.4 (A13, A91-A94). Nothing is left to edit.
 - [ ] **Step 13: Measure** on a copy of `b-import` (178,370 documents): MCP `search` p50/p95 on the dev questions first, each `Used`; then a day's cap: neurons against Cloudflare's, disk per 1,000 vectors, VmHWM, a poll's time; from text lengths, unsent, the requests, neurons and USD for the whole store and Task 6's Raw corpus. Delete the copy. The PR names where each check ran (row 55-8).
-- [ ] **Step 14: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`).
+- [ ] **Step 14: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`). (Built since: the v1 tail is removed, `oboete reindex` with it; nothing is left to do.)
 - [ ] **Step 15: Run** the suite. **Commit** `embed: the embedding phase and the hybrid's vector leg on B (milestone 4, Task 5)`. No Codex piece: the egress path is security scope.
 
 ---
 
 ## Task 6: The test-split run
+
+As built in #312, #313, #314, #318 and #319 for the eval entry, the Raw arms, `m4.py`, the statistics and the rerank script; Steps 4, 8 and 9 are recorded in docs/milestone-4.md, Task 6. Steps 10 to 14 (the dev runs, the pre-registration, the single run, its gate and its judging) are open until the evaluation runs, and the step boxes below are not ticked.
 
 **Files:**
 - Modify: `src/search/b.rs` (`Query.skip_session`, `RawArm::Rrf`, `trec_run`)
@@ -408,12 +410,14 @@ As built in #309, whose description lists where it differs from the steps below;
 - [ ] **Step 12: Runs and freeze.** No worker on `b-m4`: hash raw.db, knowledge.db and the binary; `eval` the 165, `rerank.py` on `b-off`, `m4.py map`; `b-rrf5` and `b-only` keep Raw-eligible questions only; hash again; `freeze.py add` the runs, the sidecar and `questions-test-m4.jsonl`.
 - [ ] **Step 13: Gate.** `m4.py gate` prints Raw N first, the slice counts and each comparison's N, then checks the frozen inputs, the runs, the mapping, same-session hits (with a positive control), the stores, the judge and its dry call count. Nothing is judged until it passes.
 - [ ] **Step 14: Judge and report.** With `OBOETE_EVAL_DEPTH=50 OBOETE_EVAL_RUNS=<runs-test-m4> OBOETE_EVAL_QUESTIONS=~/.oboete/eval/questions-test-m4.jsonl` set for both (without the last, both read queries.jsonl and leave out M21's 53 English questions): `judge.py test 165 <max>` until no call is left, then `report.py test --m4`; apply the lines as registered. `docs/milestone-4.md`: the commit, the gate, every table, the decisions and their limits. Then delete `b-m4`'s large files (raw.db, knowledge.db and their backups), keeping the recorded hashes and the small result files (What needs the owner, item 6); M22 builds its own home (D16).
-- [ ] **Step 15: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`).
+- [ ] **Step 15: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`). (Built since: the v1 tail is removed, `oboete reindex` with it; nothing is left to do.)
 - [ ] **Step 16: Run** the suite and the Python tests. **Commit** `eval: the test-split run on Design B, pre-registered and reported (milestone 4, Task 6)`.
 
 ---
 
 ## Task 7: The viewer on Design B
+
+As built in #316; docs/milestone-4.md keeps Step 7's measurement. The step boxes below are not ticked.
 
 **Files:**
 - Modify: `src/view.rs` (B routes; guards; `gated`; `failed`; no DELETE)
@@ -458,12 +462,14 @@ As built in #309, whose description lists where it differs from the steps below;
 - [ ] **Step 5: The page** (Codex, in its own worktree, reviewed by Claude): Timeline replaces Feed and Sessions (paged by `before`, the last entry's time and key, never by `anchor`, which reads around an item and returns the same keys again when more than a page shares one time), Context, Stats; search gains `since`, `until`, `history`, `raw`, `all`; a claim opens `/api/claim`; no delete; 503 shows retry; text nodes only; the poll waits for its answer. Claude runs `/code-review` and `ponytail-review`, then checks it in a browser.
 - [ ] **Step 6: Remove** v1's viewer-only code as the Files list names it (v1 `search::get` stays with `fuse` until D7's v1 tail leaves), then run clippy.
 - [ ] **Step 7: Measure** (row 53-6) on `~/.oboete/eval/b-import`: each route cold and warm, RSS; a route over 1.5 s p95 gets its index. Numbers go in `docs/milestone-4.md` and the PR.
-- [ ] **Step 8: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`).
+- [ ] **Step 8: The v1 tail.** If this is the last of Tasks 5-7 to land, remove the v1 tail D7 lists (including `oboete reindex`). (Built since: the v1 tail is removed, `oboete reindex` with it; nothing is left to do.)
 - [ ] **Step 9: Run** the suite. **Commit** `view: the viewer reads Design B (milestone 4, Task 7)`.
 
 ---
 
 ## Task 8: Per-prompt injection, corrections and compaction re-injection
+
+As built in #328, #333 and #340 (parts 1 to 3 of 3); the Files and Interfaces name the code. The step boxes below are not ticked.
 
 **Files:**
 - Create: `src/shortlist.rs` (phase, pick, corrections)
@@ -503,6 +509,8 @@ As built in #309, whose description lists where it differs from the steps below;
 ---
 
 ## Task 9: Cut-over tools
+
+As built in #326; the Files and Interfaces name the code. The step boxes below are not ticked.
 
 **Files:**
 - Create: `src/migrate.rs` (the v1 pass, the settings report, `--finish`)
@@ -619,6 +627,8 @@ Only on Task 6's GO for Rerank, after Task 10's build. The process that searches
 ---
 
 ## Task 12a: Dev harnesses: M6, M5, MUST-M11's slice, per-kind labels
+
+As built in #335, with `oboete cite`; the dev runs the harnesses serve wait for the evaluation. The step boxes below are not ticked.
 
 **Files:**
 - Modify: `src/consumer/claims.rs` (`live` becomes `pub(crate)`)

@@ -157,14 +157,14 @@ never quiet for a minute (parity row 50, Codex on #618). A viewer follows only a
 after it took its lock, and removes the one it follows; an older one, or one with no time, was
 another viewer's, and it takes that away (CodeRabbit on #618). It leaves only while no connection is live and no save is running.
 
-R5. **Fixed address.** `[view] port` (default 17373, to be checked against what listens on the
-owner's WSL and Windows), 127.0.0.1 only. No scan of other ports: a bookmark needs one address.
-The viewer takes `state/view.lock` first (one that does not get it exits and writes nothing), then
-replaces `state/view-outcome` with `starting`, binds, and replaces it with `listening <port>`; a
-failed start writes its reason there instead ("port in use" among them). A second home on the same
-machine sets its own port: the switch runbook writes `[view] port = 17374` into the dogfood home
-before `resident = true` is written there. Setup and doctor print the address to bookmark; for a
-"port in use" outcome they say that another program or another oboete home holds port N.
+R5. **Fixed address.** `[view] port` (default 17373), 127.0.0.1 only. No scan of other ports: a
+bookmark needs one address. The viewer takes `state/view.lock` first (one that does not get it
+exits and writes nothing), then replaces `state/view-outcome` with `starting`, binds, and
+replaces it with `listening <port>`; a failed start writes its reason there instead ("port in
+use" among them). A second home on the same machine sets its own port: the switch runbook writes
+`[view] port = 17374` into the dogfood home before `resident = true` is written there. Setup and
+doctor print the address to bookmark; for a "port in use" outcome they say that another program or
+another oboete home holds port N.
 A port saved on the resident viewer's own page is bound by the viewer before the save is written
 and served at once with a new token (R6): its accept loop takes the new listener,
 `state/view-outcome` names the new port, and the old address and the old token stop working

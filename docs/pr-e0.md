@@ -1,5 +1,7 @@
 # PR-E0 — 強いほうの全文検索 (2026-09-24)
 
+> 注 (2026-11-14): このファイルは 2026-09-24 に v1 の `oboete.db` で決めたことの記録です。今の store は Design B (`raw.db` と `knowledge.db`) で、今の設計は `docs/spec.md` にあります。手順やコマンドの形が今と違う所には、その場所に注を付けています。
+
 PR-B2 の結果 (`docs/pr-b.md`) で、今の全文検索 (空白で区切った語の AND) は日本語の問いでほぼ役に立たないとわかった (dev の hit@10 0.086)。提案 §7 の PR-E0 の行として、`search::search` を置き換える。§3.3 の「意味検索が全文検索だけに比べ +0.03」の比べる相手は、この版にする。(v1 時代の記録。ここに書いた `search::search` という関数名は今のコードにない。今の保存の作りは Design B で、`docs/milestone-4.md` にある。)
 
 ## 変えたこと
@@ -103,7 +105,7 @@ prompt ごとの自動注入 (PR-F、予算 300 ms) には重い。そこでは 
 ```sh
 cd docs/eval
 # e0-trigram: この PR のビルドで
-oboete --home ~/.oboete/eval/home eval ~/.oboete/eval/queries.jsonl --depth 50 | sed 's/ fts$/ e0-trigram/' > ~/.oboete/eval/runs/e0-trigram.trec
+oboete --home ~/.oboete/eval/home eval ~/.oboete/eval/queries.jsonl --depth 50 | sed 's/ fts$/ e0-trigram/' > ~/.oboete/eval/runs/e0-trigram.trec   # この PR の形。今の `eval` は `--out <dir> --arms <...>` で、stdout に TREC を出さない
 python3 run_claude_mem.py --no-window        # runs/claude-mem-nowindow.trec (約 21 分)
 python3 judge.py dev 312                      # 600 回ごとに止まるので、0 件になるまで繰り返す
 uv run --with ranx python report.py dev

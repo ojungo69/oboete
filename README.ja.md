@@ -221,6 +221,12 @@ flowchart LR
 | `oboete forget --repo <dir>` | 本文を完全に消す。消す前に対象の確認と最終確認があります（ほかに `--record`、`--session`、`--uid`、`--since` と `--until`） |
 | `oboete exclude` / `oboete capture exclude` | 今後、リポジトリのセッションを AI に送らない／リポジトリやフォルダを記録しない |
 | `oboete backup list` → `oboete restore --to <time>` | バックアップの時点を一覧し、戻す内容を確認する。確認画面に出た時刻と `--yes` を付けると、その時点に戻します |
+| `oboete worker status` / `stop` / `restart` | 常駐 worker が動いていて進んでいるかを表示する／道を空けさせる（次のフックがまた起動します）／止めてすぐ起動し直す（[docs/resident.md](docs/resident.md)） |
+| `oboete resume <provider>` | クレジット切れで止まった AI や、休止中の AI をもう一度使う |
+| `oboete claims` / `oboete correct <uid>` / `oboete mute <uid>` / `oboete unmute <uid>` | このリポジトリの現在の主張を uid 付きで一覧する／主張の状態や本文を直す／検索には残したままエージェントの文脈には入れない／再び入れる |
+| `oboete recurate` | 過去に要約したものをもう一度要約する。対象と見積りを表示し、`--yes` を付けるまで何も送りません |
+| `oboete pref add "<text>"` | 設定を自分の言葉で記録する（全リポジトリ向け。`--repo` で 1 つのリポジトリ向け） |
+| `oboete inject` | このディレクトリで新しいセッションが受け取る文脈を表示する（OpenCode のプラグインが読みます） |
 | `oboete import claude-mem <db>` / `oboete import transcripts` | claude-mem のデータベースや、Claude Code・Codex の会話履歴を取り込む（会話履歴はまず確認だけを表示し、`--yes` で取り込みます） |
 
 各コマンドの説明は `oboete <command> --help` で見られます。

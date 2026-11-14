@@ -39,7 +39,7 @@
 2. **A window larger than one provider's ceiling.** A Japanese-heavy window of 12,000 characters is about 8,400 tokens; Groq free refuses anything over 8,000 with 413. Expected: Groq is skipped before the call (no upload, no budget spent), the chain goes on, and after a real 413 the other entries with the same ceiling are skipped for that window. Test in Task 4.
 3. **The owner keeps working.** Hooks fire every few seconds for hours. Expected (owner decision 30, 2026-09-28, which replaced the wait of subscriptions): a full window is curated at once by whichever provider the chain reaches, subscriptions included; only the window that reaches the last record waits, until 10 minutes after the last hook, and neither a tombstone nor a replayed record moves that time. Test in Task 5.
 4. **A crash between the provider's answer and the write.** The worker dies after the answer arrives and before the ops commit. Expected: the window is curated again from the same checkpoint, no claim is written twice, and no seq is marked done unseen. Test in Task 5 (and M2's 20 crash points in Task 13).
-5. **An update that brings tools back.** claude or codex updates and its no-tool mode no longer holds. Expected: claude's `system/init` shows a tool and the result is discarded before it is parsed; codex's stored gate result is for another version, so it is re-run before the next call and codex is skipped with a doctor line if it fails. Test in Task 3.
+5. **An update that brings tools back.** claude or codex updates and its no-tool mode no longer holds. Expected: claude's `system/init` shows a tool and the result is discarded before it is parsed; codex's stored gate result is for another version, so it is re-run before the next call and codex is skipped with a doctor line if it fails. Test in Task 3. (Built since: codex is probed before each call, not once per version; its last result is kept for doctor.)
 
 ---
 
@@ -85,7 +85,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 |---|---|---|---|---|
 | 1 | `providers.db`; v1's provider layer on main; 429 backoff; root-level error bodies | Claude | — | `providers_db::open`, `Chain::new(providers, &providers_db)`, `Chain::run(role, span, prompt, schema)`, `provider_calls` rows |
 | 2 | S8 environment; spec 6.5's claude flags and `system/init` check; `rate_limit_event` and `credits_required` | Claude | 1 | `provider::curator_env`, `claude_stream` parsing, subscription cooldowns |
-| 3 | Isolation gate: reported tools empty, or a direct sandbox probe; canaries as supporting evidence; stored per CLI version; doctor lines; security review | Claude | 2 | `isolation::{gate, probe}`, the per-CLI table in `docs/spike/curator-isolation.md` |
+| 3 | Isolation gate: reported tools empty, or a direct sandbox probe; canaries as supporting evidence; stored per CLI version (built: codex is probed before each call, its last result kept for doctor); doctor lines; security review | Claude | 2 | `isolation::{gate, probe}` (built: `isolation::gate(db, cli)`; `probe` is private), the per-CLI table in `docs/spike/curator-isolation.md` |
 | 4 | Budgets: tokens and calls per day, `monthly_usd`, `max_request_tokens` with the calibrated estimate, Groq's rate-limit headers | Claude | 1 | `budget::{estimate, admit}`, `Usage` with bytes sent |
 | 5 | Windows and the curation phase: the op log, window cut, egress gate, pending reasons, the last window's wait, worker stay-up, skip after three attempts; `observe` removed | Claude | 1, 4 | `raw::Op`, `Raw::{append_ops, ops_after, curation_checkpoint}`, `curate::{next_window, run_phase}` |
 | 6 | Claims schema and the claims consumer; derivations (MUST-M18); chain tips and the tie order (MUST-M7) | Claude | 5 | `consumer::Claims`, knowledge.db `claims`, `edges`, `derivations` |
@@ -146,10 +146,10 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 **Files:**
 - Create: `src/isolation.rs`
 - Modify: `src/provider.rs` (skip a CLI whose gate has not passed for its version), `src/setup.rs` (doctor lines)
-- Test: `src/isolation.rs`; `tests/isolation.rs` (real CLIs, run only when `OBOETE_ISOLATION_LIVE=1`, in the dogfood user)
+- Test: `src/isolation.rs`; `tests/isolation.rs` (real CLIs, run only when `OBOETE_ISOLATION_LIVE=1`, in the dogfood user; built: the tests are `src/isolation/tests.rs`, there is no `tests/isolation.rs` and no such variable)
 
 **Interfaces:**
-- Produces: `isolation::probe(cli: &str) -> Result<GateResult>`. The gate tests capability, not obedience (spec 6.5: agy ignored a canary while holding 57 tools), so a model that merely declines the instructions never passes it:
+- Produces: `isolation::probe(cli: &str) -> Result<GateResult>` (built as the private `probe` and `gate(db, cli)`, see below). The gate tests capability, not obedience (spec 6.5: agy ignored a canary while holding 57 tools), so a model that merely declines the instructions never passes it:
   - **A CLI that reports its tools** (claude's `system/init` under stream-json, agy's init event) passes only when the reported tool list, MCP servers and plugins are empty and the permission mode is the one asked for. The same check runs on every curation call (Task 2), and an answer is discarded when it fails.
   - **codex**, which does not report a tool list: the permission profile is probed directly, with no model, through `codex sandbox` under the curator's profile and flags: a command that writes a canary file and one that connects to a local listener must both be refused, and the disabled features (plugins, apps, browser, computer use, image generation, web search) must be absent from the run's configuration. Where codex cannot start a command at all under the profile (Linux, docs/spike/curator-isolation.md), that refusal is the result.
   - **The canary curation call** of spec 6.5 (touch a canary file, read one into the answer, fetch a local listener's URL) runs as well, as supporting evidence and to list the files the CLI writes under its home during a call (spec 6.3). It can fail the gate; it can never pass it alone.
