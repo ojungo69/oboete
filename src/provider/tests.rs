@@ -337,7 +337,8 @@ fn the_curator_environment_is_the_allow_list() {
 #[test]
 fn a_relative_directory_reaches_a_cli_absolute() {
     let os = |k: &str, v: &std::ffi::OsStr| (std::ffi::OsString::from(k), v.to_owned());
-    let fixed = std::env::temp_dir();
+    // Absolute whatever the environment: `temp_dir` is `TMPDIR` as it stands (#1010).
+    let fixed = std::env::current_dir().unwrap().join("codex-home");
     let parent = [
         os("CLAUDE_CONFIG_DIR", ".claude-profile".as_ref()),
         os("XDG_CONFIG_HOME", "config".as_ref()),
@@ -1257,9 +1258,17 @@ fn cli_runs_neither_deadlock_nor_outlive_the_timeout() {
 fn a_cli_releases_dispatch_after_stdin_before_its_answer() {
     let home = tempfile::tempdir().unwrap();
     let admission = crate::dispatch::Admission::shared(home.path()).unwrap();
+    // The CLI answers once the test has seen dispatch come free (or after 10 s), so a loaded
+    // runner's slow start cannot use up a fixed window first (#1002).
+    let go = home.path().join("go");
     let mut command = Command::new("sh");
     command
-        .args(["-c", "cat >/dev/null; sleep 1; printf answered"])
+        .args([
+            "-c",
+            "cat >/dev/null; i=0; while [ ! -e \"$1\" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; printf answered",
+            "sh",
+        ])
+        .arg(&go)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1268,7 +1277,7 @@ fn a_cli_releases_dispatch_after_stdin_before_its_answer() {
         let result = run_cli(
             command,
             Some("synthetic prompt ".repeat(20_000)),
-            Duration::from_secs(3),
+            Duration::from_secs(30),
             Some(admission),
         );
         done_at.send(()).unwrap();
@@ -1280,7 +1289,7 @@ fn a_cli_releases_dispatch_after_stdin_before_its_answer() {
         .write(true)
         .open(path)
         .unwrap();
-    let until = Instant::now() + Duration::from_millis(500);
+    let until = Instant::now() + Duration::from_secs(5);
     let mut acquired = false;
     while Instant::now() < until {
         if registration.try_lock().is_ok() {
@@ -1290,6 +1299,7 @@ fn a_cli_releases_dispatch_after_stdin_before_its_answer() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let waiting = matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+    std::fs::write(&go, b"").unwrap();
     let (output, result) = sender.join().unwrap();
     result.unwrap();
     assert_eq!(output, b"answered");
