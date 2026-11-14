@@ -8706,6 +8706,24 @@ fn secret_straddling_the_clip_boundary_is_masked() {
     );
 }
 
+/// A mask the cut falls inside is kept whole, as capture's cut keeps one (`scan_capped`): the
+/// cut left its first characters, which tell no reader that a value was masked there.
+#[test]
+fn a_mask_the_cut_falls_inside_is_kept_whole() {
+    let key = format!(
+        "gsk_{}{}",
+        "q9Zx8mL2vB4nR7tY1wK3pS6dJ0", "aF5hU2cE8gI4kM7oQ1sV3xZ6bD"
+    );
+    let s = format!("{} {key} {}", "a".repeat(MAX_FIELD - 5), "b".repeat(3_000));
+    assert_eq!(
+        clip(&s, &redact::Rules::default()),
+        format!(
+            "{} [REDACTED]\n…[clipped, 11053 chars in full]",
+            "a".repeat(MAX_FIELD - 5)
+        )
+    );
+}
+
 #[test]
 fn a_private_block_across_the_cap_is_not_stored() {
     // Blocks go before the cap: a block cut in two would otherwise leave half of it stored.
