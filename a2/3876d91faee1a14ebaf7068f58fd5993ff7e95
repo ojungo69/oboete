@@ -1,0 +1,21 @@
+src/hook.rs
+  s_d546e4e9d39962::t_13a28e242ec2f0 3539-3547,3550-3553,3562,3585
+src/hook/tests.rs
+  s_d546e4e9d39962::t_72a83086af2239 6503-6568
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a23876d91faee1a14ebaf7068f58fd5993ff7e95",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
