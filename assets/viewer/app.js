@@ -3036,12 +3036,18 @@ function renderMaintenance(d) {
   const next=key && section.querySelector(`[data-${key[0]}="${key[1]}"]`);
   if(next && !next.disabled){next.focus({preventScroll:true});if(selection)next.setSelectionRange(...selection);}
 }
+// What a read of the status settles: the status could not be read, or a run's or a preparation's
+// outcome was unknown. A preview's or a run's refusal or failure stays until the person previews or
+// runs again or changes the operation (#1003: the poll's next read took it off the page).
+const MAINTENANCE_READ_SETTLES=new Set(['maintenance_status_unavailable','maintenance_unknown',
+  'maintenance_recurate_prepare_unknown']);
 async function refreshMaintenance(d = maintenanceDraft) {
   const read = d.statusRead = (d.statusRead || 0) + 1;
   try {
     const status = await api('maintenance');
     if (d.statusRead !== read) return;
-    const changed=JSON.stringify(d.status)!==JSON.stringify(status) || d.error!==null;
+    const settled=MAINTENANCE_READ_SETTLES.has(d.error);
+    const changed=JSON.stringify(d.status)!==JSON.stringify(status) || settled;
     const wasUnknown=d.unknown;
     d.status=status;
     const prepared=status.last?.result?.outcome?.preview;
@@ -3051,7 +3057,7 @@ async function refreshMaintenance(d = maintenanceDraft) {
       if(previewChanged)d.confirmed=false;
       d.preview={...prepared,preparation:status};
     }
-    d.error=null;
+    if(settled)d.error=null;
     if(maintenanceRun(d))d.unknown=false;
     if(changed || previewChanged || wasUnknown!==d.unknown)renderMaintenance(d);
   } catch {
