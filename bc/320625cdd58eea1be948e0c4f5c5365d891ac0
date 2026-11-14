@@ -1,0 +1,48 @@
+src/hook.rs
+  s_d169cd080e079e::t_72a79a4da56aa7 4049-4051,4070-4076
+  s_d169cd080e079e::t_90dd8427134ce0 3961-3963
+  s_d169cd080e079e::t_06bd29ae7227fc 4024,4030-4038,4042-4048,4052-4069,4077-4111,4116,4126,4176
+  s_d169cd080e079e::t_ec67cd4c5e7f87 4008-4013
+  s_d169cd080e079e::t_e6b0d8f5386290 4112-4115,4117-4125,4127-4134,4168-4175,4177-4181
+  s_d169cd080e079e::t_5e6a02ab8bbe6f 4135,4137-4167,4182
+  s_d169cd080e079e::t_d6e46996d66791 4136,4183
+docs/claude-mem-import.md
+  s_d169cd080e079e::t_e7deffc609bd88 120-146
+src/import/tests.rs
+  s_d169cd080e079e::t_8bf7d6eac415a7 741,743,745,747-749,751-755,790-791
+  s_d169cd080e079e::t_8db0b933ef6698 773,775-776
+  s_d546e4e9d39962::t_cda65bc048b695 997-998,1000
+  s_d169cd080e079e::t_2563001faf6e6a 784-785
+  s_d546e4e9d39962::t_b4ab6473965542 889,896-905,907-912,970
+  s_d169cd080e079e::t_6711790580d875 579-580,583,597-599,625,637-642,668,675,686,694,890-895
+  s_d169cd080e079e::t_c9b38fe30e86ec 794-858
+  s_d169cd080e079e::t_4e27a6783a0d59 792,859-888
+  s_d169cd080e079e::t_2651af9f535b6f 713-740,742,744,746,750,756-772,774,777-783,786-789
+  s_d169cd080e079e::t_5306a4471d1a2f 793
+src/hook/tests.rs
+  s_d169cd080e079e::t_239757953555f3 9125-9147
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bc320625cdd58eea1be948e0c4f5c5365d891ac0",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    },
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
