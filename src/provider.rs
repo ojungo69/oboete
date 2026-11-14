@@ -3801,6 +3801,24 @@ const CURATOR_ENV: [&str; 19] = [
     "PATHEXT",
 ];
 const CURATOR_ENV_PREFIXES: [&str; 2] = ["LC_", "XDG_"];
+/// The names above that hold a directory. The CLI runs in a directory of its own, so a relative
+/// one is passed absolute, against oboete's working directory, to name the same directory.
+const CURATOR_ENV_DIRS: [&str; 14] = [
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+];
 
 /// `parent`'s variables that a curator CLI may see. Names compare without case on Windows, and
 /// the proxy names everywhere (`https_proxy` is the usual spelling on Unix).
@@ -3809,17 +3827,25 @@ pub(crate) fn curator_env(
     windows: bool,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     parent
-        .filter(|(k, _)| {
-            let Some(k) = k.to_str() else {
-                return false;
-            };
-            let upper = k.to_ascii_uppercase();
+        .filter_map(|(k, v)| {
+            let key = k.to_str()?;
+            let upper = key.to_ascii_uppercase();
             let name = if windows || upper.ends_with("_PROXY") {
                 upper.as_str()
             } else {
-                k
+                key
             };
-            CURATOR_ENV.contains(&name) || CURATOR_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+            if !CURATOR_ENV.contains(&name)
+                && !CURATOR_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+            {
+                return None;
+            }
+            let relative = !v.is_empty() && Path::new(&v).is_relative();
+            let v = match std::path::absolute(&v) {
+                Ok(dir) if relative && CURATOR_ENV_DIRS.contains(&name) => dir.into_os_string(),
+                _ => v,
+            };
+            Some((k, v))
         })
         .collect()
 }
