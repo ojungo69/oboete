@@ -1,0 +1,25 @@
+src/redact.rs
+  s_76c95352747315::t_9234801cb56c8b 4201,4203-4205,4422-4431,4449-4452,4491,4505-4507,4509-4515,4538,4547-4549,4552-4556
+  s_76c95352747315::t_f5253b9be7f67f 4492-4502,4532-4537,4539-4545,4550-4551
+  s_76c95352747315::t_fadaa0d240215a 4546
+config/oboete-rules.toml
+  s_76c95352747315::t_22982ae5108001 116,130-133
+docs/milestone-2.md
+  s_76c95352747315::t_ff9ecd6cb8dc69 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c99e9fd6da9a60c253e1de5dd883baf282e909c6",
+  "prompts": {},
+  "sessions": {
+    "s_76c95352747315": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85c9c838-1efe-4bce-8363-c07637811bb4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
