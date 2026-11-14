@@ -1,0 +1,35 @@
+src/tests.rs
+  s_d546e4e9d39962::t_93f3b036b48fe3 169,173-188,208-212,222-224,233-234,248,259,261,264-269
+  s_d546e4e9d39962::t_06d9e5b828e928 170-172,189-207,213-221,225-232,235-247,249-258,260,262-263
+src/setup/agents/tests.rs
+  s_d546e4e9d39962::t_1aa7b47144644a 1-108
+src/setup/agents.rs
+  s_d546e4e9d39962::t_8dda78d750d695 190
+CLAUDE.md
+  s_d546e4e9d39962::t_0fac8cb1c7755e 9
+docs/settings-coverage.md
+  s_d546e4e9d39962::t_06d9e5b828e928 25-27
+docs/code-layout.md
+  s_d546e4e9d39962::t_06d9e5b828e928 15-16,36-40
+  s_d546e4e9d39962::t_93f3b036b48fe3 1-14,17-26,33-34,41-46,49-54,59-70
+  s_d546e4e9d39962::t_7549e1b3699a80 29-32,56,58
+  s_d546e4e9d39962::t_303890e3be71b2 27-28,35,47-48,55,57
+sonar-project.properties
+  s_d546e4e9d39962::t_93f3b036b48fe3 5-6,15-16,18,21-22,26-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cbfbd385a76e002e93eb0bd1f8c231309f306c91",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": null
+    }
+  }
+}
