@@ -1,0 +1,28 @@
+docs/claude-mem-import.md
+  s_d546e4e9d39962::t_9eaf95fe62ef8a 121-124
+src/hook.rs
+  s_d546e4e9d39962::t_b405af3acdb930 3983-3985
+  s_d546e4e9d39962::t_8206d55dde9e9c 3955-3958,3973,3979-3980,3988-3991
+  s_d546e4e9d39962::t_78af6c1ec8d884 3974-3978
+src/import/tests.rs
+  s_d546e4e9d39962::t_27b573f17d5066 597-599,607-609,614-617,619-620,622,628-632,635-645
+src/hook/tests.rs
+  s_d546e4e9d39962::t_27b573f17d5066 8709-8712,8717-8726
+  s_d546e4e9d39962::t_78af6c1ec8d884 8713-8716
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b1592697f112682467bb0e9504b685c45fc59cd",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
