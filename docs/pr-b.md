@@ -1,5 +1,7 @@
 # PR-B — 評価器 (2026-09-24 着手)
 
+> 注 (2026-11-14): このファイルは 2026-09-24 に v1 の `oboete.db` で決めたことの記録です。今の store は Design B (`raw.db` と `knowledge.db`) で、今の設計は `docs/spec.md` にあります。手順やコマンドの形が今と違う所には、その場所に注を付けています。
+
 仕様の正本は `docs/research/search-sync-proposal-2026-09-23.md` の §3 (評価セット・指標・合格線) と §7 の PR-B 行、決定 22 (claude-mem を下回らない)。ここは実装で決めたことと計測結果だけを置く。
 
 PR は 3 つに分ける。
@@ -20,7 +22,7 @@ PR は 3 つに分ける。
    - repo は `claude-mem:<project>` にする。claude-mem の project は `free-mem` や `公式サイト` のような名前で、oboete の repo キー (PR-C で origin URL) に機械的には直せない。直すのは PR-H (PR-C の repo 別名を使う)。
    - **B1 では評価用の store にしか取り込まない**: `oboete --home <dir> import claude-mem <db> --eval-store` の形だけを受け付ける。repo の対応が決まる前に普段の store に入ると、注入が repo ごとに引けない行が 16 万件入るため。hook は `OBOETE_HOME` で別の場所に書いていることもあるので、場所で見分けず、呼ぶ側に `--eval-store` で評価用だと言わせる。既定の home (`~/.oboete`) は `--eval-store` があっても断る。PR-H でこの制限を外す (外した: `--eval-store` は任意になり、普段の home にも取り込める。docs/claude-mem-import.md)。
 
-3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`、任意で `session`)。`session` があれば、その会話の文書 (問いの後に書かれた答えを含む) を順位を付ける前に除いて次の文書を繰り上げる (§3.1)。qid は空白を含まない 1 語に限る。出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。
+3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`、任意で `session`)。`session` があれば、その会話の文書 (問いの後に書かれた答えを含む) を順位を付ける前に除いて次の文書を繰り上げる (§3.1)。qid は空白を含まない 1 語に限る。出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。(その後: 今の `eval` に `--method` は無く、`--out <dir>` と `--arms off,below,only,rrf:<n>` を取り、`b-<arm>.trec` をその中に書く。TREC を stdout には出さない。)
    - もう 1 つの隠しコマンド **`oboete gate`** は、標準入力を関門 (`redact::outbound`) に通して標準出力に出す。評価のスクリプトが外 (判定器) へ送る文のうち、store を通っていないもの (transcript から拾った agent の検索語) をこれに通す。関門の実装を Python に写さないため。
 
 4. **指標は ranx (Python) で出す。** `docs/eval/report.py` が run と qrels を読み、nDCG@10・MRR@10・recall@10・hit@10 と有意差 (対応のある t 検定、p < 0.05) を出す (出荷しない)。ranx は `uv` の一時環境で入れる。関連ありは 2 点以上 (ranx の `-l2`)、nDCG は 0〜3 点をそのまま使う。recall@50 は束の深さが 20 のうちは出さない。
@@ -59,7 +61,7 @@ PR は 3 つに分ける。
 
 ## B2 の結果 (2026-09-24、dev 分)
 
-スクリプトは `docs/eval/` にある。手順 (新しく作り直すときは空の `--home` に取り込む。今の `~/.oboete/eval/home` は取り込み元の名前付け (`claude-mem:<id>`) より前に取り込んだもので、元の名前は `claude-mem`): `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。`report.py` は `runs/` にある run どうしを比べ、その束の判定だけを正解にする (この表は `fts` と `claude-mem` の 2 つの束)。
+スクリプトは `docs/eval/` にある。手順 (新しく作り直すときは空の `--home` に取り込む。今の `~/.oboete/eval/home` は取り込み元の名前付け (`claude-mem:<id>`) より前に取り込んだもので、元の名前は `claude-mem`): `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` (この PR の形。今の `eval` は `--out <dir> --arms <...>` で、stdout に TREC を出さない) → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。`report.py` は `runs/` にある run どうしを比べ、その束の判定だけを正解にする (この表は `fts` と `claude-mem` の 2 つの束)。
 
 **問いの束**: 424 件 (dev 312 / test 112。session のハッシュで分けたので 70 / 30 ちょうどにはならない)。developer の prompt 400 件と agent の検索語 24 件が dev と test に分かれ、日本語 377 件・英語 47 件。test 分は開けていない。
 

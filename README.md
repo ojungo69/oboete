@@ -323,6 +323,12 @@ On the maintainer's machines; each figure with where it comes from.
 | `oboete forget --repo <dir>` | Erase text for good, after a preview and a confirmation (also `--record`, `--session`, `--uid`, `--since` with `--until`) |
 | `oboete exclude` / `oboete capture exclude` | Stop sending a repository's sessions to any AI from now on, or stop recording a repository or folder |
 | `oboete backup list`, then `oboete restore --to <time>` | List the backup points and preview going back to one; `--yes` with the time the preview prints goes back |
+| `oboete worker status`, `stop` or `restart` | Show whether the resident worker runs and makes progress; ask it to step aside (the next hook starts one again); stop it and start one now ([docs/resident.md](docs/resident.md)) |
+| `oboete resume <provider>` | Use a provider again after it stopped for credits or cooled down |
+| `oboete claims`, `oboete correct <uid>`, `oboete mute <uid>` / `oboete unmute <uid>` | List this repository's current claims with their uids; set a claim's status or text; keep a claim searchable but out of agents' context, or inject it again |
+| `oboete recurate` | Curate again what was curated before: lists the windows and an estimate, and sends nothing without `--yes` |
+| `oboete pref add "<text>"` | Keep a preference in your own words, for every repository or for one with `--repo` |
+| `oboete inject` | Print the context a new session in this directory gets (OpenCode's plugin reads it) |
 | `oboete import claude-mem <db>` / `oboete import transcripts` | Import claude-mem's database; or Claude Code and Codex transcripts, as a preview until you add `--yes` |
 
 `oboete <command> --help` describes each one.
