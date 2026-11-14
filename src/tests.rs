@@ -166,3 +166,104 @@ fn setup_takes_an_agent_or_an_embedder() {
     assert!(!parses(&["--embeddings", "fastembed"]));
     assert!(!parses(&["--embeddings", "none", "--remove"]));
 }
+
+/// docs/code-layout.md: in a file of code, a module that only test builds compile is a file of
+/// its own, declared `mod <name>;`, and sonar-project.properties names that file as a test and
+/// leaves it out of the sources.
+#[test]
+fn a_test_module_is_a_file_of_its_own_and_declared_to_sonar() {
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name != "testdata") {
+                    rust_files(&path, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sonar = std::fs::read_to_string(root.join("sonar-project.properties")).unwrap();
+    let value = |key: &str| {
+        sonar
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| panic!("{key}"))
+            .to_owned()
+    };
+    let declared = value("sonar.test.inclusions=");
+    assert_eq!(value("sonar.exclusions="), declared);
+    // A pattern as Sonar reads it: `src/**/name.rs` is that name at any depth under src, and
+    // one with no wildcard is the path itself.
+    let is_test = |path: &str| {
+        declared
+            .split(',')
+            .any(|pattern| match pattern.strip_prefix("src/**/") {
+                Some(name) => path.starts_with("src/") && path.rsplit('/').next() == Some(name),
+                None => pattern == path,
+            })
+    };
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    assert!(files.len() > 100, "{}", files.len());
+    let mut modules = 0;
+    for file in files {
+        let relative = file
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        // A test's own file may hold modules as it likes.
+        if is_test(&relative) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+        for (at, line) in lines.iter().enumerate() {
+            let module = ["pub(crate) ", "pub(super) ", "pub "]
+                .iter()
+                .find_map(|visibility| line.strip_prefix(visibility))
+                .unwrap_or(line)
+                .strip_prefix("mod ");
+            let Some(module) = module else {
+                continue;
+            };
+            // Gated by one of the attributes right above it.
+            let gated = lines[..at]
+                .iter()
+                .rev()
+                .take_while(|above| above.starts_with("#["))
+                .any(|above| {
+                    above.starts_with("#[cfg(")
+                        && above.contains("test")
+                        && !above.contains("not(test)")
+                });
+            if !gated {
+                continue;
+            }
+            let Some(name) = module.strip_suffix(';') else {
+                panic!("{relative}: an inline test module: {line}");
+            };
+            // Where its file is: beside a crate root or a mod.rs, else under the file's name.
+            let (dir, stem) = relative
+                .rsplit_once('/')
+                .map(|(dir, file)| (dir, file.trim_end_matches(".rs")))
+                .expect("under src");
+            let child = match stem {
+                "main" | "lib" | "mod" => format!("{dir}/{name}.rs"),
+                _ => format!("{dir}/{stem}/{name}.rs"),
+            };
+            assert!(root.join(&child).is_file(), "{child}");
+            assert!(
+                is_test(&child),
+                "{child}: sonar-project.properties does not name it as a test"
+            );
+            modules += 1;
+        }
+    }
+    assert!(modules > 90, "{modules}");
+}
