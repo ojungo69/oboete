@@ -4198,10 +4198,11 @@ extra_rules = [
                 &c,
                 " https://h.test && echo ok",
             ),
-            // a cluster of any length, and a key with no password right after the option
+            // a cluster of any length
             row("curl -sssssssssu ", &c, " https://h.test && echo ok"),
-            row("curl -u", &format!("Zq8v{m}abcd:"), " https://h.test/v1/x"),
-            row("x=$(curl -su", &format!("Zq8v{m}abcd:"), ")"),
+            // a password in quotes that starts with what no string is followed by in a JSON text
+            // or in code
+            row(&format!("x=$({curl}"), &format!("admin:\"%{pw}\""), ")"),
             // beside a value the rules pass over, a single space apart (with `)` after it, so
             // that gitleaks' rule does not take it either)
             row(
@@ -4418,6 +4419,16 @@ extra_rules = [
             "cmd = \"curl -u admin:\"+pw+\" https://h.test\"",
             "$c = \"curl -u admin:\".$pw.\" https://h.test\";",
             "run('curl -u admin:'); h('X-Foo', 'abc')",
+            // whatever follows the quote that closes a string: the quote that opens the next
+            // one has a word after it, and no value's closing quote has
+            "s = \"curl -u admin:\"%f(\"X-Foo\", \"abc\")",
+            "{\"curl -u \":[{ \"X-Foo\": \"abc\"}]}",
+            "x = [\"curl -u \",key:val,\"X-Foo\": \"abc\"]",
+            "x = ['curl -u ',key:val,'X-Foo', 'abc']",
+            // removed lines of a diff: a `-` and a word at a line's start are no option with
+            // its value right after it, and a key with no password is not read there (#984)
+            "@@ -1,9 +0,0 @@\n-build-arm64:\n-  script:\n-    - curl -fsS https://h.test/install.sh\n-user1:\n-ubuntu2204:\n-results22: ok\n-queue_7:\n-url:http://h.test/a\n-count12: 3\n-sum_256: abc\n",
+            "curl -fsS https://h.test/a; make -build2: all",
         ] {
             assert_eq!(alone(line), vec![], "{line}");
             let flat =
@@ -4435,8 +4446,10 @@ extra_rules = [
                 "u"
             ),
             // a quote that closes a string after `user:`, where another character than those
-            // of a JSON text or of a call follows it and another quote stands on the line
-            "s = \"curl -u admin:\"%f(\"X-Foo\", \"abc\")".to_owned(),
+            // of a JSON text or of a call follows it and the next string starts with no word
+            "s = \"curl -u admin:\"%f(\"-X-Foo\", \"abc\")".to_owned(),
+            // a removed line of a combined diff: a blank stands before the `-`
+            "diff --cc a.yml\n -url:http://h.test/a\n+  - curl -fsS https://h.test/b".to_owned(),
             // a pattern of a search after ripgrep's -U, in a text that names curl
             "rg -U '\"scripts\":\\s*\\{[^}]*curl' package.json".to_owned(),
         ] {
@@ -4475,23 +4488,31 @@ extra_rules = [
         );
     }
 
-    /// The review of #985 (Codex): a user with no password that ends a string has the quote that
-    /// closes the string after its colon, and what follows that quote is no password in quotes:
-    /// white space, `,`, `:`, `}`, `]` in a JSON text, `)`, `;`, `+`, `.` in code. Read as one, it took
-    /// the closing quote and the quote that opens the next string, and a user's rule that reads
-    /// the masked text lost its context (here one that masks the value beside a name that was
-    /// masked): the value `main` masks was stored and let out. A key that holds a digit is still
-    /// masked, alone.
+    /// The reviews of #985 (Codex): a quote that closes a string was read as one that opens a
+    /// value. Read so, the value took the closing quote and the quote that opens the next
+    /// string, and a user's rule that reads the masked text lost its context (here one that
+    /// masks the value beside a name that was masked): the value `main` masks was stored and let
+    /// out. Two things keep it. After `user:` at a string's end, what follows that quote is no
+    /// password in quotes (white space, `,`, `:`, `}`, `]` in a JSON text, `)`, `;`, `+`, `.` in
+    /// code): the texts are masked as `main` masks them, and a key that holds a digit is still
+    /// masked, alone. And the quote that closes a value has no word character after it, as the
+    /// one that opens the next string has: the first look takes nothing, the user's rules find
+    /// the name and then the value, and the value is masked. (Once the name is a mask, which
+    /// starts with no word character, the pass over the masked text does read the quote as a
+    /// value's: it masks more than `main`, and loses nothing.)
     #[test]
     fn a_quote_that_closes_a_string_after_a_user_and_a_colon_opens_no_password() {
-        let own = user(
-            r#"[redaction]
+        let rules = |name: &str| {
+            user(&format!(
+                r#"[redaction]
 extra_rules = [
-  { id = "name", regex = 'X-Foo' },
-  { id = "value", regex = '"\[REDACTED\]"[:,] "([A-Za-z0-9]+)"' },
-]"#,
-        )
-        .unwrap();
+  {{ id = "name", regex = '{name}' }},
+  {{ id = "value", regex = '"\[REDACTED\]"[:,] "([A-Za-z0-9]+)"' }},
+]"#
+            ))
+            .unwrap()
+        };
+        let own = rules("X-Foo");
         let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
         for (name, stored) in [("admin:", "admin:"), ("admin1:", MASK)] {
             for (text, want) in [
@@ -4508,6 +4529,31 @@ extra_rules = [
                 assert_eq!(outbound_with(&text, &own), want, "{text}");
             }
         }
+        // Another character after the quote that closes the string, and the quote right after
+        // the option and a blank: the next string starts with a word.
+        for text in [
+            format!("s = \"curl {U} admin:\"%f(\"X-Foo\", \"{far}\")"),
+            format!("{{\"curl {U} \":[{{ \"X-Foo\": \"{far}\"}}]}}"),
+            format!("x = [\"curl {U} \",key:val,\"X-Foo\": \"{far}\"]"),
+        ] {
+            for out in [scan(&text, &own).0, outbound_with(&text, &own)] {
+                assert!(!out.contains(&far), "{text}: {out}");
+                assert!(
+                    out.ends_with(&text[text.find(&far).unwrap() + far.len()..]),
+                    "{out}"
+                );
+            }
+        }
+        // What is left of the reading, pinned and not wanted: the quote that closes the string
+        // has another character after it than those above, and the next string starts with no
+        // word character. The user and what stands between the two quotes are masked as a
+        // credential at the first look, the name's mask joins it, and the value after it is
+        // stored and let out.
+        let own = rules("-X-Foo");
+        let text = format!("s = \"curl {U} admin:\"%f(\"-X-Foo\", \"{far}\")");
+        let left = format!("s = \"curl -u {MASK}\", \"{far}\")");
+        assert_eq!(scan(&text, &own).0, left);
+        assert_eq!(outbound_with(&text, &own), left);
     }
 
     /// #985, what a mask costs: it takes the text it covers from every rule that reads the masked

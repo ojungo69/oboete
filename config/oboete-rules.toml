@@ -113,7 +113,7 @@ regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+[
 [[rules]]
 id = "curl-user"
 description = "The user:password given to curl's -u / --user or -U / --proxy-user, as one word of a shell: whatever follows it, of any characters, the option alone or last in a cluster of short ones (-su)"
-regex = '''(?:^|[ \t\n\r])(?:(?:-[A-Za-z0-9#]*?[uU]|--(?:proxy-)?user)(?:=|[ \t]{1,5})(?:((?:"(?:[^"\\\r\n]|\\[^nr]){3,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:"(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}"|'(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}'|<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:(?:(?:[^:"\\\r\n]|\\[^nr]){3,})?:(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}|(?:[^:"\\\r\n]|\\[^nr]){3,}:)"|'(?:(?:(?:[^:'\\\r\n]|\\[^nr]){3,})?:(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}|(?:[^:'\\\r\n]|\\[^nr]){3,}:)'|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"\\\r\n]{3,})?:[^"\\\s,:;+.)}\]][^"\\\r\n]{2,}|[^:"\\\r\n]{3,}:)\\+")|-[A-Za-z0-9#]*?[uU](?:((?:[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}"|'(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}'|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,})\\+"))'''
+regex = '''(?:(?:^|[ \t\n\r])(?:-[A-Za-z0-9#]*?[uU]|--(?:proxy-)?user)(?:=|[ \t]{1,5})(?:((?:"(?:[^"\\\r\n]|\\[^nr]){3,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:"(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}"(?-u:\b{end-half})|'(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}'(?-u:\b{end-half})|<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:(?:(?:[^:"\\\r\n]|\\[^nr]){3,})?:(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}|(?:[^:"\\\r\n]|\\[^nr]){3,}:)"(?-u:\b{end-half})|'(?:(?:(?:[^:'\\\r\n]|\\[^nr]){3,})?:(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}|(?:[^:'\\\r\n]|\\[^nr]){3,}:)'(?-u:\b{end-half})|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"\\\r\n]{3,})?:[^"\\\s,:;+.)}\]][^"\\\r\n]{2,}|[^:"\\\r\n]{3,}:)\\+"(?-u:\b{end-half}))|[ \t]-[A-Za-z0-9#]*?[uU](?:((?:[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}"(?-u:\b{end-half})|'(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}'(?-u:\b{end-half}))|\\+"((?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,})\\+"(?-u:\b{end-half})))'''
 keywords = ["curl"]
 entropy = 2
 # gitleaks' curl-auth-user (kept as it is) takes an unquoted value only of word characters, only
@@ -127,7 +127,10 @@ entropy = 2
 # quotes does not start with white space, `,`, `:`, `;`, `+`, `.`, `)`, `}` or `]`: those follow the
 # quote that closes a string, in a JSON text (`"curl -u admin:",  "next"`) and in code
 # (`run("curl -u admin:"); h("next")`), and `key: value` in quotes after another tool's option
-# is no credential. Right after a short option (`-uadmin:<pw>`) a value in quotes
+# is no credential. The quote that closes a value has no ASCII word character after it: where
+# one follows, the quote closed a string before the next one opened. Right after a short option
+# (`-uadmin:<pw>`) a value is read only where a blank stands before the option (at a line's
+# start a `-` and a word are a removed line of a diff), it has a password, and in quotes it
 # holds no white space, quote or comma: a quote there mostly closes a string around a command
 # that ends on the option (`bash -c 'date -u'`). An unquoted password runs to white space, a
 # quote, a backquote, `|&;()<>` or a backslash that escapes one of them. What it passes over is
