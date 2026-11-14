@@ -117,12 +117,20 @@ them). A prompt keeps its first 8,000 characters (a live prompt keeps 64 KiB; de
 the cut as it is): `hook::clip` masks
 it with the bundled rules, so that its check for a key block the cut leaves open sees every
 header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
-prompt was masked with the bundled rules alone. A value a rule of the home's finds with the cut
-inside it is not kept in part: what is kept ends where that value starts (2026-11-14; its start
-used to stay). The rule looks for it in the 12,000 characters `clip` masked, as the bundled
-rules left them: a value that ends past them, one that holds a value the bundled rules masked,
-and one whose rule needs what follows the cut are not found, and a part of them can stay (#994).
-A mask the cut falls inside is kept whole (2026-11-14; its first characters used to stay). While
+prompt was masked with the bundled rules alone. Before the bundled rules mask the window, the
+home's rules read all of the prompt as it came (`hook::read_whole`, #994), as capture's scan
+reads a live prompt, and what they find is masked there. So a value the cut falls inside, one
+that ends far past it, one whose rule needs the text after it and one that holds a value the
+bundled rules mask are each one mask before the cut (their parts used to stay), and the cut
+keeps 8,000 characters of the masked text. A value a rule finds only behind another rule's
+mask, with the cut inside it, ends what is kept where it starts, as before. A prompt in which
+one of the home's rules matches more times than a scan holds, or that is one value whole, is one
+mask, as capture stores a live prompt with that many; a bundled rule's matches are a mask each,
+however many. A span that holds a key
+block's header is left to the bundled rules and to the check for a key block the cut leaves
+open, so that no rule of the home's hides a header. Under no rule of the home's nothing is read
+before the bundled rules, and what is stored is what was stored. A mask the cut falls inside is
+kept whole (2026-11-14; its first characters used to stay). While
 `[capture] store_prompts` is off no prompt's text is
 stored, as a live prompt's is not: the rows are counted with the empty ones (`empty`) and come in
 once the setting is on again. A label names something, so the gate must leave it as it is: a row

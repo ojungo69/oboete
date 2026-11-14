@@ -515,9 +515,9 @@ fn home_with(toml: &str) -> (tempfile::TempDir, crate::capture::Settings) {
 
 /// A prompt is gated with the home's rules too, as a title and a body are: `clip` masked it
 /// with the bundled rules alone, so a value only a rule of the home's finds was stored as
-/// typed. What is stored is what `clip` kept, with the rule's values masked in it and nothing
-/// more: under no rule of the home's it is the text stored before, also for the key blocks,
-/// cut short and whole about the cut, that a security review of this change tried.
+/// typed. What is stored is what `clip` kept, with the rule's values masked in it: under no
+/// rule of the home's it is the text stored before, also for the key blocks, cut short and
+/// whole about the cut, that a security review of this change tried.
 #[test]
 fn a_prompt_is_gated_with_the_homes_rules_too() {
     let dir = tempfile::tempdir().unwrap();
@@ -576,14 +576,20 @@ fn a_prompt_is_gated_with_the_homes_rules_too() {
             .all(|w| !w.contains("Q9zX8mL2") && !w.contains("BBBB"))
     );
     assert_eq!(bodies(&plain, home.path()), was);
-    // Under a rule of the home's: the same, with its value masked.
+    // Under a rule of the home's: the same, with its value masked. It is masked before the cut
+    // (#994), which keeps 8,000 characters of the masked text: one more `a` in the long prompt,
+    // whose mask is a character shorter than its value.
     let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
     let (home, ruled) = home_with(rule);
-    let masked: Vec<String> = was
+    let mut masked: Vec<String> = was
         .iter()
         .map(|w| w.replace("acme-482915", "[REDACTED]"))
         .collect();
     assert_ne!(masked[..2], was[..2]);
+    masked[1] = format!(
+        "ship [REDACTED] {}\n…[clipped, 11017 chars in full]",
+        "a".repeat(7_984)
+    );
     assert_eq!(bodies(&ruled, home.path()), masked);
     // Owner decision 43: while redaction is off, a prompt is kept as typed.
     let (home, off) = home_with("[redaction]\nenabled = false\n");
@@ -593,9 +599,9 @@ fn a_prompt_is_gated_with_the_homes_rules_too() {
 }
 
 /// A value only a rule of the home's finds, with the cut at 8,000 characters inside it:
-/// nothing of it is stored. `clip` kept its start, and the home's gate, which runs on what
-/// was kept, no longer took those characters for the value. Under no rule of the home's the
-/// cut is where it was.
+/// nothing of it is stored, and one mask stands for it, whole. `clip` kept its start, and the
+/// home's gate, which runs on what was kept, no longer took those characters for the value.
+/// Under no rule of the home's the cut is where it was.
 #[test]
 fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -621,7 +627,10 @@ fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
     assert!(!stored.contains("acme"), "{}", &stored[7_980..]);
     assert_eq!(
         stored,
-        format!("{}\n…[clipped, 11004 chars in full]", "a".repeat(7_992))
+        format!(
+            "{}[REDACTED]\n…[clipped, 11004 chars in full]",
+            "a".repeat(7_992)
+        )
     );
     let (home, plain) = home_with("");
     assert_eq!(
@@ -631,6 +640,145 @@ fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
             "a".repeat(7_992)
         )
     );
+}
+
+/// The home's rules read all of an imported prompt as it came, before the bundled rules mask it
+/// and before the cut, as capture's scan reads a live prompt (#994). So nothing stays of a value
+/// that ends far past the cut, of one whose rule needs the text after it, of one that holds a
+/// value the bundled rules mask (cut or not), or of one a second rule finds behind the first
+/// rule's mask. Each was stored in part: the rules read what was kept, masked by the bundled
+/// rules.
+#[test]
+fn the_homes_rules_read_all_of_an_imported_prompt_as_it_came() {
+    let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+    let vault = "[[redaction.extra_rules]]\nid = \"vault\"\nregex = 'vault\\{[^}]*\\}'\n";
+    let ended = "[[redaction.extra_rules]]\nid = \"vault\"\nregex = 'vault\\{([^}]+)\\} end'\n";
+    let holds = "[[redaction.extra_rules]]\nid = \"vault\"\n\
+                 regex = 'vault\\{ghp_[a-zA-Z0-9]{36}:[^}]*\\}'\n";
+    let chain = "[[redaction.extra_rules]]\nid = \"foo\"\nregex = 'foo'\n\
+                 [[redaction.extra_rules]]\nid = \"tok\"\n\
+                 regex = '\\[REDACTED\\]token-([0-9]{6})'\n";
+    let a = |n: usize| "a".repeat(n);
+    // The rule, the prompt, and what is stored of it.
+    let cases: Vec<(&str, String, String)> = vec![
+        (
+            vault,
+            format!("{}vault{{{}}} done", a(7_990), "s".repeat(5_000)),
+            format!("{}[REDACTED]\n…[clipped, 13002 chars in full]", a(7_990)),
+        ),
+        (
+            ended,
+            format!("{}vault{{123456}} end {}", a(7_984), "b".repeat(3_000)),
+            format!(
+                "{}vault{{[REDACTED]\n…[clipped, 11002 chars in full]",
+                a(7_984)
+            ),
+        ),
+        (
+            holds,
+            format!("{}vault{{{token}:{}}} done", a(7_900), "s".repeat(5_000)),
+            format!(
+                "{}[REDACTED] done\n…[clipped, 12953 chars in full]",
+                a(7_900)
+            ),
+        ),
+        (
+            holds,
+            format!("x vault{{{token}:shortsecret}} y"),
+            "x [REDACTED] y".to_owned(),
+        ),
+        (
+            chain,
+            format!("{}footoken-123456 {}", a(7_983), "b".repeat(3_000)),
+            String::new(),
+        ),
+    ];
+    for (n, (rule, text, stored)) in cases.into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("claude-mem.db");
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+        prompt(&src, 41, &text);
+        let (home, ruled) = home_with(rule);
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        raw.gates_with(&ruled.rules);
+        claude_mem(&mut raw, &src, &ruled).unwrap();
+        let docs = docs(&raw);
+        let body = &docs.iter().find(|d| d.source_id == "p41").unwrap().body;
+        let end = &body[body.len().saturating_sub(60)..];
+        if stored.is_empty() {
+            // The second rule's value: no digit of it, whatever masks stand for the rest.
+            let head = body.strip_suffix("\n…[clipped, 10999 chars in full]");
+            assert!(
+                head.is_some_and(|head| !head.contains(|c: char| c.is_ascii_digit())),
+                "{n}: {end}"
+            );
+        } else {
+            assert_eq!(body, &stored, "{n}: {end}");
+        }
+    }
+}
+
+/// Two edges of the read of all of a prompt. A prompt with more matches of one rule than a
+/// scan holds is one mask, as capture stores a live prompt with that many: `redact::ranges`
+/// then gives one span for all of the text, which is not told from a value that is the whole
+/// prompt. Only a rule of the home's is counted so: a bundled rule's matches are a span each,
+/// however many, and a prompt with that many of them past the window keeps its start under a
+/// rule of the home's as it does under none. A key block the cut leaves open still goes when a
+/// rule of the home's masks its header: the span that holds a header is left to the bundled
+/// rules and to the check for it.
+#[test]
+fn a_prompt_read_whole_masks_too_many_matches_and_drops_an_open_key_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("claude-mem.db");
+    claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+    let tail = format!("{}{}", "a".repeat(12_000), " acme-123456".repeat(1_001));
+    prompt(&src, 41, &tail);
+    let key = format!(
+        "{}-----BEGIN PRIVATE KEY-----\n{}",
+        "a".repeat(7_000),
+        "B".repeat(6_000)
+    );
+    prompt(&src, 42, &key);
+    // Too many matches in a prompt that also holds a header: one mask all the same.
+    prompt(&src, 43, &format!("-----BEGIN PRIVATE KEY-----\n{tail}"));
+    // Too many of a value only the bundled rules find, all of them past the window.
+    let token = format!(" ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+    prompt(
+        &src,
+        44,
+        &format!("{}{}", "a".repeat(12_000), token.repeat(1_001)),
+    );
+    let rule = "[[redaction.extra_rules]]\nid = \"acme\"\nregex = 'acme-[0-9]{6}'\n\
+                [[redaction.extra_rules]]\nid = \"header\"\nregex = '-----BEGIN [A-Z ]+-----'\n";
+    let (home, ruled) = home_with(rule);
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    raw.gates_with(&ruled.rules);
+    claude_mem(&mut raw, &src, &ruled).unwrap();
+    let docs = docs(&raw);
+    let body = |id: &str| {
+        docs.iter()
+            .find(|d| d.source_id == id)
+            .unwrap()
+            .body
+            .clone()
+    };
+    assert_eq!(body("p41"), "[REDACTED]\n…[clipped, 24012 chars in full]");
+    assert_eq!(body("p43"), "[REDACTED]\n…[clipped, 24040 chars in full]");
+    let start = format!("{}\n…[clipped, 53041 chars in full]", "a".repeat(8_000));
+    assert_eq!(body("p44"), start);
+    assert_eq!(
+        body("p42"),
+        format!("{}\n…[clipped, 13028 chars in full]", "a".repeat(7_000))
+    );
+    let (home, plain) = home_with("");
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    claude_mem(&mut raw, &src, &plain).unwrap();
+    let kept = self::docs(&raw)
+        .into_iter()
+        .find(|d| d.source_id == "p44")
+        .unwrap()
+        .body;
+    assert_eq!(kept, start);
 }
 
 /// A harness notification is told before the home's rules run: a rule that masks its opening

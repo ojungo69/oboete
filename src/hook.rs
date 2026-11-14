@@ -3953,15 +3953,46 @@ pub(crate) fn compact(v: &Value) -> String {
     }
 }
 
+/// `s` with what the rules find in all of it masked, as capture's scan finds it in a live prompt
+/// (#994): a home's rules read an imported prompt as it came, before the bundled rules mask its
+/// window and before the cut, so a value the cut falls inside, one that ends far past it, one
+/// whose rule needs the text after it and one that holds a value the bundled rules mask are
+/// each one mask by then. Under no rule of the home's, and while redaction is off, `s` as it
+/// is: the bundled rules alone read the window, as they did.
+fn read_whole<'a>(s: &'a str, rules: &redact::Rules) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    if rules.is_off() || rules.counts().0 == 0 {
+        return Cow::Borrowed(s);
+    }
+    let mut found = redact::ranges(s, rules);
+    // One span for all of the text: a value that is the whole prompt, or more matches of one of
+    // the home's rules than a scan holds (`redact::ranges`; a bundled rule's are a span each),
+    // which nothing here tells apart. Either way it is one mask, as capture stores a live prompt
+    // with that many.
+    if found == [(0, s.len())] {
+        return Cow::Borrowed(redact::MASK);
+    }
+    // A span that holds a key block's header is left as it is: the bundled rules mask a whole
+    // block, and `clip` must see the header of one the cut leaves open, which a rule of the
+    // home's could mask. shortcut: what else such a span holds is gated only as the kept text
+    // is; split the span around the header if a home's rule is found to wrap one.
+    found.retain(|&(start, end)| !s[start..end].contains("-----BEGIN"));
+    if found.is_empty() {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(redact::masked_part(s, 0..s.len(), &found))
+}
+
 /// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
-/// it: the cut of the claude-mem import's prompts. A mask the cut falls inside is kept whole,
-/// and a value the cut would leave a part of is not kept: a key block left open, or what a
-/// rule of the home's finds in that window.
+/// it: the cut of the claude-mem import's prompts. What the home's rules find in all of the
+/// text is masked before that (`read_whole`). A mask the cut falls inside is kept whole, and a
+/// key block the cut leaves open is not kept.
 pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
     let s = &without_blocks(s, false);
     let total = s.chars().count();
+    let s = &read_whole(s, rules);
     if total <= MAX_FIELD {
         return redact::redact_unless_off(s, rules);
     }
@@ -3982,13 +4013,11 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     {
         cut = at + redact::MASK.len();
     }
-    // A value a rule of the home's finds with the cut inside it goes whole, as a key block the
-    // cut leaves open does: the caller gates what is kept with the home's rules, and the start
-    // of a value is no finding to them. Under no rule of the home's the cut is where it was.
-    // shortcut: the rules read the window as the bundled rules masked it, so they do not find a
-    // value that ends past the overlap, one that holds a value the bundled rules masked, or one
-    // whose rule needs what follows the cut (#994): read the text as it came, all of it, when
-    // an imported prompt is masked as capture masks one.
+    // A value a rule of the home's still finds with the cut inside it goes whole, as a key block
+    // the cut leaves open does: the caller gates what is kept with the home's rules, and the
+    // start of a value is no finding to them. `read_whole` masked the others; this is one it
+    // left for its key header, or one a rule finds only behind another's mask. Under no rule of
+    // the home's the cut is where it was.
     if !rules.is_off()
         && rules.counts().0 > 0
         && let Some((start, _)) = redact::ranges(&masked, rules)
