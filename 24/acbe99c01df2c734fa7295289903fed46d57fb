@@ -1,0 +1,20 @@
+src/setup/tests.rs
+  s_d169cd080e079e::t_787eaf9a57742a 2002-2010,2013-2020,2022,2026-2034
+  s_d169cd080e079e::t_c8a88f3a983eea 1996-1997
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24acbe99c01df2c734fa7295289903fed46d57fb",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
