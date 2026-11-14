@@ -993,10 +993,11 @@ fn a_damaged_raw_db_is_quarantined_and_rebuilt_from_its_segments() {
     assert_eq!(verify(&p.join("backups")).unwrap().len(), 1); // the checksum names it
 }
 
-/// A segment's checksum is found beside it in a backup directory whose path is not UTF-8. Before,
-/// the checksum's path was rebuilt from the segment's displayed path, so every segment there read
-/// as having no checksum, and a restore found none it could use.
-#[cfg(unix)]
+/// A segment's checksum is found beside it in a backup directory whose path is not UTF-8 (valid
+/// on Linux; macOS refuses such a name). Before, the checksum's path was rebuilt from the
+/// segment's displayed path, so every segment there read as having no checksum, and a restore
+/// found none it could use.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_segments_checksum_is_found_in_a_backup_directory_whose_path_is_not_utf8() {
     use std::os::unix::ffi::OsStrExt;
