@@ -6500,6 +6500,72 @@ fn a_cursor_session_end_is_recorded_though_its_recovery_cannot_read_the_prompts(
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Task 8: a Cursor SessionEnd whose recovery finds raw.db damaged in a place only it reads
+/// (the pages a stored prompt runs over) records the end and asks the worker to restore the
+/// store, as a hook that fails on a damaged store does. The read's error was only printed,
+/// and the end's write then cleared the failure marker, so nothing said the store was damaged.
+#[test]
+fn a_cursor_recovery_that_finds_the_store_damaged_asks_for_its_restore() {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let dir = tmp("cursor-recovery-damaged");
+    let payloads = cursor_fixture(&dir);
+    let transcript = dir.join("transcript.jsonl");
+    let line = json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}});
+    std::fs::write(&transcript, format!("{line}\n")).unwrap();
+    // A prompt whose row runs over several pages of the file.
+    let mut prompt = payloads["UserPromptSubmit"].clone();
+    prompt["prompt"] = json!("あ".repeat(4_000));
+    assert_eq!(hook(&dir, "cursor", "UserPromptSubmit", &prompt), "{}");
+    // The chain of those pages is cut: reading the prompt now says the file is damaged, and
+    // nothing else of the store reads those pages.
+    let conn = rusqlite::Connection::open(dir.join("raw.db")).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let size: i64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .unwrap();
+    let pages: Vec<i64> = conn
+        .prepare("SELECT pageno FROM dbstat WHERE name = 'records' AND pagetype = 'overflow'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    drop(conn);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join("raw.db"))
+        .unwrap();
+    let mut cut = 0;
+    for page in pages {
+        let at = SeekFrom::Start(u64::try_from((page - 1) * size).unwrap());
+        let mut next = [0; 4];
+        file.seek(at).unwrap();
+        file.read_exact(&mut next).unwrap();
+        if next != [0; 4] {
+            file.seek(at).unwrap();
+            file.write_all(&[0; 4]).unwrap();
+            cut += 1;
+        }
+    }
+    drop(file);
+    assert!(cut > 0, "the prompt's row has no chain of pages to cut");
+    let mut end = payloads["SessionEnd"].clone();
+    end["transcript_path"] = json!(transcript);
+    let ended = hook_bytes(&dir, "cursor", "SessionEnd", end.to_string().as_bytes());
+    let conn = rusqlite::Connection::open(dir.join("raw.db")).unwrap();
+    let ends: i64 = conn
+        .query_row("SELECT count(*) FROM records WHERE kind = 'end'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(ends, 1, "{ended:?}");
+    assert!(crate::backup::restore_requested(&dir), "{ended:?}");
+    drop(conn); // Windows removes no file that is open
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// MUST-M16: a Cursor SessionEnd whose recovery lock cannot be had (here its file is a
 /// directory) recovers no turn and still records the end. The lock's error used to leave the
 /// call before the event was built, so it was neither appended nor kept.
@@ -8637,6 +8703,43 @@ fn secret_straddling_the_clip_boundary_is_masked() {
             &redact::Rules::default()
         ),
         "x [REDACTED] y"
+    );
+}
+
+/// A mask the cut falls inside is kept whole, as capture's cut keeps one (`scan_capped`): the
+/// cut left its first characters, which tell no reader that a value was masked there.
+#[test]
+fn a_mask_the_cut_falls_inside_is_kept_whole() {
+    let key = format!(
+        "gsk_{}{}",
+        "q9Zx8mL2vB4nR7tY1wK3pS6dJ0", "aF5hU2cE8gI4kM7oQ1sV3xZ6bD"
+    );
+    let s = format!("{} {key} {}", "a".repeat(MAX_FIELD - 5), "b".repeat(3_000));
+    assert_eq!(
+        clip(&s, &redact::Rules::default()),
+        format!(
+            "{} [REDACTED]\n…[clipped, 11053 chars in full]",
+            "a".repeat(MAX_FIELD - 5)
+        )
+    );
+    // While redaction is off the text holds no mask: one typed there is cut as any text is.
+    let off = redact::Rules::new(
+        &crate::config::parse_capture(Some("[redaction]\nenabled = false\n"))
+            .unwrap()
+            .redaction,
+    )
+    .unwrap();
+    let typed = format!(
+        "{} [REDACTED] {}",
+        "a".repeat(MAX_FIELD - 5),
+        "b".repeat(3_000)
+    );
+    assert_eq!(
+        clip(&typed, &off),
+        format!(
+            "{} [RED\n…[clipped, 11007 chars in full]",
+            "a".repeat(MAX_FIELD - 5)
+        )
     );
 }
 

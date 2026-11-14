@@ -1072,6 +1072,70 @@ fn typed_transcript_refusal_keeps_independent_commits_and_reruns() {
     assert_eq!((stats.events, stats.refused), (0, 1));
 }
 
+/// A forget registered while a transcript is imported, after its file passed the cut and
+/// before a later batch of it: the store refuses that batch for the forget's sake (#949), so
+/// the file is refused where it stands and the file after it is still read. The refusal inside
+/// the batch's transaction was a plain error, which ended the run there.
+#[test]
+fn a_forget_between_a_files_batches_refuses_that_file_and_the_next_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sessions/2026/09/02");
+    std::fs::create_dir_all(&root).unwrap();
+    let at = |ms: i64| format!("2026-09-02T00:00:{:02}.{:03}Z", ms / 1000, ms % 1000);
+    let rollout = |name: &str, id: &str, calls: i64, bytes: usize| {
+        let mut file = std::fs::File::create(root.join(name)).unwrap();
+        writeln!(file, "{}", json!({"timestamp": at(0), "type": "session_meta", "payload": {"id": id, "cwd": "/gone/repo"}})).unwrap();
+        writeln!(file, "{}", json!({"timestamp": at(0), "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": "Import the tool history."}]}})).unwrap();
+        for i in 0..calls {
+            writeln!(file, "{}", json!({"timestamp": at(i * 2 + 1), "type": "response_item", "payload": {"type": "function_call", "call_id": format!("t{i}"), "name": "Read", "arguments": json!({"file": format!("file {i}")}).to_string()}})).unwrap();
+            writeln!(file, "{}", json!({"timestamp": at(i * 2 + 2), "type": "response_item", "payload": {"type": "function_call_output", "call_id": format!("t{i}"), "output": "x".repeat(bytes)}})).unwrap();
+        }
+    };
+    // More than one batch by its bytes, and fewer records in the first than one forget takes.
+    rollout("rollout-a.jsonl", "big", 100, 60_000);
+    rollout("rollout-b.jsonl", "next", 1, 1);
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // A hook recorded the session's next prompt: the transcript's lines are all before it.
+    let mut raw = raw::open(&home).unwrap();
+    let live = capture::events(
+        "codex",
+        "UserPromptSubmit",
+        &json!({"session_id": "big", "cwd": "/work", "prompt": "Already captured"}),
+        CODEX_MS + 10_000,
+        &Settings::default(),
+    );
+    raw.append_with_ledger(&live[0].event, &live[0].ledger, "test")
+        .unwrap();
+    drop(raw);
+    let of_big = |home: &Path| records(home).iter().filter(|e| e.session == "big").count();
+    // How many of the session's events the store held once the forget was registered.
+    let mut forgot = None;
+    let result = run(&home, &[("codex", &root)], None, &mut |c| {
+        if forgot.is_none() && matches!(c, Committed::Transcripts { .. }) {
+            // The hook's record is the store's first.
+            let (device, seq) = {
+                let raw = raw::open(&home).unwrap();
+                let first = raw.after(raw.device(), 0, 1).unwrap()[0].seq;
+                (raw.device().to_owned(), first)
+            };
+            let target = crate::forget::Target::Record { device, seq };
+            let preview = crate::forget::preview(&home, target).unwrap();
+            crate::forget::start(&home, &preview).unwrap();
+            forgot = Some(of_big(&home));
+        }
+    })
+    .unwrap_err();
+    assert_eq!(result.code, crate::preview::FailureCode::Refused);
+    assert_eq!(result.outcome.stats.agents["codex"].refused, 1);
+    // The refused file stopped where it stood: no later batch of it was stored.
+    assert_eq!(Some(of_big(&home)), forgot);
+    assert!(
+        records(&home).iter().any(|e| e.session == "next"),
+        "the file after the refused one was not read"
+    );
+}
+
 /// What a confirm still stops for, with nothing stored (#947 changed what a changed file
 /// does, and none of this): a preview of the codex folder, then `change` on the home, then
 /// its confirm, asked for `agent`'s folder.

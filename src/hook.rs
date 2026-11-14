@@ -3536,9 +3536,21 @@ fn adapt(
         let Ok(_read) = crate::dispatch::reading(home, READ_WAIT) else {
             return Ok(vec![(event.into(), p)]);
         };
+        // A read that fails recovers no turn. One that found raw.db damaged asks the worker to
+        // restore it, as a hook that fails on a damaged store does (`run_clocked`): the end's own
+        // write may never read the damaged page, and it clears the failure marker.
+        let unread = |what: &str, e: &anyhow::Error| {
+            eprintln!("oboete: no turn recovered, {what} not read: {e:#}");
+            if crate::backup::corrupt(e) {
+                crate::backup::request_restore(home);
+            }
+        };
         if str_field(&p, &["session_id", "sessionId"])
             .map_or(Ok(false), |id| raw.session_forgotten(agent, id))
-            .unwrap_or(true)
+            .unwrap_or_else(|e| {
+                unread("the session's forgets were", &e);
+                true
+            })
         {
             return Ok(vec![(event.into(), p)]);
         }
@@ -3547,7 +3559,7 @@ fn adapt(
         let counts = match raw.prompt_counts(agent, &session) {
             Ok(counts) => counts,
             Err(e) => {
-                eprintln!("oboete: no turn recovered, the session's prompts were not read: {e:#}");
+                unread("the session's prompts were", &e);
                 return Ok(vec![(event.into(), p)]);
             }
         };
@@ -3570,7 +3582,7 @@ fn adapt(
         let expired = match raw.expired_prompts(agent, &session) {
             Ok(expired) => expired,
             Err(e) => {
-                eprintln!("oboete: no turn recovered, the expired prompts were not read: {e:#}");
+                unread("the expired prompts were", &e);
                 return Ok(vec![(event.into(), p)]);
             }
         };
@@ -3940,8 +3952,10 @@ pub(crate) fn compact(v: &Value) -> String {
     }
 }
 
-/// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
-/// discarded tail of a megabyte tool output would only cost hook time.
+/// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
+/// it: the cut of the claude-mem import's prompts. A mask the cut falls inside is kept whole,
+/// and a value the cut would leave a part of is not kept: a key block left open, or what a
+/// rule of the home's finds in that window.
 pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
@@ -3951,13 +3965,40 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
         return redact::redact_unless_off(s, rules);
     }
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
-    let head: String = redact::redact_unless_off(&window, rules)
-        .chars()
-        .take(MAX_FIELD)
-        .collect();
+    let masked = redact::redact_unless_off(&window, rules);
+    let mut cut = masked
+        .char_indices()
+        .nth(MAX_FIELD)
+        .map_or(masked.len(), |(at, _)| at);
+    // A mask the cut falls inside is kept whole, as capture's cut keeps one (`scan_capped`).
+    // While redaction is off the text holds none: it is cut as typed (owner decision 43).
+    if !rules.is_off()
+        && let Some(at) = (cut.saturating_sub(redact::MASK.len() - 1)..cut).find(|&at| {
+            masked
+                .get(at..)
+                .is_some_and(|rest| rest.starts_with(redact::MASK))
+        })
+    {
+        cut = at + redact::MASK.len();
+    }
+    // A value a rule of the home's finds with the cut inside it goes whole, as a key block the
+    // cut leaves open does: the caller gates what is kept with the home's rules, and the start
+    // of a value is no finding to them. Under no rule of the home's the cut is where it was.
+    // shortcut: the rules read the window as the bundled rules masked it, so they do not find a
+    // value that ends past the overlap, one that holds a value the bundled rules masked, or one
+    // whose rule needs what follows the cut (#994): read the text as it came, all of it, when
+    // an imported prompt is masked as capture masks one.
+    if !rules.is_off()
+        && rules.counts().0 > 0
+        && let Some((start, _)) = redact::ranges(&masked, rules)
+            .into_iter()
+            .find(|&(start, end)| start < cut && cut < end)
+    {
+        cut = start;
+    }
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
-    let mut head = redact::redact_unless_off(&head, rules);
+    let mut head = redact::redact_unless_off(&masked[..cut], rules);
     // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
     if !rules.is_off()
         && let Some(begin) = head.rfind("-----BEGIN")
