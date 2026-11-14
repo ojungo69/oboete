@@ -154,9 +154,10 @@ regexes = [
     '''^["']?(?:https?|rediss?)://''',
     '''^["']?\+[^:]*%''',
     # the placeholder as sessions in Japanese write it (`-u ユーザー名:パスワード`), Japanese words
-    # after it too (`パスワードを入力`); an ASCII character after it ends no placeholder, as a
-    # password that starts with the word does (`パスワード!2024`)
-    '''^["']?[^:]*["']?:["']?パスワード[^\x00-\x7F]*["']?[.,]?$''',
+    # after it too (`パスワードを入力`, `パスワード。`): only kana, kanji and Japanese punctuation
+    # after it; anything else there is a password that starts with the word (`パスワード!2024`,
+    # `パスワード！２０２４`, `パスワード★七三九`)
+    '''^["']?[^:]*["']?:["']?パスワード[\p{Hiragana}\p{Katakana}\p{Han}ー・、。]*["']?[.,]?$''',
 ]
 
 [[rules]]

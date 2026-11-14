@@ -1832,18 +1832,19 @@ fn masks_more(new: &str, old: &str) -> bool {
 /// find there. What they still add to a scan is a value gitleaks' rule takes and curl-user
 /// passes over: here the placeholder curl-user knows (`パスワード`) with Japanese after it, which
 /// is of word characters and over the entropy for gitleaks' rule (an ASCII character after the
-/// word would make it a password curl-user masks, V14-31). The tests of the looks use it, so that
-/// they still say what the looks do.
+/// word, or a full-width one, would make it a password curl-user masks, V14-31). The tests of the
+/// looks use it, so that they still say what the looks do.
 fn looks_only(mark: &str) -> String {
     format!("パスワード{mark}")
 }
 
-/// `n` in `digits` full-width digits: a suffix that keeps a `looks_only` value one curl-user
-/// passes over.
-fn wide(n: usize, digits: usize) -> String {
+/// `n` in `digits` kanji numerals: a suffix that keeps a `looks_only` value one curl-user passes
+/// over, three bytes a digit as a full-width digit is (which curl-user masks after the word).
+fn kanji(n: usize, digits: usize) -> String {
+    const NUMERALS: [char; 10] = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
     format!("{n:0digits$}")
         .chars()
-        .map(|c| char::from_u32(c as u32 - u32::from('0') + u32::from('０')).unwrap())
+        .map(|c| NUMERALS[c.to_digit(10).unwrap() as usize])
         .collect()
 }
 
@@ -2073,24 +2074,42 @@ fn a_credential_given_to_curls_user_option_is_masked_whatever_follows_and_whatev
 }
 
 /// A password that begins with the Japanese placeholder is no placeholder: curl-user masks it,
-/// in a record stored before the rule too, and passes over only the word alone or with Japanese
-/// after it (`curl_user_passes_over_what_is_no_credential`) (V14-31).
+/// in a record stored before the rule too, and passes over only the word alone or with kana,
+/// kanji or Japanese punctuation after it (`curl_user_passes_over_what_is_no_credential`)
+/// (V14-31). Every password is tried and each one left unmasked is named, so a run on an older
+/// entry shows which of them it stores as written.
 #[test]
 fn a_password_that_starts_with_the_japanese_placeholder_is_masked() {
     let rules = Rules::default();
     let mark = format!("2024{}", "x");
+    let wide = format!("２０２４{}", "ｘ");
+    let kanji = format!("七三{}", "九");
+    let mut unmasked = Vec::new();
     for password in [
         format!("パスワード!{mark}"),
         format!("パスワード#{mark}"),
         format!("パスワード{mark}"),
+        format!("パスワード！{wide}"),
+        format!("パスワード＃{wide}"),
+        format!("パスワード{wide}"),
+        format!("パスワード★{kanji}"),
+        format!("パスワード￥{kanji}"),
+        format!("パスワードпароль—{kanji}"),
     ] {
         let line = format!("curl {U} admin:{password} https://h.test");
         let want = format!("curl {U} {MASK} https://h.test");
-        assert_eq!(scan(&line, &rules).0, want, "{line}");
-        assert_eq!(outbound_with(&line, &rules), want, "{line}");
         let body = serde_json::json!({ "input": { "command": line } }).to_string();
-        assert!(!field_ranges(&body, &rules).is_empty(), "{line}");
+        if scan(&line, &rules).0 != want {
+            unmasked.push(format!("captured: {password}"));
+        }
+        if outbound_with(&line, &rules) != want {
+            unmasked.push(format!("sent: {password}"));
+        }
+        if field_ranges(&body, &rules).is_empty() {
+            unmasked.push(format!("stored before: {password}"));
+        }
     }
+    assert!(unmasked.is_empty(), "{unmasked:#?}");
 }
 
 /// The rows of #985's table: before the credential, the credential, after it. Made-up values;
@@ -2778,7 +2797,7 @@ fn the_looks_again_of_a_scan_share_one_count() {
     // pass over the 92 and find values from the last one back, while the count lasts (24 of
     // them, when this was written).
     let credentials: String = (0..64)
-        .map(|i| format!(" -u c{i:02}:{pw}{}", wide(i, 2)))
+        .map(|i| format!(" -u c{i:02}:{pw}{}", kanji(i, 2)))
         .collect();
     let line = format!("curl{credentials}{}", " -u a:b".repeat(92));
     let (masked, found) = scan(&line, &rules);
@@ -2794,18 +2813,18 @@ fn the_looks_again_of_a_scan_share_one_count() {
     // longer than the count, so there is none.
     let filler = "x".repeat(1024);
     let credentials: String = (0..300)
-        .map(|i| format!(" -u c{i:03}:{pw}{} https://h.test/{filler}", wide(i, 3)))
+        .map(|i| format!(" -u c{i:03}:{pw}{} https://h.test/{filler}", kanji(i, 3)))
         .collect();
     let line = format!("curl{credentials} -u bob:pass");
     assert!(line.len() > LOOK_AGAIN);
     let (masked, found) = scan(&line, &rules);
     assert_eq!(found.len(), 1, "{} found", found.len());
     assert!(
-        !masked.contains(&format!("c299:{pw}{}", wide(299, 3))),
+        !masked.contains(&format!("c299:{pw}{}", kanji(299, 3))),
         "the last one"
     );
     assert!(
-        masked.contains(&format!("c298:{pw}{}", wide(298, 3))),
+        masked.contains(&format!("c298:{pw}{}", kanji(298, 3))),
         "the one before it"
     );
 }
