@@ -593,7 +593,7 @@ impl Bundle {
         if agents.contains(&Agent::Claude)
             && let Some(path) = std::env::var_os("PATH")
                 .into_iter()
-                .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .flat_map(|path| super::path_dirs(&path).collect::<Vec<_>>())
                 .flat_map(|dir| super::launcher_files(&dir, "claude"))
                 .find(|path| {
                     super::diagnostic_metadata(path).is_ok_and(|metadata| metadata.is_file())

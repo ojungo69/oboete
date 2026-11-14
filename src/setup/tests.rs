@@ -213,6 +213,30 @@ fn w6a_native_claude_command_is_bounded_and_discards_private_output() {
     assert!(start.elapsed() < Duration::from_millis(500));
 }
 
+/// `claude mcp` runs in an empty directory of its own, not in the one oboete was started in: on
+/// Windows npm's `claude.cmd` starts a bare `node` when no `node.exe` sits beside it, and cmd.exe
+/// looks for that in the working directory first, which may be a checkout holding one (Codex's
+/// security review of #1009).
+#[test]
+fn claude_mcp_runs_in_a_directory_of_its_own() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("cwd.txt");
+    let out = out.to_str().unwrap();
+    let exit = if cfg!(windows) {
+        let launcher = dir.path().join("claude.cmd");
+        std::fs::write(&launcher, "@cd > \"%~1\"\r\n").unwrap();
+        claude_cli_at(&launcher, &[out], Duration::from_secs(30))
+    } else {
+        let shell = Path::new("/bin/sh");
+        claude_cli_at(shell, &["-c", "pwd > \"$0\"", out], Duration::from_secs(30))
+    };
+    assert_eq!(exit, ClaudeCliExit::Success);
+    let ran_in = std::fs::read_to_string(out).unwrap();
+    let here = std::env::current_dir().unwrap();
+    assert_ne!(Path::new(ran_in.trim()), here.as_path(), "{ran_in}");
+}
+
 #[test]
 #[cfg(unix)]
 fn w6a_first_backup_preserves_a_dangling_existing_backup_alias() {
@@ -1910,4 +1934,102 @@ fn setup_asks_in_a_terminal_or_takes_yes() {
     assert!(answer(false, true, "y\n"));
     assert!(!answer(false, true, "n\n"));
     assert!(!answer(false, true, ""));
+}
+
+/// On Windows the launcher of a CLI to start is its `.exe`, then npm's `.cmd`, and last the
+/// extensionless sh script npm puts beside them, which Windows cannot start: it was taken first,
+/// so `claude mcp` could not start, and a curator started by a bare name never found a `.cmd`
+/// (the audit of 2026-11). A directory earlier on `PATH` comes first, as Windows looks; elsewhere
+/// the launcher is the name itself.
+#[test]
+fn a_windows_launcher_is_the_exe_then_the_cmd_before_the_sh_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let at = |name: &str| Some(dir.path().join(name));
+    std::fs::write(dir.path().join("claude"), "#!/bin/sh\n").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude"));
+    std::fs::write(dir.path().join("claude.cmd"), "@echo off\r\n").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude.cmd"));
+    assert_eq!(launcher_in(&path, "claude", false), at("claude"));
+    std::fs::write(dir.path().join("claude.exe"), "").unwrap();
+    assert_eq!(launcher_in(&path, "claude", true), at("claude.exe"));
+    let later = tempfile::tempdir().unwrap();
+    std::fs::write(later.path().join("codex.exe"), "").unwrap();
+    std::fs::write(dir.path().join("codex.cmd"), "").unwrap();
+    let both = std::env::join_paths([dir.path(), later.path()]).unwrap();
+    assert_eq!(launcher_in(&both, "codex", true), at("codex.cmd"));
+    assert_eq!(launcher_in(&both, "grok", true), None);
+}
+
+/// A `PATH` entry that is empty or relative names the working directory or one under it, which may
+/// be a checkout that holds a planted launcher: no launcher is taken from one.
+#[test]
+fn a_path_entry_that_is_not_absolute_gives_no_launcher() {
+    let file_in = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().is_file())
+            .map(|entry| entry.file_name().into_string().unwrap())
+    };
+    // A file of the working directory, which an empty entry names, and one of a directory under it.
+    let here = file_in(Path::new(".")).expect("a file in the working directory");
+    let (sub, file) = std::fs::read_dir(".")
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .find_map(|entry| file_in(&entry.path()).map(|file| (entry.file_name(), file)))
+        .expect("a directory with a file under the working directory");
+    for windows in [false, true] {
+        assert_eq!(launcher_in(std::ffi::OsStr::new(""), &here, windows), None);
+        assert_eq!(launcher_in(&sub, &file, windows), None);
+    }
+    let absolute = std::fs::canonicalize(&sub).unwrap();
+    assert_eq!(
+        launcher_in(absolute.as_os_str(), &file, false),
+        Some(absolute.join(&file))
+    );
+}
+
+/// A `.cmd` launcher found on `PATH` starts, with arguments as oboete gives a curator CLI (JSON
+/// with quotes and braces, and an empty one): Rust runs it through cmd.exe and refuses an
+/// argument it cannot escape there, and node behind it, as behind npm's, gets each as it was
+/// given (CodeRabbit on #1009).
+#[cfg(windows)]
+#[test]
+fn a_cmd_launcher_on_the_path_starts_with_a_curators_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    // As npm's launcher does, the `.cmd` hands its arguments (`%*`) to node, here to print the
+    // ones it was given; without node it only says it started.
+    let node = on_path("node");
+    let body = if node {
+        "@node -e \"process.stdout.write(JSON.stringify(process.argv.slice(1)))\" -- %*\r\n"
+    } else {
+        "@echo launched\r\n"
+    };
+    std::fs::write(dir.path().join("oboete-fake.cmd"), body).unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    let found = launcher_in(&path, "oboete-fake", true).unwrap();
+    let args = [
+        "--settings",
+        r#"{"disableAllHooks":true,"enabledPlugins":{"a@b":false}}"#,
+        "--setting-sources",
+        "",
+        "--json-schema",
+        r#"{"type":"object","properties":{"a":{"type":"string"}}}"#,
+    ];
+    let out = std::process::Command::new(&found)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if node {
+        let got: Vec<String> =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {out:?}"));
+        assert_eq!(got, args);
+    } else {
+        eprintln!("the arguments' check skipped: node is not on PATH");
+        assert!(stdout.contains("launched"), "{out:?}");
+    }
 }

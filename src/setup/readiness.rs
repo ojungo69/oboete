@@ -152,7 +152,7 @@ pub(crate) fn launch_found(bins: &[&str]) -> Option<bool> {
         return Some(false);
     };
     let mut result = Some(false);
-    for dir in std::env::split_paths(&paths) {
+    for dir in super::path_dirs(&paths) {
         for file in bins.iter().flat_map(|bin| launcher_files(&dir, bin)) {
             match found(&file, false) {
                 Some(true) => return Some(true),

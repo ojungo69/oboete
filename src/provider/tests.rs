@@ -331,6 +331,37 @@ fn the_curator_environment_is_the_allow_list() {
     assert_eq!(names(true), [&want[..], &["Path"]].concat());
 }
 
+/// A CLI oboete starts runs in a directory of its own, so a directory it is named relative to
+/// oboete's own working directory is passed absolute, and still names that directory (Codex on
+/// #1009: `claude mcp` with `CLAUDE_CONFIG_DIR=.claude-profile`).
+#[test]
+fn a_relative_directory_reaches_a_cli_absolute() {
+    let os = |k: &str, v: &std::ffi::OsStr| (std::ffi::OsString::from(k), v.to_owned());
+    let fixed = std::env::temp_dir();
+    let parent = [
+        os("CLAUDE_CONFIG_DIR", ".claude-profile".as_ref()),
+        os("XDG_CONFIG_HOME", "config".as_ref()),
+        os("CODEX_HOME", fixed.as_os_str()),
+        os("TMPDIR", "".as_ref()),
+        os("LANG", "ja_JP.UTF-8".as_ref()),
+    ];
+    let here = std::env::current_dir().unwrap();
+    for windows in [false, true] {
+        let env: std::collections::HashMap<_, _> = curator_env(parent.clone().into_iter(), windows)
+            .into_iter()
+            .map(|(k, v)| (k.into_string().unwrap(), v))
+            .collect();
+        assert_eq!(
+            env["CLAUDE_CONFIG_DIR"],
+            here.join(".claude-profile").into_os_string()
+        );
+        assert_eq!(env["XDG_CONFIG_HOME"], here.join("config").into_os_string());
+        assert_eq!(env["CODEX_HOME"], fixed.as_os_str());
+        assert_eq!(env["TMPDIR"], "");
+        assert_eq!(env["LANG"], "ja_JP.UTF-8");
+    }
+}
+
 /// claude's stream: the init event, an answer, the rate-limit event and the result.
 fn claude_events(init: Value, rate: &str, result: Value) -> String {
     [

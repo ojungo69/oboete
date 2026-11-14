@@ -23,7 +23,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 use crate::provider::{
-    CODEX_OFF, CODEX_ON, CODEX_PROFILE, curator_env, kill_tree, own_group, scratch_dir,
+    CODEX_OFF, CODEX_ON, CODEX_PROFILE, cli_program, curator_env, kill_tree, own_group, scratch_dir,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +47,7 @@ impl Gate {
 pub fn gate(db: &Connection, cli: &str) -> Result<Gate> {
     match cli {
         "claude" => Ok(Gate::Passed),
-        "codex" => gate_codex(db, Path::new("codex"), &crate::config::home_dir()),
+        "codex" => gate_codex(db, &cli_program("codex"), &crate::config::home_dir()),
         _ => Ok(Gate::NotProven),
     }
 }

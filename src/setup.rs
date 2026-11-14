@@ -1522,9 +1522,16 @@ fn claude_cli_at(
 ) -> ClaudeCliExit {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+    // An empty directory of its own, as a curator call has: npm's `claude.cmd` starts a bare `node`
+    // when no `node.exe` sits beside it, and cmd.exe looks for that in the working directory first,
+    // which may be a checkout that holds one (Codex's security review of #1009).
+    let Ok(scratch) = crate::provider::scratch_dir() else {
+        return ClaudeCliExit::SpawnFailed;
+    };
     let mut command = Command::new(launcher);
     command
         .args(args)
+        .current_dir(&scratch.0)
         .env_clear()
         .envs(crate::provider::curator_env(
             std::env::vars_os(),
@@ -1567,12 +1574,7 @@ fn claude_cli_at(
 
 /// Resolve once per explicit native operation; fixed remove or generated add uses this path.
 fn claude_launcher() -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .flat_map(|dir| launcher_files(&dir, "claude"))
-        .find(|path| path.is_file())
-        .and_then(|path| std::path::absolute(path).ok())
+    launcher("claude").and_then(|path| std::path::absolute(path).ok())
 }
 
 fn claude_cli(launcher: &Path, args: &[&str]) -> std::result::Result<(), ClaudeCliExit> {
@@ -3243,11 +3245,7 @@ pub fn doctor(home: &Path) -> Result<()> {
 pub(crate) fn on_path(bin: &str) -> bool {
     // Explicit native CLI actions retain symlink-backed launchers. Passive viewer
     // observations use launch_found and never follow Windows reparses.
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths)
-            .flat_map(|dir| launcher_files(&dir, bin))
-            .any(|file| file.is_file())
-    })
+    launcher(bin).is_some()
 }
 
 fn diagnostic_path_with<T>(
@@ -4014,12 +4012,42 @@ pub(crate) fn diagnostic_file_name(file: &std::fs::File) -> std::io::Result<Path
 }
 
 fn launcher_files(dir: &Path, bin: &str) -> Vec<PathBuf> {
-    // Windows npm launchers use `.cmd`; WSL must not count Windows launchers.
-    let mut files = vec![dir.join(bin)];
-    if cfg!(windows) {
-        files.extend(["exe", "cmd"].map(|ext| dir.join(format!("{bin}.{ext}"))));
+    launcher_files_for(dir, bin, cfg!(windows))
+}
+
+/// `bin`'s launchers in `dir`, the one to start first. Windows npm launchers use `.cmd`, beside an
+/// extensionless sh script that Windows cannot start, so on Windows that one is last; WSL must not
+/// count Windows launchers.
+fn launcher_files_for(dir: &Path, bin: &str, windows: bool) -> Vec<PathBuf> {
+    if windows {
+        let mut files = ["exe", "cmd"]
+            .map(|ext| dir.join(format!("{bin}.{ext}")))
+            .to_vec();
+        files.push(dir.join(bin));
+        files
+    } else {
+        vec![dir.join(bin)]
     }
-    files
+}
+
+/// The launcher of `bin` on `PATH` to start, as `launcher_files` orders them. On Windows a bare
+/// name finds `bin.exe` alone, never npm's `bin.cmd` (Rust's `Command`), so the CLIs oboete starts
+/// there are started by this path.
+pub(crate) fn launcher(bin: &str) -> Option<PathBuf> {
+    launcher_in(&std::env::var_os("PATH")?, bin, cfg!(windows))
+}
+
+fn launcher_in(paths: &std::ffi::OsStr, bin: &str, windows: bool) -> Option<PathBuf> {
+    path_dirs(paths)
+        .flat_map(|dir| launcher_files_for(&dir, bin, windows))
+        .find(|path| path.is_file())
+}
+
+/// The directories of a `PATH` to look for launchers in. An empty or relative entry names the
+/// working directory or one under it, which may be a checkout that holds a planted launcher, so
+/// only absolute ones are.
+pub(crate) fn path_dirs(paths: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(paths).filter(|dir| dir.is_absolute())
 }
 
 #[cfg(test)]
