@@ -3536,9 +3536,21 @@ fn adapt(
         let Ok(_read) = crate::dispatch::reading(home, READ_WAIT) else {
             return Ok(vec![(event.into(), p)]);
         };
+        // A read that fails recovers no turn. One that found raw.db damaged asks the worker to
+        // restore it, as a hook that fails on a damaged store does (`run_clocked`): the end's own
+        // write may never read the damaged page, and it clears the failure marker.
+        let unread = |what: &str, e: &anyhow::Error| {
+            eprintln!("oboete: no turn recovered, {what} not read: {e:#}");
+            if crate::backup::corrupt(e) {
+                crate::backup::request_restore(home);
+            }
+        };
         if str_field(&p, &["session_id", "sessionId"])
             .map_or(Ok(false), |id| raw.session_forgotten(agent, id))
-            .unwrap_or(true)
+            .unwrap_or_else(|e| {
+                unread("the session's forgets were", &e);
+                true
+            })
         {
             return Ok(vec![(event.into(), p)]);
         }
@@ -3547,7 +3559,7 @@ fn adapt(
         let counts = match raw.prompt_counts(agent, &session) {
             Ok(counts) => counts,
             Err(e) => {
-                eprintln!("oboete: no turn recovered, the session's prompts were not read: {e:#}");
+                unread("the session's prompts were", &e);
                 return Ok(vec![(event.into(), p)]);
             }
         };
@@ -3570,7 +3582,7 @@ fn adapt(
         let expired = match raw.expired_prompts(agent, &session) {
             Ok(expired) => expired,
             Err(e) => {
-                eprintln!("oboete: no turn recovered, the expired prompts were not read: {e:#}");
+                unread("the expired prompts were", &e);
                 return Ok(vec![(event.into(), p)]);
             }
         };
