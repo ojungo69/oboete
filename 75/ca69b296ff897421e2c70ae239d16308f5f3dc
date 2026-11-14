@@ -1,0 +1,19 @@
+src/redact/tests.rs
+  s_d169cd080e079e::t_50f83f9efee9fb 2998
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "75ca69b296ff897421e2c70ae239d16308f5f3dc",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
