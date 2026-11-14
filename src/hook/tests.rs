@@ -9252,3 +9252,26 @@ fn imported_v1_documents_resolve_and_are_never_injected() {
     .unwrap_or_default();
     assert!(!shown.contains("We use tabs."), "{shown}");
 }
+
+/// `aligned` puts a scan's masks back on the text by the runs `redact::hidden` gives of them: a run
+/// stands for one mask or more, as a scan's rescan can put a mask beside another, and a text that
+/// is not the runs masked gives nothing.
+#[test]
+fn aligned_puts_one_mask_or_more_on_a_run_and_nothing_else() {
+    let text = "ab-SECRETxyz-cd";
+    let runs = [(3, 12)];
+    let one = "ab-[REDACTED]-cd";
+    let from = aligned(text, &runs, one).unwrap();
+    assert_eq!(from.len(), one.len());
+    assert_eq!(from[2], (2, 3));
+    assert!(from[3..13].iter().all(|&r| r == (3, 12)));
+    assert_eq!(from[13], (12, 13));
+    let two = "ab-[REDACTED][REDACTED]-cd";
+    let from = aligned(text, &runs, two).unwrap();
+    assert_eq!(from.len(), two.len());
+    assert!(from[3..23].iter().all(|&r| r == (3, 12)));
+    assert_eq!(from[23], (12, 13));
+    assert_eq!(aligned(text, &runs, text), None);
+    assert_eq!(aligned(text, &runs, "ab-[REDACTED]-ce"), None);
+    assert_eq!(aligned(text, &[], text).map(|f| f.len()), Some(text.len()));
+}
