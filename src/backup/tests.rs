@@ -2440,3 +2440,142 @@ fn a_hole_in_the_op_log_sets_aside_every_op_after_it() {
     let restored = raw::open(p).unwrap();
     assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
 }
+
+/// Slice 3e-4: an ops segment in a backup location given up still counts, as the purge it gates
+/// walks there too. Before, only the location in use was looked in, so a rule's scan was taken as
+/// done and the old location's ops kept their text.
+#[test]
+fn an_ops_segment_in_a_location_given_up_still_counts() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[backup]\ndir = \"old-backups\"\n").unwrap();
+    segmented(p, 5, 5);
+    let mut raw = raw::open(p).unwrap();
+    raw.append_ops(&[window(5), claim("a")]).unwrap();
+    drop(raw);
+    export(p).unwrap();
+    assert!(
+        !segments(&p.join("old-backups"), Kind::Ops)
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(p.join("config.toml"), "[backup]\ndir = \"new-backups\"\n").unwrap();
+    assert!(any_ops_segment(p).unwrap());
+}
+
+/// A forget_jobs table whose page is damaged, in a raw.db whose schema still reads, does not stop
+/// the restore that is to repair it: the request the logs hold is applied. Before, the error
+/// stepping its rows stopped the restore, and with it every worker's start.
+#[test]
+fn a_damaged_forget_jobs_page_does_not_stop_the_restore() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 3, 3);
+    let raw = raw::open(p).unwrap();
+    let device = raw.device().to_owned();
+    let preview = raw
+        .forget_preview(crate::forget::Target::Record {
+            device: device.clone(),
+            seq: 2,
+        })
+        .unwrap();
+    crate::forget::start(p, &preview).unwrap();
+    drop(raw); // the last close checkpoints the WAL
+    let conn = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    let (root, size): (i64, i64) = (
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'forget_jobs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+        conn.query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap(),
+    );
+    drop(conn);
+    let at = ((root - 1) * size) as u64;
+    overwrite(&p.join("raw.db"), at, &vec![0xA5; size as usize]);
+    restore(p).unwrap();
+    let restored = raw::open(p).unwrap();
+    assert_eq!(restored.forget_requests().unwrap().len(), 1);
+    assert!(matches!(
+        restored.after(&device, 1, 1).unwrap()[0].item,
+        Item::Removed
+    ));
+}
+
+/// A raw.db that opens with no schema (an empty file) is rebuilt from the segments: it holds no
+/// exclusion to carry. Before, its missing ops table stopped the restore.
+#[test]
+fn an_empty_raw_db_is_restored_from_its_segments() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    segmented(p, 3, 3);
+    std::fs::write(p.join("raw.db"), b"").unwrap();
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(p.join(f));
+    }
+    let note = restore(p).unwrap();
+    assert!(note.contains("3 record(s)"), "{note}");
+}
+
+/// docs/backup-points.md B1: a point that another home sharing the backup directory notes while
+/// this one rewrites the points is kept. Before, the rewrite's rename put back what it had read,
+/// and the point noted in between was gone.
+#[test]
+fn a_point_noted_while_the_points_are_rewritten_is_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().to_owned();
+    let mine = |records| Point {
+        at: 1,
+        device: "a".into(),
+        records,
+        ops: 0,
+    };
+    note_point(&dir, &mine(5)).unwrap();
+    note_point(&dir, &mine(10)).unwrap();
+    let other = Point {
+        at: 2,
+        device: "b".into(),
+        records: 7,
+        ops: 0,
+    };
+    let (noted, shared) = (other.clone(), dir.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    BETWEEN_POINTS.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            let writer = std::thread::spawn(move || note_point(&shared, &noted).unwrap());
+            // Time for the other writer's append, which nothing then holds back.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            tx.send(writer).unwrap();
+        }));
+    });
+    keep_points(&dir, "a", |p| p.records <= 5).unwrap();
+    BETWEEN_POINTS.with_borrow_mut(|hook| *hook = None);
+    rx.recv().unwrap().join().unwrap();
+    assert_eq!(points(&dir).unwrap(), [mine(5), other]);
+}
+
+/// docs/backup-points.md B6: points with none to drop are left as they are without the lock, so
+/// a backup directory that cannot take the lock file still reads, and a restore from it goes on.
+#[cfg(unix)]
+#[test]
+fn points_with_none_to_drop_need_no_lock() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("backups");
+    std::fs::create_dir(&dir).unwrap();
+    let point = Point {
+        at: 1,
+        device: "a".into(),
+        records: 5,
+        ops: 0,
+    };
+    note_point(&dir, &point).unwrap();
+    std::fs::remove_file(dir.join("points.jsonl.lock")).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let kept = keep_points(&dir, "a", |p| p.records <= 5);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    kept.unwrap();
+    assert_eq!(points(&dir).unwrap(), [point]);
+}

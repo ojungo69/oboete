@@ -124,6 +124,7 @@ thread_local! {
     pub(crate) static BEFORE_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_REOPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CONSENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BETWEEN_POINTS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 pub(crate) fn before_swap() {
     #[cfg(test)]
@@ -890,6 +891,7 @@ pub(crate) struct Point {
 /// one.
 fn note_point(dir: &Path, point: &Point) -> Result<()> {
     use std::io::Seek;
+    let _points = points_lock(dir)?;
     let path = dir.join(POINTS);
     let torn = match std::fs::File::open(&path) {
         Ok(mut f) if f.metadata()?.len() > 0 => {
@@ -916,6 +918,23 @@ fn note_point(dir: &Path, point: &Point) -> Result<()> {
     file.write_all(line.as_bytes())?;
     file.sync_data()?;
     Ok(())
+}
+
+/// The hold on a backup directory's points, around an append and from a rewrite's read to its
+/// rename: the directory may be shared by homes whose workers do not hold each other's locks, and
+/// a point one notes while another rewrites would otherwise be lost. Nothing else is taken while
+/// it is held.
+fn points_lock(dir: &Path) -> Result<std::fs::File> {
+    let path = dir.join("points.jsonl.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    lock.lock()
+        .with_context(|| format!("lock {}", path.display()))?;
+    Ok(lock)
 }
 
 /// The points a backup directory names, in the order they were noted; a line that does not read
@@ -1091,25 +1110,41 @@ pub(crate) fn list_points(home: &Path, all: bool) -> Result<Vec<String>> {
 /// docs/backup-points.md B6: the directory's points rewritten without those of `device` that
 /// `keep` refuses (and any line that does not read as a point), when there are such.
 fn keep_points(dir: &Path, device: &str, keep: impl Fn(&Point) -> bool) -> Result<()> {
-    let text = match std::fs::read_to_string(dir.join(POINTS)) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", dir.join(POINTS).display())),
-    };
-    let mut kept = String::new();
-    let mut changed = false;
-    for line in text.lines() {
-        match serde_json::from_str::<Point>(line) {
-            Ok(p) if p.device != device || keep(&p) => {
-                kept.push_str(line);
-                kept.push('\n');
+    let kept = || -> Result<Option<String>> {
+        let text = match std::fs::read_to_string(dir.join(POINTS)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", dir.join(POINTS).display()));
             }
-            _ => changed = true,
+        };
+        let mut kept = String::new();
+        let mut changed = false;
+        for line in text.lines() {
+            match serde_json::from_str::<Point>(line) {
+                Ok(p) if p.device != device || keep(&p) => {
+                    kept.push_str(line);
+                    kept.push('\n');
+                }
+                _ => changed = true,
+            }
         }
+        Ok(changed.then_some(kept))
+    };
+    // The lock is taken only for a rewrite, so a directory that cannot hold it still reads, and
+    // the points are read again under it.
+    if kept()?.is_none() {
+        return Ok(());
     }
-    if changed {
-        write_synced(dir, POINTS, kept.as_bytes())?;
+    let _points = points_lock(dir)?;
+    let Some(kept) = kept()? else {
+        return Ok(());
+    };
+    #[cfg(test)]
+    if let Some(between) = BETWEEN_POINTS.with(|hook| hook.borrow_mut().take()) {
+        between();
     }
+    write_synced(dir, POINTS, kept.as_bytes())?;
     Ok(())
 }
 
@@ -1329,22 +1364,24 @@ pub(crate) fn purge_ops(
     )
 }
 
-/// Slice 3e-4: whether the backup location holds an ops segment, live or set aside, by its name
-/// alone: one may hold an op raw.db does not (Codex on #487).
+/// Slice 3e-4: whether a backup location holds an ops segment, live or set aside, by its name
+/// alone: one may hold an op raw.db does not (Codex on #487). Every directory `purge_ops` walks
+/// is looked in, the remembered ones too: a location given up keeps its segments.
 pub(crate) fn any_ops_segment(home: &Path) -> Result<bool> {
-    let dir = dir(home)?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
-    };
-    for entry in entries {
-        let name = entry?.file_name();
-        if name
-            .to_str()
-            .is_some_and(|n| segment(n, Kind::Ops) || set_aside(n, Kind::Ops))
-        {
-            return Ok(true);
+    for dir in segment_dirs(home)? {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+        };
+        for entry in entries {
+            let name = entry?.file_name();
+            if name
+                .to_str()
+                .is_some_and(|n| segment(n, Kind::Ops) || set_aside(n, Kind::Ops))
+            {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -2175,8 +2212,9 @@ type Owed = Vec<(String, i64, i64)>;
 
 /// docs/backup-points.md B5: `device`'s exclusion ops as the live raw.db holds them, in op order,
 /// those no export has backed up yet too. None when there is no raw.db or it is damaged: that
-/// store's restore keeps the backups' own. Any other failure to read them stops the restore, so an
-/// exclusion is never dropped unsaid (cubic on #880).
+/// store's restore keeps the backups' own, and so does one with no ops table (an empty file).
+/// Any other failure to read them stops the restore, so an exclusion is never dropped unsaid
+/// (cubic on #880).
 fn live_exclusions(home: &Path, device: &str) -> Result<Vec<(i64, String)>> {
     let path = raw::path(home);
     if !path.try_exists()? {
@@ -2187,6 +2225,15 @@ fn live_exclusions(home: &Path, device: &str) -> Result<Vec<(i64, String)>> {
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
+        // The table is asked of the schema, so that a file that does not read still stops here.
+        let has_ops: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ops')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_ops {
+            return Ok(Vec::new());
+        }
         let mut st = conn.prepare(
             "SELECT op_seq, body FROM ops WHERE device = ?1 AND type = 'exclusion' ORDER BY op_seq",
         )?;
@@ -2201,8 +2248,10 @@ fn live_exclusions(home: &Path, device: &str) -> Result<Vec<(i64, String)>> {
 
 /// The forget requests (D1 rule 14) and the retention batch begun (docs/retention.md) a raw.db
 /// that still reads holds, read under the swap lock without opening it as a store. A lost database
-/// or unreadable table has none (F1); once the table opens, a bad row must stop the restore rather
-/// than discard other live requests.
+/// or unreadable table has none (F1), and a table whose page is damaged holds the rows read before
+/// it, as `live_exclusions` takes a damaged file: the restore is what repairs it, and the logs and
+/// `state/expiry-owed` still bring theirs. A row that reads but does not parse or validate must
+/// stop the restore rather than discard other live requests.
 fn held_requests(home: &Path) -> Result<(Vec<crate::forget::Request>, Owed)> {
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         raw::path(home),
@@ -2224,9 +2273,15 @@ fn owed_in(conn: &rusqlite::Connection) -> Result<Owed> {
     let Ok(mut st) = conn.prepare("SELECT device, seq, ts FROM expiry_owed") else {
         return Ok(Vec::new());
     };
-    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-    rows.collect::<rusqlite::Result<_>>()
-        .context("read live expiry_owed row")
+    let mut out = Vec::new();
+    for row in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        match row.context("read live expiry_owed row") {
+            Ok(row) => out.push(row),
+            Err(e) if damaged(&e) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
 }
 
 fn requests_in(conn: &rusqlite::Connection) -> Result<Vec<crate::forget::Request>> {
@@ -2236,7 +2291,11 @@ fn requests_in(conn: &rusqlite::Connection) -> Result<Vec<crate::forget::Request
     let rows = st.query_map([], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for row in rows {
-        let text = row.context("read live forget request row")?;
+        let text = match row.context("read live forget request row") {
+            Ok(text) => text,
+            Err(e) if damaged(&e) => break,
+            Err(e) => return Err(e),
+        };
         let request: crate::forget::Request =
             serde_json::from_str(&text).context("parse live forget request")?;
         request.check().context("validate live forget request")?;
