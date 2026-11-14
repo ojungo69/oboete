@@ -1,0 +1,31 @@
+src/tests.rs
+  s_d546e4e9d39962::t_93f3b036b48fe3 169-223
+docs/code-layout.md
+  s_d546e4e9d39962::t_93f3b036b48fe3 1-25,32-33,39-44,47-52,57-68
+  s_d546e4e9d39962::t_303890e3be71b2 26-27,34-38,45-46,53,55
+  s_d546e4e9d39962::t_7549e1b3699a80 28-31,54,56
+src/setup/agents/tests.rs
+  s_d546e4e9d39962::t_1aa7b47144644a 1-108
+CLAUDE.md
+  s_d546e4e9d39962::t_0fac8cb1c7755e 9
+sonar-project.properties
+  s_d546e4e9d39962::t_93f3b036b48fe3 5-6,15-16,18,21-22,26-31
+src/setup/agents.rs
+  s_d546e4e9d39962::t_8dda78d750d695 190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d4fccb6c4dc2a5ad21d764941e3d06922a140461",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}

@@ -1,0 +1,405 @@
+src/search/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-651
+src/embed/stub.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-214
+src/embed_local.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 164
+src/worker/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-4680
+src/watchdog.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 157
+src/codex_probe/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-287
+src/cards.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1115
+src/curate/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-9571
+src/executable/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-233
+src/db.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 913
+src/mem_search.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1091
+src/memory_lookup.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 600
+src/cards/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-717
+src/my_work_judge/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1304
+src/settings/claims.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 218
+src/settings/embedding.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 379
+src/setup/doctor/retained/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-163
+src/failure/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-350
+src/deliverables/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2395
+src/my_work.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2835
+src/budget.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 686
+src/my_work_run.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 993
+src/repo/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-171
+src/provenance.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 138
+src/setup/agents/plan/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-350
+src/shortlist/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1395
+src/repo.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 258
+src/setup.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 4041
+src/forget/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-8562
+src/my_work_subagents/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-447
+src/consumer/claims.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 657
+src/settings/judge.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 194
+src/curate.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 5731
+src/hook_time/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-311
+src/manifest/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-115
+src/mcp/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2864
+src/executable.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 435
+src/consumer/products/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-73
+src/my_work_progress.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 723
+src/settings/privacy.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 624
+src/setup/readiness/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-714
+src/settings/forget.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 194
+src/settings/providers/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1264
+src/search/b/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-4380
+src/mcp.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 894
+src/my_work_group/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-937
+src/raw/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-3233
+src/replay.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 580
+src/provider/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-6299
+src/setup/agents/plan.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 491
+src/provider.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 4664
+src/preview.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 256
+src/search.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 519
+src/consumer/fts/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-205
+src/dispatch.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 313
+src/my_work_goals/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1139
+src/transcript.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1586
+src/my_work_group.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 969
+src/gates/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1301
+src/view.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 3727
+src/typed.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 320
+src/mem_search/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-169
+src/consumer/cards.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 250
+src/hook/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-9050
+src/consumer/products.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 71
+src/hide.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 190
+src/my_work_story/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-496
+src/turns/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1521
+src/consumer/imported/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-225
+src/isolation.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 445
+src/backup.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2832
+src/hook.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 4161
+src/setup/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1919
+src/work_product/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1195
+src/worker.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2569
+src/gates.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 858
+src/provenance/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-101
+src/setup/doctor.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1407
+src/consumer/claims/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1623
+src/model_fetch.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 643
+src/consumer/gaps.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 261
+src/resident.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 173
+src/settings/forget/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-296
+src/watchdog/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-105
+src/settings/maintenance.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 823
+src/consumer/compress/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-41
+src/settings/maintenance/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-588
+src/redact/fixture_scan.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-40
+src/my_work_ops/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-151
+src/consumer/manifest.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1481
+src/settings/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2580
+src/manifest.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 191
+src/isolation/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-338
+src/claims.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1434
+src/hide/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-20
+src/retention/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-866
+src/search/b.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 3637,3640
+src/redact/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-3545
+src/settings/providers.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 955
+src/turns.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 968
+src/settings/hide/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-666
+src/settings/privacy/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1164
+src/judge/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-727
+src/consumer/compress.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 52
+src/claims/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-22
+src/consumer/subagents.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 244
+src/migrate/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2115
+src/consumer/cards/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-752
+src/memory_lookup/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-222
+src/providers_db/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-477
+src/providers_db.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1136
+src/raw.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 9793
+src/my_work_judge.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 512
+src/setup/doctor/retained.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 650
+src/unwritten.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 324
+src/view/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-7687
+src/preview/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-30
+src/capture.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1265
+src/my_work_rules.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 738
+src/work_state.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 854
+src/embed/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-124
+src/judge/listener/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-112
+src/forget.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2479
+src/consumer/manifest/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-3164
+src/backup/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2445
+src/codex_probe.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 386
+src/import.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1039
+src/settings/embedding/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-565
+src/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-169
+src/consumer/rescan.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 219
+src/setup/agents/files/input_tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-175
+src/typed/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-378
+src/embed_phase/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2884
+src/knowledge.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 199
+src/config/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1173
+src/my_work_run/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1216
+src/search/b/fixture.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-279
+src/embed_local/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-95
+src/embed_phase.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2266,2269
+src/my_work/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-3084
+src/failure.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 519
+src/import/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1689
+src/search/b/timeline/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-600
+src/settings/claims/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-745
+src/setup/agents/files.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 320
+src/work_product.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1022
+src/work_state/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-943
+src/embed_phase/fixture.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-102
+src/my_work_rules/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1297
+src/search/b/timeline.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 615
+src/setup/readiness.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 725
+src/model_fetch/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-552
+src/my_work_progress/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1461
+src/retention.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 444
+src/my_work_focus.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 572
+src/settings/judge/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-358
+src/shortlist.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 729
+src/hookstate.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 188
+src/capture/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1375
+src/migrate.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1929
+src/unwritten/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-517
+src/hookstate/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-122
+src/resident/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-171
+src/embed.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 356,359
+src/consumer/imported.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 296
+src/redact.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2061,2064
+src/setup/doctor/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1567
+src/consumer/gaps/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-151
+src/my_work_focus/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-567
+src/budget/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1614
+src/settings/hide.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 197
+src/dispatch/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-555
+src/replay/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-240
+src/my_work_goals.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 923
+src/transcript/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-2350
+src/keyfile.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 904
+src/my_work_place.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 717
+src/consumer/rescan/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-454
+src/judge/listener.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 132
+src/my_work_ops.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 353
+src/config.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1824
+src/my_work_place/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1006
+src/my_work_story.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 558
+src/settings.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 2021
+src/consumer/fts.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 481
+src/db/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-505
+src/keyfile/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-1004
+src/deliverables.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1877
+src/hook_time.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 415
+src/consumer/subagents/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-206
+src/judge.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 517
+src/knowledge/tests.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1-109
+src/my_work_subagents.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 388
+src/main.rs
+  s_d546e4e9d39962::t_883e68bb3891a5 1270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "14b7c8a6dd7f84fb483b8090bed51dc27f7d71a7",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
