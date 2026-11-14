@@ -1,0 +1,4380 @@
+    use super::fixture::Store;
+    use super::*;
+
+    const R: &str = "github.com/o/r";
+
+    fn q(text: &str) -> Query {
+        Query {
+            text: text.into(),
+            caller: Some(R.into()),
+            limit: 20,
+            ..Default::default()
+        }
+    }
+
+    fn keys(a: &Answer) -> Vec<&str> {
+        a.hits.iter().map(|h| h.key.as_str()).collect()
+    }
+
+    /// Q5: unselected vector candidates cannot use the selected kind's depth. No listener,
+    /// provider configuration or external call: the existing deterministic vector fixture.
+    #[test]
+    fn type_filter_does_not_lose_vector_hits_before_depth() {
+        let mut s = Store::new();
+        let mut docs: Vec<_> = (0..101)
+            .map(|n| {
+                (
+                    format!("obs-{n}"),
+                    "import",
+                    "feature",
+                    1_000,
+                    "Nebula".to_owned(),
+                )
+            })
+            .collect();
+        docs.push((
+            "summary".into(),
+            "import",
+            "summary",
+            2_000,
+            "Zenith".into(),
+        ));
+        let ids = s.imported_all(docs);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            types: Some("sessions".parse().unwrap()),
+            raw: RawArm::Off,
+            limit: 1,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(found.vector, Vector::Used);
+        assert_eq!(keys(&found), [ids.last().unwrap().as_str()]);
+    }
+
+    /// Q2/MUST-M12: the existing imported vectors still search both knowledge and prompts,
+    /// and keep repository, date and session restrictions before taking their part.
+    #[test]
+    fn imported_vectors_keep_both_partitions_and_scope() {
+        let mut s = Store::new();
+        let ids = s.imported_all(vec![
+            ("obs".into(), "work", "feature", 1_000, "Nebula".into()),
+            ("summary".into(), "work", "summary", 2_000, "Zenith".into()),
+            ("prompt".into(), "other", "prompt", 3_000, "Quorum".into()),
+        ]);
+        s.imported("elsewhere", "elsewhere", 2_000, "Nebula", "Elsewhere.");
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            raw: RawArm::Off,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        let mut keys = keys(&found)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        keys.sort();
+        let mut wanted = ids.clone();
+        wanted.sort();
+        assert_eq!(keys, wanted);
+        let span = Query {
+            since: Some(1_500),
+            until: Some(3_000),
+            ..q.clone()
+        };
+        assert_eq!(
+            super::tests::keys(&query_with(s.home.path(), &span, Some(&vector)).unwrap()),
+            [ids[1].as_str()]
+        );
+        let skip = Query {
+            skip_session: Some("work".into()),
+            ..q
+        };
+        assert_eq!(
+            super::tests::keys(&query_with(s.home.path(), &skip, Some(&vector)).unwrap()),
+            [ids[2].as_str()]
+        );
+    }
+
+    /// sqlite-vec refuses a `k` over 4,096. Each uid a forget ever tombstoned (a claim made from a
+    /// forgotten record, a document forgotten by its uid) widens the imported leg's vector read,
+    /// as its vector may still be in the index: a store with more of them than that asked for a
+    /// `k` the index refuses, and every search with a vector failed.
+    #[test]
+    fn more_forgotten_uids_than_a_knn_may_ask_for_do_not_fail_the_search() {
+        let mut s = Store::new();
+        let ids = s.imported_all(vec![(
+            "obs".into(),
+            "work",
+            "feature",
+            1_000,
+            "Nebula".into(),
+        )]);
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        // Another device's forgets, as its ops arrive: more uids than one KNN may ask for.
+        rusqlite::Connection::open(s.home.path().join("raw.db"))
+            .unwrap()
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+                 INSERT INTO ops (device, op_seq, type, ts, body, batch)
+                 SELECT 'elsewhere', i, 'forget', 0, json_object('uid', 'gone-' || i), i FROM n",
+                [],
+            )
+            .unwrap();
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, "Nebula");
+        let q = Query {
+            text: "xqv".into(),
+            repo: Some("claude-mem:p".into()),
+            raw: RawArm::Off,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(keys(&found), [ids[0].as_str()]);
+    }
+
+    /// Tools slice 3 (V1, V4): cards and summaries are found by their vectors where no full-text
+    /// list holds the query's words, each kind ranked by its vector and `type` keeping the kind
+    /// asked; a card a removal hides is not found by its vector, and takes no place (Q3).
+    #[test]
+    fn cards_and_summaries_are_found_by_their_vectors() {
+        let mut s = Store::new();
+        let gone = s.said("gone", R, 1_000, "First source.");
+        let live = s.said("live", R, 2_000, "Second source.");
+        let card = |s: &mut Store, seq, title: &str| {
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": title}]),
+                false,
+            )[0]
+            .clone()
+        };
+        let db = card(&mut s, live, "Db ok");
+        let up = card(&mut s, live, "Up to it");
+        let hidden = card(&mut s, gone, "Db ok so");
+        let turn = |s: &mut Store, request: &str| {
+            s.turn(
+                serde_json::json!({"agent": "claude", "session": "live", "repo": R,
+                "ts": 3_000, "from": live, "through": live, "read": [], "goals": [],
+                "removed": [], "fields": {"request": request}, "skipped": false}),
+            )
+        };
+        let go = turn(&mut s, "Go on so");
+        let am = turn(&mut s, "Am in us");
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        let ask = |text: &str, types: &str| -> Vec<String> {
+            let q = Query {
+                text: text.into(),
+                raw: RawArm::Off,
+                types: Some(types.parse().unwrap()),
+                limit: 1,
+                ..Default::default()
+            };
+            let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, text);
+            let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+            assert_eq!(found.vector, Vector::Used);
+            keys(&found).into_iter().map(str::to_owned).collect()
+        };
+        // Words of two letters: no full-text list holds them.
+        let plain = Query {
+            text: "db ok".into(),
+            raw: RawArm::Off,
+            ..Default::default()
+        };
+        assert!(
+            query_with(s.home.path(), &plain, None)
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        assert_eq!(ask("up to it", "observations"), [up]);
+        assert_eq!(ask("db ok so", "observations"), [hidden]);
+        assert_eq!(ask("am in us", "sessions"), [am]);
+        assert_eq!(ask("go on so", "sessions"), [go]);
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: gone,
+            })
+            .unwrap();
+        assert_eq!(ask("db ok so", "observations"), [db]);
+    }
+
+    /// Tools slice 3 (V4, Q3; Codex): rows their reader hides take no place in the vector list:
+    /// a hundred of them nearer than a row it shows, within the candidate pool.
+    #[test]
+    fn hidden_rows_take_no_place_in_the_vector_list() {
+        let mut s = Store::new();
+        let gone = s.said("gone", R, 1_000, "First source.");
+        let live = s.said("live", R, 2_000, "Second source.");
+        let nearer = vec![serde_json::json!({"type": "bugfix", "title": "Db ok so"}); DEPTH];
+        s.cards(gone, gone, serde_json::Value::Array(nearer), false);
+        let shown = s.cards(
+            live,
+            live,
+            serde_json::json!([{"type": "bugfix", "title": "Db ok"}]),
+            false,
+        );
+        s.run();
+        crate::embed_phase::fixture::vectors(&s);
+        s.raw
+            .append_tombstone(crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq: gone,
+            })
+            .unwrap();
+        let q = Query {
+            text: "db ok so".into(),
+            raw: RawArm::Off,
+            types: Some("observations".parse().unwrap()),
+            limit: 1,
+            ..Default::default()
+        };
+        let vector = crate::embed::stub::vector(crate::embed::EMBEDDER, &q.text);
+        let found = query_with(s.home.path(), &q, Some(&vector)).unwrap();
+        assert_eq!(keys(&found), shown);
+    }
+
+    /// Q4: consumers write the rows and their indexes in one transaction; a rollback leaves
+    /// neither searchable text, and rewind deletes lost ops and revives replaced cards.
+    #[test]
+    fn index_writes_roll_back_and_rewind_with_rows() {
+        use crate::worker::Consumer;
+        let mut s = Store::new();
+        let source = s.said("work", R, 1_000, "Widget input.");
+        let card = s.cards(
+            source,
+            source,
+            serde_json::json!([{"type": "bugfix", "title": "Azimuth"}]),
+            false,
+        )[0]
+        .clone();
+        let turn = |request| {
+            serde_json::json!({"agent": "claude", "session": "work", "repo": R,
+            "ts": 2_000, "from": source, "through": source, "read": [], "goals": [],
+            "removed": [], "fields": {"request": request}, "skipped": false})
+        };
+        let summary = s.turn(turn("Zenith"));
+        let device = s.raw.device().to_owned();
+        let mut k = crate::knowledge::open(s.home.path()).unwrap();
+        crate::cards::schema(&k).unwrap();
+        crate::turns::schema(&k).unwrap();
+        let tx = k.transaction().unwrap();
+        crate::consumer::cards::Cards
+            .step(&s.raw, &tx, &device, 0)
+            .unwrap();
+        crate::consumer::turns::Turns
+            .step(&s.raw, &tx, &device, 0)
+            .unwrap();
+        tx.rollback().unwrap();
+        let ask = |text| Query {
+            raw: RawArm::Off,
+            all: true,
+            ..q(text)
+        };
+        assert!(s.query(&ask("azimuth")).hits.is_empty());
+        assert!(s.query(&ask("zenith")).hits.is_empty());
+        s.run();
+        assert_eq!(keys(&s.query(&ask("azimuth"))), [card.as_str()]);
+        assert_eq!(keys(&s.query(&ask("zenith"))), [summary.as_str()]);
+        let to = s.raw.max_op_seq().unwrap();
+        s.cards(
+            source,
+            source,
+            serde_json::json!([{"type": "feature", "title": "Nebula"}]),
+            true,
+        );
+        s.turn(turn("Quorum"));
+        s.run();
+        assert!(s.query(&ask("azimuth")).hits.is_empty());
+        let tx = k.transaction().unwrap();
+        crate::consumer::cards::Cards
+            .rewind(&tx, &device, to)
+            .unwrap();
+        crate::consumer::turns::Turns
+            .rewind(&tx, &device, to)
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(keys(&s.query(&ask("azimuth"))), [card.as_str()]);
+        assert_eq!(keys(&s.query(&ask("zenith"))), [summary.as_str()]);
+        assert!(s.query(&ask("nebula")).hits.is_empty());
+        assert!(s.query(&ask("quorum")).hits.is_empty());
+    }
+
+    /// Q2 keeps D2's delivered units: neither a concrete-kind filter nor a date limit may
+    /// leave an earlier owner preference without the decision that may overturn it.
+    #[test]
+    fn type_and_date_order_keep_delivered_claim_units() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let later = s.decided(
+            R,
+            2_000,
+            "Indent widgets with spaces, never tabs.",
+            &[&earlier],
+        );
+        s.run();
+        let only = Query {
+            raw: RawArm::Off,
+            types: Some("preference".parse().unwrap()),
+            ..q("indent widgets")
+        };
+        assert!(
+            s.query(&only).hits.is_empty(),
+            "D2 hides a unit whose mate the type filter excludes"
+        );
+        let both = Query {
+            types: Some("preference,decision".parse().unwrap()),
+            order: Order::DateAsc,
+            limit: 2,
+            ..only.clone()
+        };
+        assert_eq!(keys(&s.query(&both)), [earlier.as_str(), later.as_str()]);
+        for order in [Order::DateAsc, Order::DateDesc, Order::Relevance] {
+            let one = Query {
+                order,
+                limit: 1,
+                ..both.clone()
+            };
+            assert!(
+                s.query(&one).hits.is_empty(),
+                "D2: the whole pair takes two places"
+            );
+        }
+    }
+
+    /// #645: `offset` pages by whole units. At every offset, with limits 1 to 3, in each order, no
+    /// page holds the preference without the decision that replaced it or the decision without
+    /// it; pages of one limit show each unit that fits a page exactly once, none over the limit.
+    #[test]
+    fn pages_of_one_limit_keep_delivered_units_whole() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let later = s.decided(
+            R,
+            2_000,
+            "Indent widgets with spaces, never tabs.",
+            &[&earlier],
+        );
+        let others: Vec<String> = (0..3)
+            .map(|i| {
+                let said = format!("Indent widgets in module {i} alike.");
+                s.decided(R, 3_000 + i, &said, &[])
+            })
+            .collect();
+        s.run();
+        let total = 2 + others.len();
+        for order in [Order::Relevance, Order::DateDesc, Order::DateAsc] {
+            for limit in 1..=3 {
+                let page = |offset: usize| -> Vec<String> {
+                    let asked = Query {
+                        raw: RawArm::Off,
+                        order,
+                        limit,
+                        offset,
+                        ..q("indent widgets")
+                    };
+                    s.query(&asked).hits.into_iter().map(|h| h.key).collect()
+                };
+                for offset in 0..=total {
+                    let shown = page(offset);
+                    let at = format!("{order:?}, limit {limit}, offset {offset}: {shown:?}");
+                    assert_eq!(shown.contains(&earlier), shown.contains(&later), "{at}");
+                    assert!(shown.len() <= limit, "{at}");
+                }
+                let mut seen: Vec<String> = (0..=total).step_by(limit).flat_map(page).collect();
+                let mut whole = others.clone();
+                if limit >= 2 {
+                    whole.extend([earlier.clone(), later.clone()]);
+                }
+                seen.sort();
+                whole.sort();
+                assert_eq!(seen, whole, "{order:?}, limit {limit}");
+            }
+        }
+    }
+
+    /// #645 (Codex on #648): on a page of one, fifty delivered units, each too big for it, take
+    /// none of the claims leg's places, so the standalone claim after them still shows.
+    #[test]
+    fn units_too_big_for_the_page_leave_room_for_a_claim_that_fits() {
+        let mut s = Store::new();
+        for i in 0..50 {
+            let text = format!("Indent widgets {i}.");
+            let source = s.said("work", R, 1_000 + i, &text);
+            let earlier = s.claim(source, &text, ("preference", "decided", "user"), &[]);
+            s.decided(R, 5_000 + i, &format!("Use spaces, rule {i}."), &[&earlier]);
+        }
+        let lone = s.decided(
+            R,
+            9_000,
+            "Indent widgets in the parser module the way the formatter's settings already say.",
+            &[],
+        );
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 1,
+            ..q("indent widgets")
+        });
+        assert_eq!(keys(&found), [lone.as_str()]);
+    }
+
+    /// Q7: a stored multiline title still makes exactly one searchable index line.
+    #[test]
+    fn multiline_imported_titles_stay_on_one_hit_line() {
+        let mut s = Store::new();
+        let id = s.imported("multiline", "r", 1_000, "Quartz\n  parser", "A reader fix.");
+        s.run();
+        let found = s.query(&q("quartz"));
+        let h = found.hits.iter().find(|h| h.key == id).unwrap();
+        let line = line(h, true, &redact::Rules::default());
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("Quartz parser"), "{line}");
+        // The full item preserves the stored field, as before; only the index flattens it.
+        assert!(
+            get(s.home.path(), &id)
+                .unwrap()
+                .unwrap()
+                .contains("Quartz\n  parser")
+        );
+    }
+
+    #[test]
+    fn done_mates_take_one_place_in_a_delivered_unit() {
+        let mut s = Store::new();
+        let text = "Indent widgets with tabs.";
+        let source = s.said("work", R, 1_000, text);
+        let earlier = s.claim(source, text, ("preference", "decided", "user"), &[]);
+        let text = "Indent widgets with spaces, never tabs.";
+        let source = s.said("work", R, 2_000, text);
+        let later = s.claim(source, text, ("decision", "done", "user"), &[&earlier]);
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 2,
+            ..q("indent widgets")
+        });
+        assert_eq!(keys(&found), [later.as_str(), earlier.as_str()]);
+    }
+
+    /// The index title's original and flat views are scanned independently, even when an
+    /// original-only rule removes the context a flat-only rule needs (Q3/Q7).
+    #[test]
+    fn imported_title_gates_original_and_flat_views_independently() {
+        const HOME: &str = "OBOETE_TEST_TOOL_LINE_HOME";
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let found = query(
+                &home,
+                &Query {
+                    all: true,
+                    ..q("quartz")
+                },
+            )
+            .unwrap();
+            let rules = redact::Rules::load(&home).unwrap();
+            let text: String = found.hits.iter().map(|h| line(h, true, &rules)).collect();
+            assert!(
+                !text.contains("MASKME") && !text.contains("EXPOSED77"),
+                "{text}"
+            );
+            assert!(text.contains("[REDACTED]"), "{text}");
+            return;
+        }
+        let mut s = Store::new();
+        s.imported(
+            "flat-rule",
+            "r",
+            1_000,
+            "hide=MASKME\ncode=EXPOSED77",
+            "Quartz guide.",
+        );
+        s.run();
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = \"original\", regex = '^hide=(MASKME)', secret_group = 1 }, \
+             { id = \"flat\", regex = '^hide=MASKME code=(EXPOSED77)$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args([
+                "--exact",
+                "search::b::tests::imported_title_gates_original_and_flat_views_independently",
+            ])
+            .env(HOME, s.home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_short_japanese_word_boosts_claims_beside_a_long_word() {
+        for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+            let mut s = Store::new();
+            let both = s.decided(R, both_at, "設計 worker", &[]);
+            let long = s.decided(R, long_at, "worker", &[]);
+            let short = s.decided(R, 3_000, "設計", &[]);
+            s.run();
+            let ask = |text| Query {
+                raw: RawArm::Off,
+                since: Some(500),
+                until: Some(4_000),
+                ..q(text)
+            };
+            assert_eq!(
+                keys(&s.query(&ask("worker"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("worker absent"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設 worker"))),
+                [long.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設計"))),
+                [short.as_str(), both.as_str()]
+            );
+            assert_eq!(
+                keys(&s.query(&ask("設計 worker"))),
+                [both.as_str(), long.as_str()]
+            );
+            let k = crate::knowledge::open(s.home.path()).unwrap();
+            let found: Vec<String> = delivered_ranked(&s.raw, &k, &["設計 worker"], None, R, 20)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect();
+            // The hook's cold start waits for this path, asked with whole prompts: it ranks by
+            // bm25 alone, as before (Codex on #360).
+            assert_eq!(found, [long, both]);
+        }
+    }
+
+    #[test]
+    fn a_short_ascii_word_boosts_every_leg_and_one_character_changes_nothing() {
+        for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+            let mut s = Store::new();
+            let both = s.decided(R, both_at, "M5 forget", &[]);
+            let long = s.decided(R, long_at, "forget", &[]);
+            s.imported("both", "r", both_at, "M5", "forget");
+            s.imported("long", "r", long_at, "", "forget");
+            s.run();
+            let (raw_both, raw_long) = (s.key(1), s.key(2));
+            for text in ["forget", "M forget"] {
+                assert_eq!(
+                    keys(&s.query(&q(text))),
+                    [
+                        long.as_str(),
+                        both.as_str(),
+                        "claude-mem:test:long",
+                        "claude-mem:test:both",
+                        raw_long.as_str(),
+                        raw_both.as_str()
+                    ]
+                );
+            }
+            assert_eq!(
+                keys(&s.query(&q("M5 forget"))),
+                [
+                    both.as_str(),
+                    long.as_str(),
+                    "claude-mem:test:both",
+                    "claude-mem:test:long",
+                    raw_both.as_str(),
+                    raw_long.as_str()
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn short_word_boosts_treat_like_wildcards_and_backslashes_literally() {
+        for (word, decoy) in [("A%", "AX"), ("A_", "AX"), ("%_", "XY"), ("\\_", "\\X")] {
+            let mut s = Store::new();
+            let both = s.decided(R, 1_000, &format!("{word} worker"), &[]);
+            let long = s.decided(R, 2_000, &format!("{decoy} worker"), &[]);
+            s.imported("both", "r", 1_000, word, "worker");
+            s.imported("long", "r", 2_000, decoy, "worker");
+            s.run();
+            let (raw_both, raw_long) = (s.key(1), s.key(2));
+            assert_eq!(
+                keys(&s.query(&q("worker"))),
+                [
+                    long.as_str(),
+                    both.as_str(),
+                    "claude-mem:test:long",
+                    "claude-mem:test:both",
+                    raw_long.as_str(),
+                    raw_both.as_str()
+                ],
+                "{word}"
+            );
+            assert_eq!(
+                keys(&s.query(&q(&format!("{word} worker")))),
+                [
+                    both.as_str(),
+                    long.as_str(),
+                    "claude-mem:test:both",
+                    "claude-mem:test:long",
+                    raw_both.as_str(),
+                    raw_long.as_str()
+                ],
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_muted_claim_keeps_its_search_rank_and_is_labelled() {
+        let mut s = Store::new();
+        let old = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        let new = s.decided(R, 2_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let query = Query {
+            raw: RawArm::Off,
+            ..q("Parser errors")
+        };
+        assert_eq!(keys(&s.query(&query)), [&new, &old]);
+        for muted in [true, false] {
+            crate::claims::mute(s.home.path(), &new, muted).unwrap();
+            let answer = s.query(&query);
+            assert_eq!(keys(&answer), [&new, &old]);
+            let hit = serde_json::to_value(&answer.hits[0]).unwrap();
+            assert_eq!(hit["muted"], muted);
+            assert_eq!(
+                line(&answer.hits[0], false, &redact::Rules::default()).contains("muted"),
+                muted
+            );
+            let view = serde_json::to_value(claim(s.home.path(), &new).unwrap().unwrap()).unwrap();
+            assert_eq!(view["muted"], muted);
+            assert_eq!(view["status"], "decided");
+            assert_eq!(view["text"], "Parser errors go to stderr.");
+            assert_eq!(view["history"][1]["muted"], true);
+            let full = get(s.home.path(), &new).unwrap().unwrap();
+            let first = full.lines().next().unwrap();
+            assert_eq!(first.contains(" decided muted "), muted, "{first}");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_get_prefix_labels_each_claims_mute() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute(
+            "INSERT INTO claims(uid, op_device, op_seq)
+            SELECT substr(uid, 1, 12) || 'f00d', op_device, op_seq FROM claims WHERE uid = ?1",
+            [&uid],
+        )
+        .unwrap();
+        for (muted, label) in [(true, " muted"), (false, "")] {
+            crate::claims::mute(s.home.path(), &uid, muted).unwrap();
+            let text = get(s.home.path(), &uid[..12]).unwrap().unwrap();
+            assert!(text.starts_with("2 claims start with "));
+            let line = text.lines().find(|l| l.starts_with(&uid)).unwrap();
+            assert_eq!(
+                line,
+                format!("{uid} 1970-01-01 decision decided{label}: Parser errors go to stderr.")
+            );
+        }
+    }
+
+    /// MUST-M11: a decision a later claim ended (here a proposal, which the owner does not back,
+    /// so it is no delivered pair) ranks below every current hit, labelled with what ended it,
+    /// and a query whose only match it is still finds it; `history` ranks it by its words.
+    #[test]
+    fn a_superseded_decision_ranks_below_every_current_hit_and_history_lifts_it() {
+        let mut s = Store::new();
+        let old = s.decided(R, 1_000, "Parser caches stay in Redis with a TTL.", &[]);
+        let seq = s.said("s", R, 2_000, "Move the parser caches to files.");
+        let new = s.claim(
+            seq,
+            "Move the parser caches to files.",
+            ("decision", "proposed", "assistant proposal"),
+            &[&old],
+        );
+        let other = s.decided(R, 3_000, "Parser errors go to stderr.", &[]);
+        s.imported(
+            "o1",
+            "r",
+            500,
+            "Parser notes",
+            "The parser caches its tables.",
+        );
+        s.run();
+        let found = s.query(&q("parser caches Redis"));
+        let last = found.hits.last().unwrap();
+        assert_eq!(
+            (last.key.as_str(), &last.class),
+            (
+                old.as_str(),
+                &Class::Superseded {
+                    by: Some(new.clone())
+                }
+            )
+        );
+        assert!(
+            found.hits[..found.hits.len() - 1]
+                .iter()
+                .all(|h| !matches!(h.class, Class::Superseded { .. })),
+            "{:?}",
+            keys(&found)
+        );
+        assert!(keys(&found).contains(&other.as_str()));
+        assert!(
+            line(last, false, &redact::Rules::default())
+                .contains(&format!("superseded by {}", &new[..12]))
+        );
+        let only = s.query(&Query {
+            raw: RawArm::Off,
+            ..q("TTL")
+        });
+        assert_eq!(keys(&only), [old.as_str()]);
+        let history = s.query(&Query {
+            history: true,
+            ..q("parser caches Redis")
+        });
+        let at = |key: &str| keys(&history).iter().position(|k| *k == key).unwrap();
+        assert!(at(&old) < at(&other), "{:?}", keys(&history));
+        assert!(
+            history.hits[at(&old) + 1..]
+                .iter()
+                .all(|h| h.class != Class::Current || h.key != old)
+        );
+        assert!(
+            at(&old)
+                < history
+                    .hits
+                    .iter()
+                    .position(|h| h.class == Class::Imported)
+                    .unwrap()
+        );
+    }
+
+    /// Codex on #306: an ended decision is named superseded by the claim whose link ended it, not
+    /// by a newer claim whose link alone would keep it delivered.
+    #[test]
+    fn an_ended_decision_names_the_link_that_ended_it() {
+        let mut s = Store::new();
+        let old = s.decided(R, 1_000, "Parser caches stay in Redis.", &[]);
+        let seq = s.said("s", R, 2_000, "Move the parser caches to files.");
+        let ended = s.claim(
+            seq,
+            "Move the parser caches to files.",
+            ("decision", "proposed", "assistant proposal"),
+            &[&old],
+        );
+        s.decided(R, 3_000, "Parser caches stay in Redis for now.", &[&old]);
+        s.run();
+        let found = s.query(&q("Redis"));
+        let hit = found.hits.iter().find(|h| h.key == old).unwrap();
+        assert!(hit.class == Class::Superseded { by: Some(ended) });
+    }
+
+    /// Codex on #306: a document two devices imported is one candidate, so the leg's depth holds
+    /// that many documents, not half.
+    #[test]
+    fn an_import_held_twice_is_one_candidate_before_the_limit() {
+        let mut s = Store::new();
+        for i in 0..120 {
+            for _ in 0..2 {
+                s.imported(&format!("o{i}"), "r", 1_000 + i, "Parser", "Parser notes.");
+            }
+        }
+        s.run();
+        let found = s.query(&Query {
+            limit: 150,
+            raw: RawArm::Off,
+            ..q("Parser")
+        });
+        let imported = found.hits.iter().filter(|h| h.class == Class::Imported);
+        assert_eq!(imported.count(), 120);
+    }
+
+    /// #295 row 3: an earlier decision only a curator link ended is delivered (D1), so it ranks
+    /// with the current claims, right after the claim that ended it, before imported and raw hits.
+    #[test]
+    fn a_delivered_earlier_decision_ranks_with_current_claims() {
+        let mut s = Store::new();
+        let earlier = s.decided(R, 1_000, "Indent with tabs.", &[]);
+        let later = s.decided(R, 2_000, "Indent with spaces, never tabs.", &[&earlier]);
+        s.imported("o2", "r", 500, "Indent", "We indent with tabs here.");
+        s.run();
+        let found = s.query(&q("indent with tabs"));
+        assert_eq!(keys(&found)[..2], [later.as_str(), earlier.as_str()]);
+        assert_eq!(
+            (&found.hits[0].class, &found.hits[1].class),
+            (
+                &Class::Current,
+                &Class::Delivered {
+                    later: later.clone()
+                }
+            )
+        );
+        assert_eq!(found.hits[2].class, Class::Imported);
+        // The pair rule over the time filter (D2): an earlier decision comes with the claim that
+        // ended it, whatever that claim's time.
+        let before = s.query(&Query {
+            until: Some(1_500),
+            raw: RawArm::Off,
+            ..q("indent with tabs")
+        });
+        assert_eq!(keys(&before)[..2], [later.as_str(), earlier.as_str()]);
+        // A pair takes two places: one place left gives neither.
+        let one = s.query(&Query {
+            limit: 1,
+            ..q("tabs")
+        });
+        assert!(
+            one.hits.iter().all(|h| h.key != earlier),
+            "{:?}",
+            keys(&one)
+        );
+    }
+
+    /// MUST-M12: `since` and `until` keep each leg's documents by their own time (a claim's
+    /// `valid_from`, an imported document's and a record's `ts`) before the legs are joined.
+    #[test]
+    fn since_and_until_filter_every_leg_before_fusion() {
+        let mut s = Store::new();
+        let claim = s.decided(R, 1_000, "Alpha parser note one.", &[]);
+        let imported = s.imported("o3", "r", 2_000, "", "Alpha parser note two.");
+        let bare = s.said("s", R, 3_000, "Alpha parser note three.");
+        s.run();
+        let (rec1, rec2) = (s.key(1), s.key(bare));
+        for (since, until, want) in [
+            (None, None, vec![&claim, &imported, &rec1, &rec2]),
+            (Some(1_500), None, vec![&imported, &rec2]),
+            (None, Some(1_500), vec![&claim, &rec1]),
+            (Some(1_500), Some(2_500), vec![&imported]),
+            (Some(1_000), Some(1_001), vec![&claim, &rec1]),
+        ] {
+            let found = s.query(&Query {
+                since,
+                until,
+                ..q("alpha parser note")
+            });
+            let mut got: Vec<&str> = keys(&found);
+            got.sort_unstable();
+            let mut want: Vec<&str> = want.into_iter().map(String::as_str).collect();
+            want.sort_unstable();
+            assert_eq!(got, want, "{since:?} {until:?}");
+        }
+        let day = time("2026-09-30", false).unwrap();
+        assert_eq!(time("2026-09-30", true).unwrap(), day + 86_400_000);
+        assert_eq!(time("2026-09-30T09:00:00+09:00", false).unwrap(), day);
+        assert_eq!(time("2026-09-30T00:00Z", false).unwrap(), day);
+        assert_eq!(time("2026-09-30T00:00:00.500Z", false).unwrap(), day + 500);
+        assert!(time("2460000", false).is_err() && time("30/09/2026", false).is_err());
+    }
+
+    /// MUST-M13: every hit has one label, from what backs it: a claim or record on this device is
+    /// citable, a claim whose record is not is quote-only, an imported document says imported;
+    /// and across repositories each line names its repository.
+    #[test]
+    fn every_hit_has_one_label_and_imported_hits_say_imported() {
+        let mut s = Store::new();
+        let claim = s.decided(R, 1_000, "Keep the importer small.", &[]);
+        let doc = s.imported("o4", "r", 2_000, "Importer", "The importer stays small.");
+        s.run();
+        let found = s.query(&Query {
+            all: true,
+            ..q("importer small")
+        });
+        let label = |key: &str| found.hits.iter().find(|h| h.key == key).unwrap().label;
+        assert_eq!(
+            (label(&claim), label(&doc), label(&s.key(1))),
+            (Label::Citable, Label::Imported, Label::Citable)
+        );
+        let doc_hit = found.hits.iter().find(|h| h.key == doc).unwrap();
+        assert!(
+            line(doc_hit, true, &redact::Rules::default()).contains("(imported) [claude-mem:r]")
+        );
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let elsewhere = Claim {
+            device: "0000ffff".into(),
+            ..claims::active_one(&k, &claim).unwrap().unwrap()
+        };
+        let hit = claim_hit(&s.raw, &k, &elsewhere, Class::Current, &[]).unwrap();
+        assert_eq!(hit.label, Label::QuoteOnly);
+    }
+
+    /// The imported index keeps no text (`content=''`): a query too short for a trigram, common in
+    /// Japanese, reads the documents' own title and body, for the match and for the snippet
+    /// (OpenCodeReview on #305).
+    #[test]
+    fn a_query_too_short_for_a_trigram_finds_an_imported_document() {
+        let mut s = Store::new();
+        let doc = s.imported("o5", "r", 2_000, "索引", "検索の索引を小さく保つ。");
+        s.imported("o6", "r", 3_000, "別件", "関係のない話。");
+        s.run();
+        let found = s.query(&Query {
+            all: true,
+            ..q("索引")
+        });
+        let keys: Vec<&str> = found.hits.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, [doc.as_str()]);
+        assert!(
+            found.hits[0].snippet.contains("索引"),
+            "{:?}",
+            found.hits[0]
+        );
+    }
+
+    /// #843: where a Claude Code prompt was typed (`entrypoint`, #659) is no word of it: a search
+    /// for an entry point finds the prompt whose words say it and not one whose words do not, and
+    /// a found prompt's snippet shows its words alone.
+    #[test]
+    fn an_entry_point_is_found_only_where_a_prompts_words_say_it() {
+        let mut s = Store::new();
+        let typed = |words: &str| serde_json::json!({"prompt": words, "entrypoint": "cli"});
+        let quiet = s.event("prompt", "s", (R, "main"), 1_000, typed("Fix the parser."));
+        let says = s.event(
+            "prompt",
+            "s",
+            (R, "main"),
+            2_000,
+            typed("Run the cli tests."),
+        );
+        s.run();
+        let only = |text: &str| Query {
+            raw: RawArm::Only,
+            ..q(text)
+        };
+        let found = s.query(&only("cli"));
+        assert_eq!(keys(&found), [s.key(says)]);
+        let found = s.query(&only("parser"));
+        assert_eq!(keys(&found), [s.key(quiet)]);
+        assert!(
+            !found.hits[0].snippet.contains("cli"),
+            "{:?}",
+            found.hits[0]
+        );
+    }
+
+    #[test]
+    fn a_short_japanese_word_boosts_imported_titles_and_bodies() {
+        for in_title in [false, true] {
+            for (both_at, long_at) in [(1_000, 2_000), (2_000, 1_000)] {
+                let mut s = Store::new();
+                let (title, body) = if in_title {
+                    ("設計", "worker")
+                } else {
+                    ("", "設計 worker")
+                };
+                s.imported("both", "r", both_at, title, body);
+                s.imported("long", "r", long_at, "", "worker");
+                s.imported("short", "r", 3_000, "設計", "");
+                s.run();
+                let ask = |text| Query {
+                    raw: RawArm::Off,
+                    since: Some(500),
+                    until: Some(4_000),
+                    ..q(text)
+                };
+                assert_eq!(
+                    keys(&s.query(&ask("worker"))),
+                    ["claude-mem:test:long", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設 worker"))),
+                    ["claude-mem:test:long", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設計"))),
+                    ["claude-mem:test:short", "claude-mem:test:both"]
+                );
+                assert_eq!(
+                    keys(&s.query(&ask("設計 worker"))),
+                    ["claude-mem:test:both", "claude-mem:test:long"]
+                );
+            }
+        }
+    }
+
+    /// N5 (docs/memory-lookup.md): with the consumer's narrow index, a trigram query reads no
+    /// document of a match but the best `POOL` ones' title and body for its short words, and finds
+    /// what the join of the documents finds, in its order. A store without the index joins them.
+    #[test]
+    fn imported_full_text_reads_the_narrow_index_and_finds_the_same() {
+        let mut s = Store::new();
+        for n in 0..40_i64 {
+            let (project, body) = match n % 4 {
+                0 => ("r", "設計 worker cache"),
+                1 => ("r", "worker restarts"),
+                2 => ("other", "worker cache misses"),
+                _ => ("r", "cache 設計"),
+            };
+            s.imported(&format!("d{n}"), project, 1_000 * (n + 1), "", body);
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let plans = |k: &Connection, text: &str| -> Vec<String> {
+            let statements = imported_fts_sql(k, &q(text), 2 * crate::search::POOL).unwrap();
+            statements
+                .iter()
+                .map(|(sql, _)| {
+                    let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+                    let nulls = vec![Value::Null; st.parameter_count()];
+                    let rows = st.query_map(params_from_iter(nulls), |r| r.get::<_, String>(3));
+                    rows.unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                        .join(" | ")
+                })
+                .collect()
+        };
+        let texts = ["worker cache", "設計 worker", "設計"];
+        let found = |k: &Connection| -> Vec<Vec<String>> {
+            texts
+                .iter()
+                .map(|t| imported_fts(k, &q(t), 2 * crate::search::POOL).unwrap())
+                .collect()
+        };
+        let covered = found(&k);
+        assert!(covered.iter().all(|uids| !uids.is_empty()), "{covered:?}");
+        for text in &texts[..2] {
+            for plan in plans(&k, text) {
+                assert!(plan.contains("COVERING INDEX imported_cover"), "{plan}");
+            }
+        }
+        // Short words alone read the documents' text, so they join the documents.
+        for plan in plans(&k, texts[2]) {
+            assert!(!plan.contains("imported_cover"), "{plan}");
+        }
+        k.execute_batch("DROP INDEX imported_cover").unwrap();
+        for text in texts {
+            for plan in plans(&k, text) {
+                assert!(!plan.contains("imported_cover"), "{plan}");
+            }
+        }
+        assert_eq!(found(&k), covered);
+    }
+
+    /// Every repository's timeline reads the text of its page's imported documents alone, chosen
+    /// by their keys from the consumer's index in time order, `imported_newest`: choosing among
+    /// the texts read every document's (9.5 s of a cold first timeline on this PC's store,
+    /// 2026-11-01). It shows the newest first, each document once.
+    #[test]
+    fn every_repositorys_timeline_reads_the_texts_of_its_page_alone() {
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for n in 0..12_i64 {
+            let project = if n % 3 == 0 { "other" } else { "r" };
+            let body = format!("note {n}");
+            uids.push(s.imported(&format!("d{n:02}"), project, 1_000 * (n + 1), "", &body));
+        }
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        for older in [true, false] {
+            let sql = format!("EXPLAIN QUERY PLAN {}", imported_side(false, older));
+            let mut st = k.prepare(&sql).unwrap();
+            let nulls = vec![Value::Null; st.parameter_count()];
+            let plan: Vec<String> = st
+                .query_map(params_from_iter(nulls), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let by_key = |p: &&String| p.starts_with("SEARCH i USING INTEGER PRIMARY KEY");
+            assert!(plan.iter().any(|p| by_key(&p)), "{plan:?}");
+            // The newest first from the consumer's index in time order, stopping at the page's end.
+            let by_time = |p: &&String| p.contains("COVERING INDEX imported_newest (ts");
+            assert!(plan.iter().any(|p| by_time(&p)), "{plan:?}");
+            assert!(!plan.iter().any(|p| p == "SCAN i"), "{plan:?}");
+        }
+        let keys = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
+        let newest: Vec<String> = uids.iter().rev().take(5).cloned().collect();
+        assert_eq!(keys(timeline(home, None, None, None, 5).unwrap()), newest);
+    }
+
+    /// N5 (docs/memory-lookup.md): a timeline reads a repository's imported documents by the
+    /// consumer's index `imported_time` on both sides, at most to the page's end, and shows what
+    /// the scan of every document showed: the newest, around anchors, two documents of one time on
+    /// either side of one, and a page; a store without the index scans them.
+    #[test]
+    fn a_timeline_reads_a_repositorys_documents_in_time_order_and_finds_the_same() {
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for n in 0..24_i64 {
+            let project = if n % 4 == 0 { "other" } else { "r" };
+            let body = format!("note {n}");
+            uids.push(s.imported(&format!("d{n:02}"), project, 1_000 * (n / 2 + 1), "", &body));
+        }
+        s.decided(R, 6_000, "A decision among them.", &[]);
+        s.run();
+        let home = s.home.path();
+        let k = crate::knowledge::open(home).unwrap();
+        for older in [true, false] {
+            let mut st = k
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    imported_side(true, older)
+                ))
+                .unwrap();
+            let nulls = vec![Value::Null; st.parameter_count()];
+            let plan: Vec<String> = st
+                .query_map(params_from_iter(nulls), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let by_time = plan
+                .iter()
+                .filter(|p| p.contains("INDEX imported_time (repo=?"));
+            assert_eq!(by_time.count(), 2, "{plan:?}");
+        }
+        let keys_of = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
+        let read = || -> Vec<Vec<String>> {
+            let keys = keys_of;
+            let mut out = vec![keys(timeline(home, Some(R), None, None, 30).unwrap())];
+            for anchor in [&uids[1], &uids[5], &uids[11], &uids[23]] {
+                out.push(keys(
+                    timeline(home, Some(R), Some(anchor), None, 6).unwrap(),
+                ));
+            }
+            let page = Some((3_000, uids[5].clone()));
+            out.push(keys(timeline(home, Some(R), None, page, 4).unwrap()));
+            out
+        };
+        // A claude-mem label searched as the repository is its own two names: each document once.
+        let label = crate::import::repo("r");
+        let own = keys_of(timeline(home, Some(&label), None, None, 30).unwrap());
+        assert_eq!(own.len(), 18, "{own:?}");
+        assert_eq!(own.iter().collect::<HashSet<_>>().len(), 18);
+        // Past the first of a time's two documents, the second comes first.
+        let page =
+            keys_of(timeline(home, Some(R), None, Some((4_000, uids[6].clone())), 3).unwrap());
+        assert_eq!(page.first(), Some(&uids[7]), "{page:?}");
+        let indexed = read();
+        assert_eq!(indexed[0].len(), 19, "{:?}", indexed[0]);
+        assert!(indexed.iter().all(|keys| !keys.is_empty()), "{indexed:?}");
+        k.execute_batch("DROP INDEX imported_time").unwrap();
+        assert_eq!(read(), indexed);
+    }
+
+    /// N5: by date, a record newer than every imported document comes first though the imported
+    /// documents alone fill the limit, so the records' leg is read then.
+    #[test]
+    fn by_date_a_newer_record_comes_before_imported_documents_that_fill_the_limit() {
+        let mut s = Store::new();
+        for n in 0..5 {
+            s.imported(&format!("d{n}"), "r", 1_000 + n, "", "the parser cache");
+        }
+        let seq = s.said("s", R, 9_000, "the parser cache again");
+        s.run();
+        let by_date = Query {
+            order: Order::DateDesc,
+            limit: 3,
+            ..q("parser cache")
+        };
+        let answer = s.query(&by_date);
+        assert_eq!(answer.hits.first().map(|h| h.key.clone()), Some(s.key(seq)));
+        // In relevance order the imported documents fill it, the record below them.
+        let answer = s.query(&Query {
+            limit: 3,
+            ..q("parser cache")
+        });
+        assert!(
+            answer.hits.iter().all(|h| h.class == Class::Imported),
+            "{:?}",
+            keys(&answer)
+        );
+    }
+
+    /// N5: the read ahead of a file's vectors leaves the store as it was and its connection usable;
+    /// an in-memory store's opens nothing.
+    #[test]
+    fn prefetch_reads_a_files_vectors_and_skips_memory() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let ids: Vec<i64> = k
+            .prepare("SELECT id FROM vector_keys")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!ids.is_empty());
+        let readers = std::sync::OnceLock::new();
+        prefetch_vectors(&readers, &k, &ids);
+        assert!(readers.get().is_some_and(|r| !r.is_empty()));
+        let read: i64 = k
+            .query_row("SELECT count(*) FROM vectors", [], |r| r.get(0))
+            .unwrap();
+        assert!(read > 0);
+        let memory = Connection::open_in_memory().unwrap();
+        let none = std::sync::OnceLock::new();
+        prefetch_vectors(&none, &memory, &ids);
+        assert!(none.get().is_none());
+    }
+
+    /// As the raw leg: an imported hit below the best `POOL` keeps its place under a larger depth
+    /// (Codex on #360).
+    #[test]
+    fn an_imported_hit_below_the_pool_keeps_its_place_under_a_larger_depth() {
+        let mut s = Store::new();
+        // The first and longest ranks last.
+        for n in 0..=crate::search::POOL {
+            let body = if n == 0 { "設計 worker" } else { "worker" };
+            s.imported(&format!("d{n}"), "r", 1_000 * (n as i64 + 1), "", body);
+        }
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let uids = imported_fts(&k, &q("設計 worker"), 2 * crate::search::POOL).unwrap();
+        assert_eq!(uids.len(), crate::search::POOL + 1);
+        assert!(uids[crate::search::POOL].ends_with(":d0"));
+    }
+
+    /// Row 30-2 (D13): the caller's repository and the one searched are both checked, and a
+    /// search of every repository with any exclusion is full text only; `query` calls it itself.
+    /// The plan's Global Constraints: every reader opens raw.db before knowledge.db, so a restore
+    /// holding raw.lock stops `known`, MCP's check of a `repo` argument, as it stops `query`.
+    #[test]
+    fn known_opens_raw_first_so_a_restore_stops_it() {
+        let mut s = Store::new();
+        s.said("s", "github.com/o/r", 1_000, "hello there");
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let held = crate::raw::lock_for_swap(home.path()).unwrap();
+        assert!(known(home.path(), "github.com/o/r").is_err());
+        drop(held);
+        assert!(known(home.path(), "github.com/o/r").unwrap());
+    }
+
+    /// Codex and Cursor on #489: a search from a checkout a hook would not record sends no query,
+    /// whose key is read as the rules now read it: one never recorded under the label a rule makes
+    /// of it, with no record of it, and one the rule reads as another never recorded.
+    #[test]
+    fn a_checkout_a_hook_would_not_record_sends_no_query() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        let ask = |caller: &str| Query {
+            caller: Some(caller.into()),
+            ..q("x")
+        };
+        let not_sent = |raw: &crate::raw::Raw, caller: &str| {
+            assert!(!excluded(&raw.exclusions().unwrap(), &ask(caller)));
+            excluded_now(home.path(), raw, &ask(caller)).unwrap()
+        };
+        // Excluded before the rule under its own label, which the rule reads as another's.
+        raw.exclude_capture(("repo", "github.com/o/acme-222222"), false)
+            .unwrap();
+        std::fs::write(home.path().join("config.toml"), rule).unwrap();
+        assert!(not_sent(&raw, "github.com/o/acme-111111"));
+        // Excluded after the rule, under the label it makes, with no record of it.
+        raw.exclude_capture(("repo", "github.com/o/acme-222222"), true)
+            .unwrap();
+        let settings = crate::capture::Settings::load(home.path()).unwrap();
+        let masked = "github.com/o/acme-482915";
+        let now = crate::capture::exclusion_label("repo", masked, &settings);
+        raw.exclude_capture(("repo", &now), false).unwrap();
+        assert!(not_sent(&raw, masked));
+        assert!(!excluded_now(home.path(), &raw, &ask("github.com/o/open")).unwrap());
+    }
+
+    #[test]
+    fn the_exclusion_check_is_called_with_every_searched_repo() {
+        let (secret, open) = ("github.com/o/secret", "github.com/o/open");
+        let list = vec![secret.to_owned()];
+        let ask = |caller: &str, repo: Option<&str>, all: bool| Query {
+            caller: Some(caller.into()),
+            repo: repo.map(String::from),
+            all,
+            ..q("x")
+        };
+        for (caller, repo, all, want) in [
+            (secret, None, false, true),
+            (open, Some(secret), false, true),
+            (secret, Some(open), false, true),
+            (open, None, true, true),
+            (open, None, false, false),
+            (open, Some(open), false, false),
+        ] {
+            assert_eq!(
+                excluded(&list, &ask(caller, repo, all)),
+                want,
+                "{caller} {repo:?} {all}"
+            );
+        }
+        assert!(!excluded(&[], &ask(open, None, true)));
+        // What the imported leg reads too (`imported_match`): the claude-mem project a key's last
+        // part names and its worktree sessions, excluded as D13 maps them.
+        for (list, caller, repo, want) in [
+            ("claude-mem:jura", "/home/jura", None, true),
+            ("github.com/o/foo", open, Some("claude-mem:foo"), true),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/private"),
+                true,
+            ),
+            (
+                "claude-mem:private/wt",
+                open,
+                Some("github.com/o/other"),
+                false,
+            ),
+            // A claude-mem project searched by its own name: its worktree sessions too.
+            ("claude-mem:foo/wt", open, Some("claude-mem:foo"), true),
+            ("claude-mem:foo", open, Some("claude-mem:foo/wt"), true),
+            ("claude-mem:bar/wt", open, Some("claude-mem:foo"), false),
+        ] {
+            assert_eq!(
+                excluded(&[list.to_owned()], &ask(caller, repo, false)),
+                want,
+                "{list} {caller} {repo:?}"
+            );
+        }
+        let mut s = Store::new();
+        s.decided(open, 1_000, "Open words.", &[]);
+        s.exclude(secret);
+        s.run();
+        let skipped = Vector::Skipped(VectorSkip::Excluded);
+        assert_eq!(s.query(&ask(open, Some(secret), false)).vector, skipped);
+        assert_ne!(s.query(&ask(open, None, false)).vector, skipped);
+    }
+
+    /// `get` takes a claim's uid or its first 12 characters (SessionStart's index, #302 item 4),
+    /// listing the claims when several start so, an imported document's uid and a record's
+    /// `device:seq`; a claim shows its status (MUST-M11) and its quotes.
+    #[test]
+    fn get_resolves_a_claim_uid_a_raw_record_and_an_imported_uid() {
+        let mut s = Store::new();
+        let claim = s.decided(R, 1_000, "Ship the search core first.", &[]);
+        let doc = s.imported("o5", "r", 2_000, "Search", "Search comes first.");
+        s.run();
+        let home = s.home.path();
+        let full = get(home, &claim).unwrap().unwrap();
+        assert!(
+            full.starts_with(&claim) && full.contains(" decision decided "),
+            "{full}"
+        );
+        assert!(full.contains(&format!("- {}: Ship the search core first.", s.key(1))));
+        assert_eq!(get(home, &claim[..12]).unwrap().unwrap(), full);
+        assert!(
+            get(home, &doc)
+                .unwrap()
+                .unwrap()
+                .contains("Search comes first.")
+        );
+        let record = get(home, &s.key(1)).unwrap().unwrap();
+        assert!(record.contains("Ship the search core first."), "{record}");
+        assert_eq!(get(home, "nope").unwrap(), None);
+        assert_eq!(get(home, &format!("{}:99", s.raw.device())).unwrap(), None);
+        // A second claim whose uid starts with the same 12 characters.
+        let k = crate::knowledge::open(home).unwrap();
+        k.execute(
+            "INSERT INTO claims(uid, op_device, op_seq)
+             SELECT substr(uid, 1, 12) || 'f00d', op_device, op_seq FROM claims WHERE uid = ?1",
+            [&claim],
+        )
+        .unwrap();
+        let listed = get(home, &claim[..12]).unwrap().unwrap();
+        assert!(listed.starts_with("2 claims start with"), "{listed}");
+        // The timeline's anchor reads ids as `get` does: several claims are no anchor.
+        let anchor = timeline(home, None, Some(&claim[..12]), None, 5).unwrap_err();
+        assert!(
+            format!("{anchor:#}").contains("2 claims start with"),
+            "{anchor:#}"
+        );
+        assert_eq!(get(home, &claim).unwrap().unwrap(), full);
+    }
+
+    /// docs/cards.md S6: `get` shows a card in full by the ID session start shows it under, its
+    /// title as written: only the row at session start puts it on one line (Codex on #370).
+    #[test]
+    fn get_shows_a_card_in_full_by_its_id() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Fix the parser.");
+        let op = serde_json::json!({"outcome": "curated", "summary": "", "from_seq": seq,
+            "from_offset": null, "to_seq": seq, "to_offset": null, "elided": [],
+            "observations": [{"type": "bugfix",
+                "title": "The parser no longer drops\n  the last line",
+                "subtitle": "A missing newline lost it.",
+                "narrative": "It read up to a newline, and the last line has none.",
+                "facts": ["read_line returned at EOF.", "The fix reads to the end."],
+                "concepts": ["problem-solution", "gotcha"],
+                "files_read": ["src/a.rs"], "files_modified": ["src/b.rs"]}]});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Window, op)])
+            .unwrap();
+        s.run();
+        let home = s.home.path();
+        let op_seq: i64 = crate::knowledge::open(home)
+            .unwrap()
+            .query_row("SELECT op_seq FROM cards", [], |r| r.get(0))
+            .unwrap();
+        let id = format!("{op_seq}.0");
+        let shown = get(home, &id).unwrap().unwrap();
+        let first = shown.lines().next().unwrap();
+        assert!(first.starts_with(&format!("{id} ")));
+        assert!(first.contains(" bugfix ") && first.contains(R));
+        for part in [
+            "The parser no longer drops\n  the last line\nA missing newline lost it.\n\n\
+             It read up to a newline, and the last line has none.\n",
+            "\nfacts:\n- read_line returned at EOF.\n- The fix reads to the end.\n",
+            "\nconcepts: problem-solution, gotcha\n",
+            "\nfiles read: src/a.rs\nfiles modified: src/b.rs\n",
+        ] {
+            assert!(shown.contains(part), "{part:?}");
+        }
+        assert_eq!(get(home, &format!("{op_seq}.1")).unwrap(), None);
+        // The timeline anchors on the ID `get` takes (Codex on #370).
+        let k = crate::knowledge::open(home).unwrap();
+        assert_eq!(time_of(&s.raw, &k, &id).unwrap(), 1_000);
+    }
+
+    /// docs/summaries.md S10: `get` shows a session summary in full by the ID session start shows
+    /// it under; an ID of no summary gives none.
+    #[test]
+    fn get_shows_a_session_summary_in_full_by_its_id() {
+        let mut s = Store::new();
+        let seq = s.said("s1", R, 1_000, "Fix the parser.");
+        let op = serde_json::json!({"agent": "claude", "session": "s1", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Fix the parser", "investigated": "How it reads.",
+                "learned": "The last line has no newline.", "completed": "It reads to the end.",
+                "next_steps": "Measure it.", "notes": "One note."},
+            "skipped": false});
+        s.raw.append_ops(&[(crate::raw::OpKind::Turn, op)]).unwrap();
+        s.run();
+        let home = s.home.path();
+        let op_seq: i64 = crate::knowledge::open(home)
+            .unwrap()
+            .query_row("SELECT op_seq FROM turns", [], |r| r.get(0))
+            .unwrap();
+        let shown = get(home, &format!("S{op_seq}")).unwrap().unwrap();
+        assert!(shown.starts_with(&format!("S{op_seq} ")));
+        for part in [
+            "\nFix the parser\n",
+            "\nInvestigated: How it reads.\n",
+            "\nLearned: The last line has no newline.\n",
+            "\nCompleted: It reads to the end.\n",
+            "\nNext steps: Measure it.\n",
+            "\nNotes: One note.\n",
+        ] {
+            assert!(shown.contains(part), "{part:?}");
+        }
+        assert_eq!(get(home, &format!("S{}", op_seq + 1)).unwrap(), None);
+    }
+
+    /// The timeline: claims, imported documents and session starts, newest first, or around an
+    /// anchor's time.
+    #[test]
+    fn the_timeline_lists_claims_imports_and_session_starts_around_an_anchor() {
+        let mut s = Store::new();
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 500,
+            ..crate::raw::test_event("{}")
+        };
+        let started = s.raw.append(&start).unwrap();
+        let first = s.decided(R, 1_000, "First decision.", &[]);
+        let doc = s.imported("o6", "r", 2_000, "Middle", "An imported note.");
+        let last = s.decided(R, 3_000, "Last decision.", &[]);
+        s.run();
+        let home = s.home.path();
+        let all: Vec<String> = timeline(home, Some(R), None, None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(
+            all,
+            [last.clone(), doc.clone(), first.clone(), s.key(started)]
+        );
+        let around: Vec<String> = timeline(home, Some(R), Some(&doc), None, 2)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(around, [last, doc]);
+        assert!(timeline(home, Some(R), Some("nope"), None, 2).is_err());
+    }
+
+    /// Codex on #306: a claim the worker has yet to apply a removal to is only hidden, so the claim
+    /// after it takes its place within the leg's depth.
+    #[test]
+    fn a_pending_claim_leaves_its_place_to_the_next() {
+        let mut s = Store::new();
+        let mut newest = 0;
+        for i in 0..101 {
+            let text = format!("Parser decision {i:03}.");
+            newest = s.said("s", R, 1_000 + i, &text);
+            s.claim(newest, &text, ("decision", "decided", "user"), &[]);
+        }
+        s.run();
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: newest,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let found = s.query(&Query {
+            limit: 100,
+            raw: RawArm::Off,
+            ..q("Parser decision")
+        });
+        assert_eq!(found.hits.len(), 100);
+        assert!(found.hits.iter().all(|h| h.class == Class::Current));
+    }
+
+    /// #320 and #306: unapproved or done open items that match better cannot crowd out
+    /// approved work. Search keeps reading until it finds the current claim after them.
+    #[test]
+    fn many_unapproved_or_done_items_do_not_crowd_out_a_current_claim() {
+        let mut s = Store::new();
+        for i in 0..110 {
+            let text = format!("Fix the parser test {i:03}.");
+            let seq = s.said("s", R, 1_000 + i, &text);
+            let (status, speaker) = match i % 5 {
+                0 => ("proposed", "tool result"),
+                1 => ("proposed", "assistant proposal"),
+                2 => ("proposed", "user"),
+                3 => ("unverified", "user"),
+                _ => ("done", "user"),
+            };
+            s.claim(seq, &text, ("open item", status, speaker), &[]);
+        }
+        let current = s.decided(
+            R,
+            500,
+            "We keep a parser test suite in one long file of many tests.",
+            &[],
+        );
+        s.run();
+        let found = s.query(&Query {
+            raw: RawArm::Off,
+            limit: 20,
+            ..q("parser test")
+        });
+        assert_eq!(found.hits[0].key, current);
+        assert_eq!(found.hits.len(), 20);
+    }
+
+    /// Codex on #306: an imported uid held twice resolves to its newest copy, the one search and
+    /// the timeline show: in `get`, and as a timeline's anchor.
+    #[test]
+    fn get_and_the_anchor_read_an_imported_uids_newest_copy() {
+        let mut s = Store::new();
+        let doc = s.imported("o1", "r", 1_000, "Notes", "First copy.");
+        s.imported("o1", "r", 2_000, "Notes", "Second copy.");
+        s.run();
+        let text = get(s.home.path(), &doc).unwrap().unwrap();
+        assert!(text.contains("Second copy.") && !text.contains("First copy."));
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        assert_eq!(time_of(&s.raw, &k, &doc).unwrap(), 2_000);
+    }
+
+    /// Codex on #306: a session start removed from raw is left out of the timeline before the
+    /// worker has removed it from the index, as `get` leaves it out; one whose text expired stays.
+    #[test]
+    fn a_removed_session_start_leaves_the_timeline_at_once() {
+        let mut s = Store::new();
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 500,
+            ..crate::raw::test_event("{}")
+        };
+        let started = s.raw.append(&start).unwrap();
+        let first = s.decided(R, 1_000, "First decision.", &[]);
+        s.run();
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: started,
+        };
+        // docs/retention.md: one whose text expired stays, as its entry is its labels.
+        s.raw.expire_for_test(&[started]);
+        let keys = || -> Vec<String> {
+            timeline(s.home.path(), Some(R), None, None, 10)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.key)
+                .collect()
+        };
+        assert_eq!(
+            keys(),
+            [first.clone(), format!("{}:{started}", s.raw.device())]
+        );
+        s.raw.append_tombstone(target).unwrap();
+        assert_eq!(keys(), [first]);
+    }
+
+    /// Codex on #306: an anchor near the oldest end leaves its unused half to the newer side, so
+    /// the timeline still holds its limit.
+    #[test]
+    fn an_anchored_timeline_fills_from_the_side_that_has_entries() {
+        let mut s = Store::new();
+        let oldest = s.decided(R, 1_000, "Oldest decision.", &[]);
+        for i in 0..6 {
+            s.decided(R, 2_000 + i, &format!("Later decision {i}."), &[]);
+        }
+        s.run();
+        let around = timeline(s.home.path(), Some(R), Some(&oldest), None, 4).unwrap();
+        assert_eq!(around.len(), 4);
+        assert_eq!(around[3].key, oldest);
+    }
+
+    /// Codex on #306: claims the worker has yet to apply a removal to are only hidden from the
+    /// timeline, however many of the newest they are: the entries after them fill it.
+    #[test]
+    fn a_timeline_past_many_pending_claims_is_full() {
+        let mut s = Store::new();
+        let older = [
+            s.decided(R, 1_000, "First decision.", &[]),
+            s.decided(R, 2_000, "Second decision.", &[]),
+        ];
+        let newer: Vec<i64> = (0..4)
+            .map(|i| {
+                let text = format!("Newer decision {i}.");
+                let seq = s.said("s", R, 3_000 + i, &text);
+                s.claim(seq, &text, ("decision", "decided", "user"), &[]);
+                seq
+            })
+            .collect();
+        s.run();
+        for seq in newer {
+            let target = crate::raw::Target::Record {
+                device: s.raw.device().to_owned(),
+                seq,
+            };
+            s.raw.append_tombstone(target).unwrap();
+        }
+        let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 2)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect();
+        assert_eq!(keys, [older[1].clone(), older[0].clone()]);
+    }
+
+    /// Row 30-2 (Task 5): a query whose caller's repository or the one searched is excluded never
+    /// reaches the embedder, nor does a search of every repository while any is excluded; the
+    /// others do.
+    #[test]
+    fn an_excluded_callers_query_never_reaches_the_embedder() {
+        use crate::embed::stub::Stub;
+        const SECRET: &str = "github.com/o/secret";
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        s.raw.exclude(SECRET, false).unwrap();
+        let sent = stub.requests();
+        let ask = |caller: &str, repo: Option<&str>, all: bool| Query {
+            text: "Open words".into(),
+            caller: Some(caller.into()),
+            repo: repo.map(str::to_owned),
+            all,
+            limit: 5,
+            ..Default::default()
+        };
+        for q in [
+            ask(SECRET, None, false),
+            ask(R, Some(SECRET), false),
+            ask(R, None, true),
+        ] {
+            assert_eq!(s.query(&q).vector, Vector::Skipped(VectorSkip::Excluded));
+        }
+        assert_eq!(stub.requests(), sent);
+        assert_eq!(s.query(&ask(R, None, false)).vector, Vector::Used);
+        assert_eq!(stub.requests(), sent + 1);
+        // What is sent has passed the gate (row 30-14).
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        let gated = Query {
+            text: format!("Open words {token} <private>acme</private>"),
+            ..ask(R, None, false)
+        };
+        assert_eq!(s.query(&gated).vector, Vector::Used);
+        let last = stub.texts().pop().unwrap().pop().unwrap();
+        assert!(last.starts_with("Open words"));
+        assert!(!last.contains(&token[..12]) && !last.contains("acme"));
+    }
+
+    /// D8 (Task 5): a query that cannot be embedded is answered from full text and says why, each
+    /// reason in turn. Each request sent is recorded with role `query`, and a failure sets no rest.
+    #[test]
+    fn a_failing_query_embedding_falls_back_to_full_text_and_says_why() {
+        use crate::embed::stub::Stub;
+        use crate::providers_db as pdb;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Open words.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "Open words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let why = |s: &Store| {
+            let answer = s.query(&ask);
+            assert!(!answer.hits.is_empty());
+            answer.vector
+        };
+        let skipped = |why: VectorSkip| Vector::Skipped(why);
+        assert_eq!(why(&s), skipped(VectorSkip::Off));
+        crate::embed_phase::fixture::config(&s, &stub);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(why(&s), skipped(VectorSkip::NoVectors));
+        crate::embed_phase::fixture::embed_all(&s);
+        let sent = stub.requests();
+        assert_eq!(why(&s), Vector::Used);
+        // The active vectors another embedder's: the configured one's are still being made.
+        let generation = |from: &str, to: &str| {
+            k.execute(
+                "UPDATE vec_generation SET embedder = ?2 WHERE embedder = ?1",
+                [from, to],
+            )
+            .unwrap()
+        };
+        generation(crate::embed::EMBEDDER, "older");
+        assert_eq!(why(&s), skipped(VectorSkip::Building));
+        generation("older", crate::embed::EMBEDDER);
+        let db = pdb::open(&home).unwrap();
+        let rest = pdb::State {
+            down_until: crate::db::now_ms() + 60_000,
+            ..Default::default()
+        };
+        pdb::set_state(&db, crate::embed::CALLS, rest).unwrap();
+        assert_eq!(why(&s), skipped(VectorSkip::Waiting));
+        pdb::set_state(&db, crate::embed::CALLS, pdb::State::default()).unwrap();
+        assert_eq!(stub.requests(), sent + 1);
+        stub.fail_next(500, None);
+        assert_eq!(why(&s), skipped(VectorSkip::Error));
+        let held = stub.hold();
+        assert_eq!(why(&s), skipped(VectorSkip::Timeout));
+        drop(held);
+        assert_eq!(stub.requests(), sent + 3);
+        assert_eq!(
+            pdb::state(&db, crate::embed::CALLS).unwrap(),
+            pdb::State::default()
+        );
+        let outcomes: Vec<String> = db
+            .prepare("SELECT outcome FROM provider_calls WHERE role = 'query' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(outcomes, ["ok", "error", "error"]);
+    }
+
+    /// D8 with the query's call beside the full-text sides: a tombstone raw.db takes while the call
+    /// is out hides its record, whatever becomes of the call (here a timeout: full text alone),
+    /// though the record's full-text list was read before it.
+    #[test]
+    fn a_tombstone_taken_while_the_query_is_out_hides_its_record() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "Deploy words.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "Deploy words".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let records = |a: &Answer| a.hits.iter().filter(|h| h.class == Class::Raw).count();
+        assert_eq!(records(&query(&home, &ask).unwrap()), 1);
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = std::thread::spawn(move || query(&home, &ask).unwrap());
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let target = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        let answer = search.join().unwrap();
+        drop(held);
+        assert_eq!(answer.vector, Vector::Skipped(VectorSkip::Timeout));
+        assert_eq!(records(&answer), 0, "{:?}", keys(&answer));
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered while the query's call is out waits for the
+    /// search: its answer is the one read before the commit, and the next leaves the document out.
+    #[test]
+    fn a_forget_registered_while_the_query_is_out_waits_for_the_search() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let ask = Query {
+            text: "parser".into(),
+            all: true,
+            limit: 5,
+            ..Default::default()
+        };
+        let found = |a: &Answer| a.hits.iter().any(|h| h.key == doc);
+        assert!(found(&query(&home, &ask).unwrap()));
+        let sent = stub.requests();
+        let held = stub.hold();
+        let search = {
+            let (home, ask) = (home.clone(), ask.clone());
+            std::thread::spawn(move || query(&home, &ask).unwrap())
+        };
+        // The call is out, and the full-text lists have been read beside it.
+        while stub.requests() == sent {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let registering = crate::forget::registering(&home, &doc);
+        let answer = search.join().unwrap();
+        drop(held);
+        assert!(found(&answer), "{:?}", keys(&answer));
+        registering.join().unwrap();
+        assert!(!found(&query(&home, &ask).unwrap()));
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered after `named` read the claim, before the rest of
+    /// the read, waits for the view: it is the one read before the commit, and the next is none.
+    #[test]
+    fn a_forget_registered_inside_a_claims_read_waits_for_it() {
+        let mut s = Store::new();
+        let uid = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
+        s.run();
+        let home = s.home.path().to_owned();
+        let (h, u) = (home.clone(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        BETWEEN.set(Some(Box::new(move || {
+            sent.send(crate::forget::registering(&h, &u)).unwrap();
+        })));
+        assert!(claim(&home, &uid).unwrap().is_some());
+        started.recv().unwrap().join().unwrap();
+        assert!(claim(&home, &uid).unwrap().is_none());
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered while `get`, `get_many`, `cite` or `timeline`
+    /// reads waits until its answer is built, `get_many`'s whole answer and not each id: the answer
+    /// is the one read before the commit, and the next leaves the uid out.
+    #[test]
+    fn a_forget_registered_inside_get_cite_or_timeline_waits_for_it() {
+        let mut s = Store::new();
+        let cited = s.decided(R, 2_000, "Use tabs for the parser.", &[]);
+        let listed = s.decided(R, 2_500, "Deploy on Fridays.", &[]);
+        let doc = s.imported("o1", "r", 3_000, "Deploy notes", "Deploy with the parser.");
+        let first = s.imported("o2", "r", 3_100, "Parser notes", "The parser reads tabs.");
+        let second = s.imported("o3", "r", 3_200, "Lexer notes", "The lexer reads tabs.");
+        s.run();
+        let home = s.home.path().to_owned();
+        let all = || timeline(&home, None, None, None, 10).unwrap();
+        let (sent, started) = std::sync::mpsc::channel();
+        let forget_inside = |uid: &str| {
+            let (h, u, sent) = (home.clone(), uid.to_owned(), sent.clone());
+            BETWEEN.set(Some(Box::new(move || {
+                sent.send(crate::forget::registering(&h, &u)).unwrap();
+            })));
+        };
+        let after = || started.recv().unwrap().join().unwrap();
+        forget_inside(&doc);
+        assert!(get(&home, &doc).unwrap().is_some());
+        after();
+        assert!(get(&home, &doc).unwrap().is_none());
+        // Registered while the first id is read, and still waiting while the second is.
+        let (h, u, sent2) = (home.clone(), first.clone(), sent.clone());
+        BETWEEN.set(Some(Box::new(move || {
+            sent2.send(crate::forget::registering(&h, &u)).unwrap();
+            BETWEEN.set(Some(Box::new(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let raw = crate::raw::open(&h).unwrap();
+                assert!(!raw.forgotten(&u).unwrap(), "committed between two ids");
+            })));
+        })));
+        let both = [first.clone(), second.clone()];
+        assert!(
+            get_many(&home, &both)
+                .unwrap()
+                .contains("The parser reads tabs.")
+        );
+        after();
+        assert!(
+            !get_many(&home, &both)
+                .unwrap()
+                .contains("The parser reads tabs.")
+        );
+        forget_inside(&cited);
+        assert!(cite(&home, std::slice::from_ref(&cited)).unwrap()[0]["label"] == "citable");
+        after();
+        let answer = cite(&home, std::slice::from_ref(&cited)).unwrap();
+        assert!(answer == [serde_json::json!({"uid": cited, "error": "not a claim"})]);
+        forget_inside(&listed);
+        assert!(all().iter().any(|i| i.key == listed));
+        after();
+        assert!(!all().iter().any(|i| i.key == listed));
+    }
+
+    /// D8 with the query's call beside the full-text sides: a redaction rule added while the call
+    /// is out holds in the snippets, whether the call is answered or times out (the records are
+    /// read and gated after it), though no tombstone has been written yet. The search runs in a
+    /// child process: egress reads the rules of the home `redact::set_home` names, the process's.
+    #[test]
+    fn a_rule_added_while_the_query_is_out_masks_the_snippets() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_RULE_HOME";
+        const SECRET: &str = "INTERNAL-ALPHA-42";
+        let ask = Query {
+            text: "deploy".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let answer = query(&home, &ask).unwrap();
+            let shown: Vec<&str> = answer.hits.iter().map(|h| h.snippet.as_str()).collect();
+            assert!(shown.iter().any(|s| s.contains("deploy")), "{shown:?}");
+            assert!(shown.iter().all(|s| !s.contains(SECRET)), "{shown:?}");
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        // Two fields, so the rule anchored to a field's end matches only line by line.
+        let body = serde_json::json!({"prompt": format!("deploy {SECRET}"), "result": "tail"});
+        let event = crate::raw::Event {
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 1_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&event).unwrap();
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let config = home.join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"alpha\", regex = '{SECRET}$' }}]\n"
+        );
+        let name = "search::b::tests::a_rule_added_while_the_query_is_out_masks_the_snippets";
+        for answered in [true, false] {
+            std::fs::write(&config, &plain).unwrap();
+            let sent = stub.requests();
+            let held = stub.hold();
+            let child = std::process::Command::new(std::env::args_os().next().unwrap())
+                .args(["--exact", name])
+                .env(HOME, &home)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // The call is out, and the full-text order has been read beside it.
+            while stub.requests() == sent {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let next = home.join("config.toml.next");
+            std::fs::write(&next, &ruled).unwrap();
+            std::fs::rename(&next, &config).unwrap();
+            if !answered {
+                std::thread::sleep(QUERY_TIMEOUT + std::time::Duration::from_millis(300));
+            }
+            drop(held);
+            let out = child.wait_with_output().unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "answered {answered}: {said}");
+            assert!(said.contains("1 passed"), "{said}");
+        }
+    }
+
+    /// Owner decision 43 (Codex's security review of the switch): a query gated while redaction
+    /// is off is not sent once it is on again before the call: it is gated again after the
+    /// reservation, and the embedder gets nothing. Egress reads the rules of the home
+    /// `redact::set_home` names, the process's, so the search runs in a child process.
+    #[test]
+    fn a_query_gated_under_other_rules_is_not_sent() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_SWITCH_QUERY_HOME";
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let ask = Query {
+            text: format!("deploy {key}"),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let config = home.join("config.toml");
+            let on = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(&config, format!("{on}[redaction]\nenabled = false\n")).unwrap();
+            *AFTER_QUERY_GATE.lock().unwrap() = Some(Box::new(move || {
+                std::fs::write(&config, &on).unwrap();
+            }));
+            query(&home, &ask).unwrap();
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "deploy the parser");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path().to_owned();
+        let sent = stub.requests();
+        let name = "search::b::tests::a_query_gated_under_other_rules_is_not_sent";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, &home)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        assert_eq!(stub.requests(), sent);
+    }
+
+    /// CodeRabbit on #502: the exclusions are read again once the query is admitted to dispatch,
+    /// as the rules now read the caller: a rule written meanwhile under which an exclusion names
+    /// the caller sends nothing. (An exclusion itself cannot commit while the query is admitted:
+    /// it waits for the dispatch lock.) The search runs in a child process, as egress reads the
+    /// home `redact::set_home` names.
+    #[test]
+    fn a_query_from_a_repository_excluded_once_admitted_is_not_sent() {
+        use crate::embed::stub::Stub;
+        const HOME: &str = "OBOETE_TEST_EXCLUDED_QUERY_HOME";
+        const RULE: &str = "[redaction]\nextra_rules = [{ id = \"r\", regex = 'o/r$' }]\n";
+        let ask = Query {
+            text: "deploy the parser".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let config = home.join("config.toml");
+            let plain = std::fs::read_to_string(&config).unwrap();
+            *AFTER_QUERY_GATE.lock().unwrap() = Some(Box::new(move || {
+                std::fs::write(&config, format!("{plain}{RULE}")).unwrap();
+            }));
+            query(&home, &ask).unwrap();
+            return;
+        }
+        let stub = Stub::start();
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "deploy the parser");
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let ruled =
+            crate::redact::Rules::new(&crate::config::parse_capture(Some(RULE)).unwrap().redaction)
+                .unwrap();
+        let masked = crate::capture::label_with(R, &ruled);
+        assert_ne!(masked, R);
+        s.raw.exclude(&masked, false).unwrap();
+        let home = s.home.path().to_owned();
+        let sent = stub.requests();
+        let name = "search::b::tests::a_query_from_a_repository_excluded_once_admitted_is_not_sent";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, &home)
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        assert_eq!(stub.requests(), sent);
+    }
+
+    /// Q2 replaces D7's knowledge-before-prompts split: imported documents share one full-text
+    /// list, so a prompt that matches better can precede an observation.
+    #[test]
+    fn imported_documents_share_one_full_text_order() {
+        let mut s = Store::new();
+        let prompt = crate::raw::ImportDoc {
+            uid: "claude-mem:test:p1".into(),
+            source: "claude-mem:test".into(),
+            source_id: "p1".into(),
+            kind: "prompt".into(),
+            repo: crate::import::repo("r"),
+            session: "cm".into(),
+            ts: 2_000,
+            title: String::new(),
+            body: "Redis Redis caches in Redis, Redis.".into(),
+        };
+        s.raw.append_imports(vec![prompt]).unwrap();
+        let note = s.imported("o1", "r", 1_000, "Caching", "We picked Redis once.");
+        s.run();
+        let found = s.query(&q("Redis"));
+        let imported: Vec<&str> = found
+            .hits
+            .iter()
+            .filter(|h| h.class == Class::Imported)
+            .map(|h| h.key.as_str())
+            .collect();
+        assert_eq!(imported, ["claude-mem:test:p1", note.as_str()]);
+    }
+
+    /// MUST-M12 (Task 5): the vector side keeps to the repository searched and the time span
+    /// inside its KNN, before fusion: documents of another repository, another time or none are
+    /// left out; a search of every repository has them all, the repo-less one too.
+    #[test]
+    fn since_until_and_repo_filter_the_vector_leg_before_fusion() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let words = "Parser caches live in Redis.";
+        let here = s.said("s", R, 1_000, words);
+        s.said("s", R, 5_000, words);
+        s.said("s", "github.com/o/other", 1_000, words);
+        let body = serde_json::json!({ "prompt": words }).to_string();
+        let nowhere = s
+            .raw
+            .append(&crate::raw::Event {
+                repo: None,
+                ts: 1_000,
+                ..crate::raw::test_event(&body)
+            })
+            .unwrap();
+        s.imported("o1", "other", 1_000, "Parser", words);
+        s.imported("o2", "r/wt", 1_000, "Parser", words);
+        let decision = ("decision", "decided", "user");
+        let quoted = s.said("s", R, 1_000, words);
+        let claim = s.claim(quoted, words, decision, &[]);
+        let elsewhere = s.said("s", "github.com/o/other", 1_000, words);
+        s.claim(elsewhere, words, decision, &[]);
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let v = stub::vector(crate::embed::EMBEDDER, words);
+        let ask = |since, until, all| Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            all,
+            since,
+            until,
+            limit: 20,
+            ..Default::default()
+        };
+        let keys = |q: &Query| -> Vec<String> {
+            query_with(s.home.path(), q, Some(&v))
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.key)
+                .collect()
+        };
+        let found = keys(&ask(Some(500), Some(2_000), false));
+        assert_eq!(found[..2], [claim, "claude-mem:test:o2".to_owned()]);
+        let mut records = found[2..].to_vec();
+        records.sort();
+        let mut want = vec![s.key(here), s.key(quoted)];
+        want.sort();
+        assert_eq!(records, want);
+        let every = keys(&ask(None, None, true));
+        assert_eq!(every.len(), 10, "{every:?}");
+        assert!(every.contains(&s.key(nowhere)));
+        // The full-text side finds a worktree session's import under its repository too.
+        let text = s.query(&q("Parser"));
+        assert!(text.hits.iter().any(|h| h.key == "claude-mem:test:o2"));
+        assert!(!text.hits.iter().any(|h| h.key == "claude-mem:test:o1"));
+    }
+
+    /// Row 46-1 (Task 5): a leg's vector side reads 100 deep: a document only it finds, at its
+    /// 90th place, is still among 100 hits.
+    #[test]
+    fn the_vector_side_of_a_leg_reads_a_hundred_deep() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let id = crate::embed::EMBEDDER;
+        let dim = |w: &str| -> usize {
+            let v = stub::vector(id, w);
+            (0..v.len()).max_by(|a, b| v[*a].total_cmp(&v[*b])).unwrap()
+        };
+        // Words that share no dimension with "alpha" or with one another, so record i, "alpha"
+        // and i of them, is the i-th nearest "alpha".
+        let mut taken = vec![dim("alpha")];
+        let fillers: Vec<String> = (0..2_000)
+            .map(|j| format!("w{j}"))
+            .filter(|w| {
+                let d = dim(w);
+                !taken.contains(&d) && {
+                    taken.push(d);
+                    true
+                }
+            })
+            .take(130)
+            .collect();
+        let seqs: Vec<i64> = (0..130)
+            .map(|i| {
+                let text = format!("alpha {}", fillers[..i].join(" "));
+                s.said("s", R, 1_000 + i as i64, &text)
+            })
+            .collect();
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let q = Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            raw: RawArm::Only,
+            limit: 100,
+            ..Default::default()
+        };
+        let found = query_with(s.home.path(), &q, Some(&stub::vector(id, "alpha"))).unwrap();
+        assert_eq!(found.hits.len(), 100);
+        assert_eq!(found.hits[89].key, s.key(seqs[89]));
+    }
+
+    /// MUST-M11 and M13 (Task 5): a hit only the vector side found is ranked by the fusion,
+    /// labelled as its leg's full-text hits are, and hidden as they are: a tombstone the index has
+    /// not reached hides it. With no vector, the same query finds nothing.
+    #[test]
+    fn a_vector_only_hit_is_hidden_ranked_and_labelled_as_a_full_text_hit() {
+        use crate::embed::stub::{self, Stub};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        crate::embed_phase::fixture::config(&s, &stub);
+        let target = s.said("s", R, 1_000, "Parser caches live in Redis.");
+        let decision = ("decision", "decided", "user");
+        let claim = s.claim(target, "Parser caches live in Redis.", decision, &[]);
+        let done = ("open item", "done", "user");
+        let item = s.claim(target, "Parser caches live in Redis.", done, &[]);
+        s.said("s", R, 2_000, "Deploy on Fridays never.");
+        s.run();
+        crate::embed_phase::fixture::embed_all(&s);
+        let home = s.home.path();
+        let v = stub::vector(crate::embed::EMBEDDER, "Parser caches live in Redis.");
+        let q = Query {
+            text: "zzzz".into(),
+            caller: Some(R.into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let found = query_with(home, &q, Some(&v)).unwrap();
+        assert_eq!(found.vector, Vector::Used);
+        assert_eq!(
+            (found.hits[0].key.as_str(), &found.hits[0].class),
+            (claim.as_str(), &Class::Current)
+        );
+        let raw = &found.hits[1];
+        assert_eq!(
+            (raw.key.as_str(), &raw.class, raw.label),
+            (s.key(target).as_str(), &Class::Raw, Label::Citable)
+        );
+        assert!(found.hits.iter().any(|h| h.key == item));
+        let none = query_with(home, &q, None).unwrap();
+        assert!(none.hits.is_empty() && none.vector == Vector::Skipped(VectorSkip::Off));
+        let removed = crate::raw::Target::Record {
+            device: s.raw.device().to_owned(),
+            seq: target,
+        };
+        s.raw.append_tombstone(removed).unwrap();
+        let found = query_with(home, &q, Some(&v)).unwrap();
+        let gone = [s.key(target), claim, item];
+        assert!(!found.hits.iter().any(|h| gone.contains(&h.key)));
+        assert!(!found.hits.is_empty());
+    }
+
+    /// D8: reciprocal rank fusion: 1 / (61 + rank), so a document both sides hold far down ranks
+    /// below one a side holds first; ties keep the full-text order.
+    #[test]
+    fn rrf_scores_by_reciprocal_rank_and_keeps_full_text_order_on_ties() {
+        let fts: Vec<String> = std::iter::once("a".to_owned())
+            .chain((0..99).map(|i| format!("f{i}")))
+            .chain(["z".to_owned()])
+            .collect();
+        let vec: Vec<String> = (0..100)
+            .map(|i| format!("v{i}"))
+            .chain(["z".to_owned()])
+            .collect();
+        let fused = rrf(&fts, &vec);
+        let at = |k: &str| fused.iter().position(|x| x == k).unwrap();
+        assert!(at("a") < at("z"));
+        assert_eq!(fused[..3], ["a", "v0", "f0"]);
+    }
+
+    /// Codex on #306: three devices' imports of a document are one entry before the limit, so the
+    /// timeline is not short.
+    #[test]
+    fn a_timeline_of_documents_imported_three_times_is_full() {
+        let mut s = Store::new();
+        for i in 0..3 {
+            for _ in 0..3 {
+                s.imported(
+                    &format!("o{i}"),
+                    "r",
+                    1_000 + i,
+                    "Note",
+                    "An imported note.",
+                );
+            }
+        }
+        s.run();
+        assert_eq!(
+            timeline(s.home.path(), Some(R), None, None, 3)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// Codex on #306: a repository known only by its imported history's name is known, as the
+    /// imported leg and the timeline search it.
+    #[test]
+    fn a_repository_with_only_imported_history_is_known() {
+        let mut s = Store::new();
+        s.imported("o1", "r", 1_000, "Note", "An imported note.");
+        s.run();
+        assert!(known(s.home.path(), R).unwrap());
+        assert!(!known(s.home.path(), "github.com/o/other").unwrap());
+    }
+
+    /// The stub embedder configured for `s` and every document of it embedded.
+    fn embedded_by(s: &Store, stub: &crate::embed::stub::Stub) {
+        crate::embed_phase::fixture::config(s, stub);
+        crate::embed_phase::fixture::embed_all(s);
+    }
+
+    /// G23 (#506 item 3): the meaning side of a prompt takes delivered claims only, under
+    /// `claims::DECIDED_WHERE` before anything is kept (a proposed open item of the same words takes
+    /// no place), and cards near the prompt, each with its cosine; what is far stays out. One query
+    /// goes to the embedder.
+    #[test]
+    fn prompt_near_keeps_delivered_claims_and_near_documents() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let decided = s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        let seq = s.said("s", R, 2_000, "Parser errors go to stderr.");
+        let proposed = s.claim(
+            seq,
+            "Parser errors go to stderr.",
+            ("open item", "proposed", "user"),
+            &[],
+        );
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        s.decided(R, 3_000, "Lexer tokens are cached.", &[]);
+        // A decided lesson a later one ended (a link ends a lesson): not delivered, so no hit.
+        let seq = s.said("s", R, 4_000, "Parser errors go to stderr.");
+        let ended = s.claim(
+            seq,
+            "Parser errors go to stderr.",
+            ("lesson", "decided", "user"),
+            &[],
+        );
+        let later = s.said("s", R, 5_000, "Lexer tokens are cached twice.");
+        s.claim(
+            later,
+            "Lexer tokens are cached twice.",
+            ("lesson", "decided", "user"),
+            &[&ended],
+        );
+        s.run();
+        embedded_by(&s, &stub);
+        let asked = stub.requests();
+        let near = prompt_near(
+            s.home.path(),
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(near.vector, Vector::Used);
+        let found: Vec<(&str, &str)> = near
+            .hits
+            .iter()
+            .map(|h| (h.key.as_str(), h.kind.as_str()))
+            .collect();
+        let short = card.clone();
+        let card = format!("{}.{card}", s.raw.device());
+        assert_eq!(
+            found,
+            [(decided.as_str(), "claim"), (card.as_str(), "card")]
+        );
+        assert!(!found.iter().any(|(k, _)| *k == proposed));
+        assert!(
+            near.hits
+                .iter()
+                .all(|h| h.cosine >= crate::shortlist::MEANING)
+        );
+        assert_eq!(stub.requests(), asked + 1);
+        // What the session was shown, by the IDs the hook shows them by, takes no place.
+        let shown = [decided.clone(), short].into_iter().collect();
+        let near = prompt_near(
+            s.home.path(),
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &shown,
+        )
+        .unwrap();
+        assert_eq!(near.hits.len(), 0);
+        // Nor a claim an owner's change the worker has not applied yet touches.
+        s.correct(&decided, None, Some("Parser errors go to the log."));
+        let near = prompt_near(
+            s.home.path(),
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(!near.hits.iter().any(|h| h.key == decided));
+    }
+
+    /// #506 (acceptance test), with no names given: imported history reaches a prompt only through
+    /// an explicit mapping, never by its project's name (decision 52 adds the names given). History imported from a project named `payments`, and two
+    /// checkouts `a/payments` and `b/payments`: while oboete recorded none of its sessions, neither
+    /// gets it; once oboete recorded a session starting in `a/payments`, only `a/payments` gets
+    /// that session's documents, and `b/payments` those of the session that started there; a
+    /// session oboete never recorded goes to neither, a v1 document filed under the checkout's
+    /// repository included. An agent's note reaches the repository it was saved in. A prompt, a forgotten document and one the session was shown take no place, and a
+    /// store whose records were not read since the mapping came gets no imported history.
+    #[test]
+    fn imported_history_reaches_a_prompt_only_through_its_session() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let (a, b) = ("example.com/a/payments", "example.com/b/payments");
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: &str, kind: &str, session: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id.into(),
+            kind: kind.into(),
+            repo: crate::import::repo("payments"),
+            session: session.into(),
+            ts: 1_000,
+            title: "Gateway retries".into(),
+            body: text.into(),
+        };
+        let note = crate::raw::ImportDoc {
+            uid: format!("{}:n1", crate::raw::NOTE_SOURCE),
+            source: crate::raw::NOTE_SOURCE.into(),
+            repo: b.into(),
+            ..doc("n1", "note", crate::raw::NOTE_SESSION)
+        };
+        // v1's documents are filed under a repository: they too map through their sessions.
+        let v1 = |id: &str, session: &str| crate::raw::ImportDoc {
+            source: "oboete-v1".into(),
+            repo: a.into(),
+            ..doc(id, "decision", session)
+        };
+        s.raw
+            .append_imports(vec![
+                doc("o1", "decision", "cm-a"),
+                doc("p1", "prompt", "cm-a"),
+                doc("o2", "decision", "cm-a"),
+                doc("o3", "decision", "cm-b"),
+                doc("o4", "decision", "cm-lost"),
+                v1("v1", "cm-a"),
+                v1("v2", "v1-lost"),
+                note.clone(),
+            ])
+            .unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let none = Default::default();
+        let home = s.home.path().to_owned();
+        let near = |repo: &str, shown: &std::collections::HashSet<String>| {
+            let near = prompt_near(&home, (repo, &[]), text, shown).unwrap();
+            assert_eq!(near.vector, Vector::Used);
+            let mut keys: Vec<String> = near
+                .hits
+                .into_iter()
+                .map(|h| {
+                    assert_eq!(h.kind, "imported");
+                    h.key
+                })
+                .collect();
+            keys.sort();
+            keys
+        };
+        let uid = |id: &str| format!("claude-mem:test:{id}");
+        assert_eq!(near(a, &none), Vec::<String>::new());
+        assert_eq!(near(b, &none), std::slice::from_ref(&note.uid));
+        // oboete records two of its sessions, one starting in each checkout.
+        s.said("cm-a", a, 500, "Work on the payment gateway.");
+        s.said("cm-b", b, 500, "Work on the payment gateway.");
+        s.raw
+            .append_ops(&[(
+                crate::raw::OpKind::Forget,
+                serde_json::json!({"uid": uid("o2")}),
+            )])
+            .unwrap();
+        s.run();
+        assert_eq!(near(a, &none), [uid("o1"), uid("v1")]);
+        assert_eq!(near(b, &none), [uid("o3"), note.uid.clone()]);
+        let shown = [uid("o1"), uid("v1")].into_iter().collect();
+        assert_eq!(near(a, &shown), Vec::<String>::new());
+        let k = crate::knowledge::open(&home).unwrap();
+        k.execute_batch("DROP TABLE session_start").unwrap();
+        assert_eq!(near(a, &none), Vec::<String>::new());
+        assert_eq!(near(b, &none), Vec::<String>::new());
+    }
+
+    /// #506 (Codex on #547): a project's documents of other sessions take none of the bit index's
+    /// candidates from the sessions that map to the repository. 401 documents of a session oboete
+    /// never recorded sit nearer the prompt than the one document of a session that started in
+    /// `a/payments`, more than the KNN's `CANDIDATES`; the repository still gets its own.
+    #[test]
+    fn a_repositorys_imported_history_is_not_crowded_out_by_other_sessions() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let a = "example.com/a/payments";
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, session: &str, title: &str, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session: session.into(),
+            ts: 1_000,
+            title: title.into(),
+            body: body.into(),
+        };
+        let mut docs: Vec<_> = (0..=CANDIDATES)
+            .map(|i| doc(format!("x{i}"), "cm-lost", "", text))
+            .collect();
+        docs.push(doc(
+            "own".into(),
+            "cm-a",
+            "Gateway",
+            "Payments retry on a gateway timeout, twice.",
+        ));
+        s.raw.append_imports(docs).unwrap();
+        s.said("cm-a", a, 500, "Work on the payment gateway.");
+        s.run();
+        embedded_by(&s, &stub);
+        let near = prompt_near(s.home.path(), (a, &[]), text, &Default::default()).unwrap();
+        let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["claude-mem:test:own"]);
+    }
+
+    /// #645 (CodeRabbit on #644): a page past the bit index's `CANDIDATES` still gets the documents
+    /// only the meaning side finds, imported documents and cards alike, with a type filter too:
+    /// each leg's pool reaches the page's depth.
+    #[test]
+    fn a_deep_page_reaches_past_the_knn_candidates() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let text = "Payments retry on a gateway timeout.";
+        let n = CANDIDATES + 10;
+        let docs: Vec<_> = (0..n)
+            .map(|i| crate::raw::ImportDoc {
+                uid: format!("claude-mem:test:x{i}"),
+                source: "claude-mem:test".into(),
+                source_id: format!("x{i}"),
+                kind: "decision".into(),
+                repo: crate::import::repo("payments"),
+                session: "cm".into(),
+                ts: 1_000 + i,
+                title: String::new(),
+                body: text.into(),
+            })
+            .collect();
+        s.raw.append_imports(docs).unwrap();
+        for i in 0..n {
+            let seq = s.said("work", R, 2_000 + i, "Work on it.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "decision", "title": text}]),
+                false,
+            );
+        }
+        s.run();
+        embedded_by(&s, &stub);
+        let near = crate::embed::stub::vector(crate::embed::EMBEDDER, text);
+        for types in [None, Some("decision".parse().unwrap())] {
+            // Words no document holds, so the full-text side finds none; past both legs' 400.
+            let deep = Query {
+                text: "zqxvy wqkp".into(),
+                all: true,
+                types,
+                raw: RawArm::Off,
+                limit: 5,
+                offset: 2 * n as usize - 8,
+                ..Default::default()
+            };
+            let found = query_with(s.home.path(), &deep, Some(&near)).unwrap();
+            assert_eq!(found.hits.len(), 5, "{:?}", keys(&found));
+        }
+    }
+
+    /// #506: past `SESSION_FILTER` sessions the bit index is asked by the projects their documents
+    /// are filed under, and each hit is still kept to the mapping: near documents of a session
+    /// oboete never recorded, of one that started in another checkout, and v1's document filed
+    /// under the repository from a session never recorded take no place.
+    #[test]
+    fn a_repository_of_many_sessions_keeps_to_its_mapping() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let (a, b) = ("example.com/a/payments", "example.com/b/payments");
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, session: String, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session,
+            ts: 1_000,
+            title: String::new(),
+            body: body.into(),
+        };
+        let mut docs: Vec<_> = (0..=SESSION_FILTER)
+            .map(|i| {
+                doc(
+                    format!("far{i}"),
+                    format!("cm-{i}"),
+                    "Lexer tokens are cached.",
+                )
+            })
+            .collect();
+        docs.push(doc("own".into(), "cm-0".into(), text));
+        docs.push(doc("lost".into(), "cm-lost".into(), text));
+        docs.push(doc("elsewhere".into(), "cm-b".into(), text));
+        docs.push(crate::raw::ImportDoc {
+            source: "oboete-v1".into(),
+            repo: a.into(),
+            ..doc("filed".into(), "v1-lost".into(), text)
+        });
+        s.raw.append_imports(docs).unwrap();
+        for i in 0..=SESSION_FILTER {
+            s.said(&format!("cm-{i}"), a, 500, "Work on the payment gateway.");
+        }
+        s.said("cm-b", b, 500, "Work on the payment gateway.");
+        s.run();
+        embedded_by(&s, &stub);
+        let near = prompt_near(s.home.path(), (a, &[]), text, &Default::default()).unwrap();
+        let keys: Vec<&str> = near.hits.iter().map(|h| h.key.as_str()).collect();
+        assert_eq!(keys, ["claude-mem:test:own"]);
+    }
+
+    /// Decision 52 (docs/prompt-context.md, "Decision 52"): with the checkout's claude-mem names a
+    /// document of a session oboete never recorded reaches the prompt when it is filed under one of
+    /// them, in any case, a worktree's own project included; another worktree's, another name's and
+    /// a v1 document of a session never recorded do not. Past `SESSION_FILTER` sessions, the
+    /// projects' scan holds the names' projects; the names' sessions are read by their index.
+    #[test]
+    fn imported_history_reaches_a_prompt_by_the_checkouts_names_too() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let a = "example.com/a/payments";
+        let text = "Payments retry on a gateway timeout.";
+        let doc = |id: String, project: &str, session: String, body: &str| crate::raw::ImportDoc {
+            uid: format!("claude-mem:test:{id}"),
+            source: "claude-mem:test".into(),
+            source_id: id,
+            kind: "decision".into(),
+            repo: crate::import::repo(project),
+            session,
+            ts: 1_000,
+            title: String::new(),
+            body: body.into(),
+        };
+        let near_doc =
+            |id: &str, project: &str, session: &str| doc(id.into(), project, session.into(), text);
+        s.raw
+            .append_imports(vec![
+                near_doc("main", "payments", "cm-1"),
+                near_doc("wt", "payments/fix", "cm-2"),
+                near_doc("spike", "payments/spike", "cm-3"),
+                near_doc("billing", "billing", "cm-4"),
+                crate::raw::ImportDoc {
+                    source: "oboete-v1".into(),
+                    repo: a.into(),
+                    ..near_doc("v1", "payments", "v1-lost")
+                },
+            ])
+            .unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let home = s.home.path().to_owned();
+        let near = |names: &[String]| {
+            let mut keys: Vec<String> = prompt_near(&home, (a, names), text, &Default::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        let uid = |id: &str| format!("claude-mem:test:{id}");
+        // A worktree `fix` of `payments` checked out: its two names, the first in other case.
+        let names = ["PAYMENTS".to_owned(), "payments/fix".to_owned()];
+        assert_eq!(near(&names), [uid("main"), uid("wt")]);
+        assert_eq!(near(&[]), Vec::<String>::new());
+        assert_eq!(near(&["billing-old".to_owned()]), Vec::<String>::new());
+        // A document filed under a name and moved since to another project brings its session no
+        // more, as its newest row is read (Codex on #567).
+        for project in ["payments", "billing"] {
+            let moved = near_doc("moved", project, "cm-moved");
+            s.raw.append_imports(vec![moved]).unwrap();
+            s.run();
+        }
+        {
+            let k = crate::knowledge::open(&home).unwrap();
+            let sessions = imported_sessions(&k, a, &names).unwrap();
+            assert!(sessions.contains(&"cm-1".to_owned()), "{sessions:?}");
+            assert!(!sessions.contains(&"cm-moved".to_owned()), "{sessions:?}");
+        }
+        // Many sessions under the name: the projects' scan, which files the worktree's documents
+        // under `payments` too.
+        let far: Vec<_> = (0..=SESSION_FILTER)
+            .map(|i| {
+                let session = format!("cm-far-{i}");
+                doc(
+                    format!("far{i}"),
+                    "payments",
+                    session,
+                    "Lexer tokens are cached.",
+                )
+            })
+            .chain([near_doc("late", "payments", "cm-late")])
+            .collect();
+        s.raw.append_imports(far).unwrap();
+        s.run();
+        embedded_by(&s, &stub);
+        let k = crate::knowledge::open(&home).unwrap();
+        assert!(imported_sessions(&k, a, &names).unwrap().len() > SESSION_FILTER);
+        assert_eq!(near(&names), [uid("late"), uid("main"), uid("wt")]);
+        let plan: Vec<String> = k
+            .prepare(&format!("EXPLAIN QUERY PLAN {IMPORTED_SESSIONS}"))
+            .unwrap()
+            .query_map(params![a, "[]"], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|d| d.contains("INDEX imported_project")),
+            "{plan:?}"
+        );
+        // Parity row 31: the newest row is looked for once a session, by the session in the
+        // index, not once for each of the names' documents, whose rows a cold cache reads slowly.
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("imported_project (repo=? AND session=?)")),
+            "{plan:?}"
+        );
+    }
+
+    /// G23 (Codex on #521): a card its reader no longer shows (its record forgotten) takes no
+    /// place in the viewer's answer, nor in the words side's depth, where only what the caller
+    /// takes counts.
+    #[test]
+    fn a_document_no_reader_shows_takes_no_place() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let gone = s.said("s", R, 2_000, "Parser errors go to stderr.");
+        let hidden = s.cards(
+            gone,
+            gone,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        let kept = s.said("s", R, 3_000, "Parser notes.");
+        let shown = s.cards(
+            kept,
+            kept,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors in the log"}]),
+            false,
+        )[0]
+        .clone();
+        s.run();
+        embedded_by(&s, &stub);
+        let device = s.raw.device().to_owned();
+        let home = s.home.path().to_owned();
+        let target = crate::forget::Target::Record {
+            device: device.clone(),
+            seq: gone,
+        };
+        crate::forget::start(&home, &crate::forget::preview(&home, target).unwrap()).unwrap();
+        let near = prompt_near(
+            &home,
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
+        let hidden_key = format!("{device}.{hidden}");
+        assert!(!near.hits.iter().any(|h| h.key == hidden_key));
+        let k = crate::knowledge::open(&home).unwrap();
+        let rules = redact::Rules::default();
+        let mut taken = Vec::new();
+        curated_words(
+            &k,
+            R,
+            "Parser errors go to stderr",
+            1,
+            &|| false,
+            &mut |id, _| {
+                let readable = crate::cards::get(&k, &s.raw, id, &rules)?.is_some();
+                if readable {
+                    taken.push(id.to_owned());
+                }
+                Ok(readable)
+            },
+        )
+        .unwrap();
+        assert!(taken.iter().any(|id| id.ends_with(&shown)), "{taken:?}");
+    }
+
+    /// docs/prompt-context.md (2026-11-13): the prompt hook's words side offers the best
+    /// `WORDS_POOL` cards by the prompt's trigrams and no more, however many match and however few
+    /// are taken: each offer is a document read, and a prompt's trigrams match most of a store.
+    /// The depth still ends it first, and once the caller says to stop nothing more is offered,
+    /// of either kind.
+    #[test]
+    fn the_words_side_offers_no_more_than_its_pool() {
+        let mut s = Store::new();
+        for i in 0..WORDS_POOL + 5 {
+            let seq = s.said("s", R, 2_000, "Parser work.");
+            s.cards(
+                seq,
+                seq,
+                serde_json::json!([{"type": "bugfix", "title": format!("Parser errors, part {i}")}]),
+                false,
+            );
+        }
+        let seq = s.said("s", R, 2_000, "Parser work.");
+        s.turn(
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+            "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+            "fields": {"request": "Make the parser errors go to stderr"}, "skipped": false}),
+        );
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let offered = std::cell::RefCell::new(Vec::new());
+        let offers = |depth: usize, stop: &dyn Fn() -> bool, takes: bool| {
+            offered.borrow_mut().clear();
+            curated_words(
+                &k,
+                R,
+                "Parser errors go to stderr",
+                depth,
+                stop,
+                &mut |_, class| {
+                    offered.borrow_mut().push(class);
+                    Ok(takes)
+                },
+            )
+            .unwrap();
+            let cards = offered
+                .borrow()
+                .iter()
+                .filter(|c| **c == Class::Card)
+                .count();
+            (cards, offered.borrow().len() - cards)
+        };
+        assert_eq!(offers(1, &|| false, false), (WORDS_POOL, 1));
+        // The third card taken is the last card offered.
+        assert_eq!(offers(3, &|| false, true), (3, 1));
+        assert_eq!(offers(1, &|| offered.borrow().len() >= 3, false), (3, 0));
+        assert_eq!(offers(1, &|| true, false), (0, 0));
+    }
+
+    /// G23 (Codex on #521): the viewer counts a session summary only when it has a request, by
+    /// which the hook's block names it; a card, while its reader shows it.
+    #[test]
+    fn a_summary_without_a_request_takes_no_place() {
+        let mut s = Store::new();
+        let seq = s.said("s", R, 2_000, "Parser work.");
+        let card = s.cards(
+            seq,
+            seq,
+            serde_json::json!([{"type": "bugfix", "title": "Parser errors go to stderr"}]),
+            false,
+        )[0]
+        .clone();
+        let turn = |request: &str| {
+            serde_json::json!({"agent": "claude", "session": "s", "repo": R, "ts": 2_000,
+                "from": seq, "through": seq, "read": [], "goals": [], "removed": [],
+                "fields": {"request": request, "learned": "Parser errors go to stderr."},
+                "skipped": false})
+        };
+        let asked = s.turn(turn("Fix the parser"));
+        let bare = s.turn(turn(""));
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let rules = redact::Rules::default();
+        let shows = |family: &str, key: &str| {
+            shows_doc(&k, &s.raw, family, key, &rules)
+                .unwrap()
+                .is_some()
+        };
+        assert!(shows("o", &card));
+        assert!(shows("s", &asked));
+        assert!(!shows("s", &bare));
+    }
+
+    /// A raw session start at `ts` whose text is `text`: its key.
+    fn session_start(s: &mut Store, ts: i64, text: &str) -> String {
+        let start = crate::raw::Event {
+            kind: "start".into(),
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts,
+            ..crate::raw::test_event(&serde_json::json!({"source": text}).to_string())
+        };
+        let seq = s.raw.append(&start).unwrap();
+        s.key(seq)
+    }
+
+    /// Codex on #527: with `no_starts`, a session start takes no place in either raw leg before
+    /// its depth, the vector side's too; without it, search finds the start by both.
+    #[test]
+    fn no_starts_leaves_session_starts_out_of_both_raw_legs() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        let start = session_start(&mut s, 1_000, "Parser errors go to stderr.");
+        s.run();
+        embedded_by(&s, &stub);
+        let q = |no_starts: bool, text: &str| Query {
+            text: text.into(),
+            repo: Some(R.into()),
+            raw: RawArm::Below,
+            limit: 10,
+            no_starts,
+            ..Default::default()
+        };
+        let keys = |q: &Query| -> Vec<String> {
+            let found = query(s.home.path(), q).unwrap();
+            assert_eq!(found.vector, Vector::Used);
+            found.hits.into_iter().map(|h| h.key).collect()
+        };
+        // Both legs find the start by its own words (the stub embeds the same text the same).
+        let text = "Parser errors go to stderr.";
+        assert!(keys(&q(false, text)).contains(&start));
+        assert!(!keys(&q(true, text)).contains(&start));
+    }
+
+    /// Codex on #527: session starts take no place in `near`'s depths: two just before the anchor
+    /// leave them to the claim behind them.
+    #[test]
+    fn near_counts_no_session_start_in_its_depths() {
+        let mut s = Store::new();
+        let older = s.decided(R, 1_000, "Older decision.", &[]);
+        session_start(&mut s, 2_000, "first start");
+        session_start(&mut s, 3_000, "second start");
+        let anchor = s.decided(R, 4_000, "Anchor decision.", &[]);
+        s.run();
+        let ids: Vec<String> = near(s.home.path(), Some(R), &anchor, (2, 0))
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(ids.contains(&older), "{ids:?}");
+        assert!(ids.contains(&anchor), "{ids:?}");
+    }
+
+    /// G23 (row 30-2): a repository excluded from sending has its prompt embedded by no provider:
+    /// nothing is asked of the embedder and nothing is found.
+    #[test]
+    fn prompt_near_sends_no_prompt_of_an_excluded_repository() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        s.exclude(R);
+        s.run();
+        let asked = stub.requests();
+        let near = prompt_near(
+            s.home.path(),
+            (R, &[]),
+            "Parser errors go to stderr.",
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(near.vector, Vector::Skipped(VectorSkip::Excluded));
+        assert!(near.hits.is_empty());
+        assert_eq!(stub.requests(), asked);
+    }
+
+    /// Decision 52 (CodeRabbit on #567): a checkout named by an excluded claude-mem project,
+    /// though its repository's last part names another, has its prompt embedded by no provider
+    /// either, the name's case and a worktree's aside; another name's prompt is sent.
+    #[test]
+    fn prompt_near_sends_no_prompt_of_a_checkout_an_excluded_project_names() {
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        s.decided(R, 1_000, "Parser errors go to stderr.", &[]);
+        s.run();
+        embedded_by(&s, &stub);
+        s.exclude(&crate::import::repo("payroll"));
+        s.run();
+        let near = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            let text = "Parser errors go to stderr.";
+            prompt_near(s.home.path(), (R, &names), text, &Default::default()).unwrap()
+        };
+        let asked = stub.requests();
+        for names in [&["Payroll"][..], &["payroll/fix"], &["billing", "PAYROLL"]] {
+            let near = near(names);
+            assert_eq!(
+                near.vector,
+                Vector::Skipped(VectorSkip::Excluded),
+                "{names:?}"
+            );
+            assert!(near.hits.is_empty());
+        }
+        assert_eq!(stub.requests(), asked);
+        assert_eq!(near(&["billing"]).vector, Vector::Used);
+    }
+
+    /// Task 6 (row 46-3, spec 8.2 M1): the question's own session leaves each leg in SQL before
+    /// its limit, the vector side too, so a session with more matches than a leg's depth, all
+    /// ranked above the rest, still leaves the leg full of the rest's. One store per leg, so no
+    /// other leg fills the answer first.
+    #[test]
+    fn the_questions_own_session_leaves_every_leg_before_its_limit() {
+        use crate::embed::stub::{Stub, vector};
+        for leg in ["records", "decision", "prompt"] {
+            let stub = Stub::start();
+            let mut s = Store::new();
+            let mut rest = HashSet::new();
+            // The skipped session's texts are the word alone: shorter, so first by full text,
+            // and nearest by vector.
+            let text = |own: bool| {
+                if own {
+                    "zebra".to_owned()
+                } else {
+                    "zebra lion tiger".to_owned()
+                }
+            };
+            if leg == "records" {
+                for i in 0..=DEPTH as i64 {
+                    s.said("s1", R, 1_000 + i, &text(true));
+                }
+                for i in 0..DEPTH as i64 {
+                    let seq = s.said("s2", R, 5_000 + i, &text(false));
+                    rest.insert(s.key(seq));
+                }
+            } else {
+                let mut docs = Vec::new();
+                for i in 0..=DEPTH as i64 {
+                    docs.push((format!("a{i}"), "s1", leg, 1_000 + i, text(true)));
+                }
+                for i in 0..DEPTH as i64 {
+                    docs.push((format!("b{i}"), "s2", leg, 5_000 + i, text(false)));
+                }
+                let uids = s.imported_all(docs);
+                rest.extend(uids.into_iter().filter(|u| u.contains(":b")));
+            }
+            s.run();
+            embedded_by(&s, &stub);
+            let ask = Query {
+                text: "zebra".into(),
+                all: true,
+                limit: DEPTH,
+                skip_session: Some("s1".into()),
+                ..Default::default()
+            };
+            for v in [None, Some(vector(crate::embed::EMBEDDER, "zebra"))] {
+                let a = query_with(s.home.path(), &ask, v.as_deref()).unwrap();
+                let side = if v.is_some() {
+                    "with its vector side"
+                } else {
+                    "full text"
+                };
+                assert_eq!(a.hits.len(), DEPTH, "{leg}, {side}");
+                let own: Vec<&str> = keys(&a)
+                    .into_iter()
+                    .filter(|k| !rest.contains(*k))
+                    .collect();
+                assert!(own.is_empty(), "{leg}, {side}: {own:?}");
+            }
+        }
+    }
+
+    /// Task 6: a document with no session is no question's own, so leaving a session out keeps
+    /// it, on both sides of the leg.
+    #[test]
+    fn a_search_without_a_skip_still_finds_a_record_with_no_session() {
+        use crate::embed::stub::{Stub, vector};
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let lone = s.said("", R, 1_000, "zebra");
+        s.said("s1", R, 2_000, "zebra");
+        s.run();
+        embedded_by(&s, &stub);
+        let lone = s.key(lone);
+        for skip in [None, Some("s1".to_owned())] {
+            let ask = Query {
+                all: true,
+                raw: RawArm::Only,
+                skip_session: skip.clone(),
+                ..q("zebra")
+            };
+            for v in [None, Some(vector(crate::embed::EMBEDDER, "zebra"))] {
+                let a = query_with(s.home.path(), &ask, v.as_deref()).unwrap();
+                assert!(keys(&a).contains(&lone.as_str()), "{skip:?} {:?}", keys(&a));
+            }
+        }
+    }
+
+    /// Spec 8.2's Raw row: `Rrf(p)` ranks record j right after imported j + p, ties to the
+    /// imported document; `Rrf(0)` alternates.
+    #[test]
+    fn rrf_5_puts_raw_rank_one_after_imported_rank_six() {
+        let mut s = Store::new();
+        // Ten of each, one word and one length, so each list is in time order.
+        let docs = (0..10)
+            .map(|i| {
+                (
+                    format!("i{i}"),
+                    "cm",
+                    "decision",
+                    10_000 - i,
+                    "heron".to_owned(),
+                )
+            })
+            .collect();
+        let imported = s.imported_all(docs);
+        let records: Vec<String> = (0..10)
+            .map(|i| {
+                let seq = s.said("s", R, 10_000 - i, "heron");
+                s.key(seq)
+            })
+            .collect();
+        s.run();
+        let ask = |raw| Query {
+            all: true,
+            raw,
+            limit: 10,
+            ..q("heron")
+        };
+        let got: Vec<String> = keys(&s.query(&ask(RawArm::Rrf(5))))
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let want = [
+            &imported[..6],
+            &records[..1],
+            &imported[6..7],
+            &records[1..2],
+            &imported[7..8],
+        ]
+        .concat();
+        assert_eq!(got, want);
+        let got: Vec<String> = keys(&s.query(&ask(RawArm::Rrf(0))))
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let want: Vec<String> = imported[..5]
+            .iter()
+            .zip(&records[..5])
+            .flat_map(|(i, r)| [i.clone(), r.clone()])
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    /// Raw's default run is `Off` (spec 8.2): while imported hits fill the top 50, `Below` gives
+    /// the same 50.
+    #[test]
+    fn below_and_off_give_the_same_top_fifty_while_imported_hits_fill_it() {
+        let mut s = Store::new();
+        let docs = (0..60)
+            .map(|i| {
+                (
+                    format!("i{i}"),
+                    "cm",
+                    "decision",
+                    1_000 + i,
+                    "heron notes".to_owned(),
+                )
+            })
+            .collect();
+        s.imported_all(docs);
+        for i in 0..10 {
+            s.said("s", R, 1_000 + i, "heron");
+        }
+        s.run();
+        let ask = |raw| Query {
+            all: true,
+            raw,
+            limit: 50,
+            ..q("heron")
+        };
+        let below = s.query(&ask(RawArm::Below));
+        assert_eq!(below.hits.len(), 50);
+        assert_eq!(keys(&below), keys(&s.query(&ask(RawArm::Off))));
+    }
+
+    /// An evaluation's questions as runs need them: a one-token string qid, a string session,
+    /// every repository, the depth as the limit; an empty session leaves nothing out.
+    #[test]
+    fn question_lines_are_checked_as_a_run_needs_them() {
+        assert!(question(r#"{"qid":1,"text":"x"}"#, 5).is_err());
+        assert!(question(r#"{"qid":"q 1","text":"x"}"#, 5).is_err());
+        assert!(question(r#"{"qid":"q1","text":"x","session":7}"#, 5).is_err());
+        let (qid, q) = question(r#"{"qid":"q1","text":"x","session":"s1"}"#, 5).unwrap();
+        assert_eq!(qid, "q1");
+        assert_eq!(
+            (q.skip_session.as_deref(), q.limit, q.all),
+            (Some("s1"), 5, true)
+        );
+        let (_, q) = question(r#"{"qid":"q1","text":"x","session":""}"#, 5).unwrap();
+        assert_eq!(q.skip_session, None);
+    }
+
+    /// An evaluation home (D10): two records (one holding a GitHub-token-shaped fake) and two
+    /// claude-mem documents, embedded by `stub`.
+    fn eval_home(stub: &crate::embed::stub::Stub) -> (Store, String) {
+        let mut s = Store::new();
+        let token = ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat();
+        s.said("s1", R, 1_000, &format!("deploy with {token}"));
+        s.said("s2", R, 2_000, "deploy the worker");
+        s.imported_all(vec![
+            ("k1".into(), "s3", "decision", 3_000, "deploy notes".into()),
+            (
+                "p1".into(),
+                "s3",
+                "prompt",
+                4_000,
+                "how do we deploy".into(),
+            ),
+        ]);
+        s.run();
+        embedded_by(&s, stub);
+        (s, token)
+    }
+
+    fn run_files(out: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(out)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Milestone 5 D5 (#439): a forget registered after a run's queries, before its sidecar is
+    /// read, waits for the run: the sidecar is the one read before the commit.
+    #[test]
+    fn a_forget_registered_between_a_runs_queries_and_its_sidecar_waits_for_it() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let home = s.home.path().to_owned();
+        let k = crate::knowledge::open(&home).unwrap();
+        let uid: String = k
+            .query_row("SELECT uid FROM imported ORDER BY ts LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let (h, u) = (home.clone(), uid.clone());
+        let (sent, started) = std::sync::mpsc::channel();
+        BETWEEN.set(Some(Box::new(move || {
+            sent.send(crate::forget::registering(&h, &u)).unwrap();
+        })));
+        let out = tempfile::tempdir().unwrap();
+        let questions = r#"{"qid":"q1","text":"deploy","session":"s9"}"#;
+        trec_run(&home, questions, 10, &[RawArm::Off], out.path()).unwrap();
+        started.recv().unwrap().join().unwrap();
+        let docs = std::fs::read_to_string(out.path().join("b-docs.jsonl")).unwrap();
+        assert!(docs.contains(&uid));
+    }
+
+    /// Task 6 (rows 30-1, 30-14): every key a run prints has its sidecar row, a record's as
+    /// `r:<device>:<seq>`, and its text is gated as embedding gates it.
+    #[test]
+    fn every_printed_key_has_a_gated_sidecar_row() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, token) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        let arms = [RawArm::Off, RawArm::Only, RawArm::Rrf(5)];
+        let questions = r#"{"qid":"q1","text":"deploy","session":"s9"}"#;
+        trec_run(s.home.path(), questions, 10, &arms, out.path()).unwrap();
+        assert_eq!(
+            run_files(out.path()),
+            ["b-docs.jsonl", "b-off.trec", "b-only.trec", "b-rrf5.trec"]
+        );
+        let docs: HashMap<String, serde_json::Value> =
+            std::fs::read_to_string(out.path().join("b-docs.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                    (v["key"].as_str().unwrap().to_owned(), v)
+                })
+                .collect();
+        for arm in ["off", "only", "rrf5"] {
+            let run = std::fs::read_to_string(out.path().join(format!("b-{arm}.trec"))).unwrap();
+            assert!(!run.is_empty(), "{arm}");
+            for (i, line) in run.lines().enumerate() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                let want_rank = (i + 1).to_string();
+                let want_name = format!("b-{arm}");
+                assert_eq!(
+                    (cols[0], cols[1], cols[3], cols[5]),
+                    ("q1", "Q0", want_rank.as_str(), want_name.as_str())
+                );
+                assert!(docs.contains_key(cols[2]), "{arm}: {line}");
+            }
+        }
+        let record = docs
+            .values()
+            .find(|d| d["text"].as_str().unwrap().contains("deploy with"))
+            .unwrap();
+        assert!(
+            record["key"].as_str().unwrap().starts_with("r:"),
+            "{record}"
+        );
+        assert!(
+            !record["text"].as_str().unwrap().contains(&token),
+            "{record}"
+        );
+        assert_eq!(record["session"], "s1");
+        assert!(
+            docs.values()
+                .any(|d| d["kind"] == "prompt" && d["session"] == "s3")
+        );
+    }
+
+    /// Task 6 (rows 30-1, 30-14): the sidecar gates each text with the rules of the run, a rule
+    /// added after the record was indexed included, line by line as embedding gates it. The run
+    /// is in a child process: egress reads the rules of the home `redact::set_home` names.
+    #[test]
+    fn the_sidecar_gates_with_the_rules_of_the_run() {
+        const HOME: &str = "OBOETE_TEST_SIDECAR_HOME";
+        const SECRET: &str = "INTERNAL-BETA-7";
+        const TITLE: &str = "INTERNAL-GAMMA-3";
+        const OTHER: &str = "INTERNAL-DELTA-5";
+        let questions = r#"{"qid":"q1","text":"deploy"}"#;
+        if let Ok(home) = std::env::var(HOME) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            let out = home.join("run");
+            trec_run(&home, questions, 10, &[RawArm::Off, RawArm::Only], &out).unwrap();
+            let docs = std::fs::read_to_string(out.join("b-docs.jsonl")).unwrap();
+            // The record and the two imported notes, without their secrets: the first note keeps
+            // its words, the second is masked whole by the rule on its composed text.
+            assert_eq!(docs.lines().count(), 3, "{docs}");
+            assert_eq!(docs.matches("deploy").count(), 2, "{docs}");
+            for hidden in [SECRET, TITLE, OTHER, "private"] {
+                assert!(!docs.contains(hidden), "{hidden}: {docs}");
+            }
+            return;
+        }
+        let stub = crate::embed::stub::Stub::start();
+        let mut s = Store::new();
+        // Two fields, so the rule anchored to a field's end matches only line by line.
+        let body = serde_json::json!({"prompt": format!("deploy {SECRET}"), "result": "tail"});
+        let event = crate::raw::Event {
+            session: "s".into(),
+            repo: Some(R.into()),
+            ts: 1_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&event).unwrap();
+        // A title the rule anchors to whole, which the sidecar prefixes with its kind.
+        s.imported("o1", "r", 2_000, TITLE, "deploy notes");
+        s.imported("o2", "r", 3_000, OTHER, "private deploy value");
+        s.run();
+        embedded_by(&s, &stub);
+        let config = s.home.path().join("config.toml");
+        let plain = std::fs::read_to_string(&config).unwrap();
+        let ruled = format!(
+            "{plain}[redaction]\nextra_rules = [{{ id = \"beta\", regex = '{SECRET}$' }}, \
+             {{ id = \"gamma\", regex = '^{TITLE}$' }}, {{ id = \"delta\", regex = '^{OTHER}$' }}, \
+             {{ id = \"whole\", regex = '(?s)^decision: {OTHER}\\n.*$' }}]\n"
+        );
+        std::fs::write(&config, ruled).unwrap();
+        let name = "search::b::tests::the_sidecar_gates_with_the_rules_of_the_run";
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args(["--exact", name])
+            .env(HOME, s.home.path())
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+    }
+
+    /// Task 6: a question is embedded once, whatever the number of arms, each request counted.
+    #[test]
+    fn each_question_is_embedded_once_for_every_arm() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        let before = stub.requests();
+        let questions =
+            "{\"qid\":\"q1\",\"text\":\"deploy\"}\n{\"qid\":\"q2\",\"text\":\"worker\"}\n";
+        let arms = [RawArm::Off, RawArm::Only, RawArm::Rrf(5)];
+        trec_run(s.home.path(), questions, 10, &arms, out.path()).unwrap();
+        assert_eq!(stub.requests(), before + 2);
+        assert_eq!(
+            &stub.texts()[before..],
+            [vec!["deploy".to_owned()], vec!["worker".to_owned()]]
+        );
+    }
+
+    /// Task 6: a question that cannot be embedded stops the run, and no file is written, the
+    /// earlier questions' included: a hybrid run never quietly becomes a full-text one.
+    #[test]
+    fn a_question_that_cannot_be_embedded_stops_the_run() {
+        let stub = crate::embed::stub::Stub::start();
+        let (s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        stub.refuse("broken question");
+        let questions =
+            "{\"qid\":\"q1\",\"text\":\"deploy\"}\n{\"qid\":\"q2\",\"text\":\"broken question\"}\n";
+        let err = trec_run(s.home.path(), questions, 10, &[RawArm::Off], out.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("q2"), "{err:#}");
+        assert!(run_files(out.path()).is_empty());
+    }
+
+    /// D10: an evaluation home holds imported documents and records only; one with a claim or an
+    /// exclusion is refused before anything is sent.
+    #[test]
+    fn an_eval_home_with_a_claim_or_an_exclusion_is_refused() {
+        let stub = crate::embed::stub::Stub::start();
+        let questions = r#"{"qid":"q1","text":"deploy"}"#;
+        let (mut s, _) = eval_home(&stub);
+        let out = tempfile::tempdir().unwrap();
+        trec_run(s.home.path(), questions, 10, &[RawArm::Off], out.path()).unwrap();
+        s.exclude("github.com/o/elsewhere");
+        s.run();
+        let (mut c, _) = eval_home(&stub);
+        c.decided(R, 9_000, "Deploy from the main branch only.", &[]);
+        c.run();
+        let sent = stub.requests();
+        for home in [s.home.path(), c.home.path()] {
+            let out = tempfile::tempdir().unwrap();
+            assert!(trec_run(home, questions, 10, &[RawArm::Off], out.path()).is_err());
+            assert!(run_files(out.path()).is_empty());
+        }
+        assert_eq!(stub.requests(), sent);
+    }
+
+    /// Codex's security review of Task 7: a claim's quote is gated with its record's words around
+    /// it, so a rule added after the claim that needs them (a code after a name) hides it in the
+    /// viewer's claim and in `get` as in the record, before the rescan masks the record. The read
+    /// runs in a child process: egress reads the rules of the home `redact::set_home` names.
+    /// D12: `cite` gives each evidence row of a cited claim, whether it still reads in its record,
+    /// and its quote through the gate: a row whose record a tombstone hid after the pass is not
+    /// live, and after the next pass the claim is gone.
+    #[test]
+    fn a_cited_claim_reports_each_evidence_row_and_whether_it_still_reads() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::{OpKind, Target};
+        use serde_json::json;
+        // What the gate hides and the worker's rescan does not: an opted-out part a hook would
+        // have removed (a secret in raw is masked there, and its quote no longer reads).
+        let private = "<private>the vault code 4417</private>";
+        let mut s = Store::new();
+        let texts = [
+            format!("We keep tabs. {private}"),
+            "Tabs in every file.".to_owned(),
+        ];
+        let seqs = texts.clone().map(|t| s.said("s", R, 1_000, &t));
+        let device = s.raw.device().to_owned();
+        let evidence: Vec<Evidence> = seqs
+            .iter()
+            .zip(&texts)
+            .map(|(&seq, text)| Evidence {
+                device: device.clone(),
+                seq,
+                offset: 0,
+                length: text.len() as i64,
+                sentence: 0,
+                quote: text.clone(),
+                claim_at: None,
+            })
+            .collect();
+        let uid = crate::claims::uid("decision", &evidence[0]);
+        let op = ClaimOp {
+            id: "c1".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Tabs everywhere.".into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+            support: Vec::new(),
+        };
+        let op = serde_json::to_value(op).unwrap();
+        s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        s.run();
+        let asked = [uid.clone(), "nothing".to_owned()];
+        let cited = cite(s.home.path(), &asked).unwrap();
+        assert_eq!(cited[1], json!({"uid": "nothing", "error": "not a claim"}));
+        assert_eq!(cited[0]["label"], "citable");
+        let rows = cited[0]["evidence"].as_array().unwrap();
+        let read: Vec<(i64, bool)> = rows
+            .iter()
+            .map(|r| (r["seq"].as_i64().unwrap(), r["live"] == true))
+            .collect();
+        assert_eq!(read, [(seqs[0], true), (seqs[1], true)]);
+        let quote = rows[0]["quote"].as_str().unwrap();
+        assert!(
+            quote.starts_with("We keep tabs.") && !quote.contains("4417"),
+            "{quote}"
+        );
+        assert_eq!(rows[1]["offset"], 0);
+        assert_eq!(rows[1]["length"], texts[1].len());
+        // The second record hidden after the pass: its row is not live.
+        let gone = Target::Record {
+            device,
+            seq: seqs[1],
+        };
+        s.raw.append_tombstone(gone).unwrap();
+        let cited = cite(s.home.path(), &asked).unwrap();
+        let live: Vec<bool> = cited[0]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["live"] == true)
+            .collect();
+        assert_eq!(live, [true, false]);
+        s.run();
+        let cited = cite(s.home.path(), &asked).unwrap();
+        assert_eq!(cited[0], json!({"uid": uid, "error": "not a claim"}));
+    }
+
+    #[test]
+    fn a_quote_is_gated_with_its_records_words() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        use serde_json::json;
+        const HOME: &str = "OBOETE_TEST_QUOTE_HOME";
+        const UIDS: &str = "OBOETE_TEST_QUOTE_UIDS";
+        // Each claim's quote, the words it still shows and the code it hides: one rule needs the
+        // record's words before the quote, and two others interfere, the record's mask (the name)
+        // taking the context the rule on the quote alone needs (Codex on 908b8bf).
+        const CASES: [(&str, &str, &str); 2] = [
+            ("ACME deploy; otp=654321.", "otp=654321", "otp="),
+            (
+                "Owner note: secret=ZETA pin=987654",
+                "ZETA pin=987654",
+                " pin=",
+            ),
+        ];
+        if let (Ok(home), Ok(uids)) = (std::env::var(HOME), std::env::var(UIDS)) {
+            let home = std::path::PathBuf::from(home);
+            crate::redact::set_home(&home).unwrap();
+            for (uid, (_, quote, shown)) in uids.split(',').zip(CASES) {
+                let code = &quote[quote.len() - 6..];
+                let view = claim(&home, uid).unwrap().unwrap();
+                let text = &view.quotes[0].text;
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+                let text = get(&home, uid).unwrap().unwrap();
+                assert!(text.contains(shown) && !text.contains(code), "{text}");
+            }
+            return;
+        }
+        let mut s = Store::new();
+        let mut uids = Vec::new();
+        for (record, quote, _) in CASES {
+            let seq = s.said("s", R, 1_000, record);
+            let event = crate::raw::Event {
+                kind: "prompt".into(),
+                ..crate::raw::test_event(&json!({ "prompt": record }).to_string())
+            };
+            let long = crate::curate::long_text(&event).unwrap();
+            let evidence = Evidence {
+                device: s.raw.device().to_owned(),
+                seq,
+                offset: long.find(quote).unwrap() as i64,
+                length: quote.len() as i64,
+                sentence: 0,
+                quote: quote.into(),
+                claim_at: None,
+            };
+            uids.push(crate::claims::uid("decision", &evidence));
+            let op = ClaimOp {
+                id: "c".into(),
+                kind: "decision".into(),
+                status: "decided".into(),
+                speaker: "user".into(),
+                scope: "repo".into(),
+                body: "Deploy with the one-time code.".into(),
+                evidence: vec![evidence],
+                supersedes: Vec::new(),
+                recipe: "test".into(),
+                tier: 1,
+                why: String::new(),
+                tainted: false,
+                support: Vec::new(),
+            };
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
+        s.run();
+        // The rules come after the claims, and no worker runs before the read.
+        std::fs::write(
+            s.home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [\
+             { id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }, \
+             { id = \"name\", regex = 'secret=(ZETA)', secret_group = 1 }, \
+             { id = \"pin\", regex = '^ZETA pin=([0-9]{6})$', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::args_os().next().unwrap())
+            .args([
+                "--exact",
+                "search::b::tests::a_quote_is_gated_with_its_records_words",
+            ])
+            .env(HOME, s.home.path())
+            .env(UIDS, uids.join(","))
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && printed.contains("1 passed"),
+            "{printed}"
+        );
+    }
+
+    /// docs/retention.md: a quote whose record's text expired reads `raw expired` and is not
+    /// shown, in the claim's view, `get` and `cite`; the claim is quote-only, and `get` of the
+    /// record says its raw expired.
+    #[test]
+    fn an_expired_quote_is_withheld_and_said() {
+        use crate::claims::{ClaimOp, Evidence};
+        let mut s = Store::new();
+        let text = "Use the blue deploy key K-7731 for staging.";
+        let seq = s.said("s", R, 1_000, text);
+        let event = crate::raw::Event {
+            kind: "prompt".into(),
+            ..crate::raw::test_event(&serde_json::json!({ "prompt": text }).to_string())
+        };
+        let long = crate::curate::long_text(&event).unwrap();
+        let quote = "blue deploy key K-7731";
+        let evidence = Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: long.find(quote).unwrap() as i64,
+            length: quote.len() as i64,
+            sentence: 0,
+            quote: quote.into(),
+            claim_at: None,
+        };
+        let uid = crate::claims::uid("decision", &evidence);
+        let op = ClaimOp {
+            id: "c".into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: "Staging deploys use the blue key.".into(),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+            support: Vec::new(),
+        };
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap())])
+            .unwrap();
+        s.run();
+        let home = s.home.path().to_owned();
+        assert!(!claim(&home, &uid).unwrap().unwrap().quotes[0].expired);
+        s.raw.expire_for_test(&[seq]);
+        let view = claim(&home, &uid).unwrap().unwrap();
+        assert_eq!(view.label, "quote-only");
+        assert_eq!(
+            (view.quotes[0].text.as_str(), view.quotes[0].expired),
+            (EXPIRED_QUOTE, true)
+        );
+        let key = format!("{}:{seq}", s.raw.device());
+        let text = get(&home, &uid).unwrap().unwrap();
+        assert!(text.contains(&format!("- {key}: raw expired")), "{text}");
+        assert!(!text.contains("K-7731"), "{text}");
+        let record = get(&home, &key).unwrap().unwrap();
+        assert!(record.contains("raw expired"), "{record}");
+        let cited = cite(&home, std::slice::from_ref(&uid)).unwrap();
+        assert_eq!(cited[0]["label"], "quote-only");
+        let quote = &cited[0]["evidence"][0];
+        assert_eq!(
+            (&quote["quote"], &quote["live"], &quote["expired"]),
+            (
+                &serde_json::json!(EXPIRED_QUOTE),
+                &serde_json::json!(false),
+                &serde_json::json!(true)
+            )
+        );
+    }
+
+    /// Codex's security review of Task 7: a claim's history leaves out a derivation whose quote a
+    /// tombstone the worker has yet to apply masks, as Anchors drops it at its next step, while the
+    /// claim, whose active derivation quotes a clean record, is still shown.
+    #[test]
+    fn a_history_entry_whose_quote_is_masked_waits_out_of_sight_until_anchors_drop_it() {
+        use crate::claims::{ClaimOp, Evidence};
+        use crate::raw::OpKind;
+        let mut s = Store::new();
+        let clean = "Use the staging deploy key.";
+        let leaked = "The staging key is acme-123456.";
+        let first = s.said("s", R, 1_000, clean);
+        let second = s.said("s", R, 2_000, leaked);
+        let quote = |seq: i64, text: &str| Evidence {
+            device: s.raw.device().to_owned(),
+            seq,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let derivation = |id: &str, body: &str, evidence: Vec<Evidence>, tier: i64| ClaimOp {
+            id: id.into(),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: body.into(),
+            evidence,
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier,
+            why: String::new(),
+            tainted: false,
+            support: Vec::new(),
+        };
+        // One claim (its uid is the first quote's), two derivations: the paid one is active.
+        let older = derivation(
+            "a",
+            "Use acme-123456 for staging.",
+            vec![quote(first, clean), quote(second, leaked)],
+            1,
+        );
+        let active = derivation(
+            "b",
+            "Use the staging deploy key.",
+            vec![quote(first, clean)],
+            3,
+        );
+        let uid = crate::claims::uid("decision", &active.evidence[0]);
+        for op in [older, active] {
+            let op = serde_json::to_value(op).unwrap();
+            s.raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }
+        s.run();
+        let bodies = |s: &Store| -> Vec<String> {
+            claim(s.home.path(), &uid)
+                .unwrap()
+                .unwrap()
+                .history
+                .into_iter()
+                .filter_map(|c| c.body)
+                .collect()
+        };
+        assert_eq!(
+            bodies(&s),
+            [
+                "Use acme-123456 for staging.",
+                "Use the staging deploy key."
+            ]
+        );
+        // The range is on the record's body as stored (`said`'s JSON).
+        let stored = serde_json::json!({ "prompt": leaked }).to_string();
+        let target = crate::raw::Target::Range {
+            device: s.raw.device().to_owned(),
+            seq: second,
+            offset: stored.find("acme").unwrap() as i64,
+            length: "acme-123456".len() as i64,
+        };
+        s.raw.append_tombstone(target).unwrap();
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        // The worker applies it between `claim`'s history read and its `Pending` read: the one
+        // snapshot keeps the two in step, and the dropped derivation stays out.
+        let home = s.home.path().to_owned();
+        BETWEEN.set(Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+        })));
+        assert_eq!(bodies(&s), ["Use the staging deploy key."]);
+        assert!(BETWEEN.take().is_none(), "the worker ran inside the read");
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let derivations: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM derivations WHERE uid = ?1",
+                [&uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(derivations, 1, "Anchors dropped the masked derivation");
+        let view = claim(s.home.path(), &uid).unwrap().unwrap();
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("123456"), "{json}");
+        let record = get(s.home.path(), &s.key(second)).unwrap().unwrap();
+        assert!(!record.contains("123456"), "{record}");
+    }
+
+    /// Task 8 (D9): the shortlist's candidates are the repository's delivered claims of spec
+    /// 4.4's kinds, all decided, at most `depth`: no proposal, done item,
+    /// retraction, repo fact, claim of another repository or claim the worker has yet to apply
+    /// the owner's change to.
+    #[test]
+    fn delivered_ranked_keeps_the_repositorys_decided_delivered_claims() {
+        let mut s = Store::new();
+        for i in 0..60 {
+            s.decided(R, 1_000 + i, &format!("Parser rule {i:02} stays."), &[]);
+        }
+        let one = |s: &mut Store, ts: i64, text: &str, kind: (&str, &str, &str)| {
+            let seq = s.said("s", R, ts, text);
+            s.claim(seq, text, kind, &[])
+        };
+        let open = one(
+            &mut s,
+            2_000,
+            "Parser open item stays.",
+            ("open item", "decided", "user"),
+        );
+        let left_out = [
+            one(
+                &mut s,
+                2_001,
+                "Parser proposal.",
+                ("decision", "proposed", "assistant proposal"),
+            ),
+            one(
+                &mut s,
+                2_002,
+                "Parser task done.",
+                ("open item", "done", "user"),
+            ),
+            one(
+                &mut s,
+                2_003,
+                "Parser retracted.",
+                ("decision", "retracted", "user"),
+            ),
+            one(
+                &mut s,
+                2_004,
+                "Parser fact.",
+                ("repo fact", "decided", "user"),
+            ),
+            s.decided("github.com/x/other", 2_005, "Parser elsewhere.", &[]),
+        ];
+        let corrected = s.decided(R, 2_006, "Parser corrected later.", &[]);
+        s.run();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let uids = |raw: &Raw, depth| -> Vec<String> {
+            delivered_ranked(raw, &k, &["parser"], None, R, depth)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect()
+        };
+        let all = uids(&s.raw, 100);
+        assert_eq!(all.len(), 62);
+        assert!(all.contains(&open) && all.contains(&corrected));
+        assert!(left_out.iter().all(|u| !all.contains(u)));
+        assert_eq!(uids(&s.raw, 50).len(), 50);
+        // An owner's correction the worker has not applied yet hides the claim (D3).
+        let op = serde_json::json!({"uid": corrected, "status": "retracted"});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, op)])
+            .unwrap();
+        assert!(!uids(&s.raw, 100).contains(&corrected));
+    }
+
+    #[test]
+    fn delivered_ranked_filters_vector_neighbors_before_the_depth_limit() {
+        let mut s = Store::new();
+        let seq = s.said("s", R, 1_000, "A proposed parser rule.");
+        let proposal = s.claim(
+            seq,
+            "A proposed parser rule.",
+            ("decision", "proposed", "assistant proposal"),
+            &[],
+        );
+        let ended = s.decided(R, 1_001, "The old parser rule.", &[]);
+        s.decided(R, 1_001, "The replacement parser rule.", &[&ended]);
+        let pending = s.decided(R, 1_002, "A parser rule awaiting correction.", &[]);
+        let first = s.decided(R, 1_003, "The first eligible parser rule.", &[]);
+        let second = s.decided(R, 1_004, "The second eligible parser rule.", &[]);
+        s.run();
+        let op = serde_json::json!({"uid": pending, "status": "retracted"});
+        s.raw
+            .append_ops(&[(crate::raw::OpKind::Correction, op)])
+            .unwrap();
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        k.execute(
+            "INSERT INTO vec_generation(embedder, state) VALUES ('test', 'active')",
+            [],
+        )
+        .unwrap();
+        for (i, uid) in [&proposal, &ended, &pending, &first, &second]
+            .into_iter()
+            .enumerate()
+        {
+            let mut v = vec![0.0_f32; crate::embed::DIM];
+            v[0] = 0.99 - i as f32 * 0.1;
+            v[1] = (1.0 - v[0] * v[0]).sqrt();
+            let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let id = i as i64 + 1;
+            k.execute(
+                "INSERT INTO vectors(embedder, src_sha, vec) VALUES ('test', ?1, ?2)",
+                params![uid, blob],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vector_keys(id, embedder, kind, key, src_sha)
+                 VALUES (?1, 'test', 'c', ?2, ?2)",
+                params![id, uid],
+            )
+            .unwrap();
+            k.execute(
+                "INSERT INTO vec_index(rowid, embedder, kind, repo, ts, session, embedding)
+                 VALUES (?1, 'test', 'c', ?2, 1000, 's', vec_bit(?3))",
+                params![id, R, crate::embed::bits(&v)],
+            )
+            .unwrap();
+        }
+        let mut vector = vec![0.0; crate::embed::DIM];
+        vector[0] = 1.0;
+        let found: Vec<String> = delivered_ranked(&s.raw, &k, &[], Some(&vector), R, 2)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.uid)
+            .collect();
+        assert_eq!(found, vec![first, second]);
+    }
+
+    /// Task 8 (D9): each text's full-text list and the vector list are fused by RRF, so a claim
+    /// only the query vector finds is a candidate, and a claim only one text matches is too; the
+    /// vector list keeps to the repository's decided claims as the full-text lists do.
+    #[test]
+    fn delivered_ranked_fuses_each_texts_list_and_the_vectors() {
+        use crate::embed::stub::Stub;
+        let stub = Stub::start();
+        let mut s = Store::new();
+        let lexical = s.decided(R, 1_000, "Keep parser errors on stderr.", &[]);
+        let filed = s.decided(R, 1_001, "The config loader lives in src/config.rs.", &[]);
+        let meaning = s.decided(R, 1_002, "Retries back off exponentially.", &[]);
+        let seq = s.said("s", R, 1_003, "Retries might add jitter.");
+        let proposal = s.claim(
+            seq,
+            "Retries might add jitter.",
+            ("decision", "proposed", "assistant proposal"),
+            &[],
+        );
+        let elsewhere = s.decided("github.com/x/other", 1_004, "Retries stop at five.", &[]);
+        s.run();
+        crate::embed_phase::fixture::config(&s, &stub);
+        crate::embed_phase::fixture::embed_all(&s);
+        let k = crate::knowledge::open(s.home.path()).unwrap();
+        let vec: Vec<u8> = k
+            .query_row(
+                "SELECT v.vec FROM vector_keys x JOIN vectors v
+                   ON v.embedder = x.embedder AND v.src_sha = x.src_sha
+                 WHERE x.kind = 'c' AND x.key = ?1",
+                [&meaning],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let vector: Vec<f32> = vec
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let found: Vec<String> = delivered_ranked(
+            &s.raw,
+            &k,
+            &["parser errors", "config.rs"],
+            Some(&vector),
+            R,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.uid)
+        .collect();
+        for uid in [&lexical, &filed, &meaning] {
+            assert!(found.contains(uid));
+        }
+        assert!(!found.contains(&proposal) && !found.contains(&elsewhere));
+        let two = delivered_ranked(
+            &s.raw,
+            &k,
+            &["parser errors", "config.rs"],
+            Some(&vector),
+            R,
+            2,
+        )
+        .unwrap();
+        assert_eq!(two.len(), 2);
+        // No vector, no claim that only the vector found; each text brings its own matches.
+        let plain = |texts: &[&str]| -> Vec<String> {
+            delivered_ranked(&s.raw, &k, texts, None, R, 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.uid)
+                .collect()
+        };
+        assert_eq!(plain(&["parser errors"]), std::slice::from_ref(&lexical));
+        assert_eq!(plain(&["parser errors", "config.rs"]), [lexical, filed]);
+    }
+
+    /// Task 10: a store embedded by the local model, which loads in `ms` (`embed::stub::local`).
+    fn local_store(ms: &str) -> Store {
+        let mut s = Store::new();
+        s.said("s", R, 1_000, "Parser caches stay in Redis.");
+        s.said("s", R, 2_000, "Deploy on Fridays.");
+        s.run();
+        let config = "[embedding]\nprovider = \"local\"\n";
+        std::fs::write(s.home.path().join("config.toml"), config).unwrap();
+        crate::embed::stub::local(s.home.path(), ms);
+        crate::embed_phase::fixture::embed_all(&s);
+        s
+    }
+
+    /// D14 (D8): a reader's first search starts the local model and answers from full text, and
+    /// the later ones use its vectors; nothing is counted. An excluded repository's query keeps
+    /// its vector, which leaves no machine (D13).
+    #[test]
+    fn a_query_while_the_model_loads_answers_from_full_text() {
+        let mut s = local_store("0");
+        let home = s.home.path();
+        // The reader's load waits for `go`, so no machine finishes it before the first search.
+        crate::embed::stub::local(home, "gate");
+        let first = query(home, &q("parser caches")).unwrap();
+        assert_eq!(first.vector, Vector::Skipped(VectorSkip::Loading));
+        assert!(!first.hits.is_empty());
+        std::fs::write(crate::embed::local_dir(home).join("go"), "").unwrap();
+        let t = Instant::now();
+        let used = loop {
+            let a = query(home, &q("parser caches")).unwrap();
+            if a.vector == Vector::Used {
+                break a;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "{:?}", a.vector);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!used.hits.is_empty());
+        // The worker's load, then this process's reader.
+        assert_eq!(crate::embed::stub::local_loads(home), 2);
+        let db = crate::providers_db::open(home).unwrap();
+        let counted: i64 = db
+            .query_row(
+                "SELECT count(*) FROM provider_calls WHERE role = 'query'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(counted, 0);
+        s.raw.exclude(R, false).unwrap();
+        assert_eq!(
+            query(home, &q("parser caches")).unwrap().vector,
+            Vector::Used
+        );
+    }
+
+    /// D14: one CLI search loads the local model only with `--vectors`, and then waits for it
+    /// (`CLI_EMBEDS_QUERIES` is false: a fresh process's load and embed miss MCP's 1.5 s).
+    #[test]
+    fn the_cli_embeds_by_its_rule() {
+        let s = local_store("100");
+        let home = s.home.path();
+        let loads = crate::embed::stub::local_loads(home);
+        let plain = query_cli(home, &q("parser caches"), false).unwrap();
+        assert_eq!(plain.vector, Vector::Skipped(VectorSkip::Cli));
+        assert!(!plain.hits.is_empty());
+        assert_eq!(crate::embed::stub::local_loads(home), loads);
+        let asked = query_cli(home, &q("parser caches"), true).unwrap();
+        assert_eq!(asked.vector, Vector::Used);
+        assert_eq!(crate::embed::stub::local_loads(home), loads + 1);
+    }
+
+    /// Parity row 31 (Codex and CodeRabbit on #560): a newer record warms the model; at the
+    /// viewer's start, the newest one does when it is recent, as the session start that started
+    /// it, and not when it is older than `WARM_IDLE`.
+    #[test]
+    fn a_new_or_recent_hook_record_warms_the_model() {
+        let now = 100 * 60 * 60 * 1_000;
+        let min = 60 * 1_000;
+        assert!(warms(None, (5, now - min), now));
+        // Decision 56: within four hours, and not after them.
+        assert!(warms(None, (5, now - 239 * min), now));
+        assert!(!warms(None, (5, now - 241 * min), now));
+        assert!(!warms(Some(5), (5, now), now));
+        assert!(warms(Some(5), (6, now - 241 * min), now));
+    }
+
+    /// Decision 71: the warm set is read while the hooks record, first at once, then every five
+    /// minutes; not once they have been quiet half an hour, nor with none recorded. A slow read
+    /// keeps the wait, a second slow one in a row doubles it up to an hour, a quick one brings it
+    /// back to five minutes, and a failed one keeps the wait as it was.
+    #[test]
+    fn the_warm_set_is_read_while_the_hooks_record_and_less_when_slow() {
+        let min = 60 * 1_000;
+        let now = 100 * 60 * min;
+        let mut w = Warmth::default();
+        assert!(!w.due(now, None), "no hook record");
+        assert!(!w.due(now, Some(now - 31 * min)), "the hooks quiet");
+        assert!(
+            w.due(now, Some(now - 29 * min)),
+            "at once while they record"
+        );
+        let quick = Some(Duration::from_millis(600));
+        let slow = Some(Duration::from_secs(16));
+        w.read(now, quick);
+        assert!(!w.due(now + 4 * min, Some(now)));
+        assert!(w.due(now + 5 * min, Some(now)));
+        let wait = |w: &Warmth, from: i64| {
+            // The hooks recording all along.
+            (1..=120)
+                .find(|m| w.due(from + m * min, Some(from + m * min)))
+                .unwrap()
+        };
+        let mut at = now;
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 5, "one slow read keeps the wait");
+        for expected in [10, 20, 40, 60, 60] {
+            at += 60 * min;
+            w.read(at, slow);
+            assert_eq!(wait(&w, at), expected);
+        }
+        at += 60 * min;
+        w.read(at, quick);
+        assert_eq!(wait(&w, at), 5, "a quick read brings it back");
+        w.read(at, None);
+        assert_eq!(wait(&w, at), 5, "a failed read keeps the wait");
+        w.read(at, slow);
+        w.read(at, None);
+        w.read(at, slow);
+        assert_eq!(wait(&w, at), 10, "and comes between two slow reads unseen");
+    }
+
+    /// Decision 71: reading the warm set touches every table of it that is made and passes over
+    /// one that is not: a store with records reads, a knowledge.db with one of its tables reads that
+    /// one, and a home with no knowledge.db reads nothing, makes none and says it read none.
+    #[test]
+    fn the_warm_set_reads_what_is_made() {
+        let mut s = Store::new();
+        s.imported_all(vec![(
+            "obs-1".into(),
+            "import",
+            "feature",
+            1_000,
+            "Nebula".to_owned(),
+        )]);
+        s.run();
+        assert!(warm_pages(s.home.path()).unwrap().is_some());
+        let partial = Store::new();
+        Connection::open(partial.home.path().join("knowledge.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE imported(body TEXT)")
+            .unwrap();
+        assert!(
+            warm_pages(partial.home.path()).unwrap().is_some(),
+            "a store not made whole"
+        );
+        // No knowledge.db (as while a rebuild set it aside): nothing read, so looked at again soon.
+        assert_eq!(warm_pages(Store::new().home.path()).unwrap(), None);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(warm_pages(empty.path()).unwrap(), None);
+        assert!(!empty.path().join("knowledge.db").exists());
+    }
+
+    /// Codex on #830: the warm read gives raw.lock back every `hold`, so a forget's or a restore's
+    /// swap, which waits 10 s for it, gets it while a slow read goes on, and the read goes on
+    /// after it.
+    #[test]
+    fn a_slow_warm_read_lets_a_swap_through() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let waited = started.elapsed();
+        drop(swap);
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(reading.join().unwrap().unwrap().is_some());
+    }
+
+    /// cubic on #830: a knowledge.db replaced between two holds of the warm read (a rebuild's) makes
+    /// the read no read, since the place it reached in the old file means nothing in the new one.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_replaced_between_holds_is_no_read() {
+        let mut s = Store::new();
+        s.imported_all(
+            (0..300)
+                .map(|n| {
+                    (
+                        format!("obs-{n}"),
+                        "import",
+                        "feature",
+                        1_000 + n,
+                        "Nebula".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        s.run();
+        let Store { home, raw } = s;
+        drop(raw);
+        let path = home.path().to_owned();
+        let reading = std::thread::spawn(move || {
+            WARM_ROW_DELAY.set(Duration::from_millis(10));
+            warm_pages_holding(&path, Duration::from_millis(200))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let swap = crate::raw::lock_for_swap(home.path()).unwrap();
+        let k = home.path().join("knowledge.db");
+        let copy = home.path().join("knowledge.db.copy");
+        std::fs::copy(&k, &copy).unwrap();
+        std::fs::rename(&copy, &k).unwrap();
+        drop(swap);
+        assert_eq!(reading.join().unwrap().unwrap(), None);
+    }
+
+    /// Codex on #830: the warm read goes through a value's overflow pages, which `length()` of a
+    /// BLOB leaves unread: with the chain of a large value's overflow pages broken, the read fails
+    /// where `length()` does not.
+    #[test]
+    fn the_warm_read_reads_a_large_value_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA page_size = 4096; CREATE TABLE t(b BLOB);
+                 INSERT INTO t VALUES (randomblob(200000));",
+            )
+            .unwrap();
+        // Page 1 is the schema's, 2 the table's, and the value goes on through pages 3, 4 and
+        // on: the first four bytes of page 4 name the next, here one past the file's end.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[3 * 4096..3 * 4096 + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let c = Connection::open(&path).unwrap();
+        let length: i64 = c
+            .query_row("SELECT sum(length(b)) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(length, 200_000, "length() reads no overflow page");
+        let read = read_for(&c, "t", "b", None, Duration::MAX);
+        assert!(read.is_err(), "the warm read goes through them");
+    }
+
+    /// Parity row 31: the hooks recording again load the model of a home that embeds with it, and
+    /// nothing in a home that does not.
+    #[test]
+    fn warming_loads_the_model_only_where_it_embeds() {
+        let s = local_store("0");
+        let home = s.home.path();
+        let before = crate::embed::stub::local_loads(home);
+        warm(home);
+        let t = Instant::now();
+        while crate::embed::stub::local_loads(home) == before {
+            assert!(t.elapsed() < Duration::from_secs(5), "never loaded");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let other = Store::new();
+        crate::embed::stub::local(other.home.path(), "0");
+        warm(other.home.path());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(crate::embed::stub::local_loads(other.home.path()), 0);
+    }
+
+    /// Task 10: with the model gone from the home, a reader's search is full text and says why.
+    #[test]
+    fn a_search_without_the_local_model_says_so() {
+        let s = local_store("0");
+        let home = s.home.path();
+        std::fs::remove_file(crate::embed::local_dir(home).join("stub")).unwrap();
+        let a = query(home, &q("parser caches")).unwrap();
+        assert_eq!(a.vector, Vector::Skipped(VectorSkip::NoModel));
+        assert!(!a.hits.is_empty());
+    }
