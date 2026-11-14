@@ -1830,11 +1830,21 @@ fn masks_more(new: &str, old: &str) -> bool {
 /// The made-up value of #537's tests. Since #985 curl-user reads a credential wherever it
 /// stands, a passed-over value after it or not, and the looks of #537 have nothing left to
 /// find there. What they still add to a scan is a value gitleaks' rule takes and curl-user
-/// passes over: here a password that starts with the placeholder curl-user knows
-/// (`パスワード`), which is of word characters and over the entropy for gitleaks' rule. The
-/// tests of the looks use it, so that they still say what the looks do.
+/// passes over: here the placeholder curl-user knows (`パスワード`) with Japanese after it, which
+/// is of word characters and over the entropy for gitleaks' rule (an ASCII character after the
+/// word would make it a password curl-user masks, V14-31). The tests of the looks use it, so that
+/// they still say what the looks do.
 fn looks_only(mark: &str) -> String {
     format!("パスワード{mark}")
+}
+
+/// `n` in `digits` full-width digits: a suffix that keeps a `looks_only` value one curl-user
+/// passes over.
+fn wide(n: usize, digits: usize) -> String {
+    format!("{n:0digits$}")
+        .chars()
+        .map(|c| char::from_u32(c as u32 - u32::from('0') + u32::from('０')).unwrap())
+        .collect()
 }
 
 /// #537: curl-auth-user's `.*` takes the last `-u` in its reach. When that one is a value the
@@ -1843,7 +1853,7 @@ fn looks_only(mark: &str) -> String {
 #[test]
 fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one_before() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     for last in ["bob:pass", "a:b"] {
         let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
         // The scan before #537.
@@ -1863,7 +1873,7 @@ fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one
         scan(&line, &rules).0,
         "curl -u [REDACTED] https://h.test -u bob:pass -u $USER:$PASS"
     );
-    let line = format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} bob:pass");
+    let line = format!("curl {U} \"admin:{pw}\" {U} ops:{pw}九 https://h.test {U} bob:pass");
     let (masked, found) = scan(&line, &rules);
     assert_eq!(
         masked,
@@ -1884,7 +1894,7 @@ fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one
 #[test]
 fn a_rescan_finds_the_credential_before_a_value_a_greedy_rule_passes_over() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     for last in ["bob:pass", "a:b"] {
         for user in [format!("admin:{pw}"), format!("\"admin:{pw}\"")] {
             let line = format!("curl -u {user} https://h.test -u {last} && echo ok");
@@ -1921,7 +1931,7 @@ fn lines_a_greedy_bundled_rule_passes_over_are_no_finding_however_many() {
 #[test]
 fn the_first_look_again_at_a_match_does_not_wait_for_the_others() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     let filler = "x".repeat(1024);
     let lines = LOOK_AGAIN / 1024 + 8;
     // The last line's part before `bob:pass` is longer than any before it, so no rest of a
@@ -1944,8 +1954,8 @@ fn the_first_look_again_at_a_match_does_not_wait_for_the_others() {
 #[test]
 fn the_further_looks_again_stop_at_what_they_may_read_and_mask_nothing_whole() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
-    let far = looks_only("Q2mX9tB4");
+    let pw = looks_only("暗号鍵七三九");
+    let far = looks_only("秘密語四八二");
     // One line: a credential, then values the rule passes over until the parts before them
     // add up to many times what the looks may read, then a credential it finds at once.
     let passed = " -u $USER:$PASS".repeat(2 * LOOK_AGAIN / 1024);
@@ -2059,6 +2069,27 @@ fn a_credential_given_to_curls_user_option_is_masked_whatever_follows_and_whatev
             serde_json::json!({ "input": want_flat }).to_string(),
             "{line}"
         );
+    }
+}
+
+/// A password that begins with the Japanese placeholder is no placeholder: curl-user masks it,
+/// in a record stored before the rule too, and passes over only the word alone or with Japanese
+/// after it (`curl_user_passes_over_what_is_no_credential`) (V14-31).
+#[test]
+fn a_password_that_starts_with_the_japanese_placeholder_is_masked() {
+    let rules = Rules::default();
+    let mark = format!("2024{}", "x");
+    for password in [
+        format!("パスワード!{mark}"),
+        format!("パスワード#{mark}"),
+        format!("パスワード{mark}"),
+    ] {
+        let line = format!("curl {U} admin:{password} https://h.test");
+        let want = format!("curl {U} {MASK} https://h.test");
+        assert_eq!(scan(&line, &rules).0, want, "{line}");
+        assert_eq!(outbound_with(&line, &rules), want, "{line}");
+        let body = serde_json::json!({ "input": { "command": line } }).to_string();
+        assert!(!field_ranges(&body, &rules).is_empty(), "{line}");
     }
 }
 
@@ -2322,6 +2353,8 @@ fn curl_user_passes_over_what_is_no_credential() {
         "curl -u ユーザー名:パスワード https://h.test",
         "curl -u admin:パスワード https://h.test",
         "curl -u 'ユーザー名:パスワード' https://h.test",
+        "curl -u ユーザー名:パスワードを入力 https://h.test",
+        "curl -u ユーザー名:パスワード。 https://h.test",
         // another tool's option
         "curl -s https://h.test/a; nuclei -u https://target.h.test/path -t cves",
         "curl -s https://h.test/a; sqlmap -u \"http://h.test/a.php?id=1\" --batch",
@@ -2739,11 +2772,14 @@ fn the_rules_with_an_end_of_their_own_take_a_value_that_ends_a_string() {
 #[test]
 fn the_looks_again_of_a_scan_share_one_count() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    // One character: the counts below were set for the length of the ASCII value it replaced.
+    let pw = looks_only("鍵");
     // 64 values the looks find, then 92 at or below the rule's entropy, on one line: the looks
     // pass over the 92 and find values from the last one back, while the count lasts (24 of
     // them, when this was written).
-    let credentials: String = (0..64).map(|i| format!(" -u c{i:02}:{pw}{i:02}")).collect();
+    let credentials: String = (0..64)
+        .map(|i| format!(" -u c{i:02}:{pw}{}", wide(i, 2)))
+        .collect();
     let line = format!("curl{credentials}{}", " -u a:b".repeat(92));
     let (masked, found) = scan(&line, &rules);
     assert!(
@@ -2758,15 +2794,18 @@ fn the_looks_again_of_a_scan_share_one_count() {
     // longer than the count, so there is none.
     let filler = "x".repeat(1024);
     let credentials: String = (0..300)
-        .map(|i| format!(" -u c{i:03}:{pw}{i:03} https://h.test/{filler}"))
+        .map(|i| format!(" -u c{i:03}:{pw}{} https://h.test/{filler}", wide(i, 3)))
         .collect();
     let line = format!("curl{credentials} -u bob:pass");
     assert!(line.len() > LOOK_AGAIN);
     let (masked, found) = scan(&line, &rules);
     assert_eq!(found.len(), 1, "{} found", found.len());
-    assert!(!masked.contains(&format!("c299:{pw}299")), "the last one");
     assert!(
-        masked.contains(&format!("c298:{pw}298")),
+        !masked.contains(&format!("c299:{pw}{}", wide(299, 3))),
+        "the last one"
+    );
+    assert!(
+        masked.contains(&format!("c298:{pw}{}", wide(298, 3))),
         "the one before it"
     );
 }
@@ -2789,7 +2828,7 @@ extra_rules = [
 ]"#,
     )
     .unwrap();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
     let text = format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\ntrigger {far}");
     assert_eq!(
@@ -2841,7 +2880,7 @@ extra_rules = [
 fn the_findings_of_the_looks_again_are_where_their_masks_are() {
     let rules = user("[redaction]\nextra_rules = [{ id = \"ticket\", regex = 'ticket-[0-9]{5}' }]")
         .unwrap();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     let line = format!("ticket-11111 curl {U} admin:{pw} https://h.test {U} bob:pass ticket-22222");
     let (masked, found) = scan(&line, &rules);
     assert_eq!(
@@ -2856,7 +2895,7 @@ fn the_findings_of_the_looks_again_are_where_their_masks_are() {
         at,
         [
             ("user:ticket", 0, 12),
-            ("curl-auth-user", 19, 29),
+            ("curl-auth-user", 19, format!("admin:{pw}").len()),
             ("user:ticket", 57, 12)
         ]
     );
@@ -2871,7 +2910,7 @@ fn the_findings_of_the_looks_again_are_where_their_masks_are() {
 #[test]
 fn the_gate_and_what_it_hides_agree_where_capture_looks_again() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     for last in ["bob:pass", "a:b"] {
         let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
         assert_ne!(scan(&line, &rules).0, line, "capture looks again");
@@ -2886,7 +2925,7 @@ fn the_gate_and_what_it_hides_agree_where_capture_looks_again() {
 /// stays, and the credential before it is found.
 #[test]
 fn a_value_the_user_keeps_stays_where_the_rule_looks_again() {
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     let own = format!("deploy:Kd7w{}", "Q2mX9tB4"); // split: scanners
     let toml = format!("[redaction]\nallowlist = [\"{}\"]", short_hash_full(&own));
     let rules = user(&toml).unwrap();
@@ -2906,7 +2945,7 @@ fn a_value_the_user_keeps_stays_where_the_rule_looks_again() {
 #[test]
 fn a_cut_text_is_looked_at_again_as_it_is_stored() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     // Eleven line breaks between the `curl` and the `-u`: more than the rule reads on.
     let text = format!(
         "curl https://h.test\n{}\n{}{}\n {U} admin:{pw} {U} bob:pass\n",
@@ -2934,7 +2973,7 @@ fn a_cut_text_is_looked_at_again_as_it_is_stored() {
 #[test]
 fn a_rescan_finds_nothing_new_where_capture_looked_again() {
     let rules = Rules::default();
-    let pw = looks_only("N3kL7pW2");
+    let pw = looks_only("暗号鍵七三九");
     for line in [
         format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
         format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} a:b"),
