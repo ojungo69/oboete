@@ -937,6 +937,9 @@ button.my-work-open:focus-visible { outline: none; }
 .my-work-suggestion { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .my-work-suggestion p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .my-work-suggestion .actions { display: flex; gap: 6px; }
+/* Above the card's stretched link, as the chips and More are: a click on Join or Not this opened
+   the request instead. */
+.my-work-card button.my-work-answer { position: relative; z-index: 1; }
 .my-work-progress { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; color: var(--muted); font-size: 12.5px; }
 .my-work-meter { width: 7rem; height: 8px; accent-color: var(--accent); }
 .my-work-estimate { font-style: italic; }

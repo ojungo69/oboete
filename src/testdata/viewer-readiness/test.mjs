@@ -7665,3 +7665,65 @@ for(const [language,said] of [['en','Waiting: transcripts that were being writte
 run('lang="en"');
 console.log('PASS: #947: a transcript import says what its waiting count is, in the preview and in the result, JA/EN');
 }
+
+// #1003: a maintenance preview's or run's refusal stays across the status reads after it, which the
+// page's poll makes every 3 s, until the person previews or runs again or changes the operation;
+// what a status read settles (the status could not be read, an outcome was unknown) goes when one
+// answers.
+{
+const run=code=>vm.runInContext(code,ctx);
+const json=(value,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=>'application/json'},json:async()=>value});
+const saved=ctx.fetch;
+let started=null;
+ctx.fetch=(url,options)=>{
+  if(options?.method==='POST'&&url==='/api/maintenance/start')return Promise.resolve(started);
+  if(url.startsWith('/api/maintenance?'))return Promise.resolve(json({available:true,active:null,last:null}));
+  return new Promise(()=>{});
+};
+run("globalThis.__md={kind:'rebuild',status:null,error:'maintenance_preview_failed',unknown:false,preview:null,confirmed:false}");
+await run('refreshMaintenance(__md)');
+assert.equal(run('__md.error'),'maintenance_preview_failed','a refused preview stays across a status read');
+for(const code of ['maintenance_status_unavailable','maintenance_unknown','maintenance_recurate_prepare_unknown']){
+  run(`__md.error=${JSON.stringify(code)}`);
+  await run('refreshMaintenance(__md)');
+  assert.equal(run('__md.error'),null,`${code} goes when a status read answers`);
+}
+started=json({code:'maintenance_busy'},409);
+const hadCrypto=Object.hasOwn(ctx,'crypto');
+if(!hadCrypto)ctx.crypto=globalThis.crypto;
+run("__md.preview={preview_key:'k'};__md.confirmed=true");
+await run('startMaintenance(__md,form,false)');
+assert.equal(run('__md.error'),'maintenance_busy','a refused run stays across the status read after it');
+if(!hadCrypto)delete ctx.crypto;
+ctx.fetch=saved;
+run('delete globalThis.__md');
+console.log('PASS: #1003: a refused maintenance preview or run keeps its reason across the status reads, and what a read settles goes');
+}
+
+// A6-01: each button drawn in a My Work card, but the card's own link, is above the link that
+// covers the card (app.css: `position: relative; z-index`). Join and Not this were under it, so a
+// click on either opened the request instead.
+{
+const run=code=>vm.runInContext(code,ctx);
+const now=Date.now(),H=3600000;
+const req=(id,over={})=>({id,title:`Request ${id}`,summary:`Summary ${id}`,next:null,copy:'recorded',updating:false,status:'working',
+  updated:now-H,started:now-5*H,agents:['claude'],sessions:[{agent:'claude',id:`c:claude:${id}`}],projects:['alpha'],
+  repos:['github.com/o/alpha'],ask:{id:'dev:1',ts:now-5*H,text:`Ask ${id}`,from:'prompt'},follow_ups:[],
+  updates:[{ts:now-H,text:`Summary ${id}`}],work:[],summaries:[],cards:[],...over});
+const above=fs.readFileSync(sourcePath.replace(/app\.js$/,'app.css'),'utf8').split('}')
+  .filter(rule=>/position:\s*relative/.test(rule)&&/z-index:\s*[1-9]/.test(rule))
+  .flatMap(rule=>rule.split('{')[0].split(',')).map(selector=>selector.split('*/').pop().trim());
+const shown=run('view');
+run(`view='my_work';Object.assign(mw,{rows:null,filter:"all",query:"",project:"",range:"all",sort:"attention",agent:null,request:null,work:null,back:null,pending:null,layout:"cards"});mw.changed.clear();mw.unread.clear()`);
+ctx.__rows={requests:[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:{id:'p1',title:'Parser',conversation:{id:'c:claude:s2'}}})],unlinked:0};
+run('myWorkAccept(globalThis.__rows);myWorkDraw()');
+const buttons=document.getElementById('panel').querySelectorAll('.my-work-card').flatMap(card=>card.querySelectorAll('button'))
+  .filter(b=>!b.className.split(' ').includes('my-work-open'));
+assert(buttons.some(b=>b.dataset.action==='my-work.suggestion.join'),'a card with a suggestion draws Join');
+for(const b of buttons)
+  assert(b.className.split(' ').some(c=>above.includes(`.my-work-card button.${c}`)),
+    `${b.dataset.action||b.className} is above the card's link: ${above.join(' | ')}`);
+delete ctx.__rows;
+run(`view=${JSON.stringify(shown)}`);
+console.log('PASS: A6-01: each button in a My Work card but its link is above the link that covers the card');
+}
