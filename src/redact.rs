@@ -4425,6 +4425,10 @@ extra_rules = [
             "{\"curl -u \":[{ \"X-Foo\": \"abc\"}]}",
             "x = [\"curl -u \",key:val,\"X-Foo\": \"abc\"]",
             "x = ['curl -u ',key:val,'X-Foo', 'abc']",
+            "s = 'curl -u admin:'%f('X-Foo', 'abc')",
+            // the same where a value would stand right after the option, with nothing between
+            "x = \"curl -u\"[10:n]+\"X-Foo\"",
+            "x = 'curl -u'[10:n]+'X-Foo'",
             // removed lines of a diff: a `-` and a word at a line's start are no option with
             // its value right after it, and a key with no password is not read there (#984)
             "@@ -1,9 +0,0 @@\n-build-arm64:\n-  script:\n-    - curl -fsS https://h.test/install.sh\n-user1:\n-ubuntu2204:\n-results22: ok\n-queue_7:\n-url:http://h.test/a\n-count12: 3\n-sum_256: abc\n",
@@ -4543,6 +4547,12 @@ extra_rules = [
                     "{out}"
                 );
             }
+            // as a tool's flattened field, where the quotes are escaped ones
+            let flat = serde_json::json!({ "command": text, "description": "Shows: it" });
+            let flat = flat.to_string();
+            for out in [scan(&flat, &own).0, outbound_with(&flat, &own)] {
+                assert!(!out.contains(&far), "{flat}: {out}");
+            }
         }
         // What is left of the reading, pinned and not wanted: the quote that closes the string
         // has another character after it than those above, and the next string starts with no
@@ -4554,6 +4564,24 @@ extra_rules = [
         let left = format!("s = \"curl -u {MASK}\", \"{far}\")");
         assert_eq!(scan(&text, &own).0, left);
         assert_eq!(outbound_with(&text, &own), left);
+        // The same where the first quote stands right after the option and a blank.
+        let text = format!("{{\"curl {U} \":[{{ \"-X-Foo\": \"{far}\"}}]}}");
+        let left = format!("{{\"curl -u {MASK}\": \"{far}\"}}]}}");
+        assert_eq!(scan(&text, &own).0, left);
+        assert_eq!(outbound_with(&text, &own), left);
+        // What the rule on the closing quote costs, pinned and not wanted (#984): a value in
+        // quotes with a word character right after it is not read. A shell joins the two parts
+        // into one word. It is stored as written, as on `main`.
+        let defaults = Rules::default();
+        let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+        for text in [
+            format!("curl -s https://h.test {U} admin:\"{pw}\"more && echo ok"),
+            format!("curl -s https://h.test {U} \"admin:{pw}\"x && echo ok"),
+            format!("curl -s https://h.test {U} 'admin:{pw}'2>/dev/null"),
+        ] {
+            assert_eq!(scan(&text, &defaults).0, text);
+            assert_eq!(outbound_with(&text, &defaults), text);
+        }
     }
 
     /// #985, what a mask costs: it takes the text it covers from every rule that reads the masked
