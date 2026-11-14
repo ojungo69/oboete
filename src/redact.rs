@@ -4411,6 +4411,7 @@ extra_rules = [
             // path in quotes after another tool's option, a command that ends on the option and
             // a blank
             "grep -rU \"name: curl\" docs/",
+            "rg -U \"name: curl\" docs/",
             "rg -U 'redact::tests' src/ # as curl does",
             "curl -s https://h.test/a; bash -c 'date -u '; echo \"at: noon\"; echo 'done'",
             // and what follows a string in code: `)`, `;`, `+`, `.`
@@ -4433,6 +4434,14 @@ extra_rules = [
             // its value right after it, and a key with no password is not read there (#984)
             "@@ -1,9 +0,0 @@\n-build-arm64:\n-  script:\n-    - curl -fsS https://h.test/install.sh\n-user1:\n-ubuntu2204:\n-results22: ok\n-queue_7:\n-url:http://h.test/a\n-count12: 3\n-sum_256: abc\n",
             "curl -fsS https://h.test/a; make -build2: all",
+            // another tool's option that holds a `u` and a colon: a letter before the `u`
+            // takes an argument in curl (`X`, `o`, `d`, `z`) and so ends a cluster there
+            "javac -Xplugin:ErrorProne -d out src/CurlClient.java",
+            "csc -nologo -out:bin/app.exe -debug:full Program.cs && curl -s https://h.test",
+            concat!(
+                "curl -s https://h.test/a; rsync -avz",
+                "u deploy@h.test:/srv/www/ ./backup/"
+            ),
         ] {
             assert_eq!(alone(line), vec![], "{line}");
             let flat =
@@ -4446,7 +4455,7 @@ extra_rules = [
             format!("curl -s https://h.test/a; docker run --rm {U} node:node alpine id"),
             format!("curl -s https://h.test/a | sed {U} 's/abc:def/ghi/'"),
             format!(
-                "curl -s https://h.test/a; rsync -avz{} deploy@h.test:/srv/www/ ./backup/",
+                "curl -s https://h.test/a; rsync -a{} deploy@h.test:/srv/www/ ./backup/",
                 "u"
             ),
             // a quote that closes a string after `user:`, where another character than those
@@ -4569,6 +4578,18 @@ extra_rules = [
         let left = format!("{{\"curl -u {MASK}\": \"{far}\"}}]}}");
         assert_eq!(scan(&text, &own).0, left);
         assert_eq!(outbound_with(&text, &own), left);
+        // Where the next string starts with no word character, only the password's first
+        // character keeps the quote from opening one. Three of those characters, each alone
+        // after the quote: the end of a JSON object, of a JSON array, of a statement.
+        for text in [
+            format!("{{\"a\": {{\"command\": \"curl {U} admin:\"}}, \"-X-Foo\": \"{far}\"}}"),
+            format!("{{\"args\": [\"curl {U} admin:\"], \"-X-Foo\": \"{far}\"}}"),
+            format!("cmd = \"curl {U} admin:\"; h(\"-X-Foo\", \"{far}\")"),
+        ] {
+            for out in [scan(&text, &own).0, outbound_with(&text, &own)] {
+                assert!(!out.contains(&far), "{text}: {out}");
+            }
+        }
         // What the rule on the closing quote costs, pinned and not wanted (#984): a value in
         // quotes with a word character right after it is not read. A shell joins the two parts
         // into one word. It is stored as written, as on `main`.

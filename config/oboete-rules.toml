@@ -112,8 +112,8 @@ regexes = ['''(?i)--(?:max|min|num)[-_](?:[a-z0-9]+[-_])*token[ \t]+["']?[0-9]+[
 
 [[rules]]
 id = "curl-user"
-description = "The user:password given to curl's -u / --user or -U / --proxy-user, as one word of a shell: whatever follows it, of any characters, the option alone or last in a cluster of short ones (-su)"
-regex = '''(?:(?:^|[ \t\n\r])(?:-[A-Za-z0-9#]*?[uU]|--(?:proxy-)?user)(?:=|[ \t]{1,5})(?:((?:"(?:[^"\\\r\n]|\\[^nr]){3,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:"(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}"(?-u:\b{end-half})|'(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}'(?-u:\b{end-half})|<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:(?:(?:[^:"\\\r\n]|\\[^nr]){3,})?:(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}|(?:[^:"\\\r\n]|\\[^nr]){3,}:)"(?-u:\b{end-half})|'(?:(?:(?:[^:'\\\r\n]|\\[^nr]){3,})?:(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}|(?:[^:'\\\r\n]|\\[^nr]){3,}:)'(?-u:\b{end-half})|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"\\\r\n]{3,})?:[^"\\\s,:;+.)}\]][^"\\\r\n]{2,}|[^:"\\\r\n]{3,}:)\\+"(?-u:\b{end-half}))|[ \t]-[A-Za-z0-9#]*?[uU](?:((?:[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}"(?-u:\b{end-half})|'(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}'(?-u:\b{end-half}))|\\+"((?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,})\\+"(?-u:\b{end-half})))'''
+description = "The user:password given to curl's -u / --user or -U / --proxy-user, as one word of a shell: whatever follows it, of any characters, the option alone or last in a cluster of curl's short options that take no argument (-su)"
+regex = '''(?:(?:^|[ \t\n\r])(?:-[#0-46BGIJLMNORSVZafgijklnpqsv]*?[uU]|--(?:proxy-)?user)(?:=|[ \t]{1,5})(?:((?:"(?:[^"\\\r\n]|\\[^nr]){3,}"|'(?:[^'\\\r\n]|\\[^nr]){3,}'|[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:"(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}"(?-u:\b{end-half})|'(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}'(?-u:\b{end-half})|<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:(?:(?:[^:"\\\r\n]|\\[^nr]){3,})?:(?:[^"\\\s,:;+.)}\]]|\\[^nr])(?:[^"\\\r\n]|\\[^nr]){2,}|(?:[^:"\\\r\n]|\\[^nr]){3,}:)"(?-u:\b{end-half})|'(?:(?:(?:[^:'\\\r\n]|\\[^nr]){3,})?:(?:[^'\\\s,:;+.)}\]]|\\[^nr])(?:[^'\\\r\n]|\\[^nr]){2,}|(?:[^:'\\\r\n]|\\[^nr]){3,}:)'(?-u:\b{end-half})|[\w$@.-]*[0-9][\w$@.-]*:)|\\+"((?:[^:"\\\r\n]{3,})?:[^"\\\s,:;+.)}\]][^"\\\r\n]{2,}|[^:"\\\r\n]{3,}:)\\+"(?-u:\b{end-half}))|[ \t]-[#0-46BGIJLMNORSVZafgijklnpqsv]*?[uU](?:((?:[\w$@.-]+(?:[+\\]+[\w$@.-]+)*)?:(?:<[^<>\s]{1,60}>|(?:[^\s"'\x60\\|&;()<>]|\\[^\s\\"'nrt])+)|"(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}"(?-u:\b{end-half})|'(?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,}'(?-u:\b{end-half}))|\\+"((?:[^:"'\s,\\]{3,})?:[^"'\s,\\]{3,})\\+"(?-u:\b{end-half})))'''
 keywords = ["curl"]
 entropy = 2
 # gitleaks' curl-auth-user (kept as it is) takes an unquoted value only of word characters, only
@@ -136,7 +136,10 @@ entropy = 2
 # quote, a backquote, `|&;()<>` or a backslash that escapes one of them. What it passes over is
 # in its own allowlist, each entry from the value's start: a placeholder, a variable or a
 # template to the value's end, a URL, a format of date and the Japanese placeholder by how they
-# start (so `-U https://<password>`, a user named `https`, is passed over as a URL).
+# start (so `-U https://<password>`, a user named `https`, is passed over as a URL). In a
+# cluster, the options before it are curl's short ones that take no argument (`-sSLu`): one that
+# takes an argument ends its cluster, so another tool's option that holds a `u` and a colon after
+# such a letter (`-Xplugin:ErrorProne`, `-out:bin/app.exe`, `-debug:full`) is no user option.
 [[rules.allowlists]]
 regexes = [
     # a placeholder for the password, whole (gitleaks matches these anywhere in the value); a full
