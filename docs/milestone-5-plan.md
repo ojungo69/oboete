@@ -1466,16 +1466,21 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
 
 #### 5a: 対象と preview
 
-- **対象**（repo キー R、登録時刻 S、端末 D。records と同じく S 以前で端末 D のもの）:
+- **対象**（repo キー R、登録時刻 S）: 既にあるものは、records の解決と同じく store の全端末の、preview の時点の
+  もの（CodeRabbit on #1011）。後から届くものを止める境界は 5d（records と同じ規則）で、選ぶ条件とは分ける。
   - 自前の work state op（`source` 無し、`body.repo == R`）と note（Import op、`source == "oboete-note"`、
     `body.repo == R`）。
   - 取り込み文書（Import op と ImportFiles）と取り込みの work state で、ラベルが R の読むラベルの集合 Λ(R)
     にあるもの。Λ(R) は読み手が R の取り込み履歴を選ぶ規則の和: repo キーの末尾の名前（`import::imported_scope`
-    / `imported_match`、D13）と、R の record が持つ各 cwd の checkout の名前（`import::names_of`、決定 52。
-    session start はこちらで取り込み履歴を選ぶ）。v1 由来の文書が持つ R 自身も入る。viewer（cwd が無い）から
-    でも同じ集合になるよう、cwd は R の record から取る。最終の集合は knowledge.db ではなく raw.db の op で
-    確かめる（knowledge.db は遅れも欠けもある）。赤いテスト: フォルダの名前が repo の名前と違う checkout で
-    session start が見せる取り込み履歴を、R の forget が取り残さない。
+    / `imported_match`、D13）と、R の checkout の名前（`import::names_of`、決定 52。session start はこちらで
+    取り込み履歴を選ぶ）。checkout は、R の record が持つ各 cwd と、forget を R の checkout の中で実行したときは
+    その cwd（viewer は cwd を持たないので record の cwd だけ）。名前の対応は checkout から名前への向きしか
+    無く、repo キーから checkout は引けない: record も無く、中で forget も実行しない checkout の名前は入らない
+    ので、preview は使った checkout と名前を出し、その checkout の中で実行すれば入ることを示す（CodeRabbit on
+    #1011）。v1 由来の文書が持つ R 自身も入る。最終の集合は knowledge.db ではなく raw.db の op で確かめる
+    （knowledge.db は遅れも欠けもある）。赤いテスト: フォルダの名前が repo の名前と違う checkout で session
+    start が見せる取り込み履歴を、R の forget が取り残さない（record の cwd から、と、record の無い checkout の
+    中で実行した forget から）。
 - **preview**（spec 6.2 の「Preview first」）: 種類ごとに数える。raw records、自前の work state（list 数と件数）、
   note、取り込み文書（一意な uid の数と op の数、ラベルごと）、ImportFiles、未保存の event（5e）。
   末尾の名前が同じ別の repo も同じ claude-mem のラベルを読むときは、そのラベルと「その repo からも消える」
