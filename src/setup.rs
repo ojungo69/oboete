@@ -3245,11 +3245,7 @@ pub fn doctor(home: &Path) -> Result<()> {
 pub(crate) fn on_path(bin: &str) -> bool {
     // Explicit native CLI actions retain symlink-backed launchers. Passive viewer
     // observations use launch_found and never follow Windows reparses.
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths)
-            .flat_map(|dir| launcher_files(&dir, bin))
-            .any(|file| file.is_file())
-    })
+    launcher(bin).is_some()
 }
 
 fn diagnostic_path_with<T>(
@@ -4042,9 +4038,16 @@ pub(crate) fn launcher(bin: &str) -> Option<PathBuf> {
 }
 
 fn launcher_in(paths: &std::ffi::OsStr, bin: &str, windows: bool) -> Option<PathBuf> {
-    std::env::split_paths(paths)
+    path_dirs(paths)
         .flat_map(|dir| launcher_files_for(&dir, bin, windows))
         .find(|path| path.is_file())
+}
+
+/// The directories of a `PATH` to look for launchers in. An empty or relative entry names the
+/// working directory or one under it, which may be a checkout that holds a planted launcher, so
+/// only absolute ones are.
+pub(crate) fn path_dirs(paths: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(paths).filter(|dir| dir.is_absolute())
 }
 
 #[cfg(test)]

@@ -1961,6 +1961,36 @@ fn a_windows_launcher_is_the_exe_then_the_cmd_before_the_sh_script() {
     assert_eq!(launcher_in(&both, "grok", true), None);
 }
 
+/// A `PATH` entry that is empty or relative names the working directory or one under it, which may
+/// be a checkout that holds a planted launcher: no launcher is taken from one.
+#[test]
+fn a_path_entry_that_is_not_absolute_gives_no_launcher() {
+    let file_in = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().is_file())
+            .map(|entry| entry.file_name().into_string().unwrap())
+    };
+    // A file of the working directory, which an empty entry names, and one of a directory under it.
+    let here = file_in(Path::new(".")).expect("a file in the working directory");
+    let (sub, file) = std::fs::read_dir(".")
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .find_map(|entry| file_in(&entry.path()).map(|file| (entry.file_name(), file)))
+        .expect("a directory with a file under the working directory");
+    for windows in [false, true] {
+        assert_eq!(launcher_in(std::ffi::OsStr::new(""), &here, windows), None);
+        assert_eq!(launcher_in(&sub, &file, windows), None);
+    }
+    let absolute = std::fs::canonicalize(&sub).unwrap();
+    assert_eq!(
+        launcher_in(absolute.as_os_str(), &file, false),
+        Some(absolute.join(&file))
+    );
+}
+
 /// A `.cmd` launcher found on `PATH` starts, with arguments as oboete gives a curator CLI (JSON
 /// with quotes and braces, and an empty one): Rust runs it through cmd.exe and refuses an
 /// argument it cannot escape there.
