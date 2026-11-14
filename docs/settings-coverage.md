@@ -22,8 +22,9 @@ is when a saved value is used: the worker reads its
 settings again for each window it curates, a hook reads its own at each event, and a key file is
 read at each call. "OS" is where the row works; "all" is WSL/Linux, macOS and Windows, with the
 real-machine checks spec-webui.md asks for at the end. "Test" names the test that proves the row,
-in `src/` unless a file is named; a slice fills in its rows' tests, and #94 closes when no row is
-left with "—" there.
+in `src/` unless a file is named (a test named with `settings.rs` is one of that module's tests,
+in `src/settings/tests.rs`: [code-layout.md](code-layout.md)); a slice fills in its rows' tests,
+and #94 closes when no row is left with "—" there.
 
 ### Curation and spending
 

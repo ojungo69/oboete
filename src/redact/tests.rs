@@ -1,0 +1,3530 @@
+use super::*;
+
+/// M4: a pattern is compiled once for every thread of the process, as the viewer's, one per
+/// connection, read the same rules: by threads that ask for it at once, and by one that asks
+/// later. A pattern that does not compile is not compiled again.
+#[test]
+fn a_pattern_is_compiled_once_for_every_thread() {
+    use std::sync::atomic::Ordering;
+    let c = Compiled::new(16);
+    let pattern = "m4-one-map-[0-9]{3}";
+    std::thread::scope(|s| {
+        let asked: Vec<_> = (0..8).map(|_| s.spawn(|| c.get(pattern))).collect();
+        for ask in asked {
+            assert!(ask.join().unwrap().unwrap().is_match("m4-one-map-123"));
+        }
+    });
+    let later = std::thread::scope(|s| s.spawn(|| c.get(pattern)).join().unwrap());
+    assert!(later.unwrap().is_match("m4-one-map-456"));
+    assert_eq!(c.compiles.load(Ordering::Relaxed), 1);
+    assert!(c.get("(unclosed").is_none() && c.get("(unclosed").is_none());
+    assert_eq!(c.compiles.load(Ordering::Relaxed), 2);
+    // The process's own map is the one `compiled` reads.
+    assert!(compiled(pattern).unwrap().is_match("m4-one-map-789"));
+}
+
+/// W1: while a `Warm` lives a thread takes one clone of a regex and uses it for every text;
+/// without one each use takes its own, as before. A `Warm` inside another ends nothing, and
+/// the last to go takes the thread's regexes with it.
+#[test]
+fn a_thread_keeps_one_clone_of_a_regex_while_a_warm_lives() {
+    let kept = || WARM.with(|w| (w.borrow().regexes.len(), w.borrow().taken));
+    let pattern = "w1-warm-[0-9]{3}";
+    assert!(compiled(pattern).unwrap().is_match("w1-warm-123"));
+    assert_eq!(kept(), (0, 0), "nothing is kept without a Warm");
+    let outer = warm();
+    for text in ["w1-warm-123", "w1-warm-456"] {
+        assert!(compiled(pattern).unwrap().is_match(text));
+    }
+    assert_eq!(kept(), (1, 1), "one clone for both uses");
+    let inner = warm();
+    assert!(compiled(pattern).unwrap().is_match("w1-warm-789"));
+    drop(inner);
+    assert_eq!(kept(), (1, 1), "a Warm inside another ends nothing");
+    // A pattern that does not compile is asked for once, and stays None.
+    assert!(compiled("(w1-unclosed").is_none() && compiled("(w1-unclosed").is_none());
+    assert_eq!(kept(), (2, 2));
+    drop(outer);
+    assert_eq!(kept().0, 0, "the last Warm takes the regexes with it");
+    assert!(compiled(pattern).unwrap().is_match("w1-warm-123"));
+    assert_eq!(kept(), (0, 2), "and nothing is kept after it");
+}
+
+/// W1: a thread's map starts again past its cap, and a regex it still holds is not taken
+/// again.
+#[test]
+fn a_threads_regexes_start_again_past_their_cap() {
+    let mut w = Warmed::default();
+    let take = |p: &'static str| move || Regex::new(p).ok();
+    assert!(w.get("a1", 2, take("a1")).is_some() && w.get("b2", 2, take("b2")).is_some());
+    assert!(
+        w.get("a1", 2, || panic!("a kept regex is not taken again"))
+            .is_some()
+    );
+    assert_eq!((w.regexes.len(), w.taken), (2, 2));
+    assert!(w.get("c3", 2, take("c3")).unwrap().is_match("c3"));
+    assert_eq!((w.regexes.len(), w.taken), (1, 3));
+    assert!(w.get("a1", 2, take("a1")).unwrap().is_match("a1"));
+    assert_eq!((w.regexes.len(), w.taken), (2, 4));
+    // What does not compile is kept as None, not asked for again.
+    assert!(w.get("(", 9, || None).is_none());
+    assert!(w.get("(", 9, || panic!("asked again")).is_none());
+}
+
+/// W1: a secret is masked with a `Warm` as without one: on the thread that made it, on
+/// another thread with its own, and right after a thread's map started again.
+#[test]
+fn a_secret_is_masked_with_a_warm_as_without() {
+    let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: secret scanners
+    let text = format!("token {key} ok");
+    let plain = redact(&text);
+    assert!(!plain.contains(&key) && plain.contains(MASK));
+    let _warm = warm();
+    assert_eq!(redact(&text), plain);
+    assert_eq!(redact(&text), plain, "the kept regex masks again");
+    assert!(
+        WARM.with(|w| w.borrow().regexes.len()) > 0,
+        "this thread kept what it used"
+    );
+    let other = std::thread::spawn({
+        let (text, plain) = (text.clone(), plain.clone());
+        move || {
+            let _warm = warm();
+            redact(&text) == plain && redact(&text) == plain
+        }
+    });
+    assert!(other.join().unwrap(), "another thread, with its own Warm");
+    // The map at its cap: the next regex starts it again, and the secret is masked all the same.
+    WARM.with(|w| {
+        let mut w = w.borrow_mut();
+        w.regexes.clear();
+        for i in 0..COMPILED_CAP {
+            w.regexes.insert(format!("w1-fill-{i}"), None);
+        }
+    });
+    assert_eq!(redact(&text), plain);
+    assert!(WARM.with(|w| w.borrow().regexes.len()) < COMPILED_CAP);
+}
+
+/// M4: past its cap the map starts again, so a process whose rules change does not keep every
+/// regex it has compiled; a pattern it still holds is not compiled again.
+#[test]
+fn the_compiled_map_keeps_at_most_its_cap() {
+    use std::sync::atomic::Ordering;
+    let c = Compiled::new(2);
+    let len = |c: &Compiled| c.cells.read().unwrap().len();
+    assert!(c.get("a1").is_some() && c.get("b2").is_some());
+    assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 2));
+    assert!(c.get("a1").is_some());
+    assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 2));
+    assert!(c.get("c3").is_some());
+    assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (1, 3));
+    assert!(c.get("a1").is_some());
+    assert_eq!((len(&c), c.compiles.load(Ordering::Relaxed)), (2, 4));
+}
+
+#[test]
+fn every_bundled_regex_compiles() {
+    let started = std::time::Instant::now();
+    let r = bundled();
+    let parse_ms = started.elapsed().as_millis();
+    let started = std::time::Instant::now();
+    let mut broken_allowlists = 0;
+    for rule in &r.rules {
+        let p = rule.regex.as_deref().unwrap();
+        assert!(compiled(p).is_some(), "rule {} does not compile", rule.id);
+        for a in &rule.allowlists {
+            // A broken allowlist regex only means fewer exemptions (masking stays on).
+            broken_allowlists += a.regexes.iter().filter(|p| compiled(p).is_none()).count();
+        }
+    }
+    for p in &r.global.regexes {
+        if compiled(p).is_none() {
+            eprintln!("global allowlist regex does not compile: {p}");
+            broken_allowlists += 1;
+        }
+    }
+    eprintln!(
+        "rules {} parse {parse_ms} ms, compile all {} ms, broken allowlist regexes {broken_allowlists}",
+        r.rules.len(),
+        started.elapsed().as_millis()
+    );
+    assert!(r.rules.len() > 200);
+    assert!(
+        broken_allowlists <= 4,
+        "known: curl-auth-user's [^]] (x2) and two global `{{\\d+}}` patterns"
+    );
+}
+
+#[test]
+fn masks_known_shapes_and_leaves_prose() {
+    let r = redact("key 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 and more");
+    assert_eq!(r, "key [REDACTED] and more");
+    assert_eq!(
+        redact("no secrets here, task-1 ok, the api key is stored elsewhere"),
+        "no secrets here, task-1 ok, the api key is stored elsewhere"
+    );
+    let pem = "x -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\nq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD==\n-----END RSA PRIVATE KEY----- y";
+    assert_eq!(redact(pem), "x [REDACTED] y");
+    // AWS's documented example ids are allowlisted by gitleaks; a real-shaped one is not.
+    assert_eq!(redact("AKIAIOSFODNN7EXAMPLE"), "AKIAIOSFODNN7EXAMPLE");
+    assert_eq!(redact("id AKIAQ7ZX6ML2VB4NR3TY here"), "id [REDACTED] here");
+    // generic-api-key keeps the assignment, masks the value; low-entropy values stay.
+    assert_eq!(
+        redact("api_key = \"q9Zx8mL2vB4nR7tY1wK3pS6d\""),
+        "api_key = \"[REDACTED]\""
+    );
+    assert_eq!(
+        redact("api_key = \"aaaaaaaaaaaaaaaaaaaa\""),
+        "api_key = \"aaaaaaaaaaaaaaaaaaaa\""
+    );
+    // generic-api-key passes a value with a stopword over (gitleaks' generic allowlist), and
+    // secret-assignment, which has none, masks it (#543).
+    assert_eq!(
+        redact("token = \"example_token_value_123\""),
+        "token = \"[REDACTED]\""
+    );
+    assert_eq!(
+        redact("Authorization: Bearer ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g ok"),
+        "Authorization: Bearer [REDACTED] ok"
+    );
+    assert_eq!(
+        redact(
+            "ANTHROPIC_API_KEY=sk-ant-api03-q9Zx8mL2vB4nR7tY1wK3pS6dq9Zx8mL2vB4nR7tY1wK3pS6d-AA"
+        ),
+        "ANTHROPIC_API_KEY=[REDACTED]"
+    );
+}
+
+fn token() -> String {
+    format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g") // split: secret scanners
+}
+
+/// Every finding points at a mask in the stored text, and none holds the value.
+fn check(stored: &str, found: &[Finding], secret: &str) {
+    assert!(!stored.contains(secret));
+    assert!(!format!("{found:?}").contains(secret));
+    for f in found {
+        assert_eq!(&stored[f.offset..f.offset + MASK.len()], MASK, "{f:?}");
+    }
+}
+
+#[test]
+fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
+    let key = token();
+    let text = "x".repeat(200_000) + " Authorization: Bearer " + &key; // past v1's 12,000
+    let (masked, found) = scan(&text, &Rules::default());
+    // Two rules may find the token (github-pat and a bearer rule): one mask, a finding each.
+    assert!(
+        found
+            .iter()
+            .any(|f| f.rule == "github-pat" && f.length == key.len()),
+        "{found:?}"
+    );
+    assert!(found.iter().all(|f| f.offset == found[0].offset));
+    assert_eq!(masked.matches(MASK).count(), 1);
+    check(&masked, &found, &key);
+    let (capped, again, cut) = scan_capped(&text, 256 * 1024, &Rules::default());
+    assert_eq!((capped, again, cut), (masked, found, None));
+}
+
+#[test]
+fn a_secret_across_a_cut_is_masked_in_what_is_kept() {
+    let key = token();
+    let cap = 64 * 1024;
+    for at in [cap / 2 - 10, cap / 2 + 3, 5 * cap - cap / 2 - 10] {
+        // The token straddles the head's cut, sits just past it, or straddles the tail's.
+        let mut text = "y ".repeat(5 * cap / 2);
+        text.replace_range(at..at + key.len() + 7, &format!("Bearer {key}"));
+        let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
+        assert_eq!(cut, Some(text.len()));
+        assert!(stored.len() < cap + 100);
+        for i in 8..=key.len() {
+            assert!(
+                !stored.contains(&key[i - 8..i]),
+                "fragment ending at {i}, token at {at}"
+            );
+        }
+        check(&stored, &found, &key);
+    }
+}
+
+#[test]
+fn a_key_block_cut_in_half_is_dropped_from_the_part_that_holds_it() {
+    let cap = 64 * 1024;
+    let block = format!(
+        "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+        "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(200)
+    );
+    // BEGIN before the head's cut, END past the margin: the rule never sees the whole block.
+    let text = "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap);
+    let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    assert!(
+        !stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----BEGIN"),
+        "{}",
+        &stored[..300]
+    );
+    // The same block across the tail's cut.
+    let text = "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100);
+    let (stored, _, _) = scan_capped(&text, cap, &Rules::default());
+    assert!(!stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----END"));
+}
+
+#[test]
+fn a_rule_that_needs_context_far_from_the_cut_still_masks() {
+    // curl-auth-user reads the whole line: `curl` is far outside any window around the cut.
+    let cap = 64 * 1024;
+    let pass = "usr:q9Zx8mL2vB4nR7tYw";
+    let text = "p\n".repeat(cap)
+        + "curl"
+        + &" ".repeat(40_000)
+        + &format!("-u '{pass}'\n")
+        + &"t\n".repeat(cap / 8);
+    let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    assert!(
+        !stored.contains("q9Zx8mL2vB4nR7tYw"),
+        "the tail kept the password"
+    );
+    check(&stored, &found, pass);
+}
+
+#[test]
+fn every_credential_on_a_greedy_line_is_masked() {
+    // curl-auth-user's `.*` reaches the last `-u` of a line: one pass finds one credential.
+    let creds = [
+        "usr:q9Zx8mL2vB4nR7tYw",
+        "adm:K3pS6dJ0aF5hU2cE",
+        "ops:Z6bD4kM7oQ1sV3xa",
+        "dev:W8eR2tY6uI0pL4k",
+    ];
+    let line: String = creds
+        .iter()
+        .map(|c| format!("curl -u '{c}' https://x ; "))
+        .collect();
+    let (stored, found) = scan(&line, &Rules::default());
+    for c in creds {
+        assert!(!stored.contains(c), "{c} kept: {stored}");
+    }
+    check(&stored, &found, creds[0]);
+    assert!(spans(&stored, &Rules::default()).is_empty());
+    // The same across a cut: head, middle and tail each hold some.
+    let cap = 64 * 1024;
+    let text = line.clone() + &" ".repeat(3 * cap) + &line + "\n" + &"t".repeat(cap / 4);
+    let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    for c in creds {
+        assert!(!stored.contains(c), "{c} kept across the cut");
+    }
+    check(&stored, &found, creds[1]);
+    assert!(spans(&stored, &Rules::default()).is_empty());
+    // More than MAX_PASSES on one line: the whole text is masked.
+    let line: String = (0..MAX_PASSES + 6)
+        .map(|i| format!("curl -u '{}' https://x ; ", creds[i % 4]))
+        .collect();
+    let (stored, found) = scan(&line, &Rules::default());
+    for c in creds {
+        assert!(!stored.contains(c), "{c} kept past the pass limit");
+    }
+    assert_eq!(stored, MASK);
+    check(&stored, &found, creds[2]);
+}
+
+/// The gate and its offsets agree on a claude-mem block a read cut before its end: what
+/// `hidden` leaves is what `outbound` shows.
+#[test]
+fn a_cut_memory_context_is_hidden_as_the_gate_removes_it() {
+    let tag = "claude-mem-context"; // built: this file must not hold the pair
+    let text = format!("# Title\n<{tag}>\n# Memory Context\n| #1 | tabs |");
+    let rules = Rules::default();
+    assert_eq!(outbound_with(&text, &rules), "# Title");
+    let runs = hidden(&text, &rules).unwrap();
+    assert_eq!(runs.last().map(|r| r.1), Some(text.len()));
+    assert_eq!(outbound_part(&text, 0..text.len(), &rules), "# Title");
+    // A read that begins inside the block: the part up to the closer's line is hidden.
+    let inside = format!("| #1 | tabs |\n</{tag}>\n# Rules");
+    assert_eq!(outbound_with(&inside, &rules), "# Rules");
+    assert_eq!(hidden(&inside, &rules).unwrap()[0].0, 0);
+    assert_eq!(outbound_part(&inside, 0..inside.len(), &rules), "# Rules");
+}
+
+#[test]
+fn a_uri_password_a_cookie_and_an_authorization_token_are_masked() {
+    // Split literals: secret scanners flag whole ones in the repository.
+    let pass = format!("hunter{}", "22");
+    let cookie = format!("sid={}; Path=/; HttpOnly", "q9Zx8mL2vB4n");
+    let token = format!("q9Zx8mL2{}", "vB4nR7tYw");
+    let cases = [
+        (
+            format!("psql postgres://app:{pass}@db.internal:5432/prod"),
+            pass.clone(),
+        ),
+        (
+            format!("redis-cli -u redis://:{pass}@cache:6379"),
+            pass.clone(),
+        ),
+        (format!("< Set-Cookie: {cookie}"), cookie.clone()),
+        (
+            format!("-H \"Cookie: sid={token}\" https://x.invalid/"),
+            token.clone(),
+        ),
+        (format!("{{\"Cookie\": \"{cookie}\"}}"), cookie.clone()),
+        (format!("-H 'Authorization: Token {token}'"), token.clone()),
+        (format!("Proxy-Authorization: {token}"), token.clone()),
+        (
+            format!("Set-Cookie: sid=\"{token}\"; Path=/"),
+            token.clone(),
+        ),
+        (
+            format!("Authorization: Digest username=\"u\", nonce=\"n\", response=\"{token}\""),
+            token.clone(),
+        ),
+        (
+            format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
+            token.clone(),
+        ),
+        (format!("Authorization: foo+bar_v2 {token}"), token.clone()),
+        (
+            format!("Authorization: Digest username=\"a\\\"b\", response=\"{token}\""),
+            token.clone(),
+        ),
+    ];
+    for (text, secret) in &cases {
+        let (stored, found) = scan(text, &Rules::default());
+        assert!(!found.is_empty(), "{text}: nothing found");
+        check(&stored, &found, secret);
+    }
+    // Not credentials: a user with no password, an address in a query, prose.
+    for text in [
+        "git clone ssh://git@github.com/o/r.git",
+        "https://host:8080/p?mail=me@example.com",
+        "Authorization: required for admins",
+        "Cookie: stored by the browser",
+    ] {
+        let (stored, found) = scan(text, &Rules::default());
+        assert!(found.is_empty(), "{text}: {found:?}");
+        assert_eq!(stored, text);
+    }
+    // A header quoted for the shell: its closing quote ends the cookie, not the line.
+    let (stored, _) = scan(&cases[3].0, &Rules::default());
+    assert!(stored.ends_with("\" https://x.invalid/"), "{stored}");
+}
+
+/// A JWT (header, payload, signature) encoded once more: 192 characters, three lines at the 76
+/// columns `base64` wraps at.
+fn base64_jwt() -> String {
+    [
+        "ZXlKaGJHY2lPaUpJVXpJMU5pSXNJblI1Y0NJNklrcFhWQ0o5",
+        "LmV5SnpkV0lpT2lJeE1qTTBOVFkzT0Rrd0lpd2libUZ0WlNJ",
+        "NklrRWdRaUlzSW1saGRDSTZNVFV4TmpJek9UQXlNbjAuYzJs",
+        "bmJtRjBkWEpsTFhOcFoyNWhkSFZ5WlMxemFXZHVZWFIxY21V",
+    ]
+    .concat()
+}
+
+/// gitleaks takes a rule's secret from its first group, and two of its rules have a first group
+/// that is not the secret: a repeat inside a Teams webhook's first GUID, and the header marker
+/// of a Base64-encoded JWT. Five and ten characters were masked and the rest was stored and
+/// sent. oboete's own rules take each whole.
+#[test]
+fn a_teams_webhook_and_a_base64_jwt_are_masked_whole() {
+    let guid = |first: &str| format!("{first}-4e5f-6a7b-8c9d-{}", "0e1f2a3b4c5d");
+    let (tenant, user, last) = (guid("1a2b3c4d"), guid("9f8e7d6c"), guid("0a9b8c7d"));
+    let key = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+    let teams = format!(
+        "curl -d @card.json https://contoso.webhook.office.com/webhookb2/{tenant}@{user}/IncomingWebhook/{key}/{last} -v"
+    );
+    let (stored, found) = scan(&teams, &Rules::default());
+    assert!(!found.is_empty(), "{stored}");
+    for part in [&tenant[9..], user.as_str(), key.as_str(), last.as_str()] {
+        assert!(!stored.contains(part), "{part} is left in {stored}");
+    }
+    assert!(
+        stored.starts_with("curl -d @card.json https://contoso.webhook.office.com/webhookb2/")
+            && stored.ends_with(" -v"),
+        "{stored}"
+    );
+    let token = base64_jwt();
+    // Wrapped at 76 columns, as `base64` prints one.
+    let wrapped = [&token[..76], &token[76..152], &token[152..]].join("\n");
+    let cases = [
+        // On one line: masked whole, and what follows stays, on its line and on the next.
+        (
+            format!("the secret holds {token} there"),
+            format!("the secret holds {MASK} there"),
+        ),
+        (
+            format!("it prints {token}\nkubectl get secret"),
+            format!("it prints {MASK}\nkubectl get secret"),
+        ),
+        // Wrapped: every line of it (past the marker, `masked-remainder` took the first line's
+        // rest and left the lines after it), and nothing of the line after.
+        (
+            format!("base64 prints\n{wrapped}\nkubectl get secret"),
+            format!("base64 prints\n{MASK}\nkubectl get secret"),
+        ),
+        (
+            format!(
+                "base64 prints\r\n{}\r\ndone\r\n",
+                wrapped.replace('\n', "\r\n")
+            ),
+            format!("base64 prints\r\n{MASK}\r\ndone\r\n"),
+        ),
+        (
+            format!("base64 prints\n{wrapped}"),
+            format!("base64 prints\n{MASK}"),
+        ),
+        // Two of them, a line each, stay two lines.
+        (format!("{token}\n{token}"), format!("{MASK}\n{MASK}")),
+    ];
+    for (text, masked) in cases {
+        let (stored, found) = scan(&text, &Rules::default());
+        assert!(!found.is_empty(), "{text}");
+        assert_eq!(stored, masked);
+    }
+}
+
+/// One line of a key's base64, 64 characters.
+fn key_line() -> String {
+    format!(
+        "{}{}",
+        "Q9zX8mL2vB4nR7tY1wK3pS6dJ0aF5hU2", "cE8gI4kM7oQ1sV3xZ6bDq9Zx8mL2vB4n"
+    )
+}
+
+/// `n` lines of a key's base64 and a shorter last one, joined by `by`.
+fn key_lines(n: usize, by: &str) -> String {
+    let mut lines = vec![key_line(); n];
+    lines.push("mL2vB4nR7tY1w==".into());
+    lines.join(by)
+}
+
+/// #938: the bundled private-key rule needs a block's footer, so a block that is not whole was
+/// stored as typed: the head of a key file (`head -n 20`), its tail, a paste short of its last
+/// line. The lines of base64 after a private key's header, or before its footer, are masked,
+/// and what stands around them is left.
+#[test]
+fn the_lines_of_a_private_key_block_that_is_not_whole_are_masked() {
+    let rules = Rules::default();
+    let masked = |text: &str| scan(text, &rules).0;
+    let lines = key_lines(19, "\n");
+    let begin = "-----BEGIN RSA PRIVATE KEY-----";
+    let end = "-----END RSA PRIVATE KEY-----";
+    // Its head, its tail, a footer cut short, one short of a hyphen.
+    assert_eq!(
+        masked(&format!("$ head -n 20 id_rsa\n{begin}\n{lines}\n$ ls")),
+        format!("$ head -n 20 id_rsa\n{begin}\n{MASK}\n$ ls")
+    );
+    assert_eq!(
+        masked(&format!("$ tail -n 21 id_rsa\n{lines}\n{end}\n$ ls")),
+        format!("$ tail -n 21 id_rsa\n{MASK}\n{end}\n$ ls")
+    );
+    for footer in ["-----END RSA PRIVA", "-----END RSA PRIVATE KEY----"] {
+        assert_eq!(
+            masked(&format!("{begin}\n{lines}\n{footer}")),
+            format!("{begin}\n{MASK}\n{footer}")
+        );
+    }
+    // One with no footer before a whole one: the bundled rule takes the first header to the
+    // second, and the second block's lines were left.
+    let two = format!(
+        "x {begin}\n{lines}\n-----BEGIN OPENSSH PRIVATE KEY-----\n{lines}\n-----END OPENSSH PRIVATE KEY-----\ny"
+    );
+    let stored = masked(&two);
+    assert!(!stored.contains(&key_line()), "{stored}");
+    assert!(stored.starts_with(&format!("x {MASK}")) && stored.ends_with("KEY-----\ny"));
+    // An encrypted key's own lines between the header and the base64 stay.
+    let encrypted = format!(
+        "{begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{}\n\n{lines}",
+        "0123456789ABCDEF".repeat(2)
+    );
+    assert_eq!(
+        masked(&encrypted),
+        format!(
+            "{begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,{}\n\n{MASK}",
+            "0123456789ABCDEF".repeat(2)
+        )
+    );
+    // As a tool's output holds it, its line breaks written out.
+    let flat = format!("{begin}\\n{}\\n$ ls", key_lines(19, "\\n"));
+    assert_eq!(masked(&flat), format!("{begin}\\n{MASK}\\n$ ls"));
+    // Line breaks as Windows writes them, and a command on the line after the block.
+    let crlf = key_lines(3, "\r\n");
+    assert_eq!(
+        masked(&format!("{begin}\r\n{crlf}\r\n$ ls")),
+        format!("{begin}\r\n{MASK}\r\n$ ls")
+    );
+    assert_eq!(
+        masked(&format!("{begin}\n{lines}\nkubectl get secret -o yaml")),
+        format!("{begin}\n{MASK}\nkubectl get secret -o yaml")
+    );
+    // A whole block is one mask, as before.
+    assert_eq!(
+        masked(&format!("x {begin}\n{lines}\n{end} y")),
+        format!("x {MASK} y")
+    );
+    // Left as they are: a header quoted with no base64 after it, a certificate, a public key,
+    // and a placeholder's lines.
+    let cert = format!("-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----");
+    let public = format!("-----BEGIN PUBLIC KEY-----\n{lines}\n-----END PUBLIC KEY-----");
+    let placeholder = format!("{begin}\n{}\n", vec!["A".repeat(64); 4].join("\n"));
+    for text in [
+        format!("grep -rn -- '{begin}' src tests"),
+        format!("let pem = format!(\"{begin}\\n{{}}\\n{end}\", body);"),
+        format!("the {end} line is missing"),
+        cert,
+        public,
+        placeholder,
+    ] {
+        assert_eq!(masked(&text), text);
+    }
+}
+
+/// #938: what is stored of such a block is found again by the rescan a change of the rules
+/// starts, in the forms it is stored in: as typed in a tool's output (JSON in a JSON string),
+/// and after the bundled rule's mask of a block before it, as a mask or as a tombstone's stars.
+/// A range starred leaves the body JSON, and the tool's in it.
+#[test]
+fn what_was_stored_of_a_private_key_block_that_is_not_whole_is_found_again() {
+    let rules = Rules::default();
+    let as_tool_output = |stdout: &str| {
+        serde_json::json!({ "output": serde_json::json!({ "stdout": stdout }).to_string() })
+            .to_string()
+    };
+    let lines = key_lines(19, "\n");
+    let begin = "-----BEGIN RSA PRIVATE KEY-----";
+    let footer = "-----END OPENSSH PRIVATE KEY-----";
+    for stored in [
+        format!("$ head -n 20 id_rsa\n{begin}\n{lines}\n$ ls"),
+        format!("x {MASK}\n{lines}\n{footer}\ny"),
+        format!("x {}\n{lines}\n{footer}\ny", "*".repeat(40)),
+    ] {
+        assert_eq!(ranges(&stored, &rules).len(), 1, "{stored}");
+        assert!(!scan(&stored, &rules).0.contains(&key_line()));
+        let body = as_tool_output(&stored);
+        let found = field_ranges(&body, &rules);
+        assert_eq!(found.len(), 1, "{body}");
+        let (start, end) = found[0];
+        let found = &body[start..end];
+        assert!(
+            found.starts_with(&key_line()) && found.ends_with("mL2vB4nR7tY1w=="),
+            "{found}"
+        );
+        let starred = crate::raw::masked(&body, start as i64, (end - start) as i64);
+        let outer: serde_json::Value = serde_json::from_str(&starred).unwrap();
+        let inner: serde_json::Value =
+            serde_json::from_str(outer["output"].as_str().unwrap()).unwrap();
+        let stdout = inner["stdout"].as_str().unwrap();
+        assert!(!stdout.contains(&key_line()), "{stdout}");
+        // The lines around the block are as they were.
+        let (first, last) = (
+            stored.lines().next().unwrap(),
+            stored.lines().last().unwrap(),
+        );
+        assert!(
+            stdout.starts_with(first) && stdout.ends_with(last),
+            "{stdout}"
+        );
+    }
+}
+
+/// #938: a block the cap's cut splits is not stored, whatever a rule of the home's masks in
+/// its header: its lines are masked before the cut, where the check for a block the cut left
+/// open read the header after the home's rules had run.
+#[test]
+fn a_key_block_the_cap_splits_is_not_stored_under_a_rule_over_its_header() {
+    let ruled = user("[[redaction.extra_rules]]\nid = \"pk\"\nregex = 'RSA PRIVATE'\n").unwrap();
+    let text = format!(
+        "{}-----BEGIN RSA PRIVATE KEY-----\n{}\n{}",
+        "a".repeat(3_000),
+        key_lines(40, "\n"),
+        "z".repeat(8_000)
+    );
+    for rules in [Rules::default(), ruled] {
+        let (stored, _, cut) = scan_capped(&text, 8 * 1024, &rules);
+        assert!(cut.is_some());
+        assert!(!stored.contains(&key_line()), "{}", &stored[2_990..3_200]);
+    }
+}
+
+/// A record stored before those two rules holds what gitleaks' rules left of each: a Teams path
+/// with five characters of its first GUID masked, and the lines after a wrapped token's first.
+/// `masked-remainder` took what was glued to the mask, at capture (a second mask) or in a
+/// rescan (a tombstone, read as stars). The rescan a change of the rules starts reads a record
+/// as it is stored, so the two rules find those forms too, and nothing in what is whole.
+#[test]
+fn what_was_stored_of_a_teams_webhook_and_a_base64_jwt_is_found_again() {
+    let rules = Rules::default();
+    // As a tool's output is stored: JSON in a JSON string, read field by field.
+    let as_tool_output = |stdout: &str| {
+        serde_json::json!({ "output": serde_json::json!({ "stdout": stdout }).to_string() })
+            .to_string()
+    };
+    let guid = |first: &str| format!("{first}-4e5f-6a7b-8c9d-{}", "0e1f2a3b4c5d");
+    let (user, last) = (guid("9f8e7d6c"), guid("0a9b8c7d"));
+    let key = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+    let url = "curl -d @card.json https://contoso.webhook.office.com/webhookb2/";
+    let path = format!("@{user}/IncomingWebhook/{key}/{last}");
+    for rest in [MASK.to_owned(), "*".repeat(12)] {
+        let stored = format!("{url}1a2b3c4d-4e5f-6a7b-{MASK}{rest}{path} -v");
+        assert_eq!(
+            ranges(&stored, &rules),
+            vec![(url.len(), stored.len() - " -v".len())],
+            "{stored}"
+        );
+        assert_eq!(scan(&stored, &rules).0, format!("{url}{MASK} -v"));
+        let body = as_tool_output(&stored);
+        let found = field_ranges(&body, &rules);
+        assert_eq!(found.len(), 1, "{body}");
+        let found = &body[found[0].0..found[0].1];
+        assert!(found.contains(&key) && found.ends_with(&last), "{found}");
+    }
+    let token = base64_jwt();
+    let (second, third) = (&token[76..152], &token[152..]);
+    for rest in [MASK.to_owned(), "*".repeat(62)] {
+        let head = format!("ZXlK{MASK}{rest}");
+        // The lines after the head, and nothing of the line after the token.
+        let stored = format!("base64 prints\n{head}\n{second}\n{third}\nkubectl get secret");
+        assert_eq!(ranges(&stored, &rules).len(), 1, "{stored}");
+        assert_eq!(
+            scan(&stored, &rules).0,
+            format!("base64 prints\n{head}{MASK}\nkubectl get secret")
+        );
+        let body = as_tool_output(&stored);
+        let found = field_ranges(&body, &rules);
+        assert_eq!(found.len(), 1, "{body}");
+        let (start, end) = found[0];
+        let found = &body[start..end];
+        assert!(
+            found.contains(second) && found.ends_with(third) && !found.contains("kubectl"),
+            "{found}"
+        );
+        // The range starts at a line break's escape and takes all of it: with the range
+        // starred, as a tombstone reads, the body is still JSON, and so is the tool's in it.
+        let starred = crate::raw::masked(&body, start as i64, (end - start) as i64);
+        let outer: serde_json::Value = serde_json::from_str(&starred).unwrap();
+        let inner = outer["output"].as_str().unwrap();
+        let inner: serde_json::Value = serde_json::from_str(inner).unwrap();
+        let stdout = inner["stdout"].as_str().unwrap();
+        assert!(
+            stdout.starts_with(&format!("base64 prints\n{head}**"))
+                && stdout.ends_with("**\nkubectl get secret"),
+            "{stdout}"
+        );
+        // Nothing is left of a token that was on one line.
+        for whole in [
+            format!("the secret holds {head} there"),
+            format!("it prints {head}\nkubectl get secret"),
+        ] {
+            assert_eq!(ranges(&whole, &rules), vec![], "{whole}");
+            assert_eq!(
+                field_ranges(&as_tool_output(&whole), &rules),
+                vec![],
+                "{whole}"
+            );
+        }
+    }
+    // What the two rules masked themselves gives a rescan nothing new, as stars either.
+    let wrapped = [&token[..76], second, third].join("\n");
+    for text in [
+        format!("{url}{}{path} -v", guid("1a2b3c4d")),
+        format!("the secret holds {token} there"),
+        format!("base64 prints\n{wrapped}\nkubectl get secret"),
+    ] {
+        let (masked, found) = scan(&text, &rules);
+        assert!(!found.is_empty(), "{text}");
+        assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+        let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
+        assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
+        assert_eq!(
+            field_ranges(&as_tool_output(&masked), &rules),
+            vec![],
+            "{masked}"
+        );
+    }
+}
+
+/// A Teams workflow webhook, which replaces the incoming webhooks above, is the URL of an Azure
+/// Logic Apps or Power Automate HTTP trigger, and its `sig` parameter is its only credential.
+/// No bundled rule takes it: the signature alone is masked, on both hosts such a URL has.
+#[test]
+fn a_trigger_urls_signature_is_masked() {
+    let rules = Rules::default();
+    // split: scanners
+    let sig = format!("{}{}", "Zx8vN3kL7pW2qR5tY9uB1c", "D4eF6gH0jK2mP4sT6vX8z-_");
+    let id = format!("{}{}", "0123456789abcdef", "fedcba9876543210");
+    let query = "api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0";
+    let environment = "0123456789abcdef0123456789abcd.ef.environment.api.powerplatform.com";
+    for host in [
+        "prod-12.westus.logic.azure.com:443".to_owned(),
+        format!("{environment}:443/powerautomate/automations/direct"),
+    ] {
+        let url = format!("https://{host}/workflows/{id}/triggers/manual/paths/invoke?{query}");
+        for (text, masked) in [
+            (
+                format!("curl -d @card.json '{url}&sig={sig}' -v"),
+                format!("curl -d @card.json '{url}&sig={MASK}' -v"),
+            ),
+            (
+                format!("POST {url}&amp;sig={sig}&amp;x=1 sent"),
+                format!("POST {url}&amp;sig={MASK}&amp;x=1 sent"),
+            ),
+        ] {
+            let (stored, found) = scan(&text, &rules);
+            assert!(!found.is_empty(), "{text}");
+            assert_eq!(stored, masked);
+            assert_eq!(ranges(&stored, &rules), vec![], "{stored}");
+        }
+    }
+    // A placeholder is no signature, and another URL's `sig` is not this rule's.
+    let trigger =
+        format!("https://prod-12.westus.logic.azure.com:443/workflows/{id}/triggers/manual");
+    for text in [
+        format!("{trigger}/paths/invoke?sv=1.0&sig={}", "X".repeat(43)),
+        format!("https://files.example.test/download?name=a.txt&sig={sig}"),
+    ] {
+        assert_eq!(scan(&text, &rules).0, text);
+    }
+}
+
+/// A text of parts between tags: the rules read the whole from the text as it is. A value one
+/// rule masks in the first part is the context another needs for a value in the second: both
+/// are masked. The tags stay, also under a match that runs over them.
+#[test]
+fn parts_between_tags_are_read_before_any_mask() {
+    let rules = user(concat!(
+            "[[redaction.extra_rules]]\nid = \"name\"\nregex = '(?s)wrote.*note=(ACME)'\nsecret_group = 1\n",
+            "[[redaction.extra_rules]]\nid = \"otp\"\nregex = '(?s)ACME.*otp=([0-9]{6})'\nsecret_group = 1\n",
+        ))
+        .unwrap();
+    let (open, close) = ("<tag>\n", "</tag>\n");
+    let (first, second) = (
+        "What agents wrote: note=ACME",
+        "A code: otp=654321 and more",
+    );
+    let text = format!("{open}{first}\n{close}{open}{second}\n{close}");
+    let tags: Vec<(usize, usize)> = text
+        .match_indices("tag>\n")
+        .map(|(i, t)| {
+            let from = text[..i].rfind('<').unwrap();
+            (from, i + t.len())
+        })
+        .collect();
+    assert_eq!(tags.len(), 4);
+    let shown = outbound_but_with(&text, &tags, &rules);
+    assert!(
+        !shown.contains("ACME") && !shown.contains("654321"),
+        "{shown}"
+    );
+    assert_eq!(
+        shown,
+        format!(
+            "{open}What agents wrote: note={MASK}\n{close}{open}A code: otp={MASK} and more\n{close}"
+        )
+    );
+    // A match that runs over a tag is masked on each side of it, and the tag is not.
+    let over = user("[[redaction.extra_rules]]\nid = \"all\"\nregex = '(?s)note=.*otp=[0-9]{6}'\n")
+        .unwrap();
+    let shown = outbound_but_with(&text, &tags, &over);
+    assert_eq!(
+        shown,
+        format!("{open}What agents wrote: {MASK}{close}{open}{MASK} and more\n{close}")
+    );
+}
+
+/// A rule that finds something in the mask's own text finds it again every pass. Past
+/// `MAX_PASSES` nothing of the text is shown, the kept ranges neither, as `scan` ends.
+#[test]
+fn parts_between_tags_end_as_one_mask_when_the_passes_run_out() {
+    let rules = user("[[redaction.extra_rules]]\nid = \"caps\"\nregex = '[A-Z]{8}'\n").unwrap();
+    let text = "<tag>\nA name: ABCDEFGH and more\n</tag>\n";
+    let tags = [(0, 6), (text.len() - 7, text.len())];
+    assert_eq!(&text[tags[1].0..tags[1].1], "</tag>\n");
+    assert_eq!(outbound_but_with(text, &tags, &rules), MASK);
+    assert_eq!(scan(text, &rules).0, MASK);
+}
+
+/// #931: an Azure Storage shared access signature (a URL's query, or a token, with `sv=`, the
+/// service version's date, and `sig=`) had no rule. Its signature is masked, whichever of the
+/// two comes first; a `sig` beside no such `sv`, a short one and a placeholder are left.
+#[test]
+fn a_shared_access_signature_is_masked() {
+    let rules = Rules::default();
+    // split: scanners
+    let sig = format!(
+        "{}{}",
+        "p4Xw7ZcT1mQ9vB3nR6yK8sD0", "fG2hJ5lU7aE9iO1uY3tW%2Bx%3D"
+    );
+    let blob = "https://acct.blob.core.windows.net/logs/app.txt";
+    let rest = "ss=b&srt=sco&sp=rl&se=2026-12-31T00:00:00Z&spr=https";
+    for (text, masked) in [
+        (
+            format!("azcopy copy '{blob}?sv=2022-11-02&{rest}&sig={sig}' ./"),
+            format!("azcopy copy '{blob}?sv=2022-11-02&{rest}&sig={MASK}' ./"),
+        ),
+        (
+            format!("GET {blob}?sig={sig}&{rest}&sv=2022-11-02 200"),
+            format!("GET {blob}?sig={MASK}&{rest}&sv=2022-11-02 200"),
+        ),
+        (
+            format!("href=\"{blob}?sv=2022-11-02&amp;sp=r&amp;sig={sig}\""),
+            format!("href=\"{blob}?sv=2022-11-02&amp;sp=r&amp;sig={MASK}\""),
+        ),
+        (
+            format!("SharedAccessSignature=sv=2022-11-02&sp=rl&sig={sig};"),
+            format!("SharedAccessSignature=sv=2022-11-02&sp=rl&sig={MASK};"),
+        ),
+        // A request's own parameter between the two.
+        (
+            format!("PUT {blob}?sv=2022-11-02&api-version=2022-11-02&sig={sig}"),
+            format!("PUT {blob}?sv=2022-11-02&api-version=2022-11-02&sig={MASK}"),
+        ),
+        (
+            format!("PUT {blob}?sig={sig}&api-version=2022-11-02&sv=2022-11-02"),
+            format!("PUT {blob}?sig={MASK}&api-version=2022-11-02&sv=2022-11-02"),
+        ),
+    ] {
+        let (stored, found) = scan(&text, &rules);
+        assert!(!found.is_empty(), "{text}");
+        assert_eq!(stored, masked);
+        assert_eq!(ranges(&stored, &rules), vec![], "{stored}");
+    }
+    for text in [
+        format!("{blob}?sv=2022-11-02&{rest}&sig={}", "X".repeat(43)),
+        format!("{blob}?sv=2022-11-02&sig=short"),
+        format!("https://files.example.test/download?name=a.txt&sig={sig}"),
+    ] {
+        assert_eq!(scan(&text, &rules).0, text);
+    }
+}
+
+/// The shape behind that: a bundled rule with no `secretGroup` whose first group cannot hold the
+/// secret (it is repeated, so it holds one repetition, or it is a short marker). A copy of
+/// gitleaks.toml taken again from upstream that brings another such rule fails here, until a
+/// rule of oboete's own takes that secret whole.
+#[test]
+fn every_bundled_rule_whose_first_group_is_not_the_secret_has_a_rule_that_takes_it_whole() {
+    /// The first capturing group of `regex`: its body, and the character after it.
+    fn first_group(regex: &str) -> Option<(&str, Option<char>)> {
+        let bytes = regex.as_bytes();
+        let (mut i, mut class) = (0, false);
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 1,
+                b']' if class => class = false,
+                b'[' if !class => class = true,
+                b'(' if !class => {
+                    let named = regex[i..].starts_with("(?P<")
+                        || (regex[i..].starts_with("(?<")
+                            && !regex[i..].starts_with("(?<=")
+                            && !regex[i..].starts_with("(?<!"));
+                    if !regex[i..].starts_with("(?") || named {
+                        let (mut depth, mut j, mut inner) = (0, i, false);
+                        while j < bytes.len() {
+                            match bytes[j] {
+                                b'\\' => j += 1,
+                                b']' if inner => inner = false,
+                                b'[' if !inner => inner = true,
+                                b'(' if !inner => depth += 1,
+                                b')' if !inner => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        return Some((
+                                            &regex[i + 1..j],
+                                            regex[j + 1..].chars().next(),
+                                        ));
+                                    }
+                                }
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+    /// Whether `body` can hold a secret: something in it repeats eight times or more, or
+    /// without a bound. A quantifier alone counts: an escaped `+` or `*`, or one in a
+    /// character class, repeats nothing (cubic on #932).
+    fn long(body: &str) -> bool {
+        let bytes = body.as_bytes();
+        // The body without its escapes and its classes' contents: what is left of a `+`, a
+        // `*` or a `{n,m}` is a quantifier.
+        let (mut i, mut class, mut bare) = (0, false, String::new());
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 1,
+                b']' if class => class = false,
+                b'[' if !class => class = true,
+                b if !class && b.is_ascii() => bare.push(char::from(b)),
+                _ => {}
+            }
+            i += 1;
+        }
+        let counts = Regex::new(r"\{(\d+)(?:,(\d*))?\}").unwrap();
+        bare.contains(['+', '*'])
+            || counts.captures_iter(&bare).any(|c| {
+                let at_most = c.get(2).map_or(c[1].to_owned(), |m| m.as_str().to_owned());
+                at_most.is_empty() || at_most.parse::<u32>().is_ok_and(|n| n >= 8)
+            })
+    }
+    for (body, holds) in [
+        (r"[a-z0-9]{32}", true),
+        (r"[a-z0-9]+", true),
+        (r"\w{4,}", true),
+        (r"x{2,8}", true),
+        (r"[a-z0-9]{4}-", false),
+        (r"[a-z]{2,6}", false),
+        (r"[A-Za-z0-9+/*]", false),
+        (r"\+\d\*", false),
+        (r"aGJHY2lPaU", false),
+    ] {
+        assert_eq!(long(body), holds, "{body}");
+    }
+    let file: File = toml::from_str(RULES_TOML).unwrap();
+    let mut short: Vec<&str> = (file.rules.iter())
+        .filter(|r| r.secret_group.is_none())
+        .filter(|r| {
+            (r.regex.as_deref().and_then(first_group)).is_some_and(|(body, after)| {
+                !long(body) || after.is_some_and(|c| "{+*?".contains(c))
+            })
+        })
+        .map(|r| r.id.as_str())
+        .collect();
+    short.sort_unstable();
+    assert_eq!(short, ["jwt-base64", "microsoft-teams-webhook"]);
+    // Each has a rule of oboete's own, which names no group either: its first group is the
+    // whole secret, and `a_teams_webhook_and_a_base64_jwt_are_masked_whole` holds a sample of
+    // each to that (a rule that names a fragment under the same id fails here: cubic on
+    // #932).
+    let own: File = toml::from_str(EXTRA_TOML).unwrap();
+    for id in ["jwt-base64-whole", "microsoft-teams-webhook-secret"] {
+        let rule = own.rules.iter().find(|r| r.id == id);
+        assert!(rule.is_some_and(|r| r.secret_group.is_none()), "{id}");
+    }
+}
+
+/// The forms claude-mem 15.5 to 15.9 masks that the bundled rules left (decision 70): a Slack
+/// token of any length, a Slack webhook's whole secret, a Discord webhook's token, a Stripe
+/// webhook secret, a Docker Hub token, a test.pypi.org token, a `_PWD` value and a flag's value
+/// after a space; and past claude-mem's (#826's review): Slack's client and cookie tokens, a
+/// shell's escape inside a value, and the end of a secret glued to a mask stored before.
+#[test]
+fn the_forms_claude_mem_masks_are_masked_too() {
+    // Split literals: secret scanners flag whole ones in the repository.
+    let r20 = format!("Q7wE9rT2yU{}", "4iO6pA8sD1");
+    let slack = format!("xoxe-1-{r20}{}", "Zx3Cv5");
+    // Long enough that gitleaks' rule, which stops 56 characters into the path, leaves its end.
+    let hook = format!("{r20}{r20}{}", "Bn7M");
+    let discord = format!("{r20}{r20}{r20}{}", "Ab3dEf_h");
+    let whsec = format!("whsec_{r20}{}", "Lm4nOp6qRs8t");
+    let docker = format!("dckr_pat_{r20}{}", "Ab3-dE_");
+    let pypi = format!("pypi-AgENdGVzdC5weXBpLm9yZw{r20}{r20}{}", "Kj8hGf6dSa4q");
+    let pw = format!("Tr0ub4d{}", "or3xyz");
+    let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+    // A shell's escape inside a password, as typed and as a flattened tool field holds it.
+    let esc = format!("Q7wE9rT2\\!{}", "K4j8N6pL");
+    let esc_json = format!("Q7wE9rT2\\\\!{}", "K4j8N6pL");
+    let xoxc = format!("xoxc-{}-{r20}", "1234567890");
+    let xoxd = format!("xoxd-{r20}{}", "Hj5kL7");
+    // A stored end of a webhook's secret with a `+` in it, as gitleaks' rule left it.
+    let tail_plus = format!("8sD1+{}", "Bn7MqPz2");
+    // A shell's word that goes on after a quoted value: one argument, both parts its.
+    let (quoted, suffix) = (format!("Abcd{}", "1234"), format!("Secret{}", "Suffix"));
+    // A whole secret after the `/` gitleaks' rule stopped in front of.
+    let after_slash = format!("{r20}{}", "Wq3E");
+    // A cookie token, decoded and URL-encoded.
+    let xoxd_raw = format!("xoxd-{r20}/{}", "Ab+Cd==");
+    let xoxd_enc = format!("xoxd-{r20}%2F{}", "Ab%2BCd%3D%3D");
+    let digits = format!("1234{}", "5678");
+    let tail = format!("Tq9v2{}", "LmX4wPz");
+    let cases = [
+        (format!("SLACK_REFRESH={slack}"), slack.clone()),
+        (format!("SLACK_CLIENT={xoxc}"), xoxc.clone()),
+        (format!("Cookie-less d={xoxd} for the client"), xoxd.clone()),
+        (format!("tool --password {esc} --verbose"), esc.clone()),
+        (format!("DB_PASSWORD={esc}"), esc.clone()),
+        (
+            format!("{{\"command\": \"tool --password {esc_json}\"}}"),
+            esc_json.clone(),
+        ),
+        (format!("tool --token {digits}"), digits.clone()),
+        (
+            format!("tool --auth-token {digits}{digits}"),
+            format!("{digits}{digits}"),
+        ),
+        (format!("tool --password {digits}"), digits.clone()),
+        // The end gitleaks' slack-webhook-url left after its mask in a record stored before.
+        (
+            format!("curl -X POST https://[REDACTED]{tail}"),
+            tail.clone(),
+        ),
+        (
+            format!("curl -X POST https://[REDACTED]{tail_plus}"),
+            tail_plus.clone(),
+        ),
+        (
+            format!("curl -X POST https://[REDACTED]/{after_slash}"),
+            after_slash.clone(),
+        ),
+        (
+            format!("tool --password '{quoted}'{suffix}"),
+            quoted.clone(),
+        ),
+        (
+            format!("tool --password '{quoted}'{suffix}"),
+            suffix.clone(),
+        ),
+        (format!("DB_PASSWORD=\"{quoted}\"{suffix}"), suffix.clone()),
+        (
+            format!("tool --password ' {quoted} '{suffix}"),
+            suffix.clone(),
+        ),
+        (
+            format!("tool --password '{quoted}'_{suffix}"),
+            suffix.clone(),
+        ),
+        (
+            format!("tool --password '{quoted}'-{suffix}.x9"),
+            suffix.clone(),
+        ),
+        (format!("d={xoxd_raw} for the client"), xoxd_raw.clone()),
+        (format!("d={xoxd_enc} for the client"), xoxd_enc.clone()),
+        (
+            format!(
+                "curl -X POST https://hooks.slack.com/workflows/T0AB1CD2E/A0FG3HI4J/{}/{hook}",
+                "123456789012345678"
+            ),
+            hook.clone(),
+        ),
+        (
+            format!(
+                "curl -X POST https://discord.com/api/webhooks/{}/{discord}",
+                "123456789012345678"
+            ),
+            discord.clone(),
+        ),
+        (format!("STRIPE_WEBHOOK={whsec}"), whsec.clone()),
+        (
+            format!("echo {docker} | docker login -u me --password-stdin"),
+            docker.clone(),
+        ),
+        (format!("twine upload -p {pypi} dist/*"), pypi.clone()),
+        (format!("MYSQL_PWD={pw} mysql -u app"), pw.clone()),
+        (format!("{{\"DB_PWD\": \"{pw}\"}}"), pw.clone()),
+        (format!("tool --auth-token {tok} --verbose"), tok.clone()),
+        (format!("tool --client-secret '{tok}'"), tok.clone()),
+        (
+            format!("huggingface-cli login --hf-token {tok}"),
+            tok.clone(),
+        ),
+        (format!("tool --api-key {tok}"), tok.clone()),
+    ];
+    for (text, secret) in &cases {
+        let (stored, found) = scan(text, &Rules::default());
+        assert!(!found.is_empty(), "{text}: nothing found");
+        check(&stored, &found, secret);
+        // Masked whole: no end of it is left beside a mask.
+        let tail = &secret[secret.len() - 6..];
+        assert!(!stored.contains(tail), "{text}: {stored}");
+    }
+    // A secret whose end goes two characters past gitleaks' 56 characters of path, too short an
+    // end for masked-remainder: this rule masks it whole, and nothing follows the mask.
+    let near = format!("{r20}{}", "Mb2Xs7Kp4Q9wE1rTzY");
+    let (stored, _) = scan(
+        &format!("https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{near}"),
+        &Rules::default(),
+    );
+    assert!(stored.ends_with(MASK), "{stored}");
+    // A `+` in a secret two characters from its end, past those 56 characters: this rule's class
+    // reaches the end, where masked-remainder takes no end that short.
+    let (stored, _) = scan(
+        &format!(
+            "https://hooks.slack.com/services/T0AB1CD2E/B0FG3HI4J/{r20}{r20}+{}",
+            "Bn"
+        ),
+        &Rules::default(),
+    );
+    assert!(stored.ends_with(MASK), "{stored}");
+    // Not secrets: a working directory, a number after a flag, a flag that names a file or a
+    // name, the next flag where a value would be, and the prefixes named in prose.
+    for text in [
+        "PWD=/home/user/project",
+        "OLDPWD=/home/user",
+        "llm --max-token 4096 --stream",
+        "llm --max-token 12345678 --stream",
+        "llm --num-output-token 51200000",
+        "masked: [REDACTED] and [REDACTED].",
+        "a short end [REDACTED]abc stays",
+        "PUT /keys/[REDACTED]/rotate",
+        "key = '[REDACTED]'.strip()",
+        "{\"token\":\"[REDACTED]\",\"next\":1}",
+        "curl --token [REDACTED] \"https://example.invalid/\"",
+        "cargo run -- --token-file ./token.txt",
+        "gh secret set --secret-name deploy",
+        "tool --token --verbose",
+        "the whsec_ and dckr_pat_ prefixes mark Stripe's and Docker Hub's secrets",
+    ] {
+        let (stored, found) = scan(text, &Rules::default());
+        assert!(found.is_empty(), "{text}: {found:?}");
+        assert_eq!(stored, text);
+    }
+}
+
+/// claude-mem 15.10's key shapes (its src/utils/redaction.ts) are masked whole where no key
+/// name stands beside them; shorter look-alikes and the prefixes in prose are not.
+#[test]
+fn the_key_shapes_claude_mem_15_10_masks_are_masked_too() {
+    const NEW: [&str; 5] = [
+        "google-oauth-access-token",
+        "runcrate-api-key",
+        "supabase-access-token",
+        "notion-integration-token",
+        "sentry-org-auth-token",
+    ];
+    // Split literals: secret scanners flag whole ones in the repository.
+    let r20 = format!("Q7wE9rT2yU{}", "4iO6pA8sD1");
+    let hex20 = format!("0f1e2d3c4b{}", "5a69788796");
+    let b43 = format!("{r20}{r20}{}", "Xy7");
+    let google = format!("ya29.{r20}{}", "-Ab_9");
+    let gce = format!("ya29.c.{r20}{}", "Kp4Q");
+    let runcrate = format!("rc_live_{r20}{}", "Zx3Cv5");
+    let supabase = format!("sbp_{hex20}{hex20}");
+    let notion = format!("ntn_{r20}{r20}{}", "Ab3dEf");
+    let notion_old = format!("secret_{b43}");
+    let sentry = format!("sntrys_{r20}{}==_{b43}", "Mb2Xs7");
+    // A failure names the case by its number: its text holds the made-up secret.
+    let secrets = [
+        &google,
+        &gce,
+        &runcrate,
+        &supabase,
+        &notion,
+        &notion_old,
+        &sentry,
+    ];
+    for (i, secret) in secrets.into_iter().enumerate() {
+        let text = format!("the token in the log was {secret} this morning");
+        let (stored, found) = scan(&text, &Rules::default());
+        assert!(!found.is_empty(), "case {i}: nothing found");
+        check(&stored, &found, secret);
+        let whole = format!("the token in the log was {MASK} this morning");
+        assert!(stored == whole, "case {i}: not masked whole");
+    }
+    for text in [
+        "the ya29. prefix marks Google's OAuth tokens".to_owned(),
+        format!("too short: ya29.{}", "Ab3dEf"),
+        format!("too short: rc_live_{}", "Ab3dEf9h"),
+        format!("one short: sbp_{hex20}{}", &hex20[..19]),
+        format!("not hex: sbp_{r20}{r20}"),
+        "the secret_key_base setting and the ntn_ prefix".to_owned(),
+        format!("one short: secret_{}", &b43[..42]),
+        format!("no secret part: sntrys_{r20}"),
+    ] {
+        // A generic rule may still take a random-looking payload; the new rules must not.
+        let (_, found) = scan(&text, &Rules::default());
+        let rules: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+        assert!(!rules.iter().any(|r| NEW.contains(r)), "{rules:?}");
+    }
+}
+
+/// A value masked takes no word after it: the next argument of a command line, the next line of
+/// an env file; a second secret there is still masked (Codex on #826).
+#[test]
+fn a_masked_value_takes_no_word_after_it() {
+    let tok = format!("Zq8vR2mN5{}", "tW1xY4pL7kD");
+    let tok2 = format!("Hb3nM6qW9{}", "eR2tY5uI8oP");
+    for (text, kept) in [
+        (
+            format!("tool --token {tok} https://api.example.org/important-resource"),
+            "https://api.example.org/important-resource",
+        ),
+        (
+            format!("TOKEN={tok} https://api.example.org/important-resource"),
+            "https://api.example.org/important-resource",
+        ),
+        (
+            format!("API_KEY={tok}\nDEBUG_MODE=true\nPORT_NUMBER=8080\n"),
+            "DEBUG_MODE=true\nPORT_NUMBER=8080",
+        ),
+        (
+            format!("{{\"out\": \"API_KEY={tok}\\nDEBUG_MODE=true\"}}"),
+            "DEBUG_MODE=true",
+        ),
+    ] {
+        let (stored, found) = scan(&text, &Rules::default());
+        check(&stored, &found, &tok);
+        assert!(stored.contains(kept), "{text}: {stored}");
+    }
+    let text = format!("API_KEY={tok}\nSECRET_KEY={tok2}\nDEBUG_MODE=true\n");
+    let (stored, found) = scan(&text, &Rules::default());
+    check(&stored, &found, &tok);
+    check(&stored, &found, &tok2);
+    assert!(stored.contains("DEBUG_MODE=true"), "{stored}");
+    // A value on the indented line below its key (YAML, pretty-printed JSON) is still masked;
+    // short and plain, so that no generic rule takes it instead.
+    let pw = format!("Abcd{}", "1234");
+    for text in [
+        format!("password:\n  {pw}\nuser: app"),
+        format!("{{\"password\":\n  \"{pw}\"}}"),
+        format!("{{\"password\":\n\"{pw}\"}}"),
+    ] {
+        let (stored, found) = scan(&text, &Rules::default());
+        check(&stored, &found, &pw);
+    }
+    // A header's value on the next line, quoted (JSON) or on an indented line (YAML), is masked.
+    for (text, secret) in [
+        (
+            format!("{{\"Authorization\":\n  \"Token {tok}\"}}"),
+            tok.clone(),
+        ),
+        (
+            format!("{{\"Authorization\":\n\"Token {tok}\"}}"),
+            tok.clone(),
+        ),
+        (
+            format!("headers:\n  Authorization:\n    Token {tok}"),
+            tok.clone(),
+        ),
+        (
+            format!("{{\"Cookie\":\n  \"sid={tok}\"}}"),
+            format!("sid={tok}"),
+        ),
+    ] {
+        let (stored, found) = scan(&text, &Rules::default());
+        check(&stored, &found, &secret);
+    }
+    // An empty value takes no unindented next line; a header's value no next line.
+    let b64 = format!("dXNyOnE5Wng4bUwy{}", "dkI0blI3dFl3");
+    let word = format!("Ab3dEfGh5jKlMn7p{}", "QrStUvWx");
+    for (text, secret, kept) in [
+        (
+            "API_KEY=\nDEBUG_MODE=true".to_owned(),
+            None,
+            "DEBUG_MODE=true".to_owned(),
+        ),
+        (
+            format!("Authorization: Bearer {tok}{tok2}\nX-Request-Id: {word}"),
+            Some(format!("{tok}{tok2}")),
+            format!("X-Request-Id: {word}"),
+        ),
+        (
+            format!("Bearer {tok}{tok2}\n{word} is the next line"),
+            Some(format!("{tok}{tok2}")),
+            format!("{word} is the next line"),
+        ),
+        (
+            format!("Authorization: Basic {b64}\nAccept: application/json"),
+            Some(b64.clone()),
+            "Accept: application/json".to_owned(),
+        ),
+        (
+            format!("Authorization: Token {tok}\n{word}"),
+            Some(tok.clone()),
+            word.clone(),
+        ),
+        (
+            format!("Set-Cookie: session={tok}\nnext=1"),
+            Some(tok.clone()),
+            "next=1".to_owned(),
+        ),
+    ] {
+        let (stored, found) = scan(&text, &Rules::default());
+        if let Some(secret) = &secret {
+            check(&stored, &found, secret);
+        }
+        assert!(stored.contains(&kept), "{text}: {stored}");
+    }
+}
+
+#[test]
+fn every_header_after_one_curl_is_masked() {
+    // curl-auth-header's lazy `.*?` finds one header per `curl` per pass, and only within five
+    // lines of it; generic-basic-auth needs no `curl`.
+    let values: Vec<String> = (0..70)
+        .map(|i| format!("dXNyOnE5Wng4bUwy{i:02}dkI0blI3dFl3"))
+        .collect();
+    for n in [3, 66, 67, 70] {
+        for sep in [" ", " \\\n  "] {
+            let sets: String = values[..n]
+                .iter()
+                .map(|v| format!("-H 'Authorization: Basic {v}' https://x.invalid/{sep}--next "))
+                .collect();
+            let text = format!("curl {sets}");
+            let (stored, found) = scan(&text, &Rules::default());
+            for v in &values[..n] {
+                assert!(!stored.contains(v.as_str()), "n={n} {v} kept");
+            }
+            check(&stored, &found, &values[0]);
+            assert!(spans(&stored, &Rules::default()).is_empty());
+        }
+    }
+}
+
+#[test]
+fn a_credential_whose_quote_the_cut_would_drop_is_masked_first() {
+    // Cut first, the head would end inside the quotes and curl-auth-user would not match.
+    let cap = 64 * 1024;
+    let half = cap / 2;
+    let first = "curl -u 'alice:q9Zx8mL2vB4nR7tY1wK3pS6d";
+    let text = " ".repeat(half - first.len())
+        + first
+        + "' ; "
+        + &" ".repeat(cap)
+        + "curl -u 'bobby:r8Wy7nK3uC5oQ6sX2vJ4pR9e'\n"
+        + &"t".repeat(half);
+    let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    check(&stored, &found, "q9Zx8mL2vB4nR7tY1wK3pS6d");
+    assert!(stored.len() <= cap + 64);
+}
+
+#[test]
+fn a_key_block_in_lowercase_is_dropped_too() {
+    let cap = 64 * 1024;
+    let block = format!(
+        "-----begin rsa private key-----\n{}\n-----End RSA Private Key-----",
+        "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700)
+    );
+    for text in [
+        "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap),
+        "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100),
+    ] {
+        let (stored, _, _) = scan_capped(&text, cap, &Rules::default());
+        assert!(!stored.contains("MIIEowIBAAKCAQ"), "{}", &stored[..200]);
+    }
+}
+
+#[test]
+fn a_certificate_across_a_cut_keeps_the_head() {
+    let cap = 64 * 1024;
+    let cert = format!(
+        "-----BEGIN CERTIFICATE-----\n{}-----END CERTIFICATE-----\n",
+        "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJRTES\n".repeat(900)
+    );
+    let text = "h ".repeat(cap / 4 - 100) + "kept here\n" + &cert + &"t ".repeat(cap);
+    let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    assert!(stored.contains("kept here\n-----BEGIN CERTIFICATE-----\nMIIDdzCC"));
+}
+
+#[test]
+fn a_key_whose_footer_was_cut_upstream_is_dropped_from_the_tail() {
+    let cap = 64 * 1024;
+    let body = "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700);
+    let text = "h ".repeat(cap)
+        + "-----BEGIN RSA PRIVATE KEY-----\n"
+        + &body
+        + "-----END RSA PRIVA\n"
+        + &"log\n".repeat(cap / 16);
+    let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
+    assert!(cut.is_some());
+    assert!(!stored.contains("MIIEowIBAAKCAQ"));
+    assert!(stored.ends_with("log\n"));
+    // Flattened into JSON, with a `-----` on the next line: that is not the label's end.
+    let flat = serde_json::to_string(
+        &(text.replace(
+            "-----END RSA PRIVA\n",
+            "-----END RSA PRIVA\n----- next -----\n",
+        )),
+    )
+    .unwrap();
+    let (stored, _, cut) = scan_capped(&flat, cap, &Rules::default());
+    assert!(cut.is_some());
+    assert!(!stored.contains("MIIEowIBAAKCAQ"));
+    assert!(
+        stored.ends_with("log\\n\""),
+        "the log after the footer is kept"
+    );
+}
+
+#[test]
+fn cuts_fall_on_character_boundaries() {
+    let text = "日本語".repeat(40_000); // 360,000 bytes, three per character
+    let (stored, found, cut) = scan_capped(&text, 64 * 1024 + 1, &Rules::default());
+    assert!(cut.is_some() && found.is_empty());
+    assert!(stored.starts_with('日') && stored.ends_with('語'));
+}
+
+#[test]
+fn overlapping_rules_mask_the_whole_token() {
+    // gitlab-pat (20 chars after the prefix) and gitlab-pat-routable (the full token)
+    // start at the same place; the longer match must win, not leave a suffix.
+    assert_eq!(
+        redact("token glpat-Q9zX8mL2vB4nR7tY1wK3pS6dJ0a.1a2b3c4d5 end"),
+        "token [REDACTED] end"
+    );
+}
+
+#[test]
+fn multibyte_text_is_untouched_and_boundaries_are_safe() {
+    let s =
+        "日本語の説明。トークンは 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 です。";
+    let r = redact(s);
+    assert_eq!(r, "日本語の説明。トークンは [REDACTED] です。");
+}
+
+#[test]
+fn a_part_of_a_text_masked_whole_is_masked_whole() {
+    let rules = user(
+        "[redaction]\nextra_rules = [{ id = \"a\", regex = 'a1' }, { id = \"b\", regex = 'b1' }]\n",
+    )
+    .unwrap();
+    // Each rule matches 600 times, below its own cap; together they pass `MAX_FINDINGS`.
+    let text = "a1 b1 plain ".repeat(600);
+    assert_eq!(outbound_with(&text, &rules), MASK);
+    assert_eq!(outbound_part(&text, 0..120, &rules), MASK);
+}
+
+/// A part hides what the whole field's gate hides: found after its blocks are removed tag by
+/// tag and it is trimmed, and by the rescans after masking.
+#[test]
+fn a_part_hides_what_the_gate_finds_on_the_whole_field_as_it_sees_it() {
+    // A later OTP takes the greedy rule's first pass; the rescan finds the earlier one.
+    let greedy = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'ACME.*otp=([A-Za-z0-9]+)', secret_group = 1 }]\n",
+        )
+        .unwrap();
+    let text = "ACME otp=AAAA1111 then otp=BBBB2222";
+    let whole = outbound_with(text, &greedy);
+    assert!(
+        !whole.contains("AAAA1111") && !whole.contains("BBBB2222"),
+        "{whole}"
+    );
+    let part = outbound_part(text, 5..text.len(), &greedy);
+    assert!(!part.contains("AAAA1111"), "{part}");
+    // An anchored rule matches only once the field is trimmed.
+    let anchored = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = '^ACME.* otp=([0-9]{6})', secret_group = 1 }]\n",
+        )
+        .unwrap();
+    let text = format!("  ACME {} otp=654321 ", "words ".repeat(400));
+    assert!(!outbound_with(&text, &anchored).contains("654321"));
+    let part = outbound_part(&text, 300..text.len(), &anchored);
+    assert!(!part.contains("654321"), "{part}");
+    // A block that shows only once an inner one is removed goes too.
+    let text = format!(
+        "<private<ide_opened_file>x</ide_opened_file>>HIDDEN</private>{}",
+        "padding ".repeat(50)
+    );
+    assert!(!outbound_with(&text, &Rules::default()).contains("HIDDEN"));
+    let part = outbound_part(&text, 0..100, &Rules::default());
+    assert!(!part.contains("HIDDEN"), "{part}");
+}
+
+fn user(toml: &str) -> anyhow::Result<Rules> {
+    Rules::new(&crate::config::parse_capture(Some(toml))?.redaction)
+}
+
+/// Owner decision 43: off, no rule finds anything, the bundled ones neither, through each gate;
+/// `<private>` blocks still go; the version reads `off` whatever the rules, and a rule that
+/// does not compile is still refused.
+#[test]
+fn off_masks_nothing_and_its_version_is_off() {
+    let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+    let off = user(
+        "[redaction]\nenabled = false\nextra_rules = [{ id = \"a\", regex = 'acme-[0-9]+' }]\n",
+    )
+    .unwrap();
+    assert!(off.is_off());
+    assert_eq!(off.version(), OFF);
+    let text = format!("token {key} and acme-482915");
+    let (stored, found) = scan(&text, &off);
+    assert_eq!((stored.as_str(), found.len()), (text.as_str(), 0));
+    assert_eq!(outbound_with(&text, &off), text);
+    assert_eq!(lines_with(&text, &off), text);
+    assert_eq!(hidden(&text, &off), Some(Vec::new()));
+    let private = format!("{text} <private>pin 4242</private>");
+    assert!(!outbound_with(&private, &off).contains("4242"));
+    // The cut at the cap keeps what it leaves of a key block as typed (CodeRabbit on #502).
+    let block = format!(
+        "{}-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----{}",
+        "x".repeat(20),
+        "A".repeat(200),
+        "y".repeat(20)
+    );
+    let (stored, _, cut) = scan_capped(&block, 100, &off);
+    assert!(cut.is_some() && stored.contains("-----BEGIN"), "{stored}");
+    assert_eq!(
+        user("[redaction]\nenabled = false\n").unwrap().version(),
+        OFF
+    );
+    assert!(
+        user("[redaction]\nenabled = false\nextra_rules = [{ id = \"b\", regex = '(' }]\n")
+            .is_err()
+    );
+    let on = user("[redaction]\nenabled = true\n").unwrap();
+    assert_eq!(on.version(), bundled_version());
+    assert_eq!(outbound_with(&key, &on), MASK);
+}
+
+/// Codex on 6c19081: a joined text's parts are gated alone, and a rule on the whole still
+/// sees the whole as stored: masking the title first took away the context of a rule on the
+/// composed text, and the body went out.
+#[test]
+fn a_joined_text_is_gated_in_each_view_without_losing_another_views_context() {
+    let text = "decision: Confidential\nprivate deployment value";
+    let parts = [10..22, 23..text.len()];
+    let title = "{ id = \"title\", regex = '^Confidential$' }";
+    let whole = "{ id = \"whole\", regex = '(?s)^decision: Confidential\\n.*$' }";
+    let rules = |list: &str| user(&format!("[redaction]\nextra_rules = [{list}]")).unwrap();
+    let both = joined_with(text, &parts, &rules(&format!("{title}, {whole}")));
+    assert!(!both.contains("Confidential"), "{both}");
+    assert!(!both.contains("private deployment"), "{both}");
+    let alone = joined_with(text, &parts, &rules(title));
+    assert_eq!(alone, format!("decision: {MASK}\nprivate deployment value"));
+    assert_eq!(joined_with(text, &parts, &rules(whole)), MASK);
+    // Codex on 923bdd1: a block that spans the title and the body, removed, joins two lines,
+    // and a rule anchored to the joined line holds, as it did in `outbound_lines`.
+    let joined = "decision: public\notp=<private>\nignored\n</private>654321\ntrailer";
+    let parts = [10..30, 31..joined.len()];
+    let otp = rules("{ id = \"otp\", regex = '^otp=([0-9]{6})$' }");
+    assert!(!lines_with(joined, &otp).contains("654321"));
+    let out = joined_with(joined, &parts, &otp);
+    assert!(!out.contains("654321") && !out.contains("ignored"), "{out}");
+    assert!(out.contains("public") && out.contains("trailer"), "{out}");
+    // With no part, it is `outbound_lines`: a rule anchored to a line's end holds.
+    let line = rules("{ id = \"line\", regex = 'value$' }");
+    assert_eq!(
+        joined_with("a value\nb", &[], &line),
+        lines_with("a value\nb", &line)
+    );
+    assert!(!joined_with("a value\nb", &[], &line).contains("value"));
+}
+
+/// Codex's security review of Task 7 (on 908b8bf): a quote is gated on the untouched record
+/// and on itself untouched, so the record's mask (the name) takes away no context a rule on
+/// the quote alone needs (the name before the code), and a rule that needs the record's words
+/// around the quote still hides it.
+#[test]
+fn a_quote_is_gated_on_its_record_and_on_itself_untouched() {
+    let rules = |list: &str| user(&format!("[redaction]\nextra_rules = [{list}]")).unwrap();
+    let both = rules(
+        "{ id = \"name\", regex = 'secret=(ACME)', secret_group = 1 }, \
+             { id = \"code\", regex = '^ACME otp=([0-9]{6})$', secret_group = 1 }",
+    );
+    let record = "Owner note: secret=ACME otp=654321";
+    let at = record.find("ACME").unwrap();
+    let quote = quote_with(record, at..record.len(), &both);
+    assert!(
+        !quote.contains("ACME") && !quote.contains("654321"),
+        "{quote}"
+    );
+    assert!(quote.contains(" otp="), "{quote}");
+    let around = rules("{ id = \"acme\", regex = 'ACME.*otp=([0-9]{6})', secret_group = 1 }");
+    let record = "ACME deploy; otp=654321.";
+    let at = record.find("otp=").unwrap();
+    let quote = quote_with(record, at..at + 10, &around);
+    assert_eq!(quote, format!("otp={MASK}"));
+}
+
+/// #329: quotes and joined fields retain findings from the record's final rescans, even
+/// when the rule needs a mask made by the initial line pass.
+#[test]
+fn final_line_rescans_hide_a_quote_and_joined_body() {
+    let rules = user(
+        r#"[redaction]
+extra_rules = [
+  { id = "name", regex = '^ACME$' },
+  { id = "otp", regex = '^\[REDACTED\]\notp=([0-9]{6})$', secret_group = 1 },
+]
+"#,
+    )
+    .unwrap();
+    let text = "ACME\notp=654321";
+    assert_eq!(lines_with(text, &rules), "[REDACTED]\notp=[REDACTED]");
+    let prefix = "observation: title\n";
+    let joined = format!("{prefix}{text}");
+    let body = prefix.len()..joined.len();
+    assert_eq!(
+        (
+            quote_with(text, 9..15, &rules),
+            joined_with(&joined, std::slice::from_ref(&body), &rules),
+        ),
+        (
+            MASK.to_owned(),
+            "observation: title\n[REDACTED]\notp=[REDACTED]".to_owned(),
+        )
+    );
+}
+
+/// #315 (Codex's security review of Task 7, on 3d9c958): each pass of `outbound_lines` finds
+/// what it hides on the untouched text, so a mask from a rule that spans two lines takes no
+/// context a line-anchored rule needs on the next line, in a quote and a joined text too.
+#[test]
+fn a_line_rule_keeps_its_context_when_a_rule_spans_two_lines() {
+    let rules = user(
+        r#"[redaction]
+extra_rules = [
+  { id = "owner", regex = 'owner\n(ACME)', secret_group = 1 },
+  { id = "otp", regex = '^ACME otp=([0-9]{6})$', secret_group = 1 },
+]
+"#,
+    )
+    .unwrap();
+    let text = "owner\nACME otp=654321";
+    let shown = format!("owner\n{MASK} otp={MASK}");
+    assert_eq!(lines_with(text, &rules), shown);
+    assert_eq!(joined_with(text, &[0..5, 6..text.len()], &rules), shown);
+    let quote = quote_with(text, 6..text.len(), &rules);
+    assert_eq!(quote, format!("{MASK} otp={MASK}"));
+    // A document gated whole, a quote of the code alone, and a quote of the whole record
+    // (Codex's security review of 81f12d8).
+    assert_eq!(joined_with(text, &[], &rules), shown);
+    assert_eq!(quote_with(text, 15..21, &rules), MASK);
+    assert_eq!(quote_with(text, 0..text.len(), &rules), shown);
+}
+
+/// Codex's security review of 81f12d8: a line rule that matches the whole pass's masks, as the
+/// line pass saw them before #315, still hides what it hid then, beside what each line's
+/// untouched text hides.
+#[test]
+fn a_line_rule_on_the_masked_text_still_hides_what_it_hid() {
+    let masked = regex::escape(MASK);
+    let rules = user(&format!(
+        r#"[redaction]
+extra_rules = [
+  {{ id = "owner", regex = 'owner\n(ACME)', secret_group = 1 }},
+  {{ id = "flag", regex = '^ACME (flag) otp=[0-9]{{6}}$', secret_group = 1 }},
+  {{ id = "otp", regex = '^{masked} flag otp=([0-9]{{6}})$', secret_group = 1 }},
+]
+"#
+    ))
+    .unwrap();
+    let text = "owner\nACME flag otp=654321";
+    let shown = format!("owner\n{MASK} {MASK} otp={MASK}");
+    assert_eq!(lines_with(text, &rules), shown);
+    assert_eq!(joined_with(text, &[], &rules), shown);
+    assert_eq!(quote_with(text, 20..26, &rules), MASK);
+}
+
+/// Codex's security review of 81f12d8: the line gate removes blocks once, as the gate does, so
+/// a block that taking out another reveals keeps the words a rule needs for the whole pass.
+#[test]
+fn the_line_gate_removes_blocks_once() {
+    let rules = user(
+        r#"[redaction]
+extra_rules = [
+  { id = "ctx", regex = 'CTX</ide_opened_file> otp=([0-9]{6})', secret_group = 1 },
+]
+"#,
+    )
+    .unwrap();
+    // A quote or a part that cuts a block keeps it hidden: alone, its closer pairs with nothing.
+    let text = "a <private>code 1234</private> b";
+    let inside = text.find("1234").unwrap();
+    for shown in [
+        quote_with(text, inside..text.len(), &rules),
+        joined_with(text, &[0..2, inside..text.len()], &rules),
+    ] {
+        assert!(!shown.contains("1234"), "{shown}");
+    }
+    let text = "<ide_opened_file<private>x</private>>CTX</ide_opened_file> otp=654321";
+    assert!(outbound_with(text, &rules).ends_with(&format!("otp={MASK}")));
+    let at = text.len() - 6;
+    for shown in [
+        lines_with(text, &rules),
+        joined_with(text, &[], &rules),
+        quote_with(text, 0..text.len(), &rules),
+        quote_with(text, at..text.len(), &rules),
+    ] {
+        assert!(!shown.contains("654321"), "{shown}");
+    }
+}
+
+fn sha(v: &str) -> String {
+    short_hash_full(v)
+}
+
+#[test]
+fn a_broad_rule_gives_a_bounded_ledger() {
+    let every = user("[redaction]\nextra_rules = [{ id = \"any\", regex = '.' }]").unwrap();
+    let (masked, found) = scan(&"x".repeat(100_000), &every);
+    assert_eq!((masked.as_str(), found.len()), (MASK, 1));
+    assert_eq!(found[0].length, 100_000);
+    // Bounded while matching, not only in the ledger: one span once past the limit.
+    let mut kept = Vec::new();
+    let text = "x".repeat(10_000);
+    assert_eq!(user_spans_in(&text, &every, None, &mut kept).len(), 1);
+    let each = user("[redaction]\nextra_rules = [{ id = \"a\", regex = 'a' }]").unwrap();
+    let (masked, found) = scan(&"ab".repeat(5_000), &each);
+    assert_eq!((masked.as_str(), found.len()), (MASK, 1));
+    // Matches passed over count too: an empty group at every position ends in bounded time.
+    let empty =
+        user("[redaction]\nextra_rules = [{ id = \"e\", regex = 'a()', secret_group = 1 }]")
+            .unwrap();
+    let mut kept = Vec::new();
+    let spans = user_spans_in(&"a".repeat(100_000), &empty, None, &mut kept);
+    assert_eq!(
+        spans.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+        [(0, 100_000)]
+    );
+}
+
+#[test]
+fn a_greedy_rule_that_ends_on_a_masked_value_still_finds_the_one_before() {
+    let rules = user(
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME_[A-Z]+.* otp=\"([^\"]+)\"' }]",
+    )
+    .unwrap();
+    let (masked, found) = scan(r#"ACME_CLIENT otp="123456" otp="654321""#, &rules);
+    assert!(
+        !masked.contains("123456") && !masked.contains("654321"),
+        "{masked}"
+    );
+    assert_eq!(found.len(), 2);
+    // A rescan of stored text, whose mask the rule matches again, looks before it too.
+    let (again, _) = scan(r#"ACME_CLIENT otp="123456" otp="[REDACTED]""#, &rules);
+    assert!(!again.contains("123456"), "{again}");
+    // One below the rule's entropy, which the greedy match ends on, does not hide one before.
+    let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME.*otp=([A-Za-z0-9]+)', entropy = 3.0 }]",
+        )
+        .unwrap();
+    let (masked, _) = scan("ACME otp=Zq8vN3kL7pW2 otp=aaaaaaaa", &rules);
+    assert!(
+        !masked.contains("Zq8vN3kL7pW2") && masked.contains("aaaaaaaa"),
+        "{masked}"
+    );
+}
+
+/// curl's flag, written apart from the word in the lines below: a scanner that reads this
+/// file takes `curl`, the flag and a made-up `user:{pw}` on one line for a credential.
+const U: &str = "-u";
+
+/// What `ranges` hides of `text`, as a tombstone's stars would.
+fn starred(text: &str, ranges: &[(usize, usize)]) -> String {
+    let mut out = text.to_owned();
+    for &(s, e) in ranges {
+        out.replace_range(s..e, &"*".repeat(e - s));
+    }
+    out
+}
+
+/// Whether `new` is `old` with more of it masked: the parts of `new` between its masks are
+/// parts of `old`, in their order, from its start to its end.
+fn masks_more(new: &str, old: &str) -> bool {
+    let mut parts = new.split(MASK);
+    let Some(mut rest) = old.strip_prefix(parts.next().expect("a first part")) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, between)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in between {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
+}
+
+/// The made-up value of #537's tests. Since #985 curl-user reads a credential wherever it
+/// stands, a passed-over value after it or not, and the looks of #537 have nothing left to
+/// find there. What they still add to a scan is a value gitleaks' rule takes and curl-user
+/// passes over: here a password that starts with the placeholder curl-user knows
+/// (`パスワード`), which is of word characters and over the entropy for gitleaks' rule. The
+/// tests of the looks use it, so that they still say what the looks do.
+fn looks_only(mark: &str) -> String {
+    format!("パスワード{mark}")
+}
+
+/// #537: curl-auth-user's `.*` takes the last `-u` in its reach. When that one is a value the
+/// rule passes over (its allowlist's, or one at or below its entropy), the credential before
+/// it was stored as written.
+#[test]
+fn a_greedy_bundled_rule_that_ends_on_a_value_it_passes_over_still_finds_the_one_before() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    for last in ["bob:pass", "a:b"] {
+        let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
+        // The scan before #537.
+        assert_eq!(plain(&line, &rules), (line.clone(), vec![]));
+        let (masked, found) = scan(&line, &rules);
+        assert_eq!(
+            masked,
+            format!("curl -u [REDACTED] https://h.test -u {last} && echo ok")
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+    // Two it passes over after the credential; two credentials before one it passes over, the
+    // first of them quoted; and the credential on a later line of the same command (the rule
+    // reads up to five lines on).
+    let line = format!("curl {U} admin:{pw} https://h.test {U} bob:pass {U} $USER:$PASS");
+    assert_eq!(
+        scan(&line, &rules).0,
+        "curl -u [REDACTED] https://h.test -u bob:pass -u $USER:$PASS"
+    );
+    let line = format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} bob:pass");
+    let (masked, found) = scan(&line, &rules);
+    assert_eq!(
+        masked,
+        "curl -u [REDACTED] -u [REDACTED] https://h.test -u bob:pass"
+    );
+    assert_eq!(found.len(), 2, "{found:?}");
+    let lines = format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass");
+    assert_eq!(
+        scan(&lines, &rules).0,
+        "curl https://h.test \\\n  -u [REDACTED] \\\n  -u bob:pass"
+    );
+}
+
+/// #537 in a rescan: the same line as a tool's output is stored, JSON in a JSON string. The
+/// words after the passed-over value matter: at the end of the output the rule's match cannot
+/// end on it (a quote follows), and it found the credential before #537 too. The quoted
+/// credential is one only the field's unescaped view shows the rule.
+#[test]
+fn a_rescan_finds_the_credential_before_a_value_a_greedy_rule_passes_over() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    for last in ["bob:pass", "a:b"] {
+        for user in [format!("admin:{pw}"), format!("\"admin:{pw}\"")] {
+            let line = format!("curl -u {user} https://h.test -u {last} && echo ok");
+            let body =
+                serde_json::json!({ "output": serde_json::json!({ "stdout": line }).to_string() })
+                    .to_string();
+            let hidden = starred(&body, &field_ranges(&body, &rules));
+            assert!(!hidden.contains(&pw), "{hidden}");
+            assert!(hidden.contains(last), "{hidden}");
+        }
+    }
+}
+
+/// #537: a script of lines the rule passes over, which one of a rescan's views reads as one
+/// line, holds no secret: no range, and no span over the whole field. This passed before the
+/// looks again too; the first fix tried for #537 (#535, taken back there) had `fixpoint` look
+/// again past such values, and masked the field whole from 66 lines on.
+#[test]
+fn lines_a_greedy_bundled_rule_passes_over_are_no_finding_however_many() {
+    let rules = Rules::default();
+    let text = "curl -u $USER:$PASS https://x.test/api\n".repeat(200);
+    assert_eq!(scan(&text, &rules), (text.clone(), vec![]));
+    assert_eq!(ranges(&text, &rules), vec![]);
+    let single = serde_json::json!({ "stdout": text }).to_string();
+    assert_eq!(field_ranges(&single, &rules), vec![], "single-encoded");
+    let double = serde_json::json!({ "output": single }).to_string();
+    assert_eq!(field_ranges(&double, &rules), vec![], "double-encoded");
+    assert_eq!(scan(&single, &rules).1, vec![]);
+}
+
+/// #537: the first look at the part of a match is not counted against `LOOK_AGAIN`, so a
+/// credential with one passed-over value after it is found wherever it is in the text: here
+/// after more passed-over matches than `LOOK_AGAIN` would let a rule look at again.
+#[test]
+fn the_first_look_again_at_a_match_does_not_wait_for_the_others() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    let filler = "x".repeat(1024);
+    let lines = LOOK_AGAIN / 1024 + 8;
+    // The last line's part before `bob:pass` is longer than any before it, so no rest of a
+    // count that the lines before it had used up would hold it.
+    let text = format!("curl https://x.test/{filler} -u $USER:$PASS\n").repeat(lines)
+        + &format!("curl https://h.test/{filler}{filler} {U} admin:{pw} {U} bob:pass\n");
+    let (masked, found) = scan(&text, &rules);
+    assert!(
+        masked.ends_with(" -u [REDACTED] -u bob:pass\n"),
+        "the last line ends: {}",
+        &masked[masked.len() - 60..]
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+/// #537: past the first at each match, the looks again of one scan share `LOOK_AGAIN`. When
+/// it is spent the text is as it was before #537: nothing is masked whole, and what was found
+/// stays found. So a credential behind more passed-over values than that reads is stored as
+/// before; the test pins that limit, it does not want it.
+#[test]
+fn the_further_looks_again_stop_at_what_they_may_read_and_mask_nothing_whole() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    let far = looks_only("Q2mX9tB4");
+    // One line: a credential, then values the rule passes over until the parts before them
+    // add up to many times what the looks may read, then a credential it finds at once.
+    let passed = " -u $USER:$PASS".repeat(2 * LOOK_AGAIN / 1024);
+    let filler = "x".repeat(1024);
+    let line = format!("curl {U} admin:{pw} https://h.test/{filler}{passed} {U} ops:{far}");
+    let (masked, found) = scan(&line, &rules);
+    assert!(
+        !masked.contains(&far),
+        "the last credential is found as before"
+    );
+    assert!(
+        masked.contains(&pw),
+        "the first is past what the looks may read"
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    let body = serde_json::json!({ "output": line }).to_string();
+    assert!(
+        field_ranges(&body, &rules).iter().all(|&(s, e)| e - s < 64),
+        "no range over the field"
+    );
+    // An eighth as many passed-over values, and it is read.
+    let passed = " -u $USER:$PASS".repeat(LOOK_AGAIN / 4096);
+    let line = format!("curl {U} admin:{pw} https://h.test/{filler}{passed} {U} ops:{far}");
+    let (masked, found) = scan(&line, &rules);
+    assert!(!masked.contains(&pw) && !masked.contains(&far), "within it");
+    assert_eq!(found.len(), 2, "{found:?}");
+}
+
+/// #537: only a rule whose pattern runs greedily up to its value looks again. The part of a
+/// match before its value is not a text the rule was written for: authorization-header, cut
+/// off before a token it passes over, takes the scheme's name for the token (Codex's review
+/// of this change's first version). Such a find is no secret, and a rescan would tombstone it
+/// for good.
+#[test]
+fn only_a_rule_that_runs_greedily_to_its_value_looks_again() {
+    let rules = Rules::default();
+    for text in [
+        "Authorization: Signature AAAAAAAA\n",
+        "Authorization: Signature AAAAAAAA",
+        "proxy-authorization: Negotiate xxxxxxxxxxxx end",
+    ] {
+        assert_eq!(scan(text, &rules), (text.to_owned(), vec![]), "{text}");
+        let body = serde_json::json!({ "output": text }).to_string();
+        assert_eq!(field_ranges(&body, &rules), vec![], "{text}");
+    }
+    // Every bundled rule with a greedy run of anything outside a class is one of them, and
+    // each of them is a rule: a rule added with such a run is listed, or fails here.
+    let greedy = |regex: &str| {
+        let (mut class, mut chars) = (false, regex.chars().peekable());
+        let mut runs = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '[' if !class => class = true,
+                ']' if class => class = false,
+                '.' if !class && matches!(chars.peek(), Some('*' | '+')) => {
+                    chars.next();
+                    runs |= chars.peek() != Some(&'?');
+                }
+                _ => {}
+            }
+        }
+        runs
+    };
+    let found: Vec<&str> = bundled()
+        .rules
+        .iter()
+        .filter(|rule| rule.regex.as_deref().is_some_and(greedy))
+        .map(|rule| rule.id.as_str())
+        .collect();
+    assert_eq!(found, LOOKS_AGAIN);
+}
+
+/// #985: a credential given to one of curl's user options, as a shell would take the
+/// command. gitleaks' curl-auth-user takes it only of word characters, only before white
+/// space or the text's end, only after `-u` or `--user`, and not where its password starts
+/// with one of the rule's placeholders; curl-user reads the option's value where it stands.
+/// Each row: what is before the credential, the credential, what is after it. The credential
+/// is masked and nothing else of the line is: as a text of its own, as a tool's flattened
+/// field (where a quote follows what ends the command), by the gate alone, and in a record
+/// stored before the rule (the rescan's ranges).
+#[test]
+fn a_credential_given_to_curls_user_option_is_masked_whatever_follows_and_whatever_it_holds() {
+    let rules = Rules::default();
+    for (before, credential, after) in curl_user_rows() {
+        let line = format!("{before}{credential}{after}");
+        let want = format!("{before}{MASK}{after}");
+        assert_eq!(scan(&line, &rules).0, want, "{line}");
+        assert_eq!(outbound_with(&line, &rules), want, "{line}");
+        let flat = serde_json::json!({ "command": line, "description": "Calls: it" }).to_string();
+        let want_flat =
+            serde_json::json!({ "command": want, "description": "Calls: it" }).to_string();
+        assert_eq!(scan(&flat, &rules).0, want_flat, "{line}");
+        assert_eq!(outbound_with(&flat, &rules), want_flat, "{line}");
+        // A record stored before the rule holds the flattened field as it was: the rescan's
+        // ranges are the credential's bytes.
+        let body = serde_json::json!({ "input": flat }).to_string();
+        let ranges = field_ranges(&body, &rules);
+        assert!(!ranges.is_empty(), "{line}");
+        let (mut left, mut at) = (String::new(), 0);
+        for (start, end) in ranges {
+            left.push_str(&body[at..start]);
+            left.push_str(MASK);
+            at = end;
+        }
+        left.push_str(&body[at..]);
+        assert_eq!(
+            left,
+            serde_json::json!({ "input": want_flat }).to_string(),
+            "{line}"
+        );
+    }
+}
+
+/// The rows of #985's table: before the credential, the credential, after it. Made-up values;
+/// every password holds the same marker, written apart so that no scanner takes one for a
+/// credential.
+fn curl_user_rows() -> Vec<(String, String, String)> {
+    let m = format!("N3kL{}", "7pW2");
+    let pw = format!("Zq8v{m}");
+    let c = format!("admin:{pw}");
+    let curl = format!("curl -s https://h.test {U} ");
+    let row = |before: &str, credential: &str, after: &str| {
+        (before.to_owned(), credential.to_owned(), after.to_owned())
+    };
+    let mut rows = vec![
+        // gitleaks' reading: of word characters, before white space
+        row(&curl, &c, " && echo ok"),
+        // what follows the value
+        row(&curl, &c, ""),
+        row(&curl, &format!("'{c}'"), ""),
+        row(&curl, &format!("\"{c}\""), ""),
+        row("curl -s https://h.test --user=", &c, ""),
+        row(&format!("x=$({curl}"), &c, ")"),
+        row(&format!("x=$({curl}"), &c, ") && echo $x"),
+        row(&curl, &c, "; echo ok"),
+        row(&curl, &c, "|jq ."),
+        row(&curl, &c, ">out.json"),
+        row(&curl, &c, "& wait"),
+        row(&format!("run `{curl}"), &c, "` please"),
+        row(&format!("ssh host '{curl}"), &c, "' && echo ok"),
+        row(&format!("bash -c \"{curl}"), &c, "\" && echo ok"),
+        row(&format!("x=$({curl}"), &format!("'{c}'"), ") && echo $x"),
+        row(&format!("x=$({curl}"), &format!("\"{c}\""), ") && echo $x"),
+        // a comma is a character of a word: it is masked with the value
+        row(&curl, &format!("{c},"), " then more"),
+        // an empty user, a key with no password
+        row(&curl, &format!(":{pw}"), " && echo ok"),
+        row(&curl, &format!("':{pw}'"), " && echo ok"),
+        row(
+            &format!("curl https://h.test/v1/x {U} "),
+            &format!("Zq8v{m}abcd:"),
+            " -d a=1",
+        ),
+        row(
+            &format!("curl https://h.test/v1/x {U} "),
+            &format!("Zq8v{m}abcd:"),
+            "",
+        ),
+        // a user of more than word characters
+        row(&curl, &format!("me+ops@h.test:{pw}"), " && echo ok"),
+        row(&curl, &format!("CORP\\\\ops:{pw}"), " && echo ok"),
+        row(
+            &format!("curl --ntlm {U} "),
+            &format!("'CORP\\ops:{pw}'"),
+            " https://h.test",
+        ),
+        // the option written another way
+        row("curl -su ", &c, " https://h.test && echo ok"),
+        row("curl -sSLu ", &c, " https://h.test && echo ok"),
+        row("curl -su", &c, " https://h.test && echo ok"),
+        row("curl -s https://h.test -u", &c, "; echo ok"),
+        row("curl -s https://h.test -u", &format!("'{c}'"), ""),
+        row("x=$(curl -su", &format!("\"{c}\""), ")"),
+        row(
+            "curl -x http://p.test:3128 -U ",
+            &c,
+            " https://h.test && echo ok",
+        ),
+        row(
+            "curl -x http://p.test:3128 --proxy-user ",
+            &c,
+            " https://h.test && echo ok",
+        ),
+        // a cluster of any length
+        row("curl -sssssssssu ", &c, " https://h.test && echo ok"),
+        // a password in quotes that starts with what no string is followed by in a JSON text
+        // or in code
+        row(&format!("x=$({curl}"), &format!("admin:\"%{pw}\""), ")"),
+        // beside a value the rules pass over, a single space apart (with `)` after it, so
+        // that gitleaks' rule does not take it either)
+        row(
+            &format!("x=$(curl -x http://p.test:3128 -U $P:$Q {U} "),
+            &c,
+            ")",
+        ),
+        row(&format!("x=$(curl {U} \"$A:$B\" {U} "), &c, ")"),
+        row(
+            &format!("curl {U} "),
+            &c,
+            &format!(" https://h.test {U} $USER:$PASS"),
+        ),
+        // a user in another script
+        row(&format!("x=$({curl}"), &format!("太郎:{pw}"), ")"),
+        // gitleaks' own examples of the rule, with the marker in them
+        row(
+            &format!("curl --cacert ca.crt {U} "),
+            &format!("elastic:P@ss{m}$1"),
+            " https://localhost:9200",
+        ),
+        row(
+            &format!(
+                "sh-5.0$ curl -k -X POST https://h.test/rest \\\n  -H 'Content-type: text/plain' \\\n  -d 'world' \\\n  {U} "
+            ),
+            &format!("developer:yqDV{m}LRi"),
+            "",
+        ),
+        row(
+            &format!("curl {U} "),
+            &format!("\":d2Lk{m}!t\""),
+            " https://localhost:9200",
+        ),
+        row(
+            &format!("curl {U} "),
+            &format!("\"d2Lk{m}!t:\""),
+            " https://localhost:9200",
+        ),
+        row(
+            "curl -sw '%{http_code}' -X POST --user  ",
+            &format!("'johns:h0p{m}~21s'"),
+            " $URL/$C --data",
+        ),
+        row(
+            "curl -X POST --user ",
+            &format!("\"{{acd3c08b-74e8}}\":\"{{{m}tA2}}\""),
+            " --header \"Accept: application/json\"",
+        ),
+        row(
+            "curl --user ",
+            &format!("kevin:'pRf7{m}W9'"),
+            " -iX PATCH -H \"Content-Type: application/json\" -d",
+        ),
+    ];
+    // a password of more than word characters, and one that starts with a placeholder's word
+    for inside in [
+        "+", "/", "!", "#", "%", "*", ",", ":", "^", "~", "?", "=", "\\$",
+    ] {
+        rows.push(row(&curl, &format!("admin:Zq8v{inside}{m}"), " && echo ok"));
+    }
+    for start in ["x", "test", "pass", "token", "pwd", "changeit"] {
+        rows.push(row(&curl, &format!("admin:{start}{pw}"), " && echo ok"));
+    }
+    // what an entry of the allowlist must not pass: a password after `//` is no URL's, and
+    // one of no ASCII character is a password
+    rows.push(row(&curl, &format!("admin://{pw}"), " && echo ok"));
+    rows.push(row(&format!("x=$({curl}"), "admin:пароль", ")"));
+    rows
+}
+
+/// #985: a value in escaped quotes, as a JSON text inside a tool's field holds it (a log
+/// line, a command that writes JSON): neither view of the field shows its quotes as quotes.
+/// What the quotes hold is masked, and the quotes stay.
+#[test]
+fn a_curl_credential_in_escaped_quotes_two_levels_deep_is_masked() {
+    let rules = Rules::default();
+    let m = format!("N3kL{}", "7pW2");
+    for credential in [
+        format!("admin:Zq8v{m}"),
+        format!(":Zq8v{m}"),
+        format!("Zq8v{m}abcd:"),
+    ] {
+        let inner = serde_json::json!({ "msg": format!("ran curl {U} \"{credential}\" https://h.test"), "rc": 0 });
+        let want = serde_json::json!({ "msg": format!("ran curl {U} \"{MASK}\" https://h.test"), "rc": 0 });
+        let field = |inner: &serde_json::Value| {
+            serde_json::json!({ "stdout": format!("done\n{inner}\n") }).to_string()
+        };
+        assert_eq!(scan(&field(&inner), &rules).0, field(&want), "{credential}");
+        assert_eq!(
+            outbound_with(&field(&inner), &rules),
+            field(&want),
+            "{credential}"
+        );
+    }
+    // A key with no password that ends a string of a JSON text: what closes the object and
+    // opens the next is no password in quotes.
+    let key = format!("Zq8v{m}abcd:");
+    let text = |key: &str| {
+        format!("[{{\"cmd\":\"curl https://h.test/v1/x {U} {key}\"}},{{\"cmd\":\"ls\"}}]")
+    };
+    assert_eq!(scan(&text(&key), &rules).0, text(MASK));
+    assert_eq!(outbound_with(&text(&key), &rules), text(MASK));
+    let list =
+        |key: &str| format!("[[\"a\",\"curl https://h.test/v1/x {U} {key}\"],[\"b\",\"ls\"]]");
+    assert_eq!(scan(&list(&key), &rules).0, list(MASK));
+}
+
+/// #985: what curl-user finds no credential in, as a text of its own and as a tool's
+/// flattened field: gitleaks' own examples of what its rule passes over, and what a store
+/// holds after a `-u` in a text that names curl (a format of `date -u`, another tool's
+/// `-u <URL>`, a variable, a placeholder, a command that ends on the option).
+#[test]
+fn curl_user_passes_over_what_is_no_credential() {
+    let rules = Rules::default();
+    let own = bundled()
+        .rules
+        .iter()
+        .position(|r| r.id == "curl-user")
+        .expect("the rule");
+    let alone = |text: &str| {
+        let mut found = spans_in(text, &rules, Some(own), &mut Vec::new());
+        let (view, at) = unescaped(text);
+        found.extend(
+            spans_in(&view, &rules, Some(own), &mut Vec::new())
+                .into_iter()
+                .map(|(s, e, rule)| (at[s], at[e], rule)),
+        );
+        found.sort_unstable();
+        found.dedup();
+        found
+    };
+    for line in [
+        // gitleaks' examples
+        "curl -i -u 'test:test'",
+        "   curl -sL --user \"$1:$2\" \"$3\" > \"$4\"",
+        "curl -u <user:password> https://test.com/endpoint",
+        "curl --user neo4j:[PASSWORD] http://[IP]:7474/db/data/",
+        "curl -u \"myusername\" http://localhost:15130/api/check_user/",
+        "curl -u username:token",
+        "curl -u \"${_username}:${_password}\"",
+        "curl -u \"${username}\":\"${password}\"",
+        "curl -k -X POST -I -u \"SRVC_JENKINS:${APPID}\"",
+        "curl -u \":\" https://localhost:9200",
+        "curl -sw '%{http_code}' -X POST --user '$USERNAME:$PASSWORD' $URL/$C --data",
+        "curl --user \"xxx:yyy\"",
+        "curl --silent --fail {{- if and $.Values.username $.Values.password }} --user \"{{ $.Values.username }}:{{ $.Values.password }}\"",
+        "curl -XGET -i -u \"${{ env.ELK_ID }}:${{ build.env.ELK_PASS }}\"",
+        "curl -X POST --user \"$(cat ./login.txt):$(cat ./password.txt)\"",
+        "curl http://127.0.0.1:5000/file --user user:pass --digest        # digest auth",
+        "   curl -X GET --insecure --user \"username:password\" \\",
+        "curl --silent --insecure --user ${f5user}:${f5pass} \\",
+        "curl --insecure --ssl-reqd \"smtps://smtp.gmail.com\" --mail-from \"src@gmail.com\" --user \"src@gmail.com\" --upload-file out.txt",
+        "curl -X POST http://h.test:8080/serve\nnc -u -l 41234",
+        // what a store holds: a format of date, with a name before it, in escaped quotes
+        "curl -s https://h.test/a; date -u +%Y-%m-%dT%H:%M:%SZ",
+        "curl -s https://h.test/a; date -u '+%Y-%m-%dT%H:%M:%SZ'",
+        "curl -s https://h.test/a; date -u \"+%Y-%m-%dT%H:%M:%SZ\"",
+        "curl -s https://h.test/a; x=$(date -u +%H:%M:%S)",
+        "curl -s https://h.test/a; ssh ops@h.test 'date -u \\\"+NOW=%%Y-%%m-%%dT%%H:%%M:%%SZ\\\"'",
+        // a command that ends on the option: the quote after it closes a string, and one
+        // that opens after the option does not run over the end of its line
+        "curl -s https://h.test/a; bash -c 'date -u'; echo 'at: noon'",
+        "curl -s https://h.test/a; bash -c 'date -u'; echo \"at: noon\"; echo 'done'",
+        "curl -s https://h.test/a | grep -E 'a|uniq -u' /etc/os.txt | grep -i V && echo \"OS: it's\"",
+        "curl -s https://h.test/a | sort -u",
+        "curl -s https://h.test/a | sort -u\",name:xyz,key:12345\"",
+        "curl -s https://h.test/a; awk -u 'BEGIN {x = 1}\nEND {print \"a: b\"}' f; echo 'done'",
+        "curl -s https://h.test/a; awk -u 'BEGIN {x = 1}\nEND {print \"a:b\"}' f; echo 'done'",
+        // a variable, a template, a placeholder
+        "curl -s -u \"$K:\" https://h.test/v1/x",
+        "curl -s -u \"$STRIPE_KEY:\" https://h.test/v1/x",
+        "curl -s -u $STRIPE_KEY: https://h.test/v1/x",
+        "curl -s -u ${STRIPE_KEY}: https://h.test/v1/x",
+        "curl -s -u \"$CF_EMAIL:$CF_KEY\" https://h.test/v1/x",
+        "curl -s -u \"$${API_USER}:$${API_PASS}\" https://h.test",
+        "curl https://h.test runs as -u $U:$P, in 2 s",
+        "then I ran curl -u user:pass. It failed",
+        "then I ran curl -u admin:... and it failed",
+        "curl -u admin:<password> https://h.test",
+        "curl -u user1:<password> https://h.test",
+        "curl -u YOUR_API_KEY: https://h.test/v1/x",
+        "curl -u admin: https://h.test/v1/x",
+        "curl -u ユーザー名:パスワード https://h.test",
+        "curl -u admin:パスワード https://h.test",
+        "curl -u 'ユーザー名:パスワード' https://h.test",
+        // another tool's option
+        "curl -s https://h.test/a; nuclei -u https://target.h.test/path -t cves",
+        "curl -s https://h.test/a; sqlmap -u \"http://h.test/a.php?id=1\" --batch",
+        "curl -s https://h.test/a; docker run --rm -u 1000:1000 alpine id",
+        "curl -s https://h.test/a; chrome --user-data-dir=C:\\\\Users\\\\x\\\\p --headless",
+        "curl -s https://h.test/a; git push -u origin feature/x",
+        "curl -s https://h.test/a; python3 -u script.py --port 8080",
+        "curl -s https://h.test/a; psql -U postgres -h db.h.test -p 5432",
+        // the same values, a JSON text inside the field
+        "echo '{\"cmd\":\"curl -s -u \\\"$API_USER:$API_PASS\\\" https://h.test\"}'",
+        "echo '{\"cmd\":\"curl -s -u \\\"username:password\\\" https://h.test\"}'",
+        "echo '{\"cmd\":\"curl --user \\\"xxx:yyy\\\"\"}'",
+        "echo '{\"cmd\":\"curl -s https://h.test; date -u\",\"note\":\"at: noon\"}'",
+        // a quote that closes a string after `user:` opens no password: what follows a
+        // string in a JSON text (white space, a comma, a colon, `}`, `]`) starts none
+        "{\"command\": \"curl -u admin:\",  \"X-Foo\": \"abc\"}",
+        "{\"command\": \"curl -u admin:\"  ,  \"X-Foo\": \"abc\"}",
+        "{'command': 'curl -u admin:',  'X-Foo': 'abc'}",
+        "{\"curl -u admin:\":   \"abc\", \"b\": 1}",
+        // nor does a value quoted whole hold a password that starts so: `key: value` and a
+        // path in quotes after another tool's option, a command that ends on the option and
+        // a blank
+        "grep -rU \"name: curl\" docs/",
+        "rg -U \"name: curl\" docs/",
+        "rg -U 'redact::tests' src/ # as curl does",
+        "curl -s https://h.test/a; bash -c 'date -u '; echo \"at: noon\"; echo 'done'",
+        // and what follows a string in code: `)`, `;`, `+`, `.`
+        "run(\"curl -u admin:\"); h(\"X-Foo\", \"abc\")",
+        "x = \"curl -u admin:\";h[\"X-Foo\"] = \"abc\"",
+        "cmd = \"curl -u admin:\"+pw+\" https://h.test\"",
+        "$c = \"curl -u admin:\".$pw.\" https://h.test\";",
+        "run('curl -u admin:'); h('X-Foo', 'abc')",
+        // whatever follows the quote that closes a string: the quote that opens the next
+        // one has a word after it, and no value's closing quote has
+        "s = \"curl -u admin:\"%f(\"X-Foo\", \"abc\")",
+        "{\"curl -u \":[{ \"X-Foo\": \"abc\"}]}",
+        "x = [\"curl -u \",key:val,\"X-Foo\": \"abc\"]",
+        "x = ['curl -u ',key:val,'X-Foo', 'abc']",
+        "s = 'curl -u admin:'%f('X-Foo', 'abc')",
+        // the same where a value would stand right after the option, with nothing between
+        "x = \"curl -u\"[10:n]+\"X-Foo\"",
+        "x = 'curl -u'[10:n]+'X-Foo'",
+        // removed lines of a diff: a `-` and a word at a line's start are no option with
+        // its value right after it, and a key with no password is not read there (#984)
+        "@@ -1,9 +0,0 @@\n-build-arm64:\n-  script:\n-    - curl -fsS https://h.test/install.sh\n-user1:\n-ubuntu2204:\n-results22: ok\n-queue_7:\n-url:http://h.test/a\n-count12: 3\n-sum_256: abc\n",
+        "curl -fsS https://h.test/a; make -build2: all",
+        // another tool's option that holds a `u` and a colon: a letter before the `u`
+        // takes an argument in curl (`X`, `o`, `d`, `z`) and so ends a cluster there
+        "javac -Xplugin:ErrorProne -d out src/CurlClient.java",
+        "csc -nologo -out:bin/app.exe -debug:full Program.cs && curl -s https://h.test",
+        concat!(
+            "curl -s https://h.test/a; rsync -avz",
+            "u deploy@h.test:/srv/www/ ./backup/"
+        ),
+    ] {
+        assert_eq!(alone(line), vec![], "{line}");
+        let flat = serde_json::json!({ "command": line, "description": "Shows: it" }).to_string();
+        assert_eq!(alone(&flat), vec![], "{line}");
+    }
+    // What it does take that is no credential, as gitleaks' rule does where white space
+    // follows: a value of another tool's `-u` that has a credential's shape, in a text that
+    // names curl. Known, and written down so that a change of it is seen.
+    for line in [
+        format!("curl -s https://h.test/a; docker run --rm {U} node:node alpine id"),
+        format!("curl -s https://h.test/a | sed {U} 's/abc:def/ghi/'"),
+        format!(
+            "curl -s https://h.test/a; rsync -a{} deploy@h.test:/srv/www/ ./backup/",
+            "u"
+        ),
+        // a quote that closes a string after `user:`, where another character than those
+        // of a JSON text or of a call follows it and the next string starts with no word
+        "s = \"curl -u admin:\"%f(\"-X-Foo\", \"abc\")".to_owned(),
+        // a removed line of a combined diff: a blank stands before the `-`
+        "diff --cc a.yml\n -url:http://h.test/a\n+  - curl -fsS https://h.test/b".to_owned(),
+        // a pattern of a search after ripgrep's -U, in a text that names curl
+        "rg -U '\"scripts\":\\s*\\{[^}]*curl' package.json".to_owned(),
+    ] {
+        assert_eq!(alone(&line).len(), 1, "{line}");
+    }
+}
+
+/// The line a match stands on is read only for an allowlist that targets the line (the
+/// review of #985: it was read for every value a rule judged, and one long line of values a
+/// rule passes over was read once for each). gitleaks' generic-api-key has such an
+/// allowlist: a line of a Dockerfile that mounts a secret. It is given the line of the
+/// match and no other: the same value on the line after it, or before it, is found.
+#[test]
+fn an_allowlist_that_targets_the_line_is_given_the_line_of_the_match() {
+    let rules = Rules::default();
+    let generic = bundled()
+        .rules
+        .iter()
+        .position(|r| r.id == "generic-api-key")
+        .expect("the rule");
+    let found = |text: &str| spans_in(text, &rules, Some(generic), &mut Vec::new());
+    let key = format!("Kd7wQ2mX9tB4{}", "Zq8vN3kL7pW2"); // split: scanners
+    let mount = format!("RUN --mount=type=secret,id=k api_key={key} ./build.sh");
+    let bare = format!("RUN api_key={key} ./build.sh");
+    let at = bare.find(&key).expect("the key");
+    assert_eq!(found(&mount), vec![]);
+    assert_eq!(found(&bare), vec![(at, at + key.len(), generic)]);
+    let after = mount.len() + 1 + at;
+    assert_eq!(
+        found(&format!("{mount}\n{bare}\n")),
+        vec![(after, after + key.len(), generic)]
+    );
+    assert_eq!(
+        found(&format!("{bare}\n{mount}\n")),
+        vec![(at, at + key.len(), generic)]
+    );
+}
+
+/// The reviews of #985 (Codex): a quote that closes a string was read as one that opens a
+/// value. Read so, the value took the closing quote and the quote that opens the next
+/// string, and a user's rule that reads the masked text lost its context (here one that
+/// masks the value beside a name that was masked): the value `main` masks was stored and let
+/// out. Two things keep it. After `user:` at a string's end, what follows that quote is no
+/// password in quotes (white space, `,`, `:`, `}`, `]` in a JSON text, `)`, `;`, `+`, `.` in
+/// code): the texts are masked as `main` masks them, and a key that holds a digit is still
+/// masked, alone. And the quote that closes a value has no word character after it, as the
+/// one that opens the next string has: the first look takes nothing, the user's rules find
+/// the name and then the value, and the value is masked. (Once the name is a mask, which
+/// starts with no word character, the pass over the masked text does read the quote as a
+/// value's: it masks more than `main`, and loses nothing.)
+#[test]
+fn a_quote_that_closes_a_string_after_a_user_and_a_colon_opens_no_password() {
+    let rules = |name: &str| {
+        user(&format!(
+            r#"[redaction]
+extra_rules = [
+  {{ id = "name", regex = '{name}' }},
+  {{ id = "value", regex = '"\[REDACTED\]"[:,] "([A-Za-z0-9]+)"' }},
+]"#
+        ))
+        .unwrap()
+    };
+    let own = rules("X-Foo");
+    let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+    for (name, stored) in [("admin:", "admin:"), ("admin1:", MASK)] {
+        for (text, want) in [
+            (
+                format!("{{\"command\": \"curl {U} {name}\",  \"X-Foo\": \"{far}\"}}"),
+                format!("{{\"command\": \"curl -u {stored}\",  \"{MASK}\": \"{MASK}\"}}"),
+            ),
+            (
+                format!("run(\"curl {U} {name}\"); h(\"X-Foo\", \"{far}\")"),
+                format!("run(\"curl -u {stored}\"); h(\"{MASK}\", \"{MASK}\")"),
+            ),
+        ] {
+            assert_eq!(scan(&text, &own).0, want, "{text}");
+            assert_eq!(outbound_with(&text, &own), want, "{text}");
+        }
+    }
+    // Another character after the quote that closes the string, and the quote right after
+    // the option and a blank: the next string starts with a word.
+    for text in [
+        format!("s = \"curl {U} admin:\"%f(\"X-Foo\", \"{far}\")"),
+        format!("{{\"curl {U} \":[{{ \"X-Foo\": \"{far}\"}}]}}"),
+        format!("x = [\"curl {U} \",key:val,\"X-Foo\": \"{far}\"]"),
+    ] {
+        for out in [scan(&text, &own).0, outbound_with(&text, &own)] {
+            assert!(!out.contains(&far), "{text}: {out}");
+            assert!(
+                out.ends_with(&text[text.find(&far).unwrap() + far.len()..]),
+                "{out}"
+            );
+        }
+        // as a tool's flattened field, where the quotes are escaped ones
+        let flat = serde_json::json!({ "command": text, "description": "Shows: it" });
+        let flat = flat.to_string();
+        for out in [scan(&flat, &own).0, outbound_with(&flat, &own)] {
+            assert!(!out.contains(&far), "{flat}: {out}");
+        }
+    }
+    // What is left of the reading, pinned and not wanted: the quote that closes the string
+    // has another character after it than those above, and the next string starts with no
+    // word character. The user and what stands between the two quotes are masked as a
+    // credential at the first look, the name's mask joins it, and the value after it is
+    // stored and let out.
+    let own = rules("-X-Foo");
+    let text = format!("s = \"curl {U} admin:\"%f(\"-X-Foo\", \"{far}\")");
+    let left = format!("s = \"curl -u {MASK}\", \"{far}\")");
+    assert_eq!(scan(&text, &own).0, left);
+    assert_eq!(outbound_with(&text, &own), left);
+    // The same where the first quote stands right after the option and a blank.
+    let text = format!("{{\"curl {U} \":[{{ \"-X-Foo\": \"{far}\"}}]}}");
+    let left = format!("{{\"curl -u {MASK}\": \"{far}\"}}]}}");
+    assert_eq!(scan(&text, &own).0, left);
+    assert_eq!(outbound_with(&text, &own), left);
+    // Where the next string starts with no word character, only the password's first
+    // character keeps the quote from opening one. Three of those characters, each alone
+    // after the quote: the end of a JSON object, of a JSON array, of a statement.
+    for text in [
+        format!("{{\"a\": {{\"command\": \"curl {U} admin:\"}}, \"-X-Foo\": \"{far}\"}}"),
+        format!("{{\"args\": [\"curl {U} admin:\"], \"-X-Foo\": \"{far}\"}}"),
+        format!("cmd = \"curl {U} admin:\"; h(\"-X-Foo\", \"{far}\")"),
+    ] {
+        for out in [scan(&text, &own).0, outbound_with(&text, &own)] {
+            assert!(!out.contains(&far), "{text}: {out}");
+        }
+    }
+    // What the rule on the closing quote costs, pinned and not wanted (#984): a value in
+    // quotes with a word character right after it is not read. A shell joins the two parts
+    // into one word. It is stored as written, as on `main`.
+    let defaults = Rules::default();
+    let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+    for text in [
+        format!("curl -s https://h.test {U} admin:\"{pw}\"more && echo ok"),
+        format!("curl -s https://h.test {U} \"admin:{pw}\"x && echo ok"),
+        format!("curl -s https://h.test {U} 'admin:{pw}'2>/dev/null"),
+    ] {
+        assert_eq!(scan(&text, &defaults).0, text);
+        assert_eq!(outbound_with(&text, &defaults), text);
+    }
+}
+
+/// #985, what a mask costs: it takes the text it covers from every rule that reads the masked
+/// text. A user's rule that finds its value only there (after another mask), by a context
+/// that is inside a curl credential, finds it while the credential is not masked and loses
+/// it once it is. gitleaks' rule did so wherever it found the credential (the second text);
+/// curl-user finds the credential of the first too (#537's text of that kind, where the looks
+/// come after everything else for this reason: curl-user is a rule among the rules). The
+/// test pins that, it does not want it.
+#[test]
+fn a_mask_of_a_curl_credential_takes_the_context_a_users_rule_read_inside_it() {
+    let own = user(
+        r#"[redaction]
+extra_rules = [
+  { id = "trigger", regex = 'trigger' },
+  { id = "after-trigger", regex = 'Signature:[^\n]*\n\[REDACTED\] ([A-Za-z0-9]+)' },
+]"#,
+    )
+    .unwrap();
+    let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+    let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+    for after in [format!(" {U} bob:pass"), String::new()] {
+        let text = format!("curl {U} Signature:{pw} https://h.test{after}\ntrigger {far}");
+        for out in [plain(&text, &own).0, outbound_with(&text, &own)] {
+            assert_eq!(
+                out,
+                format!("curl -u {MASK} https://h.test{after}\n{MASK} {far}"),
+                "{text}"
+            );
+        }
+    }
+    // Where the context is outside the credential, the user's rule finds its value as before.
+    let text =
+        format!("Signature: x\ncurl {U} admin:{pw} https://h.test\nSignature: y\ntrigger {far}");
+    assert_eq!(
+        plain(&text, &own).0,
+        format!("Signature: x\ncurl -u {MASK} https://h.test\nSignature: y\n{MASK} {MASK}")
+    );
+}
+
+/// #985: the rule is beside gitleaks' own and takes nothing from it. Whatever curl-auth-user
+/// finds in a text, the gate hides with the new rule there too: for texts that cross the two
+/// (a value one of them passes over next to a value the other takes).
+#[test]
+fn what_gitleaks_curl_rule_finds_the_gate_still_hides() {
+    let rules = Rules::default();
+    let theirs = bundled()
+        .rules
+        .iter()
+        .position(|r| r.id == "curl-auth-user")
+        .expect("the rule");
+    let pw = format!("Zq8v{}", "N3kL7pW2");
+    let parts = [
+        format!("curl -s https://h.test {U} admin:{pw} && echo ok"),
+        format!("curl -s https://h.test {U} admin:{pw}"),
+        format!("curl -s https://h.test {U} \"admin:{pw}\""),
+        format!("x=$(curl -s https://h.test {U} admin:{pw})"),
+        format!("curl {U} $USER:$PASS https://h.test"),
+        format!("curl https://h.test {U} $USER:$PASS"),
+        format!("curl https://h.test {U} bob:pass"),
+        format!("curl -su ops:{pw}9 https://h.test"),
+        format!("curl {U} admin:x{pw} https://h.test"),
+        format!("date {U} '+%Y-%m-%dT%H:%M:%SZ'"),
+        format!("docker run --rm {U} node:node alpine id"),
+    ];
+    for a in &parts {
+        for b in &parts {
+            for joined in [
+                format!("{a} ; {b}"),
+                format!("{a}\n{b}"),
+                format!("{a} {b}"),
+            ] {
+                let flat = serde_json::json!({ "command": joined }).to_string();
+                for text in [joined.clone(), flat] {
+                    let hidden = hidden(&text, &rules).expect("not masked whole");
+                    let mut found = spans_in(&text, &rules, Some(theirs), &mut Vec::new());
+                    let (view, at) = unescaped(&text);
+                    found.extend(
+                        spans_in(&view, &rules, Some(theirs), &mut Vec::new())
+                            .into_iter()
+                            .map(|(s, e, rule)| (at[s], at[e], rule)),
+                    );
+                    for (s, e, _) in found {
+                        assert!(
+                            hidden.iter().any(|&(from, to)| from <= s && e <= to),
+                            "{text}: {s}..{e} of {hidden:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// #985: the bundled rules that end on a term of their own after the value, not on gitleaks'
+/// usual one. curl-auth-user is the one that left a value at a string's end (it wants white
+/// space or the text's end, and nothing else); the others take a value that ends a string of
+/// a flattened field, and one before `)`. A rule added with an end of its own is listed here
+/// with such a value, or fails. (The rules with the usual end take a value at a string's end
+/// and not before `)`, `&` or `,`: #987.)
+#[test]
+fn the_rules_with_an_end_of_their_own_take_a_value_that_ends_a_string() {
+    const USUAL: &str = r#"(?:[\x60'"\s;]|\\[nr]|$)"#;
+    // the last term: an anchor, or a group with no group inside it
+    let own_end = |regex: &str| {
+        !regex.ends_with(USUAL)
+            && (regex.ends_with('$')
+                || regex.ends_with("\\z")
+                || (regex.ends_with(')')
+                    && regex
+                        .rfind("(?:")
+                        .is_some_and(|at| !regex[at + 3..regex.len() - 1].contains(['(', ')']))))
+    };
+    let mut found: Vec<&str> = bundled()
+        .rules
+        .iter()
+        .filter(|rule| rule.regex.as_deref().is_some_and(own_end))
+        .map(|rule| rule.id.as_str())
+        .collect();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        [
+            "curl-auth-header",
+            "curl-auth-user",
+            "openshift-user-token",
+            "perplexity-api-key",
+            "sentry-org-auth-token",
+            "sentry-org-token",
+            "sidekiq-sensitive-url",
+        ]
+    );
+    let rules = Rules::default();
+    // Made-up values, each with the marker, written in parts so that no scanner takes one
+    // for a credential.
+    let m = format!("N3kL{}", "7pW2");
+    let t43 = format!("Qm7xT2vK9pL4wZ8nB3cR6yH1sD5fG0jUeXa{m}");
+    let hex = format!("{}{}", "9f3a", "c07e");
+    for (rule, command, marker) in [
+        (
+            "curl-auth-header",
+            format!("curl -s https://h.test -H \"Authorization: Bearer {t43}\""),
+            m.clone(),
+        ),
+        (
+            "curl-auth-header",
+            format!("curl -s https://h.test -H 'X-Api-Key: {t43}'"),
+            m.clone(),
+        ),
+        (
+            "openshift-user-token",
+            format!("oc login --token={}~{t43}", "sha256"),
+            m.clone(),
+        ),
+        (
+            "perplexity-api-key",
+            format!(
+                "export PPLX={}-{}{}{m}",
+                "pplx", "a1B2c3D4e5F6g7H8i9J0", "k1L2m3N4o5P6q7R8s9T0"
+            ),
+            m.clone(),
+        ),
+        (
+            "sentry-org-auth-token",
+            format!(
+                "sentry-cli --auth {}_{}_{t43}",
+                "sntrys", "ZXlKcFlYUWlPakUzTVRBd01EQXdNREF3fQ=="
+            ),
+            m.clone(),
+        ),
+        (
+            "sentry-org-token",
+            format!(
+                "sentry-cli --auth {}_{}jE3MDk4NzY1NDMy{}IjoiaHR0cHM6Ly91cy5z_{t43}",
+                "sntrys", "eyJpYXQiO", "LCJyZWdpb25fdXJs"
+            ),
+            m.clone(),
+        ),
+        (
+            "sidekiq-sensitive-url",
+            format!(
+                "bundle config https://{hex}:{}{}@gems.contribsys.com",
+                "51bd", "e2a8"
+            ),
+            format!("{}{}", "51bd", "e2a8"),
+        ),
+    ] {
+        for line in [command.clone(), format!("x=$({command})")] {
+            let flat = serde_json::json!({ "command": line }).to_string();
+            for out in [scan(&flat, &rules).0, outbound_with(&flat, &rules)] {
+                assert!(!out.contains(&marker), "{rule}: {out}");
+            }
+        }
+    }
+}
+
+/// #537: the count is one for a scan of a text. Past the first look at each match, every look
+/// is within it: the parts before the further values of a match, and each further look at the
+/// whole text after a find (the rules read what the new masks left, and the rule looks at
+/// that once more). What the count does not reach is stored as before #537.
+#[test]
+fn the_looks_again_of_a_scan_share_one_count() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    // 64 values the looks find, then 92 at or below the rule's entropy, on one line: the looks
+    // pass over the 92 and find values from the last one back, while the count lasts (24 of
+    // them, when this was written).
+    let credentials: String = (0..64).map(|i| format!(" -u c{i:02}:{pw}{i:02}")).collect();
+    let line = format!("curl{credentials}{}", " -u a:b".repeat(92));
+    let (masked, found) = scan(&line, &rules);
+    assert!(
+        masked.contains(" -u [REDACTED] -u a:b -u a:b"),
+        "the last credential is found"
+    );
+    assert!(found.len() > 1 && found.len() < 64, "{} found", found.len());
+    // 300 credentials, each 1 KiB before the next, and a value the rule passes over: the part
+    // before the last credential is longer than the count, so the rule finds that one (the
+    // first look at a match is not counted) and no other. A further look at the whole line
+    // would find the one before it, and so on, each for a read of all of it: the line is
+    // longer than the count, so there is none.
+    let filler = "x".repeat(1024);
+    let credentials: String = (0..300)
+        .map(|i| format!(" -u c{i:03}:{pw}{i:03} https://h.test/{filler}"))
+        .collect();
+    let line = format!("curl{credentials} -u bob:pass");
+    assert!(line.len() > LOOK_AGAIN);
+    let (masked, found) = scan(&line, &rules);
+    assert_eq!(found.len(), 1, "{} found", found.len());
+    assert!(!masked.contains(&format!("c299:{pw}299")), "the last one");
+    assert!(
+        masked.contains(&format!("c298:{pw}298")),
+        "the one before it"
+    );
+}
+
+/// #537's looks again only add: what a scan masked before them it masks with them, with a
+/// user's rules too, and what the rescan found before it finds with them. The first text is
+/// from Codex's review of this change's first version, which masked the curl credential while
+/// the rules were still at work: that took `Signature:` from the user's second rule, and the
+/// value after the trigger was stored.
+#[test]
+fn what_a_scan_masked_before_the_looks_again_stays_masked() {
+    assert!(masks_more("a[REDACTED]c", "abc") && masks_more("abc", "abc"));
+    assert!(!masks_more("a[REDACTED]x", "abc") && !masks_more("ab", "abc"));
+    assert!(!masks_more("a[REDACTED]c d", "a[REDACTED]c [REDACTED]"));
+    let own = user(
+        r#"[redaction]
+extra_rules = [
+  { id = "trigger", regex = 'trigger' },
+  { id = "after-trigger", regex = 'Signature:[^\n]*\n\[REDACTED\] ([A-Za-z0-9]+)' },
+]"#,
+    )
+    .unwrap();
+    let pw = looks_only("N3kL7pW2");
+    let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+    let text = format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\ntrigger {far}");
+    assert_eq!(
+        plain(&text, &own).0,
+        format!("curl {U} Signature:{pw} https://h.test {U} bob:pass\n[REDACTED] [REDACTED]")
+    );
+    assert_eq!(
+        scan(&text, &own).0,
+        "curl -u [REDACTED] https://h.test -u bob:pass\n[REDACTED] [REDACTED]"
+    );
+    let filler = "x".repeat(300);
+    let texts = [
+        text,
+        format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
+        format!("curl {U} \"admin:{pw}\" {U} ops:{far} https://h.test {U} a:b"),
+        format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass\ntrigger {far}"),
+        format!("Signature: x\ntrigger curl {U} admin:{pw} {U} $USER:$PASS\ntrigger {far}"),
+        format!(
+            "curl --json '{{\"cmd\":\"run {U} app:{pw} now\"}}' https://h.test --user \"$USER:$PASS\""
+        ),
+        format!("curl {U} [REDACTED] {U} admin:{pw} https://h.test/{filler} {U} bob:pass trigger"),
+        format!("Authorization: Signature AAAAAAAA\ncurl -u a:b -u c:d\ntrigger {far}"),
+        "curl -u $USER:$PASS https://x.test/api\n".repeat(80),
+    ];
+    for text in &texts {
+        for rules in [&Rules::default(), &own] {
+            let (before, now) = (plain(text, rules).0, scan(text, rules).0);
+            assert!(masks_more(&now, &before), "{text}\n{before}\n{now}");
+            // As a tool's output is stored, and as the rescan reads it.
+            let body = serde_json::json!({ "output": text }).to_string();
+            let now = field_ranges(&body, rules);
+            for (s, e) in literals(&body) {
+                let (field, at) = unescaped(&body[s..e]);
+                for (a, b) in ranges(&field, rules) {
+                    let (a, b) = (s + at[a], s + at[b]);
+                    assert!(
+                        now.iter().any(|&(x, y)| x <= a && b <= y),
+                        "{body}: {a}..{b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A finding of the looks again is at its mask, and the findings made before it move with
+/// what it changed, as in a rescan: the ledger's offsets, and where `scan_capped` may cut.
+#[test]
+fn the_findings_of_the_looks_again_are_where_their_masks_are() {
+    let rules = user("[redaction]\nextra_rules = [{ id = \"ticket\", regex = 'ticket-[0-9]{5}' }]")
+        .unwrap();
+    let pw = looks_only("N3kL7pW2");
+    let line = format!("ticket-11111 curl {U} admin:{pw} https://h.test {U} bob:pass ticket-22222");
+    let (masked, found) = scan(&line, &rules);
+    assert_eq!(
+        masked,
+        "[REDACTED] curl -u [REDACTED] https://h.test -u bob:pass [REDACTED]"
+    );
+    let at: Vec<(&str, usize, usize)> = found
+        .iter()
+        .map(|f| (f.rule.as_str(), f.offset, f.length))
+        .collect();
+    assert_eq!(
+        at,
+        [
+            ("user:ticket", 0, 12),
+            ("curl-auth-user", 19, 29),
+            ("user:ticket", 57, 12)
+        ]
+    );
+    for f in &found {
+        assert_eq!(&masked[f.offset..f.offset + MASK.len()], MASK, "{f:?}");
+    }
+}
+
+/// #537's looks again are capture's and the rescan's. The egress gate reads a text as it did
+/// before; whatever it reads, what `hidden` gives of a text is what `outbound_with` hides of
+/// it, and the gate that keeps ranges shows the same.
+#[test]
+fn the_gate_and_what_it_hides_agree_where_capture_looks_again() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    for last in ["bob:pass", "a:b"] {
+        let line = format!("curl {U} admin:{pw} https://h.test {U} {last} && echo ok");
+        assert_ne!(scan(&line, &rules).0, line, "capture looks again");
+        let out = outbound_with(&line, &rules);
+        let runs = hidden(&line, &rules).expect("not masked whole");
+        assert_eq!(masked_part(&line, 0..line.len(), &runs), out);
+        assert_eq!(outbound_but_with(&line, &[], &rules), out);
+    }
+}
+
+/// A value the user keeps is passed over where the rule looks again, as at every look: it
+/// stays, and the credential before it is found.
+#[test]
+fn a_value_the_user_keeps_stays_where_the_rule_looks_again() {
+    let pw = looks_only("N3kL7pW2");
+    let own = format!("deploy:Kd7w{}", "Q2mX9tB4"); // split: scanners
+    let toml = format!("[redaction]\nallowlist = [\"{}\"]", short_hash_full(&own));
+    let rules = user(&toml).unwrap();
+    let line = format!("curl {U} admin:{pw} {U} {own} https://h.test {U} bob:pass");
+    assert_eq!(
+        scan(&line, &rules).0,
+        format!("curl {U} [REDACTED] {U} {own} https://h.test {U} bob:pass")
+    );
+    let body = serde_json::json!({ "output": line }).to_string();
+    let hidden = starred(&body, &field_ranges(&body, &rules));
+    assert!(!hidden.contains(&pw) && hidden.contains(&own), "{hidden}");
+}
+
+/// A cut can bring a `curl` and a `-u` of two far lines within the rule's reach.
+/// `scan_capped` reads what it stores once more, and the rule looks again there too, so that
+/// a rescan finds nothing new in it.
+#[test]
+fn a_cut_text_is_looked_at_again_as_it_is_stored() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    // Eleven line breaks between the `curl` and the `-u`: more than the rule reads on.
+    let text = format!(
+        "curl https://h.test\n{}\n{}{}\n {U} admin:{pw} {U} bob:pass\n",
+        "x".repeat(200),
+        "y\n".repeat(8),
+        "z".repeat(200)
+    );
+    assert_eq!(scan(&text, &rules), (text.clone(), vec![]));
+    // Cut to 300 bytes, four are left between them.
+    let (stored, found, full) = scan_capped(&text, 300, &rules);
+    assert_eq!(full, Some(text.len()));
+    assert!(stored.starts_with("curl https://h.test\nxxx"), "{stored}");
+    assert!(
+        stored.ends_with("zzz\n -u [REDACTED] -u bob:pass\n"),
+        "{stored}"
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(&stored[found[0].offset..][..MASK.len()], MASK);
+    let body = serde_json::json!({ "output": stored }).to_string();
+    assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+}
+
+/// What capture stored after it looked again holds nothing new for a second scan, nor for
+/// the rescan.
+#[test]
+fn a_rescan_finds_nothing_new_where_capture_looked_again() {
+    let rules = Rules::default();
+    let pw = looks_only("N3kL7pW2");
+    for line in [
+        format!("curl {U} admin:{pw} https://h.test {U} bob:pass && echo ok"),
+        format!("curl {U} \"admin:{pw}\" {U} ops:{pw}9 https://h.test {U} a:b"),
+        format!("curl https://h.test \\\n  {U} admin:{pw} \\\n  {U} bob:pass"),
+    ] {
+        let (stored, found) = scan(&line, &rules);
+        assert!(!found.is_empty(), "{line}");
+        assert_eq!(scan(&stored, &rules), (stored.clone(), vec![]));
+        let body = serde_json::json!({ "output": stored }).to_string();
+        assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+    }
+}
+
+#[test]
+fn a_rescan_finds_nothing_new_in_what_capture_masked() {
+    let rules = Rules::default();
+    let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+    let aws = format!("AKIA{}", "Z7Q2XK4M9PL3WR8T");
+    let text = format!(
+        "curl -u admin:Zq8vN3kL7pW2 https://h.test\n\
+             curl -H \"Authorization: Bearer {ghp}\" https://h.test\n\
+             password=Zq8vN3kL7pW2xY\naws_access_key_id = {aws}\n"
+    );
+    let (masked, found) = scan(&text, &rules);
+    assert!(found.len() >= 3, "{masked}");
+    assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+    // A tombstone's stars are no new finding either.
+    let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
+    assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
+    // A URI's password, which a rule with no entropy gate finds: its mask is no finding,
+    // also as a tool's output is stored (JSON in a JSON string, read field by field).
+    let pw = format!("Zq8v{}", "N3kL7pW2"); // split: scanners
+    let (masked, found) = scan(&format!("psql postgres://app:{pw}@db:5432/x"), &rules);
+    assert_eq!(
+        (masked.as_str(), found.len()),
+        ("psql postgres://app:[REDACTED]@db:5432/x", 1)
+    );
+    assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+    let body = serde_json::json!({ "output": serde_json::json!({ "stdout": masked }).to_string() })
+        .to_string();
+    assert_eq!(field_ranges(&body, &rules), vec![], "{body}");
+}
+
+/// #541: a tool's output as capture stores it gives the rescan nothing new, whatever escapes
+/// the stored body adds: a listing whose escaped line breaks would join a URL to a later `@`
+/// (uri-userinfo-password), and code whose template reads as a PEM block only at the stored,
+/// longer length (private-key's 64 characters between its lines). A tool's own JSON is stored
+/// flattened, one string: a secret's name stays beside a value past the 256 bytes a structured
+/// field pairs with its key (Codex on #543).
+#[test]
+fn a_rescan_finds_nothing_new_in_a_captured_tool_output() {
+    let settings = crate::capture::Settings::default();
+    // split: scanners
+    let aud = format!(
+        "{}{}",
+        "9f2c7e1a4b8d3f60c5e2a7b9d1f43e8c", "57d0b2e94a1c6f38e7b5d2a09c4f1e63"
+    );
+    let secret = format!("{}{}", "e4b1c9a27f3d8b05", "a6e2c7d94f1b3a58");
+    let listing = [
+        "10:ACCESS_TEAM_DOMAIN=https://team.example.test".to_owned(),
+        format!("11:ACCESS_AUD={aud}"),
+        "15:BOT_CHANNEL_ID=1234567890".to_owned(),
+        format!("17:BOT_CHANNEL_SECRET={secret}"),
+        "18:BOT_ACCOUNT_ID=@123abcde".to_owned(),
+    ]
+    .join("\n");
+    let pem = "  return `-----BEGIN PRIVATE KEY-----\\n${b64.match(/.{1,64}/g)!.join(\"\\n\")}\\n-----END PRIVATE KEY-----`;";
+    let file =
+        serde_json::json!({"type": "text", "file": {"filePath": "/w/a.test.ts", "content": pem}});
+    let long = "ab".repeat(150);
+    let structured = serde_json::json!({"client_secret": long.clone()});
+    for response in [serde_json::json!(listing), file, structured] {
+        let payload = serde_json::json!({"session_id": "s", "tool_name": "Bash",
+                "tool_input": {"command": "x"}, "tool_response": response});
+        let body = crate::capture::events("claude", "PostToolUse", &payload, 1, &settings)
+            .remove(0)
+            .event
+            .body;
+        assert!(
+            !body.contains(&secret) && !body.contains(&aud) && !body.contains(&long),
+            "{body}"
+        );
+        assert_eq!(field_ranges(&body, &Rules::default()), vec![], "{body}");
+    }
+}
+
+/// #541: a value assigned to a name that says it is a secret is masked however plain the
+/// value is: generic-api-key passes over a hex value whose entropy is 3.5 or below.
+#[test]
+fn a_secret_assignment_is_masked_however_plain_its_value() {
+    let rules = Rules::default();
+    let low = format!("{}{}", "a3a3b1b1c2c2a3a3", "b1b1c2c2a3a3b1b1"); // split: scanners
+    // A passphrase of letters only, and a default that is in use (the security review of #543):
+    // generic-api-key's allowlists pass both over. split: scanners
+    let phrase = "Correct".to_owned() + "HorseBatteryStaple";
+    let default = "change".to_owned() + "me-in-production";
+    let reference = "process.env.".to_owned() + "MY_APP_SECRET";
+    let example = "example".to_owned() + "0123456789abcd";
+    for (text, value) in [
+        (format!("BOT_CHANNEL_SECRET={low}"), &low),
+        (
+            format!("17:BOT_CHANNEL_SECRET={low}\n18:BOT_ACCOUNT_ID=@123abcde"),
+            &low,
+        ),
+        (format!("{{\"client_secret\": \"{low}\"}}"), &low),
+        (format!("export DB_PASSWORD='{low}'"), &low),
+        (format!("DB_PASSWORD={phrase}"), &phrase),
+        (format!("POSTGRES_PASSWORD={default}"), &default),
+        // Nothing passes over a value assigned to a secret's name, not a dotted reference nor a
+        // placeholder: either can be the secret itself (the security reviews of #543).
+        (format!("CLIENT_SECRET={reference}"), &reference),
+        (format!("DB_PASSWORD={example}"), &example),
+    ] {
+        let (masked, _) = scan(&text, &rules);
+        assert!(!masked.contains(value.as_str()), "{masked}");
+    }
+    // The value whole, a `:` in it too (CodeRabbit on #543).
+    let tail = format!("{}{}", ":b1b1c2c2", "a3a3b1b1"); // split: scanners
+    let (masked, _) = scan(&format!("BOT_TOKEN={low}{tail} next"), &rules);
+    assert_eq!(masked, "BOT_TOKEN=[REDACTED] next");
+    // A value whole, whatever punctuation it holds, quoted or not, with a delimiter at an
+    // unquoted one's end left as the code's; two characters repeated; a short quoted one
+    // (Codex on #543). split: scanners
+    let punct = "Abcd1234".to_owned() + "$Efgh;5678,(x)[y]{z}<w>!";
+    let marks = "Abcd1234".to_owned() + "!Efgh@5678#%^&*x";
+    let early = "Ab(".to_owned() + "cd1234567890";
+    let flat = "0011".repeat(4);
+    for (text, masked) in [
+        (
+            format!("export DB_PASSWORD='{punct}'"),
+            "export DB_PASSWORD='[REDACTED]'",
+        ),
+        (
+            format!("{{\"db_password\": \"{punct}\"}}"),
+            "{\"db_password\": \"[REDACTED]\"}",
+        ),
+        (
+            format!("DB_PASSWORD={marks} next"),
+            "DB_PASSWORD=[REDACTED] next",
+        ),
+        (
+            format!("DB_PASSWORD={punct} next"),
+            "DB_PASSWORD=[REDACTED] next",
+        ),
+        (format!("DB_PASSWORD={early}"), "DB_PASSWORD=[REDACTED]"),
+        (
+            format!("DB_PASSWORD={marks}; next"),
+            "DB_PASSWORD=[REDACTED]; next",
+        ),
+        (
+            format!("{{\"password\": \"Ab\\\"{flat}\"}}"),
+            "{\"password\": \"[REDACTED]\"}",
+        ),
+        (format!("DB_PASSWORD={flat}"), "DB_PASSWORD=[REDACTED]"),
+        (
+            format!("{{\"password\": \"{}\"}}", "ad".to_owned() + "min"),
+            "{\"password\": \"[REDACTED]\"}",
+        ),
+        (
+            format!("PGPASSWORD={}", "post".to_owned() + "gres"),
+            "PGPASSWORD=[REDACTED]",
+        ),
+        // A quote that does not close on its line
+        (
+            format!("DB_PASSWORD=\"{flat}\nnext"),
+            "DB_PASSWORD=\"[REDACTED]\nnext",
+        ),
+    ] {
+        assert_eq!(scan(&text, &rules).0, masked);
+    }
+    // Names that only look alike, an empty value, unquoted ones under 8 characters, and
+    // unquoted code that goes on (a variable, a call's argument up to its brackets) stay.
+    for text in [
+        "max_tokens: 4000",
+        "tokenizer = AutoTokenizer.from_pretrained(name)",
+        "SECRET_LENGTH=32",
+        "password: String,",
+        "{\"password\": \"\"}",
+        "API_KEY=${API_KEY}",
+        "tools.exec_command({cmd: x, max_output_tokens:10000}),",
+    ] {
+        assert_eq!(scan(text, &rules).0, text);
+    }
+}
+
+#[test]
+fn a_rule_whose_group_is_empty_at_the_end_of_its_match_ends() {
+    let rules =
+        user("[redaction]\nextra_rules = [{ id = \"x\", regex = '(?s).*()', secret_group = 1 }]")
+            .unwrap();
+    let text = "id acme-123456\nnext line";
+    assert_eq!(scan(text, &rules).0, text);
+}
+
+#[test]
+fn a_user_rule_reads_word_boundaries_as_the_bundled_rules_do() {
+    let rules = user(
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = '\\bacme-[0-9]{6}\\b' }, \
+             { id = \"emp\", regex = '社員番号[0-9]{4}' }]",
+    )
+    .unwrap();
+    let (masked, _) = scan("日本語acme-123456 と 社員番号1234 です", &rules);
+    assert!(
+        !masked.contains("123456") && !masked.contains("1234 "),
+        "{masked}"
+    );
+}
+
+/// gitleaks's global allowlist passes over a value that is `true`, `false` or `null`, not one
+/// that only starts with `true`, holds `false` or ends with `null`: its alternation was not
+/// anchored as a whole (gitleaks#2293), so such a password was stored as written.
+#[test]
+fn only_a_whole_true_false_or_null_is_passed_over() {
+    let rules = Rules::default();
+    // split: scanners
+    for value in [
+        "True".to_owned() + "Blue4417x",
+        "xq7FALSE".to_owned() + "hood2",
+        "W9kd2zz".to_owned() + "Null",
+    ] {
+        let (masked, _) = scan(&format!("DB_PASSWORD={value}"), &rules);
+        assert_eq!(masked, "DB_PASSWORD=[REDACTED]", "{value}");
+    }
+    for value in ["true", "False", "NULL"] {
+        let text = format!("{{\"db_password\": \"{value}\"}}");
+        assert_eq!(scan(&text, &rules).0, text);
+    }
+    // #545's own examples.
+    for (head, value, tail) in [
+        ("DB_PASSWORD=", "false".to_owned() + "hood-2024!", ""),
+        ("TOKEN=", "true".to_owned() + "blue-12345678", ""),
+        ("secret: \"", "abc".to_owned() + "null", "\""),
+    ] {
+        let (masked, _) = scan(&format!("{head}{value}{tail}"), &rules);
+        assert_eq!(masked, format!("{head}[REDACTED]{tail}"));
+    }
+    for text in ["secret = true", "token: null", "\"password\": false"] {
+        assert_eq!(scan(text, &rules).0, text);
+    }
+}
+
+#[test]
+fn an_allowlisted_false_positive_is_kept_and_an_extra_rule_masks() {
+    let kept = token();
+    let other = format!("ghp_{}", "a7Kd2LmQ9xT4vB8nR1wZ6yH3jF5sP0cE2gUq"); // split: scanners
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[[providers]]\nkind = \"nonsense\"\n\n[redaction]\nallowlist = [\"{}\"]\n\
+                 extra_rules = [{{ id = \"acme\", regex = 'acme-([0-9]{{6}})' }}]\n",
+            sha(&kept).to_uppercase()
+        ),
+    )
+    .unwrap();
+    // A broken [[providers]] table is not capture's to judge.
+    let rules = Rules::load(home.path()).unwrap();
+    let text = format!("{kept} and {other} and acme-123456 and acme-12");
+    let (masked, found) = scan(&text, &rules);
+    assert!(masked.contains(&kept), "{masked}"); // the exact value the user keeps
+    assert!(!masked.contains(&other), "{masked}"); // the same rule on another value
+    assert!(
+        !masked.contains("123456") && masked.contains("acme-12"),
+        "{masked}"
+    );
+    let names: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+    assert!(names.contains(&"user:acme"), "{names:?}");
+    assert!(!format!("{found:?}").contains("123456"));
+    // The egress gate takes the same rules.
+    assert!(!outbound_with("id acme-654321", &rules).contains("654321"));
+}
+
+#[test]
+fn a_user_rule_without_keywords_always_runs_and_one_with_them_only_on_a_hit() {
+    let rules = user(
+        "[redaction]\nextra_rules = [\
+             { id = \"bare\", regex = 'zq-[0-9]{4}' },\
+             { id = \"gated\", regex = 'yk-[0-9]{4}', keywords = [\"PROJ\"] }]",
+    )
+    .unwrap();
+    let (masked, _) = scan("zq-1111 yk-2222", &rules);
+    assert!(
+        !masked.contains("1111") && masked.contains("yk-2222"),
+        "{masked}"
+    );
+    let (masked, _) = scan("proj: yk-2222", &rules);
+    assert!(!masked.contains("2222"), "{masked}");
+}
+
+/// #538: a change to how the rules are applied is a change of version, as a change to the
+/// rules is, so a store scanned before it is scanned again (the rescan consumer compares
+/// versions). With the user's rules too; off is off whatever the code.
+#[test]
+fn the_version_names_the_matching_code() {
+    assert_eq!(Rules::default().version(), version_of(MATCHING, None));
+    assert_ne!(version_of("2", None), version_of("3", None));
+    let toml = "[redaction]\nextra_rules = [{ id = \"a\", regex = 'a-[0-9]{4}' }]";
+    let own = canonical(
+        &crate::config::parse_capture(Some(toml)).unwrap().redaction,
+        &HashSet::new(),
+    );
+    assert!(own.contains("a-[0-9]{4}"), "{own}");
+    assert_eq!(
+        user(toml).unwrap().version(),
+        version_of(MATCHING, Some(&own))
+    );
+    assert_ne!(version_of("2", Some(&own)), version_of("3", Some(&own)));
+    // Before the number was part of it.
+    assert_ne!(
+        user(toml).unwrap().version(),
+        short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &own].concat())
+    );
+    assert_ne!(
+        Rules::default().version(),
+        short_hash(&[RULES_TOML, EXTRA_TOML].concat())
+    );
+    let off = user("[redaction]\nenabled = false").unwrap();
+    assert_eq!(off.version(), OFF);
+}
+
+/// #538: `MATCHING` numbers this file's code, and nothing else ties the two: an edit that
+/// leaves the number as it was is never applied to what a store holds already. So this fails
+/// on any edit of the file before its tests, as it is written, and on a new version of a
+/// crate that matches: the rules are loaded, compiled, bounded and applied all over the file
+/// (OCR on #981: two marked parts of it left out the loading of the rules, the compiling of a
+/// pattern and the limits; a hash of its lines without their comments would not see an edit
+/// inside a string of several lines). Raise `MATCHING` when the change makes some rule find
+/// or pass over something else in some text (every store then rescans once); either way, set
+/// the hash here to the one the failure shows.
+#[test]
+fn the_matching_code_is_the_one_its_number_names() {
+    let source = include_str!("../redact.rs").replace("\r\n", "\n");
+    let (code, tests) = source
+        .split_once("\n#[cfg(test)]\nmod tests;")
+        .expect("the code, then the tests");
+    assert!(code.contains("fn spans_in(") && code.contains("fn bundled("));
+    // Nothing but test modules follows: an item at the file's top level there would be code
+    // this does not hash.
+    let lines: Vec<&str> = tests.lines().collect();
+    for pair in lines.windows(2) {
+        let item = [
+            "fn ", "pub ", "pub(", "const ", "static ", "impl ", "struct ", "enum ", "type ",
+            "use ", "mod ",
+        ]
+        .iter()
+        .any(|word| pair[1].starts_with(word));
+        assert!(
+            !item || pair[0] == "#[cfg(test)]",
+            "after the tests: {}",
+            pair[1]
+        );
+    }
+    // The crates that match, at the versions the lock file holds.
+    let lock = include_str!("../../Cargo.lock").replace("\r\n", "\n");
+    let crates: Vec<String> = lock
+        .split("[[package]]\n")
+        .filter_map(|package| {
+            let mut lines = package.lines();
+            let (name, version) = (lines.next()?, lines.next()?);
+            ["regex", "regex-automata", "regex-syntax", "aho-corasick"]
+                .iter()
+                .any(|matcher| name == format!("name = \"{matcher}\""))
+                .then(|| format!("{name} {version}"))
+        })
+        .collect();
+    assert!(crates.len() >= 4, "{crates:?}");
+    assert_eq!(
+        (
+            MATCHING,
+            short_hash(&[code, &crates.join("\n")].concat()).as_str()
+        ),
+        ("2", "c9aaa31c0db6b844")
+    );
+}
+
+#[test]
+fn the_version_follows_what_is_masked_and_not_the_order_in_the_file() {
+    let none = user("").unwrap();
+    assert_eq!(none.version(), Rules::default().version());
+    assert_eq!(none.version(), bundled_version());
+    let a = "{ id = \"a\", regex = 'a-[0-9]{4}', keywords = [\"x\", \"y\"] }";
+    let a_reordered = "{ id = \"a\", regex = 'a-[0-9]{4}', keywords = [\"y\", \"x\"] }";
+    let b = "{ id = \"b\", regex = 'b-[0-9]{4}' }";
+    let h1 = sha("one");
+    let h2 = sha("two");
+    let v = |rules: &str, allow: &str| {
+        user(&format!(
+            "[redaction]\nextra_rules = [{rules}]\nallowlist = [{allow}]"
+        ))
+        .unwrap()
+        .version()
+        .to_owned()
+    };
+    let base = v(&format!("{a}, {b}"), &format!("\"{h1}\", \"{h2}\""));
+    assert_ne!(base, bundled_version());
+    assert_eq!(
+        base,
+        v(
+            &format!("{b}, {a_reordered}"),
+            &format!("\"{h2}\", \"{h1}\"")
+        )
+    );
+    assert_ne!(base, v(&format!("{a}, {b}"), &format!("\"{h1}\""))); // an entry removed
+    assert_ne!(base, v(a, &format!("\"{h1}\", \"{h2}\""))); // a rule removed
+}
+
+#[test]
+fn a_kept_value_does_not_hide_a_secret_its_rule_passed_over() {
+    let kept = format!("dev:{}", "W8eR2tY6uI0pL4k"); // split: secret scanners
+    let other = format!("usr:{}", "q9Zx8mL2vB4nR7tYw");
+    let text = format!("curl -u {other} https://x ; curl -u {kept} https://x ;");
+    let (masked, _) = scan(&text, &Rules::default());
+    assert!(
+        !masked.contains(&kept) && !masked.contains(&other),
+        "{masked}"
+    );
+    let rules = user(&format!("[redaction]\nallowlist = [\"{}\"]", sha(&kept))).unwrap();
+    let (masked, _) = scan(&text, &rules);
+    assert!(masked.contains(&kept), "{masked}");
+    assert!(!masked.contains(&other), "{masked}");
+    // Flattened JSON, where the kept value is found in the unescaped view.
+    let json = serde_json::to_string(&format!("\"{text}\"")).unwrap();
+    let (masked, _) = scan(&json, &rules);
+    assert!(
+        masked.contains(&kept) && !masked.contains(&other),
+        "{masked}"
+    );
+}
+
+#[test]
+fn a_user_rule_never_takes_context_a_bundled_rule_needs() {
+    let a = format!("usr:{}", "q9Zx8mL2vB4nR7tYw"); // split: secret scanners
+    let b = format!("dev:{}", "W8eR2tY6uI0pL4k");
+    let text = format!("curl -u {a} https://x ; curl -u {b} https://x ;");
+    let rules = user("[redaction]\nextra_rules = [{ id = \"c\", regex = '\\bcurl\\b' }]").unwrap();
+    let (masked, _) = scan(&text, &rules);
+    assert!(!masked.contains(&a) && !masked.contains(&b), "{masked}");
+    assert!(!masked.contains("curl"), "{masked}");
+}
+
+#[test]
+fn many_kept_values_never_let_a_secret_through() {
+    let kept = format!("dev:{}", "W8eR2tY6uI0pL4k"); // split: secret scanners
+    let other = format!("usr:{}", "q9Zx8mL2vB4nR7tYw");
+    let rules = user(&format!("[redaction]\nallowlist = [\"{}\"]", sha(&kept))).unwrap();
+    for n in [MAX_PASSES - 1, MAX_PASSES, MAX_PASSES + 1, MAX_PASSES + 2] {
+        let line = format!("curl -u {other} https://x ; ")
+            + &format!("curl -u {kept} https://x ; ").repeat(n);
+        let json = serde_json::to_string(&line).unwrap();
+        for text in [&line, &json] {
+            let (masked, _) = scan(text, &rules);
+            assert!(!masked.contains(&other), "n={n}: {masked}");
+        }
+    }
+}
+
+#[test]
+fn a_bundled_rule_never_takes_context_a_user_rule_needs() {
+    let bearer = format!("q9Zx8mL2vB4nR7tYw{}", "K3pS6dJ0"); // split: secret scanners
+    let text = format!("Authorization: Bearer {bearer}; otp=654321");
+    let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'Bearer [A-Za-z0-9]+; otp=([0-9]{6})' }]",
+        )
+        .unwrap();
+    let (masked, found) = scan(&text, &rules);
+    assert!(
+        !masked.contains(&bearer) && !masked.contains("654321"),
+        "{masked}"
+    );
+    assert!(found.iter().any(|f| f.rule == "user:otp"), "{found:?}");
+}
+
+#[test]
+fn a_rule_never_takes_context_another_rule_of_its_group_needs() {
+    let rules = user(
+        "[redaction]\nextra_rules = [{ id = \"name\", regex = 'ACME_[A-Z]+' }, \
+             { id = \"otp\", regex = 'ACME_[A-Z]+.* otp=([0-9]{6})' }]",
+    )
+    .unwrap();
+    let (masked, _) = scan("ACME_CLIENT otp=123456 otp=654321", &rules);
+    assert!(
+        !masked.contains("123456") && !masked.contains("654321"),
+        "{masked}"
+    );
+}
+
+#[test]
+fn egress_follows_the_file_as_it_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let mut e = Egress {
+        home: home.path().to_owned(),
+        seen: None,
+        rules: None,
+    };
+    let text = "id acme-123456";
+    let now = |e: &mut Egress| e.rules().map(|r| outbound_with(text, &r));
+    assert_eq!(now(&mut e).as_deref(), Some(text)); // no file: the bundled rules
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    assert!(!now(&mut e).unwrap().contains("123456")); // a rule added while running
+    std::fs::write(
+        &config,
+        "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]\n",
+    )
+    .unwrap();
+    assert_eq!(now(&mut e), None); // wrong: nothing leaves
+    std::fs::remove_file(&config).unwrap();
+    assert_eq!(now(&mut e).as_deref(), Some(text));
+}
+
+#[test]
+fn a_settings_error_never_prints_the_value() {
+    let v = format!("hunter{}", "2secret"); // split: secret scanners
+    for toml in [
+        format!("[redaction]\nallowlist = [\"{v}\"]"),
+        format!("[redaction]\nextra_rules = [{{ id = \"x\", regex = '({v}' }}]"),
+        format!("[redaction]\nallowlist = [{v}]"),
+        format!("[redaction]\nallowlist = \"{v}\""),
+        format!("[redaction]\nallowlist = 'prefix\"{v}'"),
+        format!("[redaction]\nextra_rules = [{{ id = \"x\", regex = 'x', entropy = \"{v}\" }}]"),
+        format!("redaction = \"{v}\""),
+        format!("[ redaction ]\nallowlist = \"{v}\""),
+        format!("[\"redaction\"]\nallowlist = \"{v}\""),
+        format!("[[redaction.extra_rules]]\nid = \"x\"\nregex = 'x'\nentropy = \"{v}\""),
+        format!("[capture]\ntool_output = \"{v}\""),
+    ] {
+        let e = format!("{:#}", user(&toml).expect_err(&toml));
+        assert!(!e.contains(&v), "{toml}: {e}");
+        // The whole config, as doctor and `oboete mcp` read it.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), &toml).unwrap();
+        if let Err(e) = crate::config::load(home.path()) {
+            assert!(!format!("{e:#}").contains(&v), "{toml}: {e:#}");
+        }
+    }
+    let e = format!(
+        "{:#}",
+        user("[capture]\nstore_prompts = \"yes\"").err().unwrap()
+    );
+    assert!(e.contains("line 2 is not valid"), "{e}");
+}
+
+#[test]
+fn a_wrong_redaction_table_is_an_error_that_names_the_mistake() {
+    for (toml, says) in [
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]",
+            "regex",
+        ),
+        (
+            "[redaction]\nextra_rules = [{ id = \"a b\", regex = 'x' }]",
+            "id",
+        ),
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x' }, { id = \"x\", regex = 'y' }]",
+            "twice",
+        ),
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', secret_group = 1 }]",
+            "secret_group",
+        ),
+        ("[redaction]\nallowlist = [\"abc\"]", "SHA-256"),
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', entropy = nan }]",
+            "finite",
+        ),
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', entropy = inf }]",
+            "finite",
+        ),
+        ("[redaction]\nextra_rule = []", "line 2 is not valid"),
+        (
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
+            "line 2 is not valid",
+        ),
+        ("[redactions]\nallowlist = []", "line 1 is not valid"),
+        (
+            "[capture]\n[captures]\nstore_prompts = false",
+            "line 2 is not valid",
+        ),
+    ] {
+        let e = format!("{:#}", user(toml).expect_err(toml));
+        assert!(e.contains(says), "{toml}: {e}");
+    }
+    // The tables other commands read are no mistake here.
+    let others = "[[providers]]\nname = \"x\"\n[summary]\nmax = 1\n[embedding]\nprovider = \"none\"\n\
+                      [backup]\ndir = \"elsewhere\"\n";
+    assert!(user(others).is_ok());
+}
