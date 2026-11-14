@@ -1,807 +1,435 @@
-    /// A worker's phases with only `p`, the curation phase.
-    fn curating<'a, 'f>(p: &'a mut CurationPhase<'f>) -> Phases<'a, 'f> {
-        Phases {
-            curation: Some(p),
-            ..Phases::default()
-        }
+/// A worker's phases with only `p`, the curation phase.
+fn curating<'a, 'f>(p: &'a mut CurationPhase<'f>) -> Phases<'a, 'f> {
+    Phases {
+        curation: Some(p),
+        ..Phases::default()
     }
+}
 
-    use super::*;
-    use crate::knowledge;
-    use crate::raw;
+use super::*;
+use crate::knowledge;
+use crate::raw;
 
-    /// What an idle worker keeps up waits for a command that asked it to step aside, for its
-    /// leaving and for a call out, whatever the pause.
-    #[test]
-    fn the_session_index_waits_for_a_command_a_leaving_and_a_call() {
+/// What an idle worker keeps up waits for a command that asked it to step aside, for its
+/// leaving and for a call out, whatever the pause.
+#[test]
+fn the_session_index_waits_for_a_command_a_leaving_and_a_call() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - INDEX_PAUSE_MS,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    maintain(p, &raw, true, false);
+    maintain(p, &raw, false, true);
+    let asked = yield_request(p);
+    std::fs::write(&asked, "").unwrap();
+    maintain(p, &raw, false, false);
+    assert!(!raw.has_session_index().unwrap());
+    std::fs::remove_file(asked).unwrap();
+    maintain(p, &raw, false, false);
+    assert!(raw.has_session_index().unwrap());
+}
+
+/// #899 W2: the index of the events' repositories is the idle worker's to build too, in the
+/// same pause, on a store whose session index an earlier worker built.
+#[test]
+fn the_repository_index_is_built_in_a_pause_beside_the_session_index() {
+    for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut raw = crate::raw::open(p).unwrap();
         let e = crate::raw::Event {
-            ts: crate::db::now_ms() - INDEX_PAUSE_MS,
+            ts: crate::db::now_ms() - ago,
             ..crate::raw::test_event("a step")
         };
         raw.append(&e).unwrap();
+        raw.ensure_session_index().unwrap();
+        assert!(!raw.has_repo_index().unwrap());
         maintain(p, &raw, true, false);
         maintain(p, &raw, false, true);
-        let asked = yield_request(p);
-        std::fs::write(&asked, "").unwrap();
+        assert!(
+            !raw.has_repo_index().unwrap(),
+            "leaving, or with a call out"
+        );
         maintain(p, &raw, false, false);
-        assert!(!raw.has_session_index().unwrap());
-        std::fs::remove_file(asked).unwrap();
-        maintain(p, &raw, false, false);
-        assert!(raw.has_session_index().unwrap());
+        assert_eq!(raw.has_repo_index().unwrap(), built, "{ago} ms ago");
     }
+    // Neither built: one pause builds both.
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - INDEX_PAUSE_MS,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    maintain(p, &raw, false, false);
+    assert!(raw.has_session_index().unwrap() && raw.has_repo_index().unwrap());
+}
 
-    /// #899 W2: the index of the events' repositories is the idle worker's to build too, in the
-    /// same pause, on a store whose session index an earlier worker built.
-    #[test]
-    fn the_repository_index_is_built_in_a_pause_beside_the_session_index() {
-        for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            let mut raw = crate::raw::open(p).unwrap();
-            let e = crate::raw::Event {
-                ts: crate::db::now_ms() - ago,
-                ..crate::raw::test_event("a step")
-            };
-            raw.append(&e).unwrap();
-            raw.ensure_session_index().unwrap();
-            assert!(!raw.has_repo_index().unwrap());
-            maintain(p, &raw, true, false);
-            maintain(p, &raw, false, true);
-            assert!(
-                !raw.has_repo_index().unwrap(),
-                "leaving, or with a call out"
-            );
-            maintain(p, &raw, false, false);
-            assert_eq!(raw.has_repo_index().unwrap(), built, "{ago} ms ago");
-        }
-        // Neither built: one pause builds both.
+/// A resident worker that went idle before the pause came builds the index once it has: its
+/// idle times go on with nothing new.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - INDEX_PAUSE_MS + 1_000,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    drop(raw);
+    let built = || crate::raw::open(p).unwrap().has_session_index().unwrap();
+    assert!(!built());
+    let worker = resident(p, 100);
+    until("the index built in the pause", built);
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// Decision 71's plan, slice 1: the worker builds raw's session index in a pause of the
+/// owner's work, and not while hooks record (its first build takes seconds a hook's write
+/// would wait out).
+#[test]
+fn the_session_index_is_built_in_a_pause_only() {
+    for (ago, worker, built) in [
+        (INDEX_PAUSE_MS, true, true),
+        (1_000, true, false),
+        (INDEX_PAUSE_MS, false, false),
+    ] {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut raw = crate::raw::open(p).unwrap();
         let e = crate::raw::Event {
-            ts: crate::db::now_ms() - INDEX_PAUSE_MS,
-            ..crate::raw::test_event("a step")
-        };
-        raw.append(&e).unwrap();
-        maintain(p, &raw, false, false);
-        assert!(raw.has_session_index().unwrap() && raw.has_repo_index().unwrap());
-    }
-
-    /// A resident worker that went idle before the pause came builds the index once it has: its
-    /// idle times go on with nothing new.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = crate::raw::open(p).unwrap();
-        let e = crate::raw::Event {
-            ts: crate::db::now_ms() - INDEX_PAUSE_MS + 1_000,
+            ts: crate::db::now_ms() - ago,
             ..crate::raw::test_event("a step")
         };
         raw.append(&e).unwrap();
         drop(raw);
-        let built = || crate::raw::open(p).unwrap().has_session_index().unwrap();
-        assert!(!built());
-        let worker = resident(p, 100);
-        until("the index built in the pause", built);
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// Decision 71's plan, slice 1: the worker builds raw's session index in a pause of the
-    /// owner's work, and not while hooks record (its first build takes seconds a hook's write
-    /// would wait out).
-    #[test]
-    fn the_session_index_is_built_in_a_pause_only() {
-        for (ago, worker, built) in [
-            (INDEX_PAUSE_MS, true, true),
-            (1_000, true, false),
-            (INDEX_PAUSE_MS, false, false),
-        ] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            let mut raw = crate::raw::open(p).unwrap();
-            let e = crate::raw::Event {
-                ts: crate::db::now_ms() - ago,
-                ..crate::raw::test_event("a step")
+        if worker {
+            // `oboete worker` itself, as a hook starts it.
+            let held = lock(p).unwrap();
+            let phases = Phases {
+                yields: true,
+                ..Phases::default()
             };
-            raw.append(&e).unwrap();
-            drop(raw);
-            if worker {
-                // `oboete worker` itself, as a hook starts it.
-                let held = lock(p).unwrap();
-                let phases = Phases {
-                    yields: true,
-                    ..Phases::default()
-                };
-                run_holding(p, 0, vec![], || {}, held, phases).unwrap();
-            } else {
-                // A command that borrows the loop, as a restore or a rebuild does.
-                run_with(p, 0, vec![], || {}).unwrap();
-            }
-            let raw = crate::raw::open(p).unwrap();
-            let case = format!("{ago} ms ago, the worker's own: {worker}");
-            assert_eq!(raw.has_session_index().unwrap(), built, "{case}");
+            run_holding(p, 0, vec![], || {}, held, phases).unwrap();
+        } else {
+            // A command that borrows the loop, as a restore or a rebuild does.
+            run_with(p, 0, vec![], || {}).unwrap();
         }
+        let raw = crate::raw::open(p).unwrap();
+        let case = format!("{ago} ms ago, the worker's own: {worker}");
+        assert_eq!(raw.has_session_index().unwrap(), built, "{case}");
     }
+}
 
-    #[test]
-    fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(
-            p.join("config.toml"),
-            "providers = []\n[summary]\ncurate = false\n",
-        )
+#[test]
+fn w5c_config_lock_failure_drains_records_captured_while_worker_held() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(
+        p.join("config.toml"),
+        "providers = []\n[summary]\ncurate = false\n",
+    )
+    .unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic initial configuration failure"))
         .unwrap();
-        raw::open(p)
+    run_once(p).unwrap();
+    assert_eq!(backlog(p).unwrap(), 0);
+    if p.join("providers.db").exists() {
+        std::fs::remove_file(p.join("providers.db")).unwrap();
+    }
+    std::fs::create_dir(p.join("state/config.lock")).unwrap();
+    AFTER_OPEN.set(Some(|home| {
+        AFTER_OPEN.set(None);
+        assert!(lock(home).unwrap().is_none());
+        raw::open(home)
             .unwrap()
-            .append(&raw::test_event("synthetic initial configuration failure"))
+            .append(&raw::test_event("synthetic 尾刻"))
             .unwrap();
-        run_once(p).unwrap();
-        assert_eq!(backlog(p).unwrap(), 0);
-        if p.join("providers.db").exists() {
-            std::fs::remove_file(p.join("providers.db")).unwrap();
+    }));
+    let (index, result) = crate::curate::prepare_report(
+        p,
+        &crate::curate::RecurationScope::Queued {},
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    );
+    AFTER_OPEN.set(None);
+    assert!(result.is_err());
+    assert_eq!(index.state, IndexState::Complete);
+    assert_eq!(backlog(p).unwrap(), 0);
+    assert_eq!(crate::search::raw(p, "尾刻", None, 5).unwrap().len(), 1);
+    assert!(!p.join("providers.db").exists());
+}
+
+#[test]
+fn w5c_config_lock_failure_keeps_stale_recuration_without_a_drain() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(
+        p.join("config.toml"),
+        "providers = []\n[summary]\ncurate = false\n",
+    )
+    .unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic original recuration"))
+        .unwrap();
+    let scope = crate::curate::RecurationScope::Queued {};
+    let (_, prepared) = crate::curate::prepare_report(
+        p,
+        &scope,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    );
+    let (_, consent) = prepared.unwrap();
+    std::fs::remove_file(p.join("state/config.lock")).unwrap();
+    std::fs::create_dir(p.join("state/config.lock")).unwrap();
+    AFTER_OPEN.set(Some(|home| {
+        AFTER_OPEN.set(None);
+        raw::open(home)
+            .unwrap()
+            .append(&raw::test_event("synthetic 異帆"))
+            .unwrap();
+    }));
+    let (receipt, result) = crate::curate::recurate_report(
+        p,
+        &scope,
+        &consent,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    );
+    AFTER_OPEN.set(None);
+    assert_eq!(receipt.index.state, IndexState::NotStarted);
+    assert!(matches!(
+        result
+            .unwrap_err()
+            .downcast_ref::<crate::backup::MaintenanceCode>(),
+        Some(crate::backup::MaintenanceCode::Stale)
+    ));
+    assert_eq!(backlog(p).unwrap(), 1);
+    assert_eq!(receipt.providers.sent, 0);
+    assert!(crate::search::raw(p, "異帆", None, 5).unwrap().is_empty());
+    assert!(!p.join("providers.db").exists());
+}
+
+#[test]
+fn w5b_a_failed_store_inspection_keeps_the_restore_request() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    drop(raw::open(p).unwrap());
+    std::fs::create_dir(p.join("knowledge.db")).unwrap();
+    crate::backup::request_restore(p);
+    let failure = restore_report(
+        p,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.outcome.index.state, IndexState::Failed);
+    assert!(failure.index_cause.is_some());
+    assert!(
+        crate::backup::restore_requested(p),
+        "inspection lost the pending restore request"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn w5b_a_rejected_home_does_not_receive_a_restore_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("memory");
+    let replacement = home.with_extension("replacement");
+    std::fs::create_dir(&home).unwrap();
+    let mut raw = raw::open(&home).unwrap();
+    raw.append(&raw::test_event("synthetic restore retry"))
+        .unwrap();
+    let wal = std::fs::read(home.join("raw.db-wal")).unwrap();
+    drop(raw);
+    std::fs::write(home.join("raw.db-wal"), wal).unwrap();
+    crate::backup::request_restore(&home);
+    std::fs::create_dir_all(replacement.join("state")).unwrap();
+    std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
+    std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
+    BEFORE_STORE_OPEN.set(Some(|path| {
+        let home = path.parent().unwrap().to_owned();
+        let held = raw::lock_for_swap(&home).unwrap();
+        raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                std::fs::rename(&home, home.with_extension("retired")).unwrap();
+                std::fs::rename(home.with_extension("replacement"), &home).unwrap();
+                drop(held);
+            }));
+        });
+    }));
+    let result = restore_report(
+        &home,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    );
+    BEFORE_STORE_OPEN.set(None);
+    raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
+    let failure = result.unwrap_err();
+    assert_eq!(failure.outcome.index.state, IndexState::Failed);
+    assert!(
+        !crate::backup::restore_requested(&home),
+        "the rejected home got a retry marker"
+    );
+    assert!(!home.join("raw.lock").exists());
+    assert!(!home.join("raw.db").exists());
+    assert_eq!(
+        std::fs::read(home.join("canary")).unwrap(),
+        b"synthetic unrelated home"
+    );
+}
+
+#[test]
+fn w5b_consumer_progress_counts_durable_changes_and_not_empty_transactions() {
+    struct ReceiptConsumer(&'static str);
+    impl Consumer for ReceiptConsumer {
+        fn name(&self) -> &'static str {
+            "receipt-fixture"
         }
-        std::fs::create_dir(p.join("state/config.lock")).unwrap();
-        AFTER_OPEN.set(Some(|home| {
-            AFTER_OPEN.set(None);
-            assert!(lock(home).unwrap().is_none());
-            raw::open(home)
-                .unwrap()
-                .append(&raw::test_event("synthetic 尾刻"))
-                .unwrap();
-        }));
-        let (index, result) = crate::curate::prepare_report(
-            p,
-            &crate::curate::RecurationScope::Queued {},
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        );
-        AFTER_OPEN.set(None);
-        assert!(result.is_err());
-        assert_eq!(index.state, IndexState::Complete);
-        assert_eq!(backlog(p).unwrap(), 0);
-        assert_eq!(crate::search::raw(p, "尾刻", None, 5).unwrap().len(), 1);
-        assert!(!p.join("providers.db").exists());
-    }
-
-    #[test]
-    fn w5c_config_lock_failure_keeps_stale_recuration_without_a_drain() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(
-            p.join("config.toml"),
-            "providers = []\n[summary]\ncurate = false\n",
-        )
-        .unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic original recuration"))
-            .unwrap();
-        let scope = crate::curate::RecurationScope::Queued {};
-        let (_, prepared) = crate::curate::prepare_report(
-            p,
-            &scope,
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        );
-        let (_, consent) = prepared.unwrap();
-        std::fs::remove_file(p.join("state/config.lock")).unwrap();
-        std::fs::create_dir(p.join("state/config.lock")).unwrap();
-        AFTER_OPEN.set(Some(|home| {
-            AFTER_OPEN.set(None);
-            raw::open(home)
-                .unwrap()
-                .append(&raw::test_event("synthetic 異帆"))
-                .unwrap();
-        }));
-        let (receipt, result) = crate::curate::recurate_report(
-            p,
-            &scope,
-            &consent,
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        );
-        AFTER_OPEN.set(None);
-        assert_eq!(receipt.index.state, IndexState::NotStarted);
-        assert!(matches!(
-            result
-                .unwrap_err()
-                .downcast_ref::<crate::backup::MaintenanceCode>(),
-            Some(crate::backup::MaintenanceCode::Stale)
-        ));
-        assert_eq!(backlog(p).unwrap(), 1);
-        assert_eq!(receipt.providers.sent, 0);
-        assert!(crate::search::raw(p, "異帆", None, 5).unwrap().is_empty());
-        assert!(!p.join("providers.db").exists());
-    }
-
-    #[test]
-    fn w5b_a_failed_store_inspection_keeps_the_restore_request() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        drop(raw::open(p).unwrap());
-        std::fs::create_dir(p.join("knowledge.db")).unwrap();
-        crate::backup::request_restore(p);
-        let failure = restore_report(
-            p,
-            None,
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        )
-        .unwrap_err();
-        assert_eq!(failure.outcome.index.state, IndexState::Failed);
-        assert!(failure.index_cause.is_some());
-        assert!(
-            crate::backup::restore_requested(p),
-            "inspection lost the pending restore request"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn w5b_a_rejected_home_does_not_receive_a_restore_retry() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("memory");
-        let replacement = home.with_extension("replacement");
-        std::fs::create_dir(&home).unwrap();
-        let mut raw = raw::open(&home).unwrap();
-        raw.append(&raw::test_event("synthetic restore retry"))
-            .unwrap();
-        let wal = std::fs::read(home.join("raw.db-wal")).unwrap();
-        drop(raw);
-        std::fs::write(home.join("raw.db-wal"), wal).unwrap();
-        crate::backup::request_restore(&home);
-        std::fs::create_dir_all(replacement.join("state")).unwrap();
-        std::fs::write(replacement.join("state/worker.lock"), "other home").unwrap();
-        std::fs::write(replacement.join("canary"), "synthetic unrelated home").unwrap();
-        BEFORE_STORE_OPEN.set(Some(|path| {
-            let home = path.parent().unwrap().to_owned();
-            let held = raw::lock_for_swap(&home).unwrap();
-            raw::SWAP_BLOCKED.with_borrow_mut(|hook| {
-                *hook = Some(Box::new(move || {
-                    std::fs::rename(&home, home.with_extension("retired")).unwrap();
-                    std::fs::rename(home.with_extension("replacement"), &home).unwrap();
-                    drop(held);
-                }));
-            });
-        }));
-        let result = restore_report(
-            &home,
-            None,
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        );
-        BEFORE_STORE_OPEN.set(None);
-        raw::SWAP_BLOCKED.with_borrow_mut(|hook| *hook = None);
-        let failure = result.unwrap_err();
-        assert_eq!(failure.outcome.index.state, IndexState::Failed);
-        assert!(
-            !crate::backup::restore_requested(&home),
-            "the rejected home got a retry marker"
-        );
-        assert!(!home.join("raw.lock").exists());
-        assert!(!home.join("raw.db").exists());
-        assert_eq!(
-            std::fs::read(home.join("canary")).unwrap(),
-            b"synthetic unrelated home"
-        );
-    }
-
-    #[test]
-    fn w5b_consumer_progress_counts_durable_changes_and_not_empty_transactions() {
-        struct ReceiptConsumer(&'static str);
-        impl Consumer for ReceiptConsumer {
-            fn name(&self) -> &'static str {
-                "receipt-fixture"
-            }
-            fn top(&self, _: &Raw, _: &str) -> Result<i64> {
-                Ok(i64::from(self.0 == "checkpoint"))
-            }
-            fn step(&mut self, _: &Raw, k: &Connection, _: &str, after: i64) -> Result<i64> {
-                match self.0 {
-                    "checkpoint" => return Ok(1),
-                    "row" => {
-                        k.execute("INSERT INTO receipt_rows VALUES(73)", [])?;
-                    }
-                    "schema" => {
-                        k.execute("CREATE TABLE receipt_schema(value)", [])?;
-                    }
-                    _ => {}
+        fn top(&self, _: &Raw, _: &str) -> Result<i64> {
+            Ok(i64::from(self.0 == "checkpoint"))
+        }
+        fn step(&mut self, _: &Raw, k: &Connection, _: &str, after: i64) -> Result<i64> {
+            match self.0 {
+                "checkpoint" => return Ok(1),
+                "row" => {
+                    k.execute("INSERT INTO receipt_rows VALUES(73)", [])?;
                 }
-                Ok(after)
+                "schema" => {
+                    k.execute("CREATE TABLE receipt_schema(value)", [])?;
+                }
+                _ => {}
             }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
+            Ok(after)
         }
-        for (mode, expected) in [("noop", 0), ("checkpoint", 1), ("row", 1), ("schema", 1)] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            raw::open(p)
-                .unwrap()
-                .append(&raw::test_event("synthetic receipt checkpoint"))
-                .unwrap();
-            knowledge::open(p)
-                .unwrap()
-                .execute("CREATE TABLE receipt_rows(value)", [])
-                .unwrap();
-            let mut receipt = IndexReceipt::default();
-            let mut commits = Vec::new();
-            {
-                let mut callback = |event: &MaintenanceCommit| commits.push(event.clone());
-                let mut report = IndexReport {
-                    receipt: &mut receipt,
-                    committed: &mut callback,
-                };
-                run_holding_report(
-                    p,
-                    0,
-                    vec![Box::new(ReceiptConsumer(mode))],
-                    || {},
-                    None,
-                    Phases::default(),
-                    &mut Some(&mut report),
-                )
-                .unwrap();
-            }
-            assert_eq!(receipt.consumer_commits, expected, "{mode}");
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    for (mode, expected) in [("noop", 0), ("checkpoint", 1), ("row", 1), ("schema", 1)] {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic receipt checkpoint"))
+            .unwrap();
+        knowledge::open(p)
+            .unwrap()
+            .execute("CREATE TABLE receipt_rows(value)", [])
+            .unwrap();
+        let mut receipt = IndexReceipt::default();
+        let mut commits = Vec::new();
+        {
+            let mut callback = |event: &MaintenanceCommit| commits.push(event.clone());
+            let mut report = IndexReport {
+                receipt: &mut receipt,
+                committed: &mut callback,
+            };
+            run_holding_report(
+                p,
+                0,
+                vec![Box::new(ReceiptConsumer(mode))],
+                || {},
+                None,
+                Phases::default(),
+                &mut Some(&mut report),
+            )
+            .unwrap();
+        }
+        assert_eq!(receipt.consumer_commits, expected, "{mode}");
+        assert_eq!(
+            commits
+                .iter()
+                .filter(|event| matches!(event, MaintenanceCommit::Index { .. }))
+                .count(),
+            expected as usize,
+            "{mode}"
+        );
+        let k = knowledge::open(p).unwrap();
+        if mode == "checkpoint" {
+            let raw = raw::open(p).unwrap();
             assert_eq!(
-                commits
-                    .iter()
-                    .filter(|event| matches!(event, MaintenanceCommit::Index { .. }))
-                    .count(),
-                expected as usize,
-                "{mode}"
+                checkpoint::get_in(&k, checkpoint::SEQS, "receipt-fixture", raw.device()).unwrap(),
+                1
             );
-            let k = knowledge::open(p).unwrap();
-            if mode == "checkpoint" {
-                let raw = raw::open(p).unwrap();
-                assert_eq!(
-                    checkpoint::get_in(&k, checkpoint::SEQS, "receipt-fixture", raw.device())
-                        .unwrap(),
-                    1
-                );
-            } else if mode == "row" {
-                assert_eq!(
-                    k.query_row("SELECT value FROM receipt_rows", [], |r| r.get::<_, i64>(0))
-                        .unwrap(),
-                    73
-                );
-            } else if mode == "schema" {
-                assert_eq!(
-                    k.query_row(
-                        "SELECT count(*) FROM sqlite_master WHERE name='receipt_schema'",
-                        [],
-                        |r| r.get::<_, i64>(0)
-                    )
+        } else if mode == "row" {
+            assert_eq!(
+                k.query_row("SELECT value FROM receipt_rows", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
-                    1
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn w5b_rescan_raw_commits_survive_later_raw_or_checkpoint_failure() {
-        for fault in ["checkpoint", "next_raw"] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            let mut raw = raw::open(p).unwrap();
-            for canary in ["111111", "222222"] {
-                raw.append(&raw::test_event(&format!(
-                    r#"{{"prompt":"synthetic causal-canary-{canary}"}}"#
-                )))
-                .unwrap();
-            }
-            drop(raw);
-            run_once(p).unwrap();
-            std::fs::remove_dir_all(p.join("backups")).unwrap();
-            raw::open(p)
-                .unwrap()
-                .append(&raw::test_event("synthetic pending rescan"))
-                .unwrap();
-            if fault == "checkpoint" {
-                knowledge::open(p)
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TRIGGER stop_rescan_checkpoint BEFORE UPDATE ON checkpoints
-                     WHEN OLD.consumer='rescan'
-                     BEGIN SELECT RAISE(ABORT, 'synthetic failed rescan checkpoint'); END;",
-                    )
-                    .unwrap();
-            } else {
-                Connection::open(p.join("raw.db"))
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TRIGGER stop_next_rescan BEFORE INSERT ON records
-                     WHEN NEW.type='tombstone' AND NEW.target_seq=2
-                     BEGIN SELECT RAISE(ABORT, 'synthetic failed next raw rescan'); END;",
-                    )
-                    .unwrap();
-            }
-            std::fs::write(p.join("config.toml"),
-                "[redaction]\nextra_rules = [{ id = 'causal', regex = 'causal-canary-[0-9]{6}' }]\n"
-            ).unwrap();
-            let mut commits = Vec::new();
-            let failure = restore_report(
-                p,
-                None,
-                crate::executable::CommandCaller::Worker,
-                &mut |event| commits.push(event.clone()),
-            )
-            .unwrap_err();
-            assert!(
-                failure
-                    .cause
-                    .to_string()
-                    .contains("no usable backup segment")
+                73
             );
-            assert!(
-                failure
-                    .index_cause
-                    .as_ref()
-                    .unwrap()
-                    .to_string()
-                    .contains("synthetic failed")
-            );
-            let raw = raw::open(p).unwrap();
-            let expected = if fault == "checkpoint" { 2 } else { 1 };
-            assert_eq!(raw.tombstones().unwrap(), expected);
-            let crate::raw::Item::Event(first) = &raw.after(raw.device(), 0, 1).unwrap()[0].item
-            else {
-                panic!("synthetic first record disappeared");
-            };
-            assert!(!first.body.contains("causal-canary-111111"));
-            assert_eq!(failure.outcome.index.consumer_commits, 0);
-            assert!(
-                !failure
-                    .outcome
-                    .restore
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .committed()
-            );
-            assert!(
-                failure.outcome.index.stores_changed,
-                "independently committed rescan was lost from the receipt: {fault}"
-            );
-            assert!(failure.outcome.committed());
+        } else if mode == "schema" {
             assert_eq!(
-                commits
-                    .iter()
-                    .filter(|event| matches!(
-                        event,
-                        MaintenanceCommit::Effect {
-                            stage: "stores_changed"
-                        }
-                    ))
-                    .count(),
-                expected as usize
-            );
-        }
-    }
-
-    #[test]
-    fn w5b_compressed_batches_survive_later_errors_without_counting_empty_batches() {
-        for fault in ["checkpoint", "later_batch", "noop_checkpoint"] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            let body = if fault == "noop_checkpoint" {
-                "hi".to_owned()
-            } else {
-                "synthetic compression payload ".repeat(300)
-            };
-            let count = if fault == "later_batch" { 201 } else { 1 };
-            let mut raw = raw::open(p).unwrap();
-            for _ in 0..count {
-                raw.append(&raw::test_event(&body)).unwrap();
-            }
-            let device = raw.device().to_owned();
-            drop(raw);
-            let mut initial = consumers(p);
-            assert_eq!(initial.pop().unwrap().name(), "compress");
-            run_holding(p, 0, initial, || {}, None, Phases::default()).unwrap();
-            std::fs::remove_dir_all(p.join("backups")).unwrap();
-            if fault == "later_batch" {
-                Connection::open(p.join("raw.db"))
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TRIGGER stop_later_compression BEFORE UPDATE OF enc ON records
-                     WHEN OLD.seq=201
-                     BEGIN SELECT RAISE(ABORT, 'synthetic failed later compression'); END;",
-                    )
-                    .unwrap();
-            } else {
-                knowledge::open(p)
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TRIGGER stop_compress_checkpoint BEFORE INSERT ON checkpoints
-                     WHEN NEW.consumer='compress'
-                     BEGIN SELECT RAISE(ABORT, 'synthetic failed compression checkpoint'); END;",
-                    )
-                    .unwrap();
-            }
-            let mut commits = Vec::new();
-            let failure = restore_report(
-                p,
-                None,
-                crate::executable::CommandCaller::Worker,
-                &mut |event| commits.push(event.clone()),
-            )
-            .unwrap_err();
-            assert!(
-                failure
-                    .cause
-                    .to_string()
-                    .contains("no usable backup segment")
-            );
-            assert!(
-                failure
-                    .index_cause
-                    .as_ref()
-                    .unwrap()
-                    .to_string()
-                    .contains("synthetic failed")
-            );
-            let c = Connection::open(p.join("raw.db")).unwrap();
-            let encoding = |seq| {
-                c.query_row(
-                    "SELECT enc FROM records WHERE device=?1 AND seq=?2",
-                    (&device, seq),
-                    |row| row.get::<_, String>(0),
+                k.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name='receipt_schema'",
+                    [],
+                    |r| r.get::<_, i64>(0)
                 )
-                .unwrap()
-            };
-            let changed = fault != "noop_checkpoint";
-            assert_eq!(encoding(1), if changed { "zstd" } else { "plain" });
-            if fault == "later_batch" {
-                assert_eq!(encoding(201), "plain");
-            }
-            drop(c);
-            let raw = raw::open(p).unwrap();
-            let records = raw.after(&device, 0, 1).unwrap();
-            let crate::raw::Item::Event(first) = &records[0].item else {
-                panic!("synthetic compressed record disappeared");
-            };
-            assert_eq!(first.body, body);
-            assert_eq!(raw.max_seq().unwrap(), count);
-            assert_eq!(failure.outcome.index.consumer_commits, 0);
-            assert!(
-                !failure
-                    .outcome
-                    .restore
-                    .as_ref()
-                    .unwrap()
-                    .effects
-                    .committed()
-            );
-            assert_eq!(
-                failure.outcome.index.stores_changed, changed,
-                "independently committed compression was lost or an empty batch counted: {fault}"
-            );
-            assert_eq!(failure.outcome.committed(), changed);
-            assert_eq!(
-                commits
-                    .iter()
-                    .filter(|event| matches!(
-                        event,
-                        MaintenanceCommit::Effect {
-                            stage: "stores_changed"
-                        }
-                    ))
-                    .count(),
-                usize::from(changed)
+                .unwrap(),
+                1
             );
         }
     }
+}
 
-    #[test]
-    fn w5b_owned_initialization_progress_survives_a_later_open_failure() {
-        for setup in ["new_raw", "raw_schema", "raw_identity", "knowledge_schema"] {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            if setup != "new_raw" {
-                drop(raw::open(p).unwrap());
-                drop(knowledge::open(p).unwrap());
-                let (file, sql) = match setup {
-                    "raw_schema" => ("raw.db", "DROP TABLE ledger"),
-                    "raw_identity" => ("raw.db", "DELETE FROM meta WHERE key='store_file'"),
-                    _ => ("knowledge.db", "DROP TABLE rewinds"),
-                };
-                Connection::open(p.join(file))
-                    .unwrap()
-                    .execute_batch(sql)
-                    .unwrap();
-            }
-            crate::backup::FAIL_AFTER.set(Some("stores_changed"));
-            let failure = restore_report(
-                p,
-                None,
-                crate::executable::CommandCaller::Worker,
-                &mut |_| {},
-            )
-            .unwrap_err();
-            crate::backup::FAIL_AFTER.set(None);
-            assert!(
-                failure.cause.to_string().contains(if setup == "new_raw" {
-                    "no backup segments"
-                } else {
-                    "no usable backup segment"
-                }),
-                "{setup}"
-            );
-            assert!(
-                failure
-                    .index_cause
-                    .as_ref()
-                    .unwrap()
-                    .to_string()
-                    .contains("stores_changed"),
-                "{setup}"
-            );
-            assert_eq!(failure.outcome.index.consumer_commits, 0, "{setup}");
-            assert!(failure.outcome.index.stores_changed, "{setup}");
-            assert!(failure.outcome.committed(), "{setup}");
-        }
-    }
-
-    #[test]
-    fn w5b_a_rewind_commit_is_reported_before_a_later_rewind_fails() {
+#[test]
+fn w5b_rescan_raw_commits_survive_later_raw_or_checkpoint_failure() {
+    for fault in ["checkpoint", "next_raw"] {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("synthetic rewind receipt"))
+        for canary in ["111111", "222222"] {
+            raw.append(&raw::test_event(&format!(
+                r#"{{"prompt":"synthetic causal-canary-{canary}"}}"#
+            )))
             .unwrap();
-        let device = raw.device().to_owned();
+        }
         drop(raw);
         run_once(p).unwrap();
         std::fs::remove_dir_all(p.join("backups")).unwrap();
-        let k = knowledge::open(p).unwrap();
-        for consumer in ["rescan", "fts"] {
-            checkpoint::set_in(&k, checkpoint::SEQS, consumer, &device, 2).unwrap();
-        }
-        k.execute_batch(
-            "CREATE TRIGGER stop_fts_rewind BEFORE UPDATE ON checkpoints
-                         WHEN OLD.consumer='fts'
-                         BEGIN SELECT RAISE(ABORT, 'synthetic failed rewind'); END;",
-        )
-        .unwrap();
-        drop(k);
-        let mut commits = Vec::new();
-        let failure = restore_report(
-            p,
-            None,
-            crate::executable::CommandCaller::Worker,
-            &mut |event| commits.push(event.clone()),
-        )
-        .unwrap_err();
-        assert!(
-            failure
-                .index_cause
-                .as_ref()
-                .unwrap()
-                .to_string()
-                .contains("synthetic failed rewind")
-        );
-        assert_eq!(failure.outcome.index.consumer_commits, 1);
-        assert!(!failure.outcome.index.stores_changed);
-        assert!(failure.outcome.committed());
-        assert!(matches!(
-            commits.as_slice(),
-            [MaintenanceCommit::Index {
-                consumer: "rescan",
-                checkpoint: 1,
-                unit: CheckpointUnit::Records
-            }]
-        ));
-    }
-
-    #[test]
-    fn w5b_a_repaired_forget_log_is_progress_without_a_consumer_commit() {
-        let faults = [
-            None,
-            Some("forget_log_sync"),
-            #[cfg(unix)]
-            Some("forget_log_directory_sync"),
-        ];
-        for fault in faults {
-            let home = tempfile::tempdir().unwrap();
-            let p = home.path();
-            let (original, _) = crate::backup::tests::w5b_log_change(p);
-            run_once(p).unwrap();
-            for entry in std::fs::read_dir(p.join("backups")).unwrap() {
-                let path = entry.unwrap().path();
-                if path.file_name().unwrap() != "forget.log" {
-                    std::fs::remove_file(path).unwrap();
-                }
-            }
-            std::fs::remove_file(p.join("forget.log")).unwrap();
-            raw::open(p)
-                .unwrap()
-                .append(&raw::test_event("synthetic pending log repair"))
-                .unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic pending rescan"))
+            .unwrap();
+        if fault == "checkpoint" {
             knowledge::open(p)
                 .unwrap()
                 .execute_batch(
-                    "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
-                 BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
+                    "CREATE TRIGGER stop_rescan_checkpoint BEFORE UPDATE ON checkpoints
+                     WHEN OLD.consumer='rescan'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed rescan checkpoint'); END;",
                 )
                 .unwrap();
-            let mut commits = Vec::new();
-            crate::backup::FAIL_AFTER.set(fault);
-            let result = restore_report(
-                p,
-                None,
-                crate::executable::CommandCaller::Worker,
-                &mut |event| commits.push(event.clone()),
-            );
-            crate::backup::FAIL_AFTER.set(None);
-            let failure = result.unwrap_err();
-            assert!(
-                failure
-                    .index_cause
-                    .as_ref()
-                    .unwrap()
-                    .to_string()
-                    .contains("synthetic stopped log repair drain")
-            );
-            assert_eq!(failure.outcome.index.consumer_commits, 0);
-            assert_eq!(failure.outcome.index.forget_requests_applied, 0);
-            assert!(failure.outcome.committed());
-            assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
-            let expected = if fault.is_some() {
-                "stores_changed"
-            } else {
-                "forget_reconciled"
-            };
-            assert_eq!(
-                failure.outcome.index.forget_log_warnings,
-                u64::from(fault.is_some())
-            );
-            assert!(
-                matches!(commits.as_slice(), [MaintenanceCommit::Effect { stage }] if *stage == expected),
-                "failed log sync was reported as fully reconciled: {fault:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn w5b_concurrent_records_are_not_reported_as_this_failed_restores_progress() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic already indexed record"))
-            .unwrap();
-        run_once(p).unwrap();
-        std::fs::remove_dir_all(p.join("backups")).unwrap();
-        knowledge::open(p)
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER stop_receipt_checkpoint BEFORE UPDATE ON checkpoints
-                 BEGIN SELECT RAISE(ABORT, 'synthetic blocked checkpoint'); END;",
-            )
-            .unwrap();
-        AFTER_RAW_OPEN.set(Some(|home| {
-            raw::open(home)
+        } else {
+            Connection::open(p.join("raw.db"))
                 .unwrap()
-                .append(&raw::test_event("synthetic concurrent first record"))
+                .execute_batch(
+                    "CREATE TRIGGER stop_next_rescan BEFORE INSERT ON records
+                     WHEN NEW.type='tombstone' AND NEW.target_seq=2
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed next raw rescan'); END;",
+                )
                 .unwrap();
-            AFTER_KNOWLEDGE_OPEN.set(Some(|home| {
-                raw::open(home)
-                    .unwrap()
-                    .append(&raw::test_event("synthetic concurrent second record"))
-                    .unwrap();
-            }));
-        }));
+        }
+        std::fs::write(
+            p.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = 'causal', regex = 'causal-canary-[0-9]{6}' }]\n",
+        )
+        .unwrap();
         let mut commits = Vec::new();
         let failure = restore_report(
             p,
@@ -810,8 +438,6 @@
             &mut |event| commits.push(event.clone()),
         )
         .unwrap_err();
-        AFTER_RAW_OPEN.set(None);
-        AFTER_KNOWLEDGE_OPEN.set(None);
         assert!(
             failure
                 .cause
@@ -824,9 +450,15 @@
                 .as_ref()
                 .unwrap()
                 .to_string()
-                .contains("synthetic blocked checkpoint")
+                .contains("synthetic failed")
         );
-        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 3);
+        let raw = raw::open(p).unwrap();
+        let expected = if fault == "checkpoint" { 2 } else { 1 };
+        assert_eq!(raw.tombstones().unwrap(), expected);
+        let crate::raw::Item::Event(first) = &raw.after(raw.device(), 0, 1).unwrap()[0].item else {
+            panic!("synthetic first record disappeared");
+        };
+        assert!(!first.body.contains("causal-canary-111111"));
         assert_eq!(failure.outcome.index.consumer_commits, 0);
         assert!(
             !failure
@@ -838,246 +470,65 @@
                 .committed()
         );
         assert!(
-            !failure.outcome.committed(),
-            "concurrent writes were attributed to the failed restore"
+            failure.outcome.index.stores_changed,
+            "independently committed rescan was lost from the receipt: {fault}"
         );
-        assert!(commits.is_empty(), "uncommitted restore emitted progress");
-    }
-
-    #[test]
-    fn w5b_a_disappearing_wal_does_not_abort_the_required_restore_drain() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("synthetic disappearing WAL"))
-            .unwrap();
-        let wal = std::fs::read(p.join("raw.db-wal")).unwrap();
-        assert!(wal.len() > 32);
-        drop(raw);
-        std::fs::write(p.join("raw.db-wal"), wal).unwrap();
-        BEFORE_STORE_OPEN.set(Some(|path| std::fs::remove_file(path).unwrap()));
-        let failure = restore_report(
-            p,
-            None,
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        )
-        .unwrap_err();
-        BEFORE_STORE_OPEN.set(None);
-        assert_eq!(failure.outcome.index.state, IndexState::Complete);
-        assert!(failure.index_cause.is_none());
+        assert!(failure.outcome.committed());
         assert_eq!(
-            crate::search::raw(p, "disappearing WAL", None, 5)
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn w5b_viewer_commands_require_a_readable_original_view_lock() {
-        for operation in ["rebuild", "restore"] {
-            for unusable in ["missing", "directory", "unreadable"] {
-                let home = tempfile::tempdir().unwrap();
-                let p = home.path();
-                drop(raw::open(p).unwrap());
-                run_once(p).unwrap();
-                let lock = p.join("state/view.lock");
-                let viewer = std::fs::File::create(&lock).unwrap();
-                let identity = file_id(viewer.metadata()).unwrap();
-                if unusable != "unreadable" {
-                    std::fs::remove_file(&lock).unwrap();
-                }
-                if unusable == "directory" {
-                    std::fs::create_dir(&lock).unwrap();
-                } else if unusable == "unreadable" {
-                    std::fs::write(&lock, "").unwrap();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o0))
-                            .unwrap();
-                    }
-                }
-                let generation = std::fs::read(p.join("state/worker-gen")).unwrap();
-                let result = if operation == "rebuild" {
-                    rebuild_report(
-                        p,
-                        None,
-                        crate::executable::CommandCaller::Viewer(identity),
-                        &mut |_| {},
-                    )
-                } else {
-                    restore_report(
-                        p,
-                        None,
-                        crate::executable::CommandCaller::Viewer(identity),
-                        &mut |_| {},
-                    )
-                };
-                let failure = result.expect_err("viewer without its home proof was admitted");
-                assert!(!failure.outcome.committed(), "{operation}: {unusable}");
-                assert_eq!(
-                    std::fs::read(p.join("state/worker-gen")).unwrap(),
-                    generation,
-                    "{operation}: {unusable} borrowed the worker lock"
-                );
-            }
-        }
-    }
-
-    // This R3/R9 proof needs Unix device/inode identity and renaming a home with open locks.
-    // Windows rejects that fixture's rename before the rollback guard is reached.
-    #[cfg(unix)]
-    #[test]
-    fn w5b_a_replaced_home_is_not_touched_by_a_failed_carry_put_back() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("memory");
-        let retired = root.path().join("retired");
-        std::fs::create_dir(&home).unwrap();
-        drop(raw::open(&home).unwrap());
-        std::fs::write(home.join("knowledge.db"), "synthetic unreadable old cache").unwrap();
-        let shown = preview_rebuild(&home).unwrap();
-        let replacement = home.clone();
-        let kept_home = retired.clone();
-        AFTER_CARRY.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(move || {
-                std::fs::rename(&replacement, &kept_home).unwrap();
-                std::fs::create_dir_all(replacement.join("state")).unwrap();
-                std::fs::write(replacement.join("state/worker.lock"), "different home").unwrap();
-                let knowledge = knowledge::open(&replacement).unwrap();
-                knowledge
-                    .execute_batch(
-                        "CREATE TABLE unrelated(value); INSERT INTO unrelated VALUES(73)",
-                    )
-                    .unwrap();
-            }))
-        });
-        let failed = rebuild_report(
-            &home,
-            Some(&shown.key),
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        )
-        .unwrap_err();
-        assert!(
-            home.join("knowledge.db").exists(),
-            "rollback deleted the replacement home's unrelated store"
-        );
-        assert!(!home.join("raw.lock").exists());
-        let replacement = Connection::open_with_flags(
-            home.join("knowledge.db"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        assert_eq!(
-            replacement
-                .query_row("SELECT value FROM unrelated", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            73
-        );
-        assert!(!failed.outcome.effects.knowledge_put_back);
-        assert!(failed.outcome.old_knowledge_kept);
-        assert!(std::fs::read_dir(&retired).unwrap().flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("knowledge.db.rebuilding-")
-        }));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn w5b_exec_viewer_probe() {
-        let Some(home) = std::env::var_os("OBOETE_TEST_MAINT_HOME") else {
-            return;
-        };
-        let home = std::path::PathBuf::from(home);
-        let original = crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap();
-        assert!(original.is_some());
-        assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
-        let shown = preview_rebuild(&home).unwrap();
-        let result = rebuild_report(
-            &home,
-            Some(&shown.key),
-            crate::executable::CommandCaller::Viewer(original.unwrap()),
-            &mut |_| {},
-        );
-        assert!(result.is_ok(), "borrowed viewer command: {result:?}");
-        assert_eq!(result.unwrap().index.state, IndexState::Complete);
-        assert_eq!(
-            crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
-            original
-        );
-        let shown = preview_rebuild(&home).unwrap();
-        AFTER_OPEN.set(Some(|home| {
-            std::fs::remove_file(home.join("state/view.lock")).unwrap();
-            std::fs::write(home.join("state/view.lock"), "new viewer home authority").unwrap();
-        }));
-        let failed = rebuild_report(
-            &home,
-            Some(&shown.key),
-            crate::executable::CommandCaller::Viewer(original.unwrap()),
-            &mut |_| {},
-        )
-        .unwrap_err();
-        AFTER_OPEN.set(None);
-        assert!(!failed.outcome.committed());
-        assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
-        assert_eq!(
-            crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
-            original
-        );
-        assert!(!std::fs::read_dir(&home).unwrap().flatten().any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("knowledge.db.rebuilding-")
-        }));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn w5b_a_real_exec_viewer_can_borrow_worker_authority_and_keeps_both_home_checks() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic viewer maintenance"))
-            .unwrap();
-        run_once(p).unwrap();
-        let viewer = std::fs::File::create(p.join("state/view.lock")).unwrap();
-        let (device, inode) = file_id(viewer.metadata()).unwrap();
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "export OBOETE_EXEC_HOME=\"$$:view.lock:$1:$2\"; exec \"$3\" --exact worker::tests::w5b_exec_viewer_probe --nocapture", "private-viewer-fixture"])
-            .arg(device.to_string()).arg(inode.to_string()).arg(std::env::current_exe().unwrap())
-            .env("OBOETE_TEST_MAINT_HOME", p).stdin(std::process::Stdio::null());
-        for (key, _) in std::env::vars_os() {
-            if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+            commits
                 .iter()
-                .any(|part| key.to_string_lossy().to_ascii_uppercase().contains(part))
-            {
-                command.env_remove(key);
-            }
-        }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+                .filter(|event| matches!(
+                    event,
+                    MaintenanceCommit::Effect {
+                        stage: "stores_changed"
+                    }
+                ))
+                .count(),
+            expected as usize
         );
     }
+}
 
-    #[test]
-    fn w5b_a_failed_native_restore_still_drains_and_reports_store_commits() {
+#[test]
+fn w5b_compressed_batches_survive_later_errors_without_counting_empty_batches() {
+    for fault in ["checkpoint", "later_batch", "noop_checkpoint"] {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic pending FTS record"))
-            .unwrap();
+        let body = if fault == "noop_checkpoint" {
+            "hi".to_owned()
+        } else {
+            "synthetic compression payload ".repeat(300)
+        };
+        let count = if fault == "later_batch" { 201 } else { 1 };
+        let mut raw = raw::open(p).unwrap();
+        for _ in 0..count {
+            raw.append(&raw::test_event(&body)).unwrap();
+        }
+        let device = raw.device().to_owned();
+        drop(raw);
+        let mut initial = consumers(p);
+        assert_eq!(initial.pop().unwrap().name(), "compress");
+        run_holding(p, 0, initial, || {}, None, Phases::default()).unwrap();
+        std::fs::remove_dir_all(p.join("backups")).unwrap();
+        if fault == "later_batch" {
+            Connection::open(p.join("raw.db"))
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER stop_later_compression BEFORE UPDATE OF enc ON records
+                     WHEN OLD.seq=201
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed later compression'); END;",
+                )
+                .unwrap();
+        } else {
+            knowledge::open(p)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER stop_compress_checkpoint BEFORE INSERT ON checkpoints
+                     WHEN NEW.consumer='compress'
+                     BEGIN SELECT RAISE(ABORT, 'synthetic failed compression checkpoint'); END;",
+                )
+                .unwrap();
+        }
         let mut commits = Vec::new();
         let failure = restore_report(
             p,
@@ -1092,36 +543,87 @@
                 .to_string()
                 .contains("no usable backup segment")
         );
-        assert_eq!(failure.outcome.index.state, IndexState::Complete);
-        assert!(failure.outcome.index.stores_changed);
-        assert!(failure.outcome.committed());
-        assert!(failure.outcome.index.consumer_commits > 0);
-        assert!(commits.iter().any(|event| matches!(
-            event,
-            MaintenanceCommit::Index {
-                consumer: "fts",
-                unit: CheckpointUnit::Records,
-                checkpoint: 1
-            }
-        )));
-        assert_eq!(
-            crate::search::raw(p, "pending FTS", None, 5).unwrap().len(),
-            1
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic failed")
         );
-        assert!(!p.join("providers.db").exists());
-        assert!(!failure.outcome.hybrid_ready);
-    }
-
-    #[test]
-    fn w5b_restore_preserves_both_native_failures_and_committed_consumer_progress() {
-        let home = tempfile::tempdir().unwrap();
-        raw::open(home.path())
+        let c = Connection::open(p.join("raw.db")).unwrap();
+        let encoding = |seq| {
+            c.query_row(
+                "SELECT enc FROM records WHERE device=?1 AND seq=?2",
+                (&device, seq),
+                |row| row.get::<_, String>(0),
+            )
             .unwrap()
-            .append(&raw::test_event("synthetic dual failure"))
-            .unwrap();
-        crate::backup::FAIL_AFTER.set(Some("index_commit"));
+        };
+        let changed = fault != "noop_checkpoint";
+        assert_eq!(encoding(1), if changed { "zstd" } else { "plain" });
+        if fault == "later_batch" {
+            assert_eq!(encoding(201), "plain");
+        }
+        drop(c);
+        let raw = raw::open(p).unwrap();
+        let records = raw.after(&device, 0, 1).unwrap();
+        let crate::raw::Item::Event(first) = &records[0].item else {
+            panic!("synthetic compressed record disappeared");
+        };
+        assert_eq!(first.body, body);
+        assert_eq!(raw.max_seq().unwrap(), count);
+        assert_eq!(failure.outcome.index.consumer_commits, 0);
+        assert!(
+            !failure
+                .outcome
+                .restore
+                .as_ref()
+                .unwrap()
+                .effects
+                .committed()
+        );
+        assert_eq!(
+            failure.outcome.index.stores_changed, changed,
+            "independently committed compression was lost or an empty batch counted: {fault}"
+        );
+        assert_eq!(failure.outcome.committed(), changed);
+        assert_eq!(
+            commits
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    MaintenanceCommit::Effect {
+                        stage: "stores_changed"
+                    }
+                ))
+                .count(),
+            usize::from(changed)
+        );
+    }
+}
+
+#[test]
+fn w5b_owned_initialization_progress_survives_a_later_open_failure() {
+    for setup in ["new_raw", "raw_schema", "raw_identity", "knowledge_schema"] {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        if setup != "new_raw" {
+            drop(raw::open(p).unwrap());
+            drop(knowledge::open(p).unwrap());
+            let (file, sql) = match setup {
+                "raw_schema" => ("raw.db", "DROP TABLE ledger"),
+                "raw_identity" => ("raw.db", "DELETE FROM meta WHERE key='store_file'"),
+                _ => ("knowledge.db", "DROP TABLE rewinds"),
+            };
+            Connection::open(p.join(file))
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap();
+        }
+        crate::backup::FAIL_AFTER.set(Some("stores_changed"));
         let failure = restore_report(
-            home.path(),
+            p,
             None,
             crate::executable::CommandCaller::Worker,
             &mut |_| {},
@@ -1129,10 +631,12 @@
         .unwrap_err();
         crate::backup::FAIL_AFTER.set(None);
         assert!(
-            failure
-                .cause
-                .to_string()
-                .contains("no usable backup segment")
+            failure.cause.to_string().contains(if setup == "new_raw" {
+                "no backup segments"
+            } else {
+                "no usable backup segment"
+            }),
+            "{setup}"
         );
         assert!(
             failure
@@ -1140,1817 +644,2587 @@
                 .as_ref()
                 .unwrap()
                 .to_string()
-                .contains("index_commit")
+                .contains("stores_changed"),
+            "{setup}"
         );
-        assert_eq!(failure.outcome.index.state, IndexState::Failed);
-        assert_eq!(failure.outcome.index.consumer_commits, 1);
-        assert!(failure.outcome.committed());
+        assert_eq!(failure.outcome.index.consumer_commits, 0, "{setup}");
+        assert!(failure.outcome.index.stores_changed, "{setup}");
+        assert!(failure.outcome.committed(), "{setup}");
     }
+}
 
-    #[test]
-    fn w5b_a_zero_payload_rebuild_retains_carry_and_cleanup_failure_receipts() {
-        for stage in ["knowledge_set_aside", "vectors_carried", "old_cleanup"] {
+#[test]
+fn w5b_a_rewind_commit_is_reported_before_a_later_rewind_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("synthetic rewind receipt"))
+        .unwrap();
+    let device = raw.device().to_owned();
+    drop(raw);
+    run_once(p).unwrap();
+    std::fs::remove_dir_all(p.join("backups")).unwrap();
+    let k = knowledge::open(p).unwrap();
+    for consumer in ["rescan", "fts"] {
+        checkpoint::set_in(&k, checkpoint::SEQS, consumer, &device, 2).unwrap();
+    }
+    k.execute_batch(
+        "CREATE TRIGGER stop_fts_rewind BEFORE UPDATE ON checkpoints
+                         WHEN OLD.consumer='fts'
+                         BEGIN SELECT RAISE(ABORT, 'synthetic failed rewind'); END;",
+    )
+    .unwrap();
+    drop(k);
+    let mut commits = Vec::new();
+    let failure = restore_report(
+        p,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |event| commits.push(event.clone()),
+    )
+    .unwrap_err();
+    assert!(
+        failure
+            .index_cause
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("synthetic failed rewind")
+    );
+    assert_eq!(failure.outcome.index.consumer_commits, 1);
+    assert!(!failure.outcome.index.stores_changed);
+    assert!(failure.outcome.committed());
+    assert!(matches!(
+        commits.as_slice(),
+        [MaintenanceCommit::Index {
+            consumer: "rescan",
+            checkpoint: 1,
+            unit: CheckpointUnit::Records
+        }]
+    ));
+}
+
+#[test]
+fn w5b_a_repaired_forget_log_is_progress_without_a_consumer_commit() {
+    let faults = [
+        None,
+        Some("forget_log_sync"),
+        #[cfg(unix)]
+        Some("forget_log_directory_sync"),
+    ];
+    for fault in faults {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let (original, _) = crate::backup::tests::w5b_log_change(p);
+        run_once(p).unwrap();
+        for entry in std::fs::read_dir(p.join("backups")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap() != "forget.log" {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        std::fs::remove_file(p.join("forget.log")).unwrap();
+        raw::open(p)
+            .unwrap()
+            .append(&raw::test_event("synthetic pending log repair"))
+            .unwrap();
+        knowledge::open(p)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER stop_log_repair_drain BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic stopped log repair drain'); END;",
+            )
+            .unwrap();
+        let mut commits = Vec::new();
+        crate::backup::FAIL_AFTER.set(fault);
+        let result = restore_report(
+            p,
+            None,
+            crate::executable::CommandCaller::Worker,
+            &mut |event| commits.push(event.clone()),
+        );
+        crate::backup::FAIL_AFTER.set(None);
+        let failure = result.unwrap_err();
+        assert!(
+            failure
+                .index_cause
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("synthetic stopped log repair drain")
+        );
+        assert_eq!(failure.outcome.index.consumer_commits, 0);
+        assert_eq!(failure.outcome.index.forget_requests_applied, 0);
+        assert!(failure.outcome.committed());
+        assert_eq!(std::fs::read(p.join("forget.log")).unwrap(), original);
+        let expected = if fault.is_some() {
+            "stores_changed"
+        } else {
+            "forget_reconciled"
+        };
+        assert_eq!(
+            failure.outcome.index.forget_log_warnings,
+            u64::from(fault.is_some())
+        );
+        assert!(
+            matches!(commits.as_slice(), [MaintenanceCommit::Effect { stage }] if *stage == expected),
+            "failed log sync was reported as fully reconciled: {fault:?}"
+        );
+    }
+}
+
+#[test]
+fn w5b_concurrent_records_are_not_reported_as_this_failed_restores_progress() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic already indexed record"))
+        .unwrap();
+    run_once(p).unwrap();
+    std::fs::remove_dir_all(p.join("backups")).unwrap();
+    knowledge::open(p)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER stop_receipt_checkpoint BEFORE UPDATE ON checkpoints
+                 BEGIN SELECT RAISE(ABORT, 'synthetic blocked checkpoint'); END;",
+        )
+        .unwrap();
+    AFTER_RAW_OPEN.set(Some(|home| {
+        raw::open(home)
+            .unwrap()
+            .append(&raw::test_event("synthetic concurrent first record"))
+            .unwrap();
+        AFTER_KNOWLEDGE_OPEN.set(Some(|home| {
+            raw::open(home)
+                .unwrap()
+                .append(&raw::test_event("synthetic concurrent second record"))
+                .unwrap();
+        }));
+    }));
+    let mut commits = Vec::new();
+    let failure = restore_report(
+        p,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |event| commits.push(event.clone()),
+    )
+    .unwrap_err();
+    AFTER_RAW_OPEN.set(None);
+    AFTER_KNOWLEDGE_OPEN.set(None);
+    assert!(
+        failure
+            .cause
+            .to_string()
+            .contains("no usable backup segment")
+    );
+    assert!(
+        failure
+            .index_cause
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("synthetic blocked checkpoint")
+    );
+    assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 3);
+    assert_eq!(failure.outcome.index.consumer_commits, 0);
+    assert!(
+        !failure
+            .outcome
+            .restore
+            .as_ref()
+            .unwrap()
+            .effects
+            .committed()
+    );
+    assert!(
+        !failure.outcome.committed(),
+        "concurrent writes were attributed to the failed restore"
+    );
+    assert!(commits.is_empty(), "uncommitted restore emitted progress");
+}
+
+#[test]
+fn w5b_a_disappearing_wal_does_not_abort_the_required_restore_drain() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("synthetic disappearing WAL"))
+        .unwrap();
+    let wal = std::fs::read(p.join("raw.db-wal")).unwrap();
+    assert!(wal.len() > 32);
+    drop(raw);
+    std::fs::write(p.join("raw.db-wal"), wal).unwrap();
+    BEFORE_STORE_OPEN.set(Some(|path| std::fs::remove_file(path).unwrap()));
+    let failure = restore_report(
+        p,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    BEFORE_STORE_OPEN.set(None);
+    assert_eq!(failure.outcome.index.state, IndexState::Complete);
+    assert!(failure.index_cause.is_none());
+    assert_eq!(
+        crate::search::raw(p, "disappearing WAL", None, 5)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn w5b_viewer_commands_require_a_readable_original_view_lock() {
+    for operation in ["rebuild", "restore"] {
+        for unusable in ["missing", "directory", "unreadable"] {
             let home = tempfile::tempdir().unwrap();
             let p = home.path();
             drop(raw::open(p).unwrap());
-            drop(knowledge::open(p).unwrap());
-            let shown = preview_rebuild(p).unwrap();
-            crate::backup::FAIL_AFTER.set(Some(stage));
-            let result = rebuild_report(
-                p,
-                Some(&shown.key),
-                crate::executable::CommandCaller::Worker,
-                &mut |_| {},
-            );
-            crate::backup::FAIL_AFTER.set(None);
-            let outcome = if stage == "old_cleanup" {
-                result.unwrap()
-            } else {
-                *result.unwrap_err().outcome
-            };
-            assert!(outcome.committed(), "zero payload {stage}");
-            assert_eq!(outcome.cached_vectors_carried, 0);
-            assert!(!outcome.hybrid_ready);
-            match stage {
-                "knowledge_set_aside" => assert!(outcome.effects.knowledge_put_back),
-                "vectors_carried" => assert!(outcome.old_knowledge_kept),
-                "old_cleanup" => {
-                    assert_eq!(outcome.cleanup_warnings, 1);
-                    assert_eq!(outcome.index.state, IndexState::Complete);
-                    assert!(outcome.old_knowledge_kept);
-                }
-                _ => unreachable!(),
+            run_once(p).unwrap();
+            let lock = p.join("state/view.lock");
+            let viewer = std::fs::File::create(&lock).unwrap();
+            let identity = file_id(viewer.metadata()).unwrap();
+            if unusable != "unreadable" {
+                std::fs::remove_file(&lock).unwrap();
             }
+            if unusable == "directory" {
+                std::fs::create_dir(&lock).unwrap();
+            } else if unusable == "unreadable" {
+                std::fs::write(&lock, "").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o0)).unwrap();
+                }
+            }
+            let generation = std::fs::read(p.join("state/worker-gen")).unwrap();
+            let result = if operation == "rebuild" {
+                rebuild_report(
+                    p,
+                    None,
+                    crate::executable::CommandCaller::Viewer(identity),
+                    &mut |_| {},
+                )
+            } else {
+                restore_report(
+                    p,
+                    None,
+                    crate::executable::CommandCaller::Viewer(identity),
+                    &mut |_| {},
+                )
+            };
+            let failure = result.expect_err("viewer without its home proof was admitted");
+            assert!(!failure.outcome.committed(), "{operation}: {unusable}");
+            assert_eq!(
+                std::fs::read(p.join("state/worker-gen")).unwrap(),
+                generation,
+                "{operation}: {unusable} borrowed the worker lock"
+            );
         }
     }
+}
 
-    #[test]
-    fn w5b_source_change_while_worker_admission_runs_refuses_before_rebuild() {
+// This R3/R9 proof needs Unix device/inode identity and renaming a home with open locks.
+// Windows rejects that fixture's rename before the rollback guard is reached.
+#[cfg(unix)]
+#[test]
+fn w5b_a_replaced_home_is_not_touched_by_a_failed_carry_put_back() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("memory");
+    let retired = root.path().join("retired");
+    std::fs::create_dir(&home).unwrap();
+    drop(raw::open(&home).unwrap());
+    std::fs::write(home.join("knowledge.db"), "synthetic unreadable old cache").unwrap();
+    let shown = preview_rebuild(&home).unwrap();
+    let replacement = home.clone();
+    let kept_home = retired.clone();
+    AFTER_CARRY.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            std::fs::rename(&replacement, &kept_home).unwrap();
+            std::fs::create_dir_all(replacement.join("state")).unwrap();
+            std::fs::write(replacement.join("state/worker.lock"), "different home").unwrap();
+            let knowledge = knowledge::open(&replacement).unwrap();
+            knowledge
+                .execute_batch("CREATE TABLE unrelated(value); INSERT INTO unrelated VALUES(73)")
+                .unwrap();
+        }))
+    });
+    let failed = rebuild_report(
+        &home,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        home.join("knowledge.db").exists(),
+        "rollback deleted the replacement home's unrelated store"
+    );
+    assert!(!home.join("raw.lock").exists());
+    let replacement = Connection::open_with_flags(
+        home.join("knowledge.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        replacement
+            .query_row("SELECT value FROM unrelated", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        73
+    );
+    assert!(!failed.outcome.effects.knowledge_put_back);
+    assert!(failed.outcome.old_knowledge_kept);
+    assert!(std::fs::read_dir(&retired).unwrap().flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("knowledge.db.rebuilding-")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn w5b_exec_viewer_probe() {
+    let Some(home) = std::env::var_os("OBOETE_TEST_MAINT_HOME") else {
+        return;
+    };
+    let home = std::path::PathBuf::from(home);
+    let original = crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap();
+    assert!(original.is_some());
+    assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
+    let shown = preview_rebuild(&home).unwrap();
+    let result = rebuild_report(
+        &home,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Viewer(original.unwrap()),
+        &mut |_| {},
+    );
+    assert!(result.is_ok(), "borrowed viewer command: {result:?}");
+    assert_eq!(result.unwrap().index.state, IndexState::Complete);
+    assert_eq!(
+        crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
+        original
+    );
+    let shown = preview_rebuild(&home).unwrap();
+    AFTER_OPEN.set(Some(|home| {
+        std::fs::remove_file(home.join("state/view.lock")).unwrap();
+        std::fs::write(home.join("state/view.lock"), "new viewer home authority").unwrap();
+    }));
+    let failed = rebuild_report(
+        &home,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Viewer(original.unwrap()),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    AFTER_OPEN.set(None);
+    assert!(!failed.outcome.committed());
+    assert!(crate::executable::expected(Some(crate::executable::Role::Worker)).is_err());
+    assert_eq!(
+        crate::executable::expected(Some(crate::executable::Role::Viewer)).unwrap(),
+        original
+    );
+    assert!(!std::fs::read_dir(&home).unwrap().flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("knowledge.db.rebuilding-")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn w5b_a_real_exec_viewer_can_borrow_worker_authority_and_keeps_both_home_checks() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic viewer maintenance"))
+        .unwrap();
+    run_once(p).unwrap();
+    let viewer = std::fs::File::create(p.join("state/view.lock")).unwrap();
+    let (device, inode) = file_id(viewer.metadata()).unwrap();
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "export OBOETE_EXEC_HOME=\"$$:view.lock:$1:$2\"; exec \"$3\" --exact worker::tests::w5b_exec_viewer_probe --nocapture", "private-viewer-fixture"])
+            .arg(device.to_string()).arg(inode.to_string()).arg(std::env::current_exe().unwrap())
+            .env("OBOETE_TEST_MAINT_HOME", p).stdin(std::process::Stdio::null());
+    for (key, _) in std::env::vars_os() {
+        if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+            .iter()
+            .any(|part| key.to_string_lossy().to_ascii_uppercase().contains(part))
+        {
+            command.env_remove(key);
+        }
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn w5b_a_failed_native_restore_still_drains_and_reports_store_commits() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic pending FTS record"))
+        .unwrap();
+    let mut commits = Vec::new();
+    let failure = restore_report(
+        p,
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |event| commits.push(event.clone()),
+    )
+    .unwrap_err();
+    assert!(
+        failure
+            .cause
+            .to_string()
+            .contains("no usable backup segment")
+    );
+    assert_eq!(failure.outcome.index.state, IndexState::Complete);
+    assert!(failure.outcome.index.stores_changed);
+    assert!(failure.outcome.committed());
+    assert!(failure.outcome.index.consumer_commits > 0);
+    assert!(commits.iter().any(|event| matches!(
+        event,
+        MaintenanceCommit::Index {
+            consumer: "fts",
+            unit: CheckpointUnit::Records,
+            checkpoint: 1
+        }
+    )));
+    assert_eq!(
+        crate::search::raw(p, "pending FTS", None, 5).unwrap().len(),
+        1
+    );
+    assert!(!p.join("providers.db").exists());
+    assert!(!failure.outcome.hybrid_ready);
+}
+
+#[test]
+fn w5b_restore_preserves_both_native_failures_and_committed_consumer_progress() {
+    let home = tempfile::tempdir().unwrap();
+    raw::open(home.path())
+        .unwrap()
+        .append(&raw::test_event("synthetic dual failure"))
+        .unwrap();
+    crate::backup::FAIL_AFTER.set(Some("index_commit"));
+    let failure = restore_report(
+        home.path(),
+        None,
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    crate::backup::FAIL_AFTER.set(None);
+    assert!(
+        failure
+            .cause
+            .to_string()
+            .contains("no usable backup segment")
+    );
+    assert!(
+        failure
+            .index_cause
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("index_commit")
+    );
+    assert_eq!(failure.outcome.index.state, IndexState::Failed);
+    assert_eq!(failure.outcome.index.consumer_commits, 1);
+    assert!(failure.outcome.committed());
+}
+
+#[test]
+fn w5b_a_zero_payload_rebuild_retains_carry_and_cleanup_failure_receipts() {
+    for stage in ["knowledge_set_aside", "vectors_carried", "old_cleanup"] {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic admission fixture"))
-            .unwrap();
+        drop(raw::open(p).unwrap());
         drop(knowledge::open(p).unwrap());
         let shown = preview_rebuild(p).unwrap();
-        AFTER_OPEN.set(Some(|home| {
-            std::fs::write(
-                home.join("config.toml"),
-                "[capture]\nstore_prompts = false\n",
-            )
-            .unwrap()
-        }));
-        let failed = rebuild_report(
+        crate::backup::FAIL_AFTER.set(Some(stage));
+        let result = rebuild_report(
             p,
             Some(&shown.key),
             crate::executable::CommandCaller::Worker,
             &mut |_| {},
+        );
+        crate::backup::FAIL_AFTER.set(None);
+        let outcome = if stage == "old_cleanup" {
+            result.unwrap()
+        } else {
+            *result.unwrap_err().outcome
+        };
+        assert!(outcome.committed(), "zero payload {stage}");
+        assert_eq!(outcome.cached_vectors_carried, 0);
+        assert!(!outcome.hybrid_ready);
+        match stage {
+            "knowledge_set_aside" => assert!(outcome.effects.knowledge_put_back),
+            "vectors_carried" => assert!(outcome.old_knowledge_kept),
+            "old_cleanup" => {
+                assert_eq!(outcome.cleanup_warnings, 1);
+                assert_eq!(outcome.index.state, IndexState::Complete);
+                assert!(outcome.old_knowledge_kept);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn w5b_source_change_while_worker_admission_runs_refuses_before_rebuild() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic admission fixture"))
+        .unwrap();
+    drop(knowledge::open(p).unwrap());
+    let shown = preview_rebuild(p).unwrap();
+    AFTER_OPEN.set(Some(|home| {
+        std::fs::write(
+            home.join("config.toml"),
+            "[capture]\nstore_prompts = false\n",
         )
-        .unwrap_err();
-        AFTER_OPEN.set(None);
-        assert_eq!(failed.code, crate::backup::MaintenanceCode::Stale);
-        assert!(!failed.outcome.committed());
-        assert!(p.join("knowledge.db").exists());
-        assert!(!std::fs::read_dir(p).unwrap().flatten().any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("knowledge.db.rebuilding-")
-        }));
-    }
+        .unwrap()
+    }));
+    let failed = rebuild_report(
+        p,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    AFTER_OPEN.set(None);
+    assert_eq!(failed.code, crate::backup::MaintenanceCode::Stale);
+    assert!(!failed.outcome.committed());
+    assert!(p.join("knowledge.db").exists());
+    assert!(!std::fs::read_dir(p).unwrap().flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("knowledge.db.rebuilding-")
+    }));
+}
 
-    /// A consumer that writes each seq it sees into knowledge.db, so these tests need no index
-    /// (Task 6).
-    struct Seen;
-    impl Consumer for Seen {
-        fn name(&self) -> &'static str {
-            "seen"
-        }
-        fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
-            k.execute(
-                "CREATE TABLE IF NOT EXISTS seen(device TEXT, seq INTEGER)",
-                [],
-            )?;
-            let recs = raw.after(raw.device(), after, 100)?;
-            for r in &recs {
-                k.execute("INSERT INTO seen VALUES (?1, ?2)", (&r.device, r.seq))?;
-            }
-            Ok(recs.last().map_or(after, |r| r.seq))
-        }
-        fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
-            k.execute(
-                "DELETE FROM seen WHERE device = ?1 AND seq > ?2",
-                (device, to),
-            )?;
-            Ok(())
-        }
+/// A consumer that writes each seq it sees into knowledge.db, so these tests need no index
+/// (Task 6).
+struct Seen;
+impl Consumer for Seen {
+    fn name(&self) -> &'static str {
+        "seen"
     }
-
-    /// A consumer of the op log: it counts in op_seqs, for every device with ops.
-    struct OpsSeen;
-    impl Consumer for OpsSeen {
-        fn name(&self) -> &'static str {
-            "ops-seen"
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
+        k.execute(
+            "CREATE TABLE IF NOT EXISTS seen(device TEXT, seq INTEGER)",
+            [],
+        )?;
+        let recs = raw.after(raw.device(), after, 100)?;
+        for r in &recs {
+            k.execute("INSERT INTO seen VALUES (?1, ?2)", (&r.device, r.seq))?;
         }
-        fn reads_ops(&self) -> bool {
-            true
-        }
-        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
-            Ok(raw
-                .ops_after(device, after, 100)?
-                .last()
-                .map_or(after, |o| o.op_seq))
-        }
-        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-            Ok(())
-        }
+        Ok(recs.last().map_or(after, |r| r.seq))
     }
-
-    fn two_ops(raw: &mut Raw) {
-        let op = || (raw::OpKind::Claim, serde_json::json!({}));
-        raw.append_ops(&[op(), op()]).unwrap();
+    fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
+        k.execute(
+            "DELETE FROM seen WHERE device = ?1 AND seq > ?2",
+            (device, to),
+        )?;
+        Ok(())
     }
+}
 
-    /// A rebuild keeps the old knowledge.db under names SQLite opens as one database: a commit
-    /// still in its WAL reads there.
-    #[test]
-    fn the_file_a_rebuild_sets_aside_opens_with_its_wal() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        {
-            let k = knowledge::open(p).unwrap();
-            k.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(7);")
-                .unwrap();
-            // A copy of the file and its WAL while the commit is only in the WAL (the last
-            // close would checkpoint it), put back in place once the connection is gone.
-            for ext in ["", "-wal"] {
-                std::fs::copy(
-                    p.join(format!("knowledge.db{ext}")),
-                    p.join(format!("copy{ext}")),
-                )
-                .unwrap();
-            }
-        }
-        for ext in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(p.join(format!("knowledge.db{ext}")));
-        }
+/// A consumer of the op log: it counts in op_seqs, for every device with ops.
+struct OpsSeen;
+impl Consumer for OpsSeen {
+    fn name(&self) -> &'static str {
+        "ops-seen"
+    }
+    fn reads_ops(&self) -> bool {
+        true
+    }
+    fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+        Ok(raw
+            .ops_after(device, after, 100)?
+            .last()
+            .map_or(after, |o| o.op_seq))
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn two_ops(raw: &mut Raw) {
+    let op = || (raw::OpKind::Claim, serde_json::json!({}));
+    raw.append_ops(&[op(), op()]).unwrap();
+}
+
+/// A rebuild keeps the old knowledge.db under names SQLite opens as one database: a commit
+/// still in its WAL reads there.
+#[test]
+fn the_file_a_rebuild_sets_aside_opens_with_its_wal() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    {
+        let k = knowledge::open(p).unwrap();
+        k.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+            .unwrap();
+        // A copy of the file and its WAL while the commit is only in the WAL (the last
+        // close would checkpoint it), put back in place once the connection is gone.
         for ext in ["", "-wal"] {
-            std::fs::rename(
-                p.join(format!("copy{ext}")),
+            std::fs::copy(
                 p.join(format!("knowledge.db{ext}")),
+                p.join(format!("copy{ext}")),
             )
             .unwrap();
         }
-        let aside = set_aside(p, "kept").unwrap();
-        let kept = p.join("kept");
-        assert!(!p.join("knowledge.db").exists() && aside.contains(&kept));
-        let x: i64 = Connection::open(&kept)
-            .unwrap()
-            .query_row("SELECT x FROM t", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(x, 7);
     }
-
-    /// A home whose path is not UTF-8 (valid on Linux; macOS refuses such a name) keeps its file
-    /// under the right name.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_home_path_that_is_not_utf8_is_set_aside_in_place() {
-        use std::os::unix::ffi::OsStrExt;
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
-        std::fs::create_dir(&home).unwrap();
-        drop(knowledge::open(&home).unwrap());
-        let aside = set_aside(&home, "kept").unwrap();
-        assert!(aside.contains(&home.join("kept")));
-        assert!(
-            aside
-                .iter()
-                .all(|f| f.parent() == Some(home.as_path()) && f.exists())
-        );
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(p.join(format!("knowledge.db{ext}")));
     }
-
-    /// A move that fails puts back the ones before it: the file never stays without its WAL.
-    #[test]
-    fn a_set_aside_that_fails_puts_the_wal_back() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("knowledge.db"), b"db").unwrap();
-        std::fs::write(p.join("knowledge.db-wal"), b"wal").unwrap();
-        // The file's new name is a directory's, so its move fails after the WAL's.
-        std::fs::create_dir(p.join("kept")).unwrap();
-        std::fs::write(p.join("kept").join("x"), b"").unwrap();
-        assert!(set_aside(p, "kept").is_err());
-        assert_eq!(std::fs::read(p.join("knowledge.db-wal")).unwrap(), b"wal");
-        assert!(!p.join("kept-wal").exists() && p.join("knowledge.db").exists());
+    for ext in ["", "-wal"] {
+        std::fs::rename(
+            p.join(format!("copy{ext}")),
+            p.join(format!("knowledge.db{ext}")),
+        )
+        .unwrap();
     }
+    let aside = set_aside(p, "kept").unwrap();
+    let kept = p.join("kept");
+    assert!(!p.join("knowledge.db").exists() && aside.contains(&kept));
+    let x: i64 = Connection::open(&kept)
+        .unwrap()
+        .query_row("SELECT x FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(x, 7);
+}
 
-    /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw
-    /// holds, even once the device has no op left, and leaves the record consumers where they
-    /// were.
-    #[test]
-    fn a_restore_that_loses_ops_rewinds_the_op_consumers_only() {
-        let home = tempfile::tempdir().unwrap();
+/// A home whose path is not UTF-8 (valid on Linux; macOS refuses such a name) keeps its file
+/// under the right name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_home_path_that_is_not_utf8_is_set_aside_in_place() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+    std::fs::create_dir(&home).unwrap();
+    drop(knowledge::open(&home).unwrap());
+    let aside = set_aside(&home, "kept").unwrap();
+    assert!(aside.contains(&home.join("kept")));
+    assert!(
+        aside
+            .iter()
+            .all(|f| f.parent() == Some(home.as_path()) && f.exists())
+    );
+}
+
+/// A move that fails puts back the ones before it: the file never stays without its WAL.
+#[test]
+fn a_set_aside_that_fails_puts_the_wal_back() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("knowledge.db"), b"db").unwrap();
+    std::fs::write(p.join("knowledge.db-wal"), b"wal").unwrap();
+    // The file's new name is a directory's, so its move fails after the WAL's.
+    std::fs::create_dir(p.join("kept")).unwrap();
+    std::fs::write(p.join("kept").join("x"), b"").unwrap();
+    assert!(set_aside(p, "kept").is_err());
+    assert_eq!(std::fs::read(p.join("knowledge.db-wal")).unwrap(), b"wal");
+    assert!(!p.join("kept-wal").exists() && p.join("knowledge.db").exists());
+}
+
+/// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw
+/// holds, even once the device has no op left, and leaves the record consumers where they
+/// were.
+#[test]
+fn a_restore_that_loses_ops_rewinds_the_op_consumers_only() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = raw::open(home.path()).unwrap();
+    raw.append(&raw::test_event("a")).unwrap();
+    two_ops(&mut raw);
+    let mut k = knowledge::open(home.path()).unwrap();
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+    drain(&raw, &mut k, &mut consumers).unwrap();
+    let device = raw.device().to_owned();
+    let ops_at = |k: &Connection| checkpoint::get_in(k, checkpoint::OPS, "ops-seen", &device);
+    assert_eq!(ops_at(&k).unwrap(), 2);
+    Connection::open(home.path().join("raw.db"))
+        .unwrap()
+        .execute("DELETE FROM ops", [])
+        .unwrap();
+    let moved = checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
+    assert_eq!(moved, [("ops-seen".to_owned(), 2, 0)]);
+    assert_eq!(ops_at(&k).unwrap(), 0);
+    assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 1);
+}
+
+/// Compression waits for what every record consumer has passed: an op consumer's checkpoint
+/// is an op_seq, kept apart, and does not hold it back.
+#[test]
+fn compression_waits_for_the_record_consumers_only() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = raw::open(home.path()).unwrap();
+    for body in ["a", "b", "c"] {
+        raw.append(&raw::test_event(body)).unwrap();
+    }
+    two_ops(&mut raw);
+    let mut k = knowledge::open(home.path()).unwrap();
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![
+        Box::new(Seen),
+        Box::new(OpsSeen),
+        Box::new(crate::consumer::compress::Compress),
+    ];
+    drain(&raw, &mut k, &mut consumers).unwrap();
+    assert_eq!(checkpoint::get(&k, "compress", raw.device()).unwrap(), 3);
+}
+
+/// A consumer whose step reads, lets another connection write to knowledge.db (as a search
+/// does when it creates its table in a fresh file), then writes itself. Once. The other
+/// writer's thread is kept for the test to join.
+type Contender = std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+struct Raced(std::path::PathBuf, bool, Contender);
+impl Consumer for Raced {
+    fn name(&self) -> &'static str {
+        "raced"
+    }
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
+        if std::mem::replace(&mut self.1, true) {
+            return Ok(after.max(raw.max_seq()?));
+        }
+        let _: i64 = k.query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get(0))?;
+        let (home, (done, wait)) = (self.0.clone(), std::sync::mpsc::channel());
+        *self.2.lock().unwrap() = Some(std::thread::spawn(move || {
+            let other = knowledge::open(&home).unwrap();
+            other
+                .execute_batch("CREATE TABLE IF NOT EXISTS other(x)")
+                .unwrap();
+            done.send(()).ok();
+        }));
+        // The other write lands first unless this step already holds the write lock.
+        let _ = wait.recv_timeout(Duration::from_millis(500));
+        k.execute("CREATE TABLE IF NOT EXISTS raced(x)", [])?;
+        raw.max_seq()
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
+    assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
+    let why = last_failure(home.path()).unwrap();
+    assert!(why.contains("backup segment"), "{why}");
+    std::fs::remove_file(home.path().join("raw.db")).unwrap();
+    // A run that finds another worker holding the lock did nothing: the note stays.
+    let other = lock(home.path()).unwrap();
+    run(home.path(), 0).unwrap();
+    assert!(last_failure(home.path()).is_some());
+    drop(other);
+    run(home.path(), 0).unwrap();
+    assert!(last_failure(home.path()).is_none());
+}
+
+/// A run's outcome is recorded unless a later run's already is, whichever order the two end
+/// in, and recording never holds the worker lock.
+#[test]
+fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
+    let home = tempfile::tempdir().unwrap();
+    let failed = || Err(anyhow::anyhow!("a failure"));
+    let taken = |h: &Path| lock(h).unwrap().unwrap().1;
+    // A lets go; B takes the lock, fails and records; then A ends well.
+    let (a, b) = (taken(home.path()), taken(home.path()));
+    record(home.path(), b, &failed());
+    record(home.path(), a, &Ok(()));
+    assert!(last_failure(home.path()).is_some(), "A cleared B's failure");
+    // B ends well; then A fails.
+    let (a, b) = (taken(home.path()), taken(home.path()));
+    record(home.path(), b, &Ok(()));
+    record(home.path(), a, &failed());
+    assert!(last_failure(home.path()).is_none(), "A recorded over B");
+    // A records before B, which fails: B's outcome is the last one.
+    let (a, b) = (taken(home.path()), taken(home.path()));
+    record(home.path(), a, &Ok(()));
+    record(home.path(), b, &failed());
+    let why = last_failure(home.path()).unwrap();
+    assert_eq!(why, "a failure");
+    // A lock number lost to a damaged file goes on from the last recorded outcome's.
+    std::fs::write(home.path().join("state").join("worker-gen"), "").unwrap();
+    let after_damage = taken(home.path());
+    record(home.path(), after_damage, &Ok(()));
+    assert!(
+        last_failure(home.path()).is_none(),
+        "an outcome after the damage was refused"
+    );
+    // A run stopped between writing its outcome and putting it in place changes nothing.
+    record(home.path(), taken(home.path()), &failed());
+    let state = home.path().join("state");
+    std::fs::write(state.join("worker-outcome.next"), "1\nhalf written").unwrap();
+    assert_eq!(last_failure(home.path()).as_deref(), Some("a failure"));
+    record(home.path(), taken(home.path()), &Ok(()));
+    // A worker holding the lock does not keep an outcome from being recorded.
+    let running = lock(home.path()).unwrap().unwrap();
+    record(home.path(), running.1, &Ok(()));
+    assert!(last_failure(home.path()).is_none());
+    assert!(lock(home.path()).unwrap().is_none());
+}
+
+/// A step that panics once it reaches its seq.
+struct PanicsAt(i64);
+impl Consumer for PanicsAt {
+    fn name(&self) -> &'static str {
+        "panics"
+    }
+    fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+        let top = raw.max_seq()?;
+        assert!(top < self.0, "a crash in the middle of a run");
+        Ok(after.max(top))
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A worker killed or crashed after it took the lock never records how its run ended: doctor
+/// says it stopped once no process holds the lock, and not while one does.
+#[test]
+fn a_run_that_never_ends_is_reported_once_its_lock_is_free() {
+    let home = tempfile::tempdir().unwrap();
+    run(home.path(), 0).unwrap();
+    raw::open(home.path())
+        .unwrap()
+        .append(&raw::test_event("a"))
+        .unwrap();
+    let crashed =
+        std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(PanicsAt(1))]));
+    assert!(crashed.is_err());
+    let why = last_failure(home.path()).expect("the stopped run was not reported");
+    assert!(why.starts_with("it stopped before it finished"), "{why}");
+    let held = lock(home.path()).unwrap().unwrap();
+    note(home.path(), held.1, STOPPED);
+    assert!(
+        last_failure(home.path()).is_none(),
+        "a live run was reported"
+    );
+    drop(held);
+    assert!(last_failure(home.path()).is_some());
+    run(home.path(), 0).unwrap();
+    assert!(last_failure(home.path()).is_none());
+}
+
+/// A run that takes the lock again at its idle exit notes that taking too: B takes and
+/// releases the lock in A's exit window and records its success, then A takes it again and
+/// crashes. Doctor reports A, not B's success.
+#[test]
+fn a_run_that_crashes_after_taking_the_lock_again_is_reported() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = raw::open(home.path()).unwrap();
+    raw.append(&raw::test_event("a")).unwrap();
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut once = true;
+        run_with(home.path(), 0, vec![Box::new(PanicsAt(2))], || {
+            if std::mem::take(&mut once) {
+                // B: a hook's worker, run to its end while A has let go.
+                raw.append(&raw::test_event("b")).unwrap();
+                run_consumers(home.path(), 0, vec![Box::new(Seen)]).unwrap();
+                assert!(last_failure(home.path()).is_none());
+            }
+        })
+    }));
+    assert!(crashed.is_err(), "A did not take the lock again");
+    let why = last_failure(home.path()).expect("A's crash was not reported");
+    assert!(why.starts_with("it stopped before it finished"), "{why}");
+}
+
+/// D10: a window that waits only on time keeps the worker up until then, and the phase runs
+/// again; a wait beyond 30 minutes, or on the owner or a budget, does not.
+#[test]
+fn the_worker_sleeps_until_the_gate_opens_and_exits_when_the_wait_is_longer() {
+    let home = tempfile::tempdir().unwrap();
+    raw::open(home.path())
+        .unwrap()
+        .append(&raw::test_event("a"))
+        .unwrap();
+    let calls = std::cell::Cell::new(0);
+    // The window's time is taken when the phase first answers, and the wait is measured from
+    // there on the monotonic clock, which the worker sleeps by: a step of the wall clock while
+    // the first pass runs (WSL's time sync under load) no longer shortens what is measured.
+    let (first, again) = (std::cell::Cell::new(None), std::cell::Cell::new(None));
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        calls.set(calls.get() + 1);
+        Ok(match calls.get() {
+            1 => {
+                first.set(Some(Instant::now()));
+                Phase::Waiting {
+                    until: crate::db::now_ms() + 400,
+                    up: true,
+                }
+            }
+            2 => {
+                again.set(Some(Instant::now()));
+                Phase::Covered
+            }
+            _ => Phase::Idle,
+        })
+    };
+    let p: &mut CurationPhase = &mut phase;
+    // The window's time, not the longer idle wait, says when the phase runs again.
+    run_holding(
+        home.path(),
+        1_500,
+        vec![Box::new(Seen)],
+        || {},
+        None,
+        curating(p),
+    )
+    .unwrap();
+    let (first, again) = (first.get().unwrap(), again.get());
+    let waited = again.expect("the phase did not run again") - first;
+    assert!(waited >= Duration::from_millis(350), "{waited:?}");
+    assert!(waited < Duration::from_millis(1_200), "{waited:?}");
+    assert_eq!(calls.get(), 3);
+
+    calls.set(0);
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        calls.set(calls.get() + 1);
+        Ok(Phase::Waiting {
+            until: crate::db::now_ms() + 3_600_000,
+            up: false,
+        })
+    };
+    let started = Instant::now();
+    let p: &mut CurationPhase = &mut phase;
+    run_holding(
+        home.path(),
+        0,
+        vec![Box::new(Seen)],
+        || {},
+        None,
+        curating(p),
+    )
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(calls.get(), 1);
+}
+
+/// Curation runs only in a home that asks for it: by default nothing reaches providers.db.
+/// With `[summary] curate = true` the phase runs the configured chain; here its one entry has
+/// no budget left, so the window waits for the next day and nothing leaves the machine.
+#[test]
+fn a_home_curates_only_when_it_asks_to() {
+    let home = tempfile::tempdir().unwrap();
+    let device = {
         let mut raw = raw::open(home.path()).unwrap();
         raw.append(&raw::test_event("a")).unwrap();
-        two_ops(&mut raw);
-        let mut k = knowledge::open(home.path()).unwrap();
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
-        drain(&raw, &mut k, &mut consumers).unwrap();
-        let device = raw.device().to_owned();
-        let ops_at = |k: &Connection| checkpoint::get_in(k, checkpoint::OPS, "ops-seen", &device);
-        assert_eq!(ops_at(&k).unwrap(), 2);
-        Connection::open(home.path().join("raw.db"))
-            .unwrap()
-            .execute("DELETE FROM ops", [])
+        raw.device().to_owned()
+    };
+    run(home.path(), 0).unwrap();
+    assert!(!home.path().join("providers.db").exists());
+    let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
+                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                      daily_budget = 0\n";
+    std::fs::write(home.path().join("config.toml"), config).unwrap();
+    raw::open(home.path())
+        .unwrap()
+        .append(&raw::test_event("b"))
+        .unwrap();
+    run(home.path(), 0).unwrap();
+    let db = crate::providers_db::open(home.path()).unwrap();
+    let p = crate::providers_db::pending_of(&db, &device)
+        .unwrap()
+        .expect("the phase did not run");
+    assert_eq!((p.hold.as_str(), p.from_seq, p.to_seq), ("budget", 1, 2));
+    assert!(
+        p.reason.contains("spent: 0/0 calls in 24 hours"),
+        "{}",
+        p.reason
+    );
+}
+
+/// Decision 107 (docs/curator-conversation.md), #971 condition 9: with `[summary]
+/// conversation`, the curation phase keeps a Messages entry's conversation from one window to
+/// the next: the second window's call sends the first's stretch again before its own, and the
+/// window's op lists it in `read`. A store opened again within the run (a restore of a
+/// damaged raw.db) starts the conversation again, and so does another run of the worker,
+/// whose phase is another.
+#[test]
+fn the_curation_phase_keeps_a_conversation_until_the_store_is_opened_again() {
+    use crate::provider::tests::{request_body, serve_each};
+    let home = tempfile::tempdir().unwrap();
+    let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
+    let answer = serde_json::json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
+                "cache_creation_input_tokens": 60, "output_tokens": 9}})
+    .to_string()
+    .into_bytes();
+    let (url, requests) = serve_each(vec![("200 OK", answer); 5], "");
+    let config = format!(
+        "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
+             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
+             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
+    );
+    std::fs::write(home.path().join("config.toml"), config).unwrap();
+    let k = Connection::open_in_memory().unwrap();
+    // The stretches a window's call holds: every block but its instructions and its tail.
+    let window = |raw: &mut Raw, phase: &mut CurationPhase| -> usize {
+        raw.append(&raw::test_event("Use tabs in this repository."))
             .unwrap();
-        let moved = checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
-        assert_eq!(moved, [("ops-seen".to_owned(), 2, 0)]);
-        assert_eq!(ops_at(&k).unwrap(), 0);
-        assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 1);
-    }
+        assert_eq!(phase(raw, &k).unwrap(), Phase::Covered);
+        let body = request_body(&requests.recv().unwrap());
+        body["messages"][0]["content"].as_array().unwrap().len() - 2
+    };
+    let read = |raw: &Raw| -> serde_json::Value {
+        let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
+        let last = ops.iter().rfind(|o| o.kind == raw::OpKind::Window);
+        last.unwrap().body["read"].clone()
+    };
+    let mut raw = raw::open(home.path()).unwrap();
+    let mut phase = curation(home.path());
+    assert_eq!(window(&mut raw, &mut phase), 1);
+    assert_eq!(read(&raw), serde_json::Value::Null);
+    assert_eq!(window(&mut raw, &mut phase), 2);
+    assert_eq!(read(&raw), serde_json::json!([[1, 1]]));
+    // The store opened again: another handle, and a conversation of its own.
+    drop(raw);
+    let mut raw = raw::open(home.path()).unwrap();
+    assert_eq!(window(&mut raw, &mut phase), 1);
+    assert_eq!(read(&raw), serde_json::Value::Null);
+    assert_eq!(window(&mut raw, &mut phase), 2);
+    // Another run of the worker.
+    let mut phase = curation(home.path());
+    assert_eq!(window(&mut raw, &mut phase), 1);
+}
 
-    /// Compression waits for what every record consumer has passed: an op consumer's checkpoint
-    /// is an op_seq, kept apart, and does not hold it back.
-    #[test]
-    fn compression_waits_for_the_record_consumers_only() {
-        let home = tempfile::tempdir().unwrap();
+/// Decision 107 (the security review of this branch): the worker's lock let go and taken
+/// again ends every conversation: whoever held it between may have rewritten a record's text
+/// with no tombstone (a retention's expiry). A record that arrives while the worker decides
+/// to exit is curated by the same run, with its phase and its handle of raw.db, and its
+/// window's call sends no stretch again.
+#[test]
+fn a_conversation_ends_when_the_workers_lock_is_let_go_and_taken_again() {
+    use crate::provider::tests::{request_body, serve_each};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
+    let answer = serde_json::json!({"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
+                "cache_creation_input_tokens": 60, "output_tokens": 9}})
+    .to_string()
+    .into_bytes();
+    let (url, requests) = serve_each(vec![("200 OK", answer); 2], "");
+    let config = format!(
+        "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
+             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
+             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
+    );
+    std::fs::write(p.join("config.toml"), config).unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("Use tabs in this repository."))
+        .unwrap();
+    let mut phase = curation(p);
+    let phases = Phases {
+        curation: Some(&mut *phase),
+        ..Phases::default()
+    };
+    let mut late = true;
+    // `before_exit` runs after the lock is released: the record it appends is found by the
+    // last check, and the lock is taken again for it.
+    let before_exit = || {
+        if std::mem::take(&mut late) {
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("Use spaces in that one."))
+                .unwrap();
+        }
+    };
+    run_holding(p, 0, vec![Box::new(Seen)], before_exit, None, phases).unwrap();
+    // The stretches each window's call held: every block but its instructions and its tail.
+    let stretches: Vec<usize> = requests
+        .try_iter()
+        .map(|r| {
+            let body = request_body(&r);
+            body["messages"][0]["content"].as_array().unwrap().len() - 2
+        })
+        .collect();
+    assert_eq!(stretches, [1, 1]);
+}
+
+/// #94: the worker's chain leaves out an entry `[chain] off` turns off, and a window held under
+/// that chain is tried again once the entry is on.
+#[test]
+fn the_workers_chain_leaves_out_an_entry_turned_off() {
+    let home = tempfile::tempdir().unwrap();
+    let device = {
         let mut raw = raw::open(home.path()).unwrap();
-        for body in ["a", "b", "c"] {
-            raw.append(&raw::test_event(body)).unwrap();
-        }
-        two_ops(&mut raw);
-        let mut k = knowledge::open(home.path()).unwrap();
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![
-            Box::new(Seen),
-            Box::new(OpsSeen),
-            Box::new(crate::consumer::compress::Compress),
-        ];
-        drain(&raw, &mut k, &mut consumers).unwrap();
-        assert_eq!(checkpoint::get(&k, "compress", raw.device()).unwrap(), 3);
-    }
+        raw.append(&raw::test_event("a")).unwrap();
+        raw.device().to_owned()
+    };
+    let config = |off: &str| {
+        let entry = |name: &str| {
+            format!(
+                "[[providers]]\nkind = \"openai\"\nname = \"{name}\"\n\
+                     base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\ndaily_budget = 0\n"
+            )
+        };
+        let text = format!(
+            "[summary]\ncurate = true\n{}{}[chain]\noff = [{off}]\n",
+            entry("first"),
+            entry("second")
+        );
+        std::fs::write(home.path().join("config.toml"), text).unwrap();
+    };
+    let held = || {
+        let db = crate::providers_db::open(home.path()).unwrap();
+        let p = crate::providers_db::pending_of(&db, &device).unwrap();
+        p.expect("the phase did not run").reason
+    };
+    config("\"first\"");
+    run(home.path(), 0).unwrap();
+    let without = held();
+    assert!(
+        without.contains("second: 0/0") && !without.contains("first"),
+        "{without}"
+    );
+    config("");
+    run(home.path(), 0).unwrap();
+    let with = held();
+    assert!(
+        with.contains("first: 0/0") && with.contains("second: 0/0"),
+        "{with}"
+    );
+}
 
-    /// A consumer whose step reads, lets another connection write to knowledge.db (as a search
-    /// does when it creates its table in a fresh file), then writes itself. Once. The other
-    /// writer's thread is kept for the test to join.
-    type Contender = std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
-    struct Raced(std::path::PathBuf, bool, Contender);
-    impl Consumer for Raced {
-        fn name(&self) -> &'static str {
-            "raced"
+/// A worker that stays up reads the config again for each window: turning curation on or
+/// off takes effect without a new worker, and a config that no longer loads turns it off.
+#[test]
+fn a_worker_that_stays_up_follows_the_owners_config() {
+    let home = tempfile::tempdir().unwrap();
+    let config = |curate: bool| {
+        let text = format!(
+            "[summary]\ncurate = {curate}\n[[providers]]\nkind = \"openai\"\n\
+                 name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                 daily_budget = 0\n"
+        );
+        std::fs::write(home.path().join("config.toml"), text).unwrap();
+    };
+    config(false);
+    let mut raw = raw::open(home.path()).unwrap();
+    raw.append(&raw::test_event("a")).unwrap();
+    let mut phase = curation(home.path());
+    assert_eq!(
+        phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+        Phase::Idle
+    );
+    config(true);
+    assert!(matches!(
+        phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+        Phase::Waiting { up: false, .. }
+    ));
+    config(false);
+    assert_eq!(
+        phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+        Phase::Idle
+    );
+    // A file the owner is still editing stops curation for this run, not the worker.
+    std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
+    assert_eq!(
+        phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+        Phase::Idle
+    );
+}
+
+/// The Windows runner's worker stopped with "database is locked" after a restore: a search
+/// created its table in the fresh knowledge.db between a step's read and its write.
+#[test]
+fn a_reader_writing_knowledge_db_mid_step_does_not_stop_the_pass() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = raw::open(home.path()).unwrap();
+    raw.append(&raw::test_event("a")).unwrap();
+    let mut k = knowledge::open(home.path()).unwrap();
+    let contender = Contender::default();
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Raced(
+        home.path().to_path_buf(),
+        false,
+        contender.clone(),
+    ))];
+    drain(&raw, &mut k, &mut consumers).unwrap();
+    // The other writer ran, and its write went through once the step's had.
+    let other = contender.lock().unwrap().take().expect("the step ran");
+    other.join().unwrap();
+}
+
+fn seen(k: &Connection) -> Vec<i64> {
+    let mut st = k.prepare("SELECT seq FROM seen ORDER BY seq").unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// raw.db as if its commits above `seq` had never reached the disk (MUST-M14).
+fn lose_after(home: &Path, seq: i64) -> Raw {
+    let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    c.execute("DELETE FROM records WHERE seq > ?1", [seq])
+        .unwrap();
+    drop(c);
+    raw::open(home).unwrap()
+}
+
+#[test]
+fn a_checkpoint_above_raw_is_rewound_with_its_output_and_later_events_are_not_skipped() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = raw::open(home.path()).unwrap();
+    let mut k = knowledge::open(home.path()).unwrap();
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen)];
+    for i in 0..8 {
+        raw.append(&raw::test_event(&i.to_string())).unwrap();
+    }
+    drain(&raw, &mut k, &mut consumers).unwrap(); // output and checkpoint at 8
+    drop(raw);
+    let mut raw = lose_after(home.path(), 5);
+    assert_eq!(
+        checkpoint::rewind(&raw, &k, &mut consumers).unwrap(),
+        vec![("seen".into(), 8, 5)]
+    );
+    assert_eq!(seen(&k), vec![1, 2, 3, 4, 5]); // no output left for the lost 6-8
+    let logged: (String, i64, i64) = k
+        .query_row("SELECT consumer, was, now FROM rewinds", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(logged, ("seen".into(), 8, 5));
+    raw.append(&raw::test_event("new")).unwrap(); // seq 6 again, a different event
+    drain(&raw, &mut k, &mut consumers).unwrap();
+    assert_eq!(seen(&k), vec![1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn an_event_that_arrives_while_the_worker_decides_to_exit_is_still_processed() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut late = true;
+    // `before_exit` runs after the lock is released and before the last check: a hook
+    // appending here finds the lock free, but this test starts no second worker, so only the
+    // last check can pick the event up.
+    run_with(p, 0, vec![Box::new(Seen)], || {
+        if std::mem::take(&mut late) {
+            raw::open(p)
+                .unwrap()
+                .append(&raw::test_event("late"))
+                .unwrap();
         }
-        fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
-            if std::mem::replace(&mut self.1, true) {
-                return Ok(after.max(raw.max_seq()?));
-            }
-            let _: i64 = k.query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get(0))?;
-            let (home, (done, wait)) = (self.0.clone(), std::sync::mpsc::channel());
-            *self.2.lock().unwrap() = Some(std::thread::spawn(move || {
-                let other = knowledge::open(&home).unwrap();
-                other
-                    .execute_batch("CREATE TABLE IF NOT EXISTS other(x)")
-                    .unwrap();
-                done.send(()).ok();
-            }));
-            // The other write lands first unless this step already holds the write lock.
-            let _ = wait.recv_timeout(Duration::from_millis(500));
-            k.execute("CREATE TABLE IF NOT EXISTS raced(x)", [])?;
+    })
+    .unwrap();
+    let device = raw::open(p).unwrap().device().to_owned();
+    let k = knowledge::open(p).unwrap();
+    assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
+}
+
+/// Milestone 5 F2: the zero-length idle wait still checks which raw.db it holds before
+/// exporting it, and opens the replacement to reconcile forgets and drain new records.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_nonresident_worker_reopens_a_replacement_before_its_final_backup() {
+    replacement_at_idle_exit(true);
+}
+
+/// The same check is needed after releasing the lock: a replacement in the exit seam has
+/// no new records in the old connection to wake the worker through `behind`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_nonresident_worker_reopens_a_replacement_while_it_decides_to_exit() {
+    replacement_at_idle_exit(false);
+}
+
+/// The held file must not become the replacement pathname while SQLite still holds the
+/// file it opened: its new input must be consumed and its forget logs reconciled.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replacement_after_sqlite_open_is_not_adopted_as_the_held_file() {
+    replacement_after_open(false);
+}
+
+/// An absent path creates a store, but a replacement before its first identity capture
+/// must still be opened rather than leave its new input unconsumed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fresh_raw_replaced_after_open_is_read_before_the_worker_exits() {
+    replacement_after_open(true);
+}
+
+#[cfg(target_os = "linux")]
+fn pending_forget_copy(p: &Path) -> (String, i64) {
+    let mut raw = raw::open(p).unwrap();
+    let mut event = raw::test_event("opened-file-forget-canary-8351");
+    event.source = "transcript".into();
+    let identity = raw::ImportIdentity {
+        origin: crate::forget::origin("synthetic", "opened-file-import"),
+        session: crate::forget::session(&event.agent, &event.session),
+        ambiguous: None,
+        unverified: false,
+    };
+    let seq = raw
+        .append_imported_origins(
+            &[crate::capture::Captured {
+                event,
+                ledger: Vec::new(),
+            }],
+            &[identity],
+            "",
+            None,
+        )
+        .unwrap()[0];
+    let device = raw.device().to_owned();
+    drop(raw);
+    std::fs::copy(p.join("raw.db"), p.join("raw-before-forget.db")).unwrap();
+    let preview = crate::forget::preview(
+        p,
+        crate::forget::Target::Record {
+            device: device.clone(),
+            seq,
+        },
+    )
+    .unwrap();
+    crate::forget::start(p, &preview).unwrap();
+    (device, seq)
+}
+
+#[cfg(target_os = "linux")]
+fn replace_raw_at_boundary(p: &Path) {
+    let old = p.join("raw-before-forget.db");
+    if !old.exists() {
+        // The fresh-open case copies the just-created schema, including its WAL commits.
+        Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        std::fs::copy(p.join("raw.db"), &old).unwrap();
+    }
+    let staged = p.join("raw.db.copy");
+    std::fs::copy(old, &staged).unwrap();
+    for file in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(p.join(file));
+    }
+    std::fs::rename(staged, p.join("raw.db")).unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("opened-file-new-input-8352"))
+        .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn replacement_after_open(fresh: bool) {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let forgotten = (!fresh).then(|| pending_forget_copy(p));
+    AFTER_RAW_OPEN.set(Some(replace_raw_at_boundary));
+    run_with(p, 0, vec![Box::new(Seen)], || {}).unwrap();
+    let raw = raw::open(p).unwrap();
+    let k = knowledge::open(p).unwrap();
+    assert_eq!(
+        k.query_row(
+            "SELECT COUNT(*) FROM seen WHERE device=?1 AND seq=1",
+            [raw.device()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1,
+        "the replacement was adopted as held while its new input was never read"
+    );
+    if let Some((device, seq)) = forgotten {
+        assert!(matches!(
+            raw.after(&device, seq - 1, 1).unwrap()[0].item,
+            raw::Item::Removed
+        ));
+    }
+}
+
+/// A copy put back after the previous round's final check must be reconciled before the
+/// next consumer sees a raw handle, even when another phase immediately starts that round.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replacement_at_round_entry_is_opened_before_the_first_consumer() {
+    struct CurrentFile(std::path::PathBuf);
+    impl Consumer for CurrentFile {
+        fn name(&self) -> &'static str {
+            "current-file"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+            assert_eq!(
+                raw.device(),
+                raw::open(&self.0)?.device(),
+                "a new round sent the replaced file's old handle to a consumer"
+            );
             raw.max_seq()
         }
         fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
             Ok(())
         }
     }
-
-    #[test]
-    fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
-        assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
-        let why = last_failure(home.path()).unwrap();
-        assert!(why.contains("backup segment"), "{why}");
-        std::fs::remove_file(home.path().join("raw.db")).unwrap();
-        // A run that finds another worker holding the lock did nothing: the note stays.
-        let other = lock(home.path()).unwrap();
-        run(home.path(), 0).unwrap();
-        assert!(last_failure(home.path()).is_some());
-        drop(other);
-        run(home.path(), 0).unwrap();
-        assert!(last_failure(home.path()).is_none());
-    }
-
-    /// A run's outcome is recorded unless a later run's already is, whichever order the two end
-    /// in, and recording never holds the worker lock.
-    #[test]
-    fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
-        let home = tempfile::tempdir().unwrap();
-        let failed = || Err(anyhow::anyhow!("a failure"));
-        let taken = |h: &Path| lock(h).unwrap().unwrap().1;
-        // A lets go; B takes the lock, fails and records; then A ends well.
-        let (a, b) = (taken(home.path()), taken(home.path()));
-        record(home.path(), b, &failed());
-        record(home.path(), a, &Ok(()));
-        assert!(last_failure(home.path()).is_some(), "A cleared B's failure");
-        // B ends well; then A fails.
-        let (a, b) = (taken(home.path()), taken(home.path()));
-        record(home.path(), b, &Ok(()));
-        record(home.path(), a, &failed());
-        assert!(last_failure(home.path()).is_none(), "A recorded over B");
-        // A records before B, which fails: B's outcome is the last one.
-        let (a, b) = (taken(home.path()), taken(home.path()));
-        record(home.path(), a, &Ok(()));
-        record(home.path(), b, &failed());
-        let why = last_failure(home.path()).unwrap();
-        assert_eq!(why, "a failure");
-        // A lock number lost to a damaged file goes on from the last recorded outcome's.
-        std::fs::write(home.path().join("state").join("worker-gen"), "").unwrap();
-        let after_damage = taken(home.path());
-        record(home.path(), after_damage, &Ok(()));
-        assert!(
-            last_failure(home.path()).is_none(),
-            "an outcome after the damage was refused"
-        );
-        // A run stopped between writing its outcome and putting it in place changes nothing.
-        record(home.path(), taken(home.path()), &failed());
-        let state = home.path().join("state");
-        std::fs::write(state.join("worker-outcome.next"), "1\nhalf written").unwrap();
-        assert_eq!(last_failure(home.path()).as_deref(), Some("a failure"));
-        record(home.path(), taken(home.path()), &Ok(()));
-        // A worker holding the lock does not keep an outcome from being recorded.
-        let running = lock(home.path()).unwrap().unwrap();
-        record(home.path(), running.1, &Ok(()));
-        assert!(last_failure(home.path()).is_none());
-        assert!(lock(home.path()).unwrap().is_none());
-    }
-
-    /// A step that panics once it reaches its seq.
-    struct PanicsAt(i64);
-    impl Consumer for PanicsAt {
-        fn name(&self) -> &'static str {
-            "panics"
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let (device, seq) = pending_forget_copy(p);
+    let mut first = true;
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if std::mem::take(&mut first) {
+            BEFORE_ROUND.set(Some(replace_raw_at_boundary));
+            Ok(Phase::Covered)
+        } else {
+            Ok(Phase::Idle)
         }
-        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
-            let top = raw.max_seq()?;
-            assert!(top < self.0, "a crash in the middle of a run");
-            Ok(after.max(top))
+    };
+    run_holding(
+        p,
+        0,
+        vec![Box::new(CurrentFile(p.into()))],
+        || {},
+        None,
+        curating(&mut phase),
+    )
+    .unwrap();
+    assert!(matches!(
+        raw::open(p).unwrap().after(&device, seq - 1, 1).unwrap()[0].item,
+        raw::Item::Removed
+    ));
+}
+
+/// docs/store-format.md: a worker whose raw.db a newer oboete stamps meanwhile opens it again
+/// at its next round and stops on the refusal, rather than writing on through its handle or
+/// restoring the file as damaged.
+#[test]
+fn a_worker_stops_when_a_newer_oboete_stamps_its_raw_db() {
+    fn stamp_newer(home: &Path) {
+        Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut first = true;
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if std::mem::take(&mut first) {
+            BEFORE_ROUND.set(Some(stamp_newer));
+            Ok(Phase::Covered)
+        } else {
+            Ok(Phase::Idle)
+        }
+    };
+    let why = run_holding(
+        p,
+        0,
+        vec![Box::new(Seen)],
+        || {},
+        None,
+        curating(&mut phase),
+    )
+    .unwrap_err();
+    assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+    let stamped: i64 = Connection::open(p.join("raw.db"))
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stamped, raw::FORMAT + 1);
+}
+
+/// A replacement during a batch cannot be exported through that batch's old connection
+/// at the scheduled backup boundary. The deadline is injected, never waited for.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_scheduled_backup_reopens_a_replacement_instead_of_exporting_the_old_file() {
+    struct ReplacingBatch(std::path::PathBuf, bool);
+    impl Consumer for ReplacingBatch {
+        fn name(&self) -> &'static str {
+            "replacing-batch"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+            let through = raw.max_seq()?;
+            if std::mem::take(&mut self.1) {
+                replace_raw_at_boundary(&self.0);
+            }
+            Ok(through)
         }
         fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
             Ok(())
         }
     }
-
-    /// A worker killed or crashed after it took the lock never records how its run ended: doctor
-    /// says it stopped once no process holds the lock, and not while one does.
-    #[test]
-    fn a_run_that_never_ends_is_reported_once_its_lock_is_free() {
-        let home = tempfile::tempdir().unwrap();
-        run(home.path(), 0).unwrap();
-        raw::open(home.path())
-            .unwrap()
-            .append(&raw::test_event("a"))
-            .unwrap();
-        let crashed =
-            std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(PanicsAt(1))]));
-        assert!(crashed.is_err());
-        let why = last_failure(home.path()).expect("the stopped run was not reported");
-        assert!(why.starts_with("it stopped before it finished"), "{why}");
-        let held = lock(home.path()).unwrap().unwrap();
-        note(home.path(), held.1, STOPPED);
-        assert!(
-            last_failure(home.path()).is_none(),
-            "a live run was reported"
-        );
-        drop(held);
-        assert!(last_failure(home.path()).is_some());
-        run(home.path(), 0).unwrap();
-        assert!(last_failure(home.path()).is_none());
-    }
-
-    /// A run that takes the lock again at its idle exit notes that taking too: B takes and
-    /// releases the lock in A's exit window and records its success, then A takes it again and
-    /// crashes. Doctor reports A, not B's success.
-    #[test]
-    fn a_run_that_crashes_after_taking_the_lock_again_is_reported() {
-        let home = tempfile::tempdir().unwrap();
-        let mut raw = raw::open(home.path()).unwrap();
-        raw.append(&raw::test_event("a")).unwrap();
-        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut once = true;
-            run_with(home.path(), 0, vec![Box::new(PanicsAt(2))], || {
-                if std::mem::take(&mut once) {
-                    // B: a hook's worker, run to its end while A has let go.
-                    raw.append(&raw::test_event("b")).unwrap();
-                    run_consumers(home.path(), 0, vec![Box::new(Seen)]).unwrap();
-                    assert!(last_failure(home.path()).is_none());
-                }
-            })
-        }));
-        assert!(crashed.is_err(), "A did not take the lock again");
-        let why = last_failure(home.path()).expect("A's crash was not reported");
-        assert!(why.starts_with("it stopped before it finished"), "{why}");
-    }
-
-    /// D10: a window that waits only on time keeps the worker up until then, and the phase runs
-    /// again; a wait beyond 30 minutes, or on the owner or a budget, does not.
-    #[test]
-    fn the_worker_sleeps_until_the_gate_opens_and_exits_when_the_wait_is_longer() {
-        let home = tempfile::tempdir().unwrap();
-        raw::open(home.path())
-            .unwrap()
-            .append(&raw::test_event("a"))
-            .unwrap();
-        let calls = std::cell::Cell::new(0);
-        // The window's time is taken when the phase first answers, and the wait is measured from
-        // there on the monotonic clock, which the worker sleeps by: a step of the wall clock while
-        // the first pass runs (WSL's time sync under load) no longer shortens what is measured.
-        let (first, again) = (std::cell::Cell::new(None), std::cell::Cell::new(None));
-        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-            calls.set(calls.get() + 1);
-            Ok(match calls.get() {
-                1 => {
-                    first.set(Some(Instant::now()));
-                    Phase::Waiting {
-                        until: crate::db::now_ms() + 400,
-                        up: true,
-                    }
-                }
-                2 => {
-                    again.set(Some(Instant::now()));
-                    Phase::Covered
-                }
-                _ => Phase::Idle,
-            })
-        };
-        let p: &mut CurationPhase = &mut phase;
-        // The window's time, not the longer idle wait, says when the phase runs again.
-        run_holding(
-            home.path(),
-            1_500,
-            vec![Box::new(Seen)],
-            || {},
-            None,
-            curating(p),
-        )
-        .unwrap();
-        let (first, again) = (first.get().unwrap(), again.get());
-        let waited = again.expect("the phase did not run again") - first;
-        assert!(waited >= Duration::from_millis(350), "{waited:?}");
-        assert!(waited < Duration::from_millis(1_200), "{waited:?}");
-        assert_eq!(calls.get(), 3);
-
-        calls.set(0);
-        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-            calls.set(calls.get() + 1);
-            Ok(Phase::Waiting {
-                until: crate::db::now_ms() + 3_600_000,
-                up: false,
-            })
-        };
-        let started = Instant::now();
-        let p: &mut CurationPhase = &mut phase;
-        run_holding(
-            home.path(),
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let (device, _) = pending_forget_copy(p);
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(ReplacingBatch(p.into(), true))];
+    let mut holding = Holding::default();
+    let mut deadline = Instant::now();
+    assert!(
+        serve(
+            p,
             0,
-            vec![Box::new(Seen)],
-            || {},
-            None,
-            curating(p),
+            &mut consumers,
+            (&mut holding, &mut None),
+            &mut deadline,
+            &mut || {},
+            &mut Phases::default(),
         )
-        .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(calls.get(), 1);
-    }
-
-    /// Curation runs only in a home that asks for it: by default nothing reaches providers.db.
-    /// With `[summary] curate = true` the phase runs the configured chain; here its one entry has
-    /// no budget left, so the window waits for the next day and nothing leaves the machine.
-    #[test]
-    fn a_home_curates_only_when_it_asks_to() {
-        let home = tempfile::tempdir().unwrap();
-        let device = {
-            let mut raw = raw::open(home.path()).unwrap();
-            raw.append(&raw::test_event("a")).unwrap();
-            raw.device().to_owned()
-        };
-        run(home.path(), 0).unwrap();
-        assert!(!home.path().join("providers.db").exists());
-        let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
-                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
-                      daily_budget = 0\n";
-        std::fs::write(home.path().join("config.toml"), config).unwrap();
-        raw::open(home.path())
-            .unwrap()
-            .append(&raw::test_event("b"))
-            .unwrap();
-        run(home.path(), 0).unwrap();
-        let db = crate::providers_db::open(home.path()).unwrap();
-        let p = crate::providers_db::pending_of(&db, &device)
-            .unwrap()
-            .expect("the phase did not run");
-        assert_eq!((p.hold.as_str(), p.from_seq, p.to_seq), ("budget", 1, 2));
-        assert!(
-            p.reason.contains("spent: 0/0 calls in 24 hours"),
-            "{}",
-            p.reason
-        );
-    }
-
-    /// Decision 107 (docs/curator-conversation.md), #971 condition 9: with `[summary]
-    /// conversation`, the curation phase keeps a Messages entry's conversation from one window to
-    /// the next: the second window's call sends the first's stretch again before its own, and the
-    /// window's op lists it in `read`. A store opened again within the run (a restore of a
-    /// damaged raw.db) starts the conversation again, and so does another run of the worker,
-    /// whose phase is another.
-    #[test]
-    fn the_curation_phase_keeps_a_conversation_until_the_store_is_opened_again() {
-        use crate::provider::tests::{request_body, serve_each};
-        let home = tempfile::tempdir().unwrap();
-        let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
-        let answer = serde_json::json!({"stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
-                "cache_creation_input_tokens": 60, "output_tokens": 9}})
-        .to_string()
-        .into_bytes();
-        let (url, requests) = serve_each(vec![("200 OK", answer); 5], "");
-        let config = format!(
-            "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
-             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
-             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
-        );
-        std::fs::write(home.path().join("config.toml"), config).unwrap();
-        let k = Connection::open_in_memory().unwrap();
-        // The stretches a window's call holds: every block but its instructions and its tail.
-        let window = |raw: &mut Raw, phase: &mut CurationPhase| -> usize {
-            raw.append(&raw::test_event("Use tabs in this repository."))
-                .unwrap();
-            assert_eq!(phase(raw, &k).unwrap(), Phase::Covered);
-            let body = request_body(&requests.recv().unwrap());
-            body["messages"][0]["content"].as_array().unwrap().len() - 2
-        };
-        let read = |raw: &Raw| -> serde_json::Value {
-            let ops = raw.ops_after(raw.device(), 0, 100).unwrap();
-            let last = ops.iter().rfind(|o| o.kind == raw::OpKind::Window);
-            last.unwrap().body["read"].clone()
-        };
-        let mut raw = raw::open(home.path()).unwrap();
-        let mut phase = curation(home.path());
-        assert_eq!(window(&mut raw, &mut phase), 1);
-        assert_eq!(read(&raw), serde_json::Value::Null);
-        assert_eq!(window(&mut raw, &mut phase), 2);
-        assert_eq!(read(&raw), serde_json::json!([[1, 1]]));
-        // The store opened again: another handle, and a conversation of its own.
-        drop(raw);
-        let mut raw = raw::open(home.path()).unwrap();
-        assert_eq!(window(&mut raw, &mut phase), 1);
-        assert_eq!(read(&raw), serde_json::Value::Null);
-        assert_eq!(window(&mut raw, &mut phase), 2);
-        // Another run of the worker.
-        let mut phase = curation(home.path());
-        assert_eq!(window(&mut raw, &mut phase), 1);
-    }
-
-    /// Decision 107 (the security review of this branch): the worker's lock let go and taken
-    /// again ends every conversation: whoever held it between may have rewritten a record's text
-    /// with no tombstone (a retention's expiry). A record that arrives while the worker decides
-    /// to exit is curated by the same run, with its phase and its handle of raw.db, and its
-    /// window's call sends no stretch again.
-    #[test]
-    fn a_conversation_ends_when_the_workers_lock_is_let_go_and_taken_again() {
-        use crate::provider::tests::{request_body, serve_each};
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let text = serde_json::json!({"claims": [], "summary": "Nothing."}).to_string();
-        let answer = serde_json::json!({"stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 60, "cache_read_input_tokens": 1_900,
-                "cache_creation_input_tokens": 60, "output_tokens": 9}})
-        .to_string()
-        .into_bytes();
-        let (url, requests) = serve_each(vec![("200 OK", answer); 2], "");
-        let config = format!(
-            "[summary]\ncurate = true\nconversation = true\nidle_minutes = 0\n\
-             [[providers]]\nkind = \"openai\"\napi = \"anthropic\"\nname = \"stub\"\n\
-             base_url = \"{url}\"\nmodel = \"m\"\n[providers.limits]\nmax_request_tokens = 100000\n"
-        );
-        std::fs::write(p.join("config.toml"), config).unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("Use tabs in this repository."))
-            .unwrap();
-        let mut phase = curation(p);
-        let phases = Phases {
-            curation: Some(&mut *phase),
-            ..Phases::default()
-        };
-        let mut late = true;
-        // `before_exit` runs after the lock is released: the record it appends is found by the
-        // last check, and the lock is taken again for it.
-        let before_exit = || {
-            if std::mem::take(&mut late) {
-                raw::open(p)
-                    .unwrap()
-                    .append(&raw::test_event("Use spaces in that one."))
-                    .unwrap();
-            }
-        };
-        run_holding(p, 0, vec![Box::new(Seen)], before_exit, None, phases).unwrap();
-        // The stretches each window's call held: every block but its instructions and its tail.
-        let stretches: Vec<usize> = requests
-            .try_iter()
-            .map(|r| {
-                let body = request_body(&r);
-                body["messages"][0]["content"].as_array().unwrap().len() - 2
-            })
-            .collect();
-        assert_eq!(stretches, [1, 1]);
-    }
-
-    /// #94: the worker's chain leaves out an entry `[chain] off` turns off, and a window held under
-    /// that chain is tried again once the entry is on.
-    #[test]
-    fn the_workers_chain_leaves_out_an_entry_turned_off() {
-        let home = tempfile::tempdir().unwrap();
-        let device = {
-            let mut raw = raw::open(home.path()).unwrap();
-            raw.append(&raw::test_event("a")).unwrap();
-            raw.device().to_owned()
-        };
-        let config = |off: &str| {
-            let entry = |name: &str| {
-                format!(
-                    "[[providers]]\nkind = \"openai\"\nname = \"{name}\"\n\
-                     base_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\ndaily_budget = 0\n"
-                )
-            };
-            let text = format!(
-                "[summary]\ncurate = true\n{}{}[chain]\noff = [{off}]\n",
-                entry("first"),
-                entry("second")
-            );
-            std::fs::write(home.path().join("config.toml"), text).unwrap();
-        };
-        let held = || {
-            let db = crate::providers_db::open(home.path()).unwrap();
-            let p = crate::providers_db::pending_of(&db, &device).unwrap();
-            p.expect("the phase did not run").reason
-        };
-        config("\"first\"");
-        run(home.path(), 0).unwrap();
-        let without = held();
-        assert!(
-            without.contains("second: 0/0") && !without.contains("first"),
-            "{without}"
-        );
-        config("");
-        run(home.path(), 0).unwrap();
-        let with = held();
-        assert!(
-            with.contains("first: 0/0") && with.contains("second: 0/0"),
-            "{with}"
-        );
-    }
-
-    /// A worker that stays up reads the config again for each window: turning curation on or
-    /// off takes effect without a new worker, and a config that no longer loads turns it off.
-    #[test]
-    fn a_worker_that_stays_up_follows_the_owners_config() {
-        let home = tempfile::tempdir().unwrap();
-        let config = |curate: bool| {
-            let text = format!(
-                "[summary]\ncurate = {curate}\n[[providers]]\nkind = \"openai\"\n\
-                 name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
-                 daily_budget = 0\n"
-            );
-            std::fs::write(home.path().join("config.toml"), text).unwrap();
-        };
-        config(false);
-        let mut raw = raw::open(home.path()).unwrap();
-        raw.append(&raw::test_event("a")).unwrap();
-        let mut phase = curation(home.path());
-        assert_eq!(
-            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
-            Phase::Idle
-        );
-        config(true);
-        assert!(matches!(
-            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
-            Phase::Waiting { up: false, .. }
-        ));
-        config(false);
-        assert_eq!(
-            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
-            Phase::Idle
-        );
-        // A file the owner is still editing stops curation for this run, not the worker.
-        std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
-        assert_eq!(
-            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
-            Phase::Idle
-        );
-    }
-
-    /// The Windows runner's worker stopped with "database is locked" after a restore: a search
-    /// created its table in the fresh knowledge.db between a step's read and its write.
-    #[test]
-    fn a_reader_writing_knowledge_db_mid_step_does_not_stop_the_pass() {
-        let home = tempfile::tempdir().unwrap();
-        let mut raw = raw::open(home.path()).unwrap();
-        raw.append(&raw::test_event("a")).unwrap();
-        let mut k = knowledge::open(home.path()).unwrap();
-        let contender = Contender::default();
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Raced(
-            home.path().to_path_buf(),
-            false,
-            contender.clone(),
-        ))];
-        drain(&raw, &mut k, &mut consumers).unwrap();
-        // The other writer ran, and its write went through once the step's had.
-        let other = contender.lock().unwrap().take().expect("the step ran");
-        other.join().unwrap();
-    }
-
-    fn seen(k: &Connection) -> Vec<i64> {
-        let mut st = k.prepare("SELECT seq FROM seen ORDER BY seq").unwrap();
-        st.query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect()
-    }
-
-    /// raw.db as if its commits above `seq` had never reached the disk (MUST-M14).
-    fn lose_after(home: &Path, seq: i64) -> Raw {
-        let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
-        c.execute("DELETE FROM records WHERE seq > ?1", [seq])
-            .unwrap();
-        drop(c);
-        raw::open(home).unwrap()
-    }
-
-    #[test]
-    fn a_checkpoint_above_raw_is_rewound_with_its_output_and_later_events_are_not_skipped() {
-        let home = tempfile::tempdir().unwrap();
-        let mut raw = raw::open(home.path()).unwrap();
-        let mut k = knowledge::open(home.path()).unwrap();
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen)];
-        for i in 0..8 {
-            raw.append(&raw::test_event(&i.to_string())).unwrap();
-        }
-        drain(&raw, &mut k, &mut consumers).unwrap(); // output and checkpoint at 8
-        drop(raw);
-        let mut raw = lose_after(home.path(), 5);
-        assert_eq!(
-            checkpoint::rewind(&raw, &k, &mut consumers).unwrap(),
-            vec![("seen".into(), 8, 5)]
-        );
-        assert_eq!(seen(&k), vec![1, 2, 3, 4, 5]); // no output left for the lost 6-8
-        let logged: (String, i64, i64) = k
-            .query_row("SELECT consumer, was, now FROM rewinds", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
-            .unwrap();
-        assert_eq!(logged, ("seen".into(), 8, 5));
-        raw.append(&raw::test_event("new")).unwrap(); // seq 6 again, a different event
-        drain(&raw, &mut k, &mut consumers).unwrap();
-        assert_eq!(seen(&k), vec![1, 2, 3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn an_event_that_arrives_while_the_worker_decides_to_exit_is_still_processed() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut late = true;
-        // `before_exit` runs after the lock is released and before the last check: a hook
-        // appending here finds the lock free, but this test starts no second worker, so only the
-        // last check can pick the event up.
-        run_with(p, 0, vec![Box::new(Seen)], || {
-            if std::mem::take(&mut late) {
-                raw::open(p)
-                    .unwrap()
-                    .append(&raw::test_event("late"))
-                    .unwrap();
-            }
+        .unwrap()
+    );
+    let stale = std::fs::read_dir(p.join("backups"))
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(&device) && name.ends_with(".seg.zst")
         })
+        .count();
+    assert_eq!(stale, 0, "the scheduled backup exported the replaced file");
+}
+
+/// M5 F2, D1 rule 7: the lock `oboete recurate` plans and sends under reconciles the forget
+/// request logs before its consumers run, as a worker's start does. A raw.db put back from an
+/// older copy holds none of a forget the logs hold, and the command would plan from, and send,
+/// what was forgotten. The consumers run after the request is applied.
+#[test]
+fn a_drained_lock_reconciles_the_forget_logs_first() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
+    let target = crate::forget::Target::Record {
+        device: raw.device().to_owned(),
+        seq,
+    };
+    drop(raw);
+    // The copy holds the record: what the WAL kept is written into the file first.
+    rusqlite::Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
-        let device = raw::open(p).unwrap().device().to_owned();
-        let k = knowledge::open(p).unwrap();
-        assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
+    let old = p.join("raw-before-forget.db");
+    std::fs::copy(p.join("raw.db"), &old).unwrap();
+    crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
+    let mut raw = raw::open(p).unwrap();
+    crate::forget::reconcile(p, &mut raw).unwrap();
+    assert_eq!(raw.forget_requests().unwrap().len(), 1);
+    drop(raw);
+    // The old copy takes raw.db's place, as a restore by hand would put it.
+    for file in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(p.join(file));
     }
+    let staged = p.join("raw.db.copy");
+    std::fs::copy(&old, &staged).unwrap();
+    std::fs::rename(staged, p.join("raw.db")).unwrap();
+    assert!(raw::open(p).unwrap().forget_requests().unwrap().is_empty());
+    drop(
+        drained(p, false)
+            .unwrap()
+            .expect("no other process holds the lock"),
+    );
+    let raw = raw::open(p).unwrap();
+    assert_eq!(raw.forget_requests().unwrap().len(), 1);
+    // The request left a tombstone under the device the copy became, and the consumers ran
+    // after it: the full-text index has read up to it.
+    let k = knowledge::open(p).unwrap();
+    let read = checkpoint::get(&k, "fts", raw.device()).unwrap();
+    assert_eq!((raw.max_seq().unwrap(), read), (1, 1));
+}
 
-    /// Milestone 5 F2: the zero-length idle wait still checks which raw.db it holds before
-    /// exporting it, and opens the replacement to reconcile forgets and drain new records.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_nonresident_worker_reopens_a_replacement_before_its_final_backup() {
-        replacement_at_idle_exit(true);
-    }
-
-    /// The same check is needed after releasing the lock: a replacement in the exit seam has
-    /// no new records in the old connection to wake the worker through `behind`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_nonresident_worker_reopens_a_replacement_while_it_decides_to_exit() {
-        replacement_at_idle_exit(false);
-    }
-
-    /// The held file must not become the replacement pathname while SQLite still holds the
-    /// file it opened: its new input must be consumed and its forget logs reconciled.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_replacement_after_sqlite_open_is_not_adopted_as_the_held_file() {
-        replacement_after_open(false);
-    }
-
-    /// An absent path creates a store, but a replacement before its first identity capture
-    /// must still be opened rather than leave its new input unconsumed.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_fresh_raw_replaced_after_open_is_read_before_the_worker_exits() {
-        replacement_after_open(true);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn pending_forget_copy(p: &Path) -> (String, i64) {
-        let mut raw = raw::open(p).unwrap();
-        let mut event = raw::test_event("opened-file-forget-canary-8351");
-        event.source = "transcript".into();
-        let identity = raw::ImportIdentity {
-            origin: crate::forget::origin("synthetic", "opened-file-import"),
-            session: crate::forget::session(&event.agent, &event.session),
-            ambiguous: None,
-            unverified: false,
-        };
-        let seq = raw
-            .append_imported_origins(
-                &[crate::capture::Captured {
-                    event,
-                    ledger: Vec::new(),
-                }],
-                &[identity],
-                "",
-                None,
-            )
-            .unwrap()[0];
-        let device = raw.device().to_owned();
-        drop(raw);
-        std::fs::copy(p.join("raw.db"), p.join("raw-before-forget.db")).unwrap();
-        let preview = crate::forget::preview(
-            p,
-            crate::forget::Target::Record {
-                device: device.clone(),
-                seq,
-            },
-        )
+/// MUST-M14, D1 rule 7: and it checks the backup segments before that, as a worker's start
+/// does. raw.db lost commits its backups hold, a forget's among them. The request's tombstone
+/// takes the first seq raw lost: a check after it would find raw as long as its backups, and
+/// leave in place a segment that holds another record under that seq.
+#[test]
+fn a_drained_lock_checks_the_backups_before_it_reconciles() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
+    let device = raw.device().to_owned();
+    drop(raw);
+    // What the WAL kept is written into the file first: these bytes hold the record.
+    rusqlite::Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
-        crate::forget::start(p, &preview).unwrap();
-        (device, seq)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn replace_raw_at_boundary(p: &Path) {
-        let old = p.join("raw-before-forget.db");
-        if !old.exists() {
-            // The fresh-open case copies the just-created schema, including its WAL commits.
-            Connection::open(p.join("raw.db"))
-                .unwrap()
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                .unwrap();
-            std::fs::copy(p.join("raw.db"), &old).unwrap();
-        }
-        let staged = p.join("raw.db.copy");
-        std::fs::copy(old, &staged).unwrap();
-        for file in ["raw.db-wal", "raw.db-shm"] {
-            let _ = std::fs::remove_file(p.join(file));
-        }
-        std::fs::rename(staged, p.join("raw.db")).unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("opened-file-new-input-8352"))
-            .unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn replacement_after_open(fresh: bool) {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let forgotten = (!fresh).then(|| pending_forget_copy(p));
-        AFTER_RAW_OPEN.set(Some(replace_raw_at_boundary));
-        run_with(p, 0, vec![Box::new(Seen)], || {}).unwrap();
-        let raw = raw::open(p).unwrap();
-        let k = knowledge::open(p).unwrap();
-        assert_eq!(
-            k.query_row(
-                "SELECT COUNT(*) FROM seen WHERE device=?1 AND seq=1",
-                [raw.device()],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap(),
-            1,
-            "the replacement was adopted as held while its new input was never read"
-        );
-        if let Some((device, seq)) = forgotten {
-            assert!(matches!(
-                raw.after(&device, seq - 1, 1).unwrap()[0].item,
-                raw::Item::Removed
-            ));
-        }
-    }
-
-    /// A copy put back after the previous round's final check must be reconciled before the
-    /// next consumer sees a raw handle, even when another phase immediately starts that round.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_replacement_at_round_entry_is_opened_before_the_first_consumer() {
-        struct CurrentFile(std::path::PathBuf);
-        impl Consumer for CurrentFile {
-            fn name(&self) -> &'static str {
-                "current-file"
-            }
-            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
-                assert_eq!(
-                    raw.device(),
-                    raw::open(&self.0)?.device(),
-                    "a new round sent the replaced file's old handle to a consumer"
-                );
-                raw.max_seq()
-            }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
-        }
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let (device, seq) = pending_forget_copy(p);
-        let mut first = true;
-        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-            if std::mem::take(&mut first) {
-                BEFORE_ROUND.set(Some(replace_raw_at_boundary));
-                Ok(Phase::Covered)
-            } else {
-                Ok(Phase::Idle)
-            }
-        };
-        run_holding(
-            p,
-            0,
-            vec![Box::new(CurrentFile(p.into()))],
-            || {},
-            None,
-            curating(&mut phase),
-        )
+    let before = std::fs::read(p.join("raw.db")).unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("lost"))
         .unwrap();
-        assert!(matches!(
-            raw::open(p).unwrap().after(&device, seq - 1, 1).unwrap()[0].item,
-            raw::Item::Removed
-        ));
+    crate::backup::export(p).unwrap().expect("a segment");
+    let target = crate::forget::Target::Record {
+        device: device.clone(),
+        seq,
+    };
+    crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
+    let mut raw = raw::open(p).unwrap();
+    crate::forget::reconcile(p, &mut raw).unwrap();
+    drop(raw);
+    // raw.db as it was before the second record and the forget, in the same file: the device
+    // is the same one, and its backups reach past its end.
+    for file in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(p.join(file));
     }
-
-    /// docs/store-format.md: a worker whose raw.db a newer oboete stamps meanwhile opens it again
-    /// at its next round and stops on the refusal, rather than writing on through its handle or
-    /// restoring the file as damaged.
-    #[test]
-    fn a_worker_stops_when_a_newer_oboete_stamps_its_raw_db() {
-        fn stamp_newer(home: &Path) {
-            Connection::open(home.join("raw.db"))
-                .unwrap()
-                .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
-                .unwrap();
-        }
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
+    std::fs::write(p.join("raw.db"), before).unwrap();
+    let raw = raw::open(p).unwrap();
+    let held = (
+        raw.device().to_owned(),
+        raw.max_seq().unwrap(),
+        raw.forget_requests().unwrap().len(),
+    );
+    assert_eq!(held, (device, 1, 0));
+    drop(raw);
+    let aside = || {
+        std::fs::read_dir(p.join("backups"))
             .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut first = true;
-        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-            if std::mem::take(&mut first) {
-                BEFORE_ROUND.set(Some(stamp_newer));
-                Ok(Phase::Covered)
-            } else {
-                Ok(Phase::Idle)
-            }
-        };
-        let why = run_holding(
-            p,
-            0,
-            vec![Box::new(Seen)],
-            || {},
-            None,
-            curating(&mut phase),
-        )
-        .unwrap_err();
-        assert!(why.is::<raw::NewerFormat>(), "{why:#}");
-        let stamped: i64 = Connection::open(p.join("raw.db"))
-            .unwrap()
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stamped, raw::FORMAT + 1);
-    }
-
-    /// A replacement during a batch cannot be exported through that batch's old connection
-    /// at the scheduled backup boundary. The deadline is injected, never waited for.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_scheduled_backup_reopens_a_replacement_instead_of_exporting_the_old_file() {
-        struct ReplacingBatch(std::path::PathBuf, bool);
-        impl Consumer for ReplacingBatch {
-            fn name(&self) -> &'static str {
-                "replacing-batch"
-            }
-            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
-                let through = raw.max_seq()?;
-                if std::mem::take(&mut self.1) {
-                    replace_raw_at_boundary(&self.0);
-                }
-                Ok(through)
-            }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
-        }
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let (device, _) = pending_forget_copy(p);
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(ReplacingBatch(p.into(), true))];
-        let mut holding = Holding::default();
-        let mut deadline = Instant::now();
-        assert!(
-            serve(
-                p,
-                0,
-                &mut consumers,
-                (&mut holding, &mut None),
-                &mut deadline,
-                &mut || {},
-                &mut Phases::default(),
-            )
-            .unwrap()
-        );
-        let stale = std::fs::read_dir(p.join("backups"))
-            .unwrap()
-            .flatten()
             .filter(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.starts_with(&device) && name.ends_with(".seg.zst")
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().contains(".quarantined-")
             })
-            .count();
-        assert_eq!(stale, 0, "the scheduled backup exported the replaced file");
-    }
-
-    /// M5 F2, D1 rule 7: the lock `oboete recurate` plans and sends under reconciles the forget
-    /// request logs before its consumers run, as a worker's start does. A raw.db put back from an
-    /// older copy holds none of a forget the logs hold, and the command would plan from, and send,
-    /// what was forgotten. The consumers run after the request is applied.
-    #[test]
-    fn a_drained_lock_reconciles_the_forget_logs_first() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
-        let target = crate::forget::Target::Record {
-            device: raw.device().to_owned(),
-            seq,
-        };
-        drop(raw);
-        // The copy holds the record: what the WAL kept is written into the file first.
-        rusqlite::Connection::open(p.join("raw.db"))
+            .count()
+    };
+    assert_eq!(aside(), 0);
+    drop(
+        drained(p, false)
             .unwrap()
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-        let old = p.join("raw-before-forget.db");
-        std::fs::copy(p.join("raw.db"), &old).unwrap();
-        crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
-        let mut raw = raw::open(p).unwrap();
-        crate::forget::reconcile(p, &mut raw).unwrap();
-        assert_eq!(raw.forget_requests().unwrap().len(), 1);
-        drop(raw);
-        // The old copy takes raw.db's place, as a restore by hand would put it.
-        for file in ["raw.db-wal", "raw.db-shm"] {
-            let _ = std::fs::remove_file(p.join(file));
-        }
-        let staged = p.join("raw.db.copy");
-        std::fs::copy(&old, &staged).unwrap();
-        std::fs::rename(staged, p.join("raw.db")).unwrap();
-        assert!(raw::open(p).unwrap().forget_requests().unwrap().is_empty());
-        drop(
-            drained(p, false)
-                .unwrap()
-                .expect("no other process holds the lock"),
-        );
-        let raw = raw::open(p).unwrap();
-        assert_eq!(raw.forget_requests().unwrap().len(), 1);
-        // The request left a tombstone under the device the copy became, and the consumers ran
-        // after it: the full-text index has read up to it.
-        let k = knowledge::open(p).unwrap();
-        let read = checkpoint::get(&k, "fts", raw.device()).unwrap();
-        assert_eq!((raw.max_seq().unwrap(), read), (1, 1));
-    }
+            .expect("no other process holds the lock"),
+    );
+    assert!(aside() > 0, "the segment past raw's end is still in place");
+    assert_eq!(raw::open(p).unwrap().forget_requests().unwrap().len(), 1);
+}
 
-    /// MUST-M14, D1 rule 7: and it checks the backup segments before that, as a worker's start
-    /// does. raw.db lost commits its backups hold, a forget's among them. The request's tombstone
-    /// takes the first seq raw lost: a check after it would find raw as long as its backups, and
-    /// leave in place a segment that holds another record under that seq.
-    #[test]
-    fn a_drained_lock_checks_the_backups_before_it_reconciles() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        let seq = raw.append(&raw::test_event("forgotten later")).unwrap();
-        let device = raw.device().to_owned();
-        drop(raw);
-        // What the WAL kept is written into the file first: these bytes hold the record.
-        rusqlite::Connection::open(p.join("raw.db"))
-            .unwrap()
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-        let before = std::fs::read(p.join("raw.db")).unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("lost"))
-            .unwrap();
-        crate::backup::export(p).unwrap().expect("a segment");
-        let target = crate::forget::Target::Record {
-            device: device.clone(),
-            seq,
-        };
-        crate::forget::start(p, &crate::forget::preview(p, target).unwrap()).unwrap();
-        let mut raw = raw::open(p).unwrap();
-        crate::forget::reconcile(p, &mut raw).unwrap();
-        drop(raw);
-        // raw.db as it was before the second record and the forget, in the same file: the device
-        // is the same one, and its backups reach past its end.
-        for file in ["raw.db-wal", "raw.db-shm"] {
-            let _ = std::fs::remove_file(p.join(file));
-        }
-        std::fs::write(p.join("raw.db"), before).unwrap();
-        let raw = raw::open(p).unwrap();
-        let held = (
-            raw.device().to_owned(),
-            raw.max_seq().unwrap(),
-            raw.forget_requests().unwrap().len(),
-        );
-        assert_eq!(held, (device, 1, 0));
-        drop(raw);
-        let aside = || {
-            std::fs::read_dir(p.join("backups"))
-                .unwrap()
-                .filter(|e| {
-                    let name = e.as_ref().unwrap().file_name();
-                    name.to_string_lossy().contains(".quarantined-")
-                })
-                .count()
-        };
-        assert_eq!(aside(), 0);
-        drop(
-            drained(p, false)
-                .unwrap()
-                .expect("no other process holds the lock"),
-        );
-        assert!(aside() > 0, "the segment past raw's end is still in place");
-        assert_eq!(raw::open(p).unwrap().forget_requests().unwrap().len(), 1);
-    }
-
-    /// M5 F2: an embedding reply starts another round even when curation is idle. The next
-    /// round must reconcile the replacement before a consumer or provider sees it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn embedding_progress_does_not_skip_reopening_raw_while_curation_is_idle() {
-        let _contending = contending();
-        let mut s = crate::search::b::fixture::Store::new();
-        s.decided(
-            "github.com/example/replacement",
-            1_000,
-            "The parser reads one line at a time.",
-            &[],
-        );
-        s.run();
-        let stub = crate::embed::stub::Stub::start();
-        crate::embed_phase::fixture::config(&s, &stub);
-        let p = s.home.path();
-        let mut event = raw::test_event("embedding-reopen-forget-canary-6831");
-        event.source = "transcript".into();
-        let identity = raw::ImportIdentity {
-            origin: crate::forget::origin("synthetic", "embedding-reopen-import"),
-            session: crate::forget::session(&event.agent, &event.session),
-            ambiguous: None,
-            unverified: false,
-        };
-        let seq = s
-            .raw
-            .append_imported_origins(
-                &[crate::capture::Captured {
-                    event,
-                    ledger: Vec::new(),
-                }],
-                std::slice::from_ref(&identity),
-                "",
-                None,
-            )
-            .unwrap()[0];
-        let device = s.raw.device().to_owned();
-        let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
-        drop(s.raw);
-        let old = p.join("raw-before-forget.db");
-        std::fs::copy(p.join("raw.db"), &old).unwrap();
-        let mut replay = raw::open(p).unwrap();
-        assert_eq!(replay.forget_apply(&[request]).unwrap(), 1);
-        crate::forget::reconcile(p, &mut replay).unwrap();
-        let raw = raw::open(p).unwrap();
-        let mut k = knowledge::open(p).unwrap();
-        drain(&raw, &mut k, &mut consumers(p)).unwrap();
-        let mut embed = crate::embed_phase::Phase::new(p);
-        assert!(matches!(
-            embed.poll(&raw, &k).unwrap(),
-            Phase::Waiting { .. }
-        ));
-        until("the stub embedding reply", || embed.done());
-        drop((raw, k));
-        let mut calls = 0;
-        let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
-            calls += 1;
-            if calls == 1 {
-                for file in ["raw.db-wal", "raw.db-shm"] {
-                    let _ = std::fs::remove_file(p.join(file));
-                }
-                let staged = p.join("raw.db.copy");
-                std::fs::copy(&old, &staged).unwrap();
-                std::fs::rename(staged, p.join("raw.db")).unwrap();
-                std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n").unwrap();
-            } else {
-                assert_ne!(
-                    raw.device(),
-                    device,
-                    "embedding progress started another round over the old raw.db"
-                );
-                assert!(matches!(
-                    raw.after(&device, seq - 1, 1).unwrap()[0].item,
-                    raw::Item::Removed
-                ));
-            }
-            Ok(Phase::Idle)
-        };
-        let phases = Phases {
-            embed: Some(&mut embed),
-            curation: Some(&mut phase),
-            ..Phases::default()
-        };
-        run_holding(p, 0, consumers(p), || {}, None, phases).unwrap();
-        assert_eq!(calls, 2);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn replacement_at_idle_exit(before_release: bool) {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        let mut event = raw::test_event("idle-exit-forget-canary-5821");
-        event.source = "transcript".into();
-        let identity = raw::ImportIdentity {
-            origin: crate::forget::origin("synthetic", "idle-exit-import"),
-            session: crate::forget::session(&event.agent, &event.session),
-            ambiguous: None,
-            unverified: false,
-        };
-        let seq = raw
-            .append_imported_origins(
-                &[crate::capture::Captured {
-                    event,
-                    ledger: Vec::new(),
-                }],
-                &[identity],
-                "",
-                None,
-            )
-            .unwrap()[0];
-        let device = raw.device().to_owned();
-        drop(raw);
-        let old = p.join("raw-before-forget.db");
-        std::fs::copy(p.join("raw.db"), &old).unwrap();
-        let preview = crate::forget::preview(
-            p,
-            crate::forget::Target::Record {
-                device: device.clone(),
-                seq,
-            },
+/// M5 F2: an embedding reply starts another round even when curation is idle. The next
+/// round must reconcile the replacement before a consumer or provider sees it.
+#[cfg(target_os = "linux")]
+#[test]
+fn embedding_progress_does_not_skip_reopening_raw_while_curation_is_idle() {
+    let _contending = contending();
+    let mut s = crate::search::b::fixture::Store::new();
+    s.decided(
+        "github.com/example/replacement",
+        1_000,
+        "The parser reads one line at a time.",
+        &[],
+    );
+    s.run();
+    let stub = crate::embed::stub::Stub::start();
+    crate::embed_phase::fixture::config(&s, &stub);
+    let p = s.home.path();
+    let mut event = raw::test_event("embedding-reopen-forget-canary-6831");
+    event.source = "transcript".into();
+    let identity = raw::ImportIdentity {
+        origin: crate::forget::origin("synthetic", "embedding-reopen-import"),
+        session: crate::forget::session(&event.agent, &event.session),
+        ambiguous: None,
+        unverified: false,
+    };
+    let seq = s
+        .raw
+        .append_imported_origins(
+            &[crate::capture::Captured {
+                event,
+                ledger: Vec::new(),
+            }],
+            std::slice::from_ref(&identity),
+            "",
+            None,
         )
-        .unwrap();
-        crate::forget::start(p, &preview).unwrap();
-        // Both existing seams run synchronously: no timing or scheduling decides when the
-        // replacement happens, and it happens only once even after the worker opens it again.
-        let copied = std::cell::RefCell::new(None);
-        let replace = || {
-            if copied.borrow().is_some() {
-                return;
-            }
+        .unwrap()[0];
+    let device = s.raw.device().to_owned();
+    let request = crate::forget::previous_transcript_request(&s.raw, seq, &identity);
+    drop(s.raw);
+    let old = p.join("raw-before-forget.db");
+    std::fs::copy(p.join("raw.db"), &old).unwrap();
+    let mut replay = raw::open(p).unwrap();
+    assert_eq!(replay.forget_apply(&[request]).unwrap(), 1);
+    crate::forget::reconcile(p, &mut replay).unwrap();
+    let raw = raw::open(p).unwrap();
+    let mut k = knowledge::open(p).unwrap();
+    drain(&raw, &mut k, &mut consumers(p)).unwrap();
+    let mut embed = crate::embed_phase::Phase::new(p);
+    assert!(matches!(
+        embed.poll(&raw, &k).unwrap(),
+        Phase::Waiting { .. }
+    ));
+    until("the stub embedding reply", || embed.done());
+    drop((raw, k));
+    let mut calls = 0;
+    let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
+        calls += 1;
+        if calls == 1 {
             for file in ["raw.db-wal", "raw.db-shm"] {
                 let _ = std::fs::remove_file(p.join(file));
             }
             let staged = p.join("raw.db.copy");
             std::fs::copy(&old, &staged).unwrap();
             std::fs::rename(staged, p.join("raw.db")).unwrap();
-            let mut raw = raw::open(p).unwrap();
-            let fresh = raw
-                .append(&raw::test_event("idle-exit-new-record-5822"))
-                .unwrap();
-            copied.replace(Some((raw.device().to_owned(), fresh)));
-        };
-        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+            std::fs::write(p.join("config.toml"), "[embedding]\nprovider = 'none'\n").unwrap();
+        } else {
+            assert_ne!(
+                raw.device(),
+                device,
+                "embedding progress started another round over the old raw.db"
+            );
+            assert!(matches!(
+                raw.after(&device, seq - 1, 1).unwrap()[0].item,
+                raw::Item::Removed
+            ));
+        }
+        Ok(Phase::Idle)
+    };
+    let phases = Phases {
+        embed: Some(&mut embed),
+        curation: Some(&mut phase),
+        ..Phases::default()
+    };
+    run_holding(p, 0, consumers(p), || {}, None, phases).unwrap();
+    assert_eq!(calls, 2);
+}
+
+#[cfg(target_os = "linux")]
+fn replacement_at_idle_exit(before_release: bool) {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    let mut event = raw::test_event("idle-exit-forget-canary-5821");
+    event.source = "transcript".into();
+    let identity = raw::ImportIdentity {
+        origin: crate::forget::origin("synthetic", "idle-exit-import"),
+        session: crate::forget::session(&event.agent, &event.session),
+        ambiguous: None,
+        unverified: false,
+    };
+    let seq = raw
+        .append_imported_origins(
+            &[crate::capture::Captured {
+                event,
+                ledger: Vec::new(),
+            }],
+            &[identity],
+            "",
+            None,
+        )
+        .unwrap()[0];
+    let device = raw.device().to_owned();
+    drop(raw);
+    let old = p.join("raw-before-forget.db");
+    std::fs::copy(p.join("raw.db"), &old).unwrap();
+    let preview = crate::forget::preview(
+        p,
+        crate::forget::Target::Record {
+            device: device.clone(),
+            seq,
+        },
+    )
+    .unwrap();
+    crate::forget::start(p, &preview).unwrap();
+    // Both existing seams run synchronously: no timing or scheduling decides when the
+    // replacement happens, and it happens only once even after the worker opens it again.
+    let copied = std::cell::RefCell::new(None);
+    let replace = || {
+        if copied.borrow().is_some() {
+            return;
+        }
+        for file in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(file));
+        }
+        let staged = p.join("raw.db.copy");
+        std::fs::copy(&old, &staged).unwrap();
+        std::fs::rename(staged, p.join("raw.db")).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        let fresh = raw
+            .append(&raw::test_event("idle-exit-new-record-5822"))
+            .unwrap();
+        copied.replace(Some((raw.device().to_owned(), fresh)));
+    };
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if before_release {
+            replace();
+        }
+        Ok(Phase::Idle)
+    };
+    run_holding(
+        p,
+        0,
+        vec![Box::new(Seen)],
+        || {
             if before_release {
+                let stale = std::fs::read_dir(p.join("backups"))
+                    .unwrap()
+                    .flatten()
+                    .any(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        name.starts_with(&device) && name.ends_with(".seg.zst")
+                    });
+                assert!(!stale, "the replaced raw.db was exported before reopening");
+            } else {
                 replace();
             }
-            Ok(Phase::Idle)
-        };
-        run_holding(
-            p,
-            0,
-            vec![Box::new(Seen)],
-            || {
-                if before_release {
-                    let stale = std::fs::read_dir(p.join("backups"))
-                        .unwrap()
-                        .flatten()
-                        .any(|e| {
-                            let name = e.file_name().to_string_lossy().into_owned();
-                            name.starts_with(&device) && name.ends_with(".seg.zst")
-                        });
-                    assert!(!stale, "the replaced raw.db was exported before reopening");
-                } else {
-                    replace();
-                }
-            },
-            None,
-            curating(&mut phase),
+        },
+        None,
+        curating(&mut phase),
+    )
+    .unwrap();
+    let (copy, fresh) = copied.into_inner().unwrap();
+    let k = knowledge::open(p).unwrap();
+    assert_eq!(
+        k.query_row(
+            "SELECT COUNT(*) FROM seen WHERE device = ?1 AND seq = ?2",
+            (&copy, fresh),
+            |r| r.get::<_, i64>(0),
         )
-        .unwrap();
-        let (copy, fresh) = copied.into_inner().unwrap();
-        let k = knowledge::open(p).unwrap();
-        assert_eq!(
-            k.query_row(
-                "SELECT COUNT(*) FROM seen WHERE device = ?1 AND seq = ?2",
-                (&copy, fresh),
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap(),
-            1,
-            "the replacement's new record was skipped at idle exit"
-        );
-        let raw = raw::open(p).unwrap();
-        assert!(matches!(
-            raw.after(&device, seq - 1, 1).unwrap()[0].item,
-            raw::Item::Removed
-        ));
-        assert!(lock(p).unwrap().is_some());
-    }
+        .unwrap(),
+        1,
+        "the replacement's new record was skipped at idle exit"
+    );
+    let raw = raw::open(p).unwrap();
+    assert!(matches!(
+        raw.after(&device, seq - 1, 1).unwrap()[0].item,
+        raw::Item::Removed
+    ));
+    assert!(lock(p).unwrap().is_some());
+}
 
-    #[test]
-    fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        let device = {
-            let mut raw = raw::open(&p).unwrap();
-            raw.append(&raw::test_event("first")).unwrap();
-            raw.device().to_owned()
-        };
-        // A worker that only took the request on its way out would take it after its 10 s wait,
-        // past the 8 s this test allows; a slow runner still gets its worker into the wait (a
-        // Windows runner took over 1 s, #199).
-        let worker = {
-            let p = p.clone();
-            std::thread::spawn(move || run_with(&p, 10_000, vec![Box::new(Seen)], || {}))
-        };
-        // Asked only once the worker has read the event: past its start, where a request would be
-        // taken too, so only the wait can take it.
-        let t = Instant::now();
-        while knowledge::open(&p)
-            .ok()
-            .and_then(|k| checkpoint::get(&k, "seen", &device).ok())
-            != Some(1)
-        {
-            assert!(
-                t.elapsed() < Duration::from_secs(30),
-                "the worker never read"
-            );
-            std::thread::sleep(Duration::from_millis(20));
+#[test]
+fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let device = {
+        let mut raw = raw::open(&p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        raw.device().to_owned()
+    };
+    // A worker that only took the request on its way out would take it after its 10 s wait,
+    // past the 8 s this test allows; a slow runner still gets its worker into the wait (a
+    // Windows runner took over 1 s, #199).
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || run_with(&p, 10_000, vec![Box::new(Seen)], || {}))
+    };
+    // Asked only once the worker has read the event: past its start, where a request would be
+    // taken too, so only the wait can take it.
+    let t = Instant::now();
+    while knowledge::open(&p)
+        .ok()
+        .and_then(|k| checkpoint::get(&k, "seen", &device).ok())
+        != Some(1)
+    {
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the worker never read"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::backup::request_restore(&p);
+    let t = Instant::now();
+    while crate::backup::restore_requested(&p) {
+        assert!(
+            t.elapsed() < Duration::from_secs(8),
+            "not taken while waiting"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_restore_that_fails_keeps_the_request() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    drop(raw::open(p).unwrap());
+    std::fs::write(p.join("raw.db"), vec![b'x'; 4096]).unwrap();
+    crate::backup::request_restore(p);
+    // No backup segment: the restore fails, and so does the worker.
+    assert!(run_with(p, 0, vec![Box::new(Seen)], || {}).is_err());
+    assert!(crate::backup::restore_requested(p));
+}
+
+#[test]
+fn a_restore_asked_for_as_the_worker_exits_is_not_lost() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut asked = false;
+    // After the release: the hook that asked saw the lock still held and started nothing.
+    run_with(p, 0, vec![Box::new(Seen)], || {
+        if !std::mem::replace(&mut asked, true) {
+            crate::backup::request_restore(p);
         }
-        crate::backup::request_restore(&p);
-        let t = Instant::now();
-        while crate::backup::restore_requested(&p) {
-            assert!(
-                t.elapsed() < Duration::from_secs(8),
-                "not taken while waiting"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        worker.join().unwrap().unwrap();
-    }
+    })
+    .unwrap();
+    assert!(!crate::backup::restore_requested(p));
+}
 
-    #[test]
-    fn a_restore_that_fails_keeps_the_request() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        drop(raw::open(p).unwrap());
-        std::fs::write(p.join("raw.db"), vec![b'x'; 4096]).unwrap();
-        crate::backup::request_restore(p);
-        // No backup segment: the restore fails, and so does the worker.
-        assert!(run_with(p, 0, vec![Box::new(Seen)], || {}).is_err());
-        assert!(crate::backup::restore_requested(p));
-    }
-
-    #[test]
-    fn a_restore_asked_for_as_the_worker_exits_is_not_lost() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut asked = false;
-        // After the release: the hook that asked saw the lock still held and started nothing.
-        run_with(p, 0, vec![Box::new(Seen)], || {
-            if !std::mem::replace(&mut asked, true) {
-                crate::backup::request_restore(p);
-            }
-        })
-        .unwrap();
-        assert!(!crate::backup::restore_requested(p));
-    }
-
-    /// Forks can retain the dropped OFD until exec. Once every owned spawn round completes,
-    /// the lock is strictly available again; no scheduler-duration promise is involved.
-    #[cfg(unix)]
-    #[test]
-    fn a_lock_just_dropped_is_taken_again_while_other_threads_spawn() {
-        const ISOLATED: &str = "OBOETE_TEST_LOCK_SPAWN_ROUNDS";
-        if std::env::var_os(ISOLATED).is_none() {
-            // Other libtest tests also fork. Isolate only this fixture, not the entire suite.
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "worker::tests::a_lock_just_dropped_is_taken_again_while_other_threads_spawn",
-                    "--test-threads=1",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .envs(std::env::vars_os().filter(|(key, _)| {
-                    let key = key.to_string_lossy().to_ascii_uppercase();
-                    !["KEY", "TOKEN", "SECRET", "PASSWORD"]
-                        .iter()
-                        .any(|word| key.contains(word))
-                }))
-                .env(ISOLATED, "1")
-                .stdin(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let start = Instant::now();
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(status.success(), "isolated lock fixture failed");
-                    return;
-                }
-                if start.elapsed() >= Duration::from_secs(120) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("isolated lock fixture stuck");
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        let _strict = contending(); // Existing test helper: every taking uses File::try_lock once.
-        let home = tempfile::tempdir().unwrap();
-        let taken = std::thread::scope(|scope| {
-            let (completed, results) = std::sync::mpsc::channel();
-            let mut rounds = Vec::new();
-            let mut spawners = Vec::new();
-            for spawner in 0..4 {
-                let (release, round) = std::sync::mpsc::channel();
-                rounds.push(release);
-                let completed = completed.clone();
-                spawners.push(scope.spawn(move || {
-                    while let Ok(round) = round.recv() {
-                        let status = std::process::Command::new("true").env_clear().status();
-                        completed.send((spawner, round, status)).unwrap();
-                    }
-                }));
-            }
-            let mut taken = 0;
-            for round in 0..100 {
-                let held = lock(home.path()).unwrap().expect("initial round taking");
-                for release in &rounds {
-                    release.send(round).unwrap();
-                }
-                drop(held);
-                let mut finished = [false; 4];
-                for _ in 0..4 {
-                    let (spawner, completed_round, status) = results
-                        .recv_timeout(Duration::from_secs(30))
-                        .expect("owned spawn round stuck");
-                    assert_eq!(completed_round, round);
-                    assert!(!finished[spawner], "duplicate spawn completion");
-                    finished[spawner] = true;
-                    assert!(status.unwrap().success(), "owned child failed");
-                }
-                assert!(finished.into_iter().all(|done| done));
-                drop(
-                    lock(home.path())
-                        .unwrap()
-                        .expect("a completed spawn round retained the dropped lock"),
-                );
-                taken += 1;
-            }
-            drop(rounds); // Stop every owned receiver before joining its spawner.
-            for spawner in spawners {
-                spawner.join().unwrap();
-            }
-            taken
-        });
-        assert_eq!(taken, 100, "a dropped lock was still held");
-    }
-
-    #[test]
-    fn a_second_worker_exits_at_once() {
-        // The lock is held on purpose: found held at once, not after the wait for one just dropped
-        // (its 20 sleeps ran past the bound below on a loaded macOS runner).
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let _held = lock(home.path()).unwrap().expect("the first lock");
-        assert!(lock(home.path()).unwrap().is_none());
-        let t = Instant::now();
-        run(home.path(), 60_000).unwrap(); // returns at once: the lock is held
-        assert!(t.elapsed() < Duration::from_secs(1));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn status_probe_detects_an_exclusive_read_only_lock_without_changing_it() {
-        use std::os::unix::fs::PermissionsExt;
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("read-only.lock");
-        std::fs::write(&path, "synthetic read-only status canary").unwrap();
-        let producer = std::fs::File::open(&path).unwrap();
-        producer.lock().unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        let before = std::fs::read(&path).unwrap();
-        assert!(
-            lock_held(&path),
-            "read-only exclusive holder was reported absent"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o400
-        );
-    }
-
-    #[test]
-    fn status_probe_does_not_create_missing_files_or_conflict_with_shared_readers() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("reader.lock");
-        assert!(!lock_held(&path));
-        assert!(!path.exists(), "status created a missing lock");
-        std::fs::write(&path, "synthetic shared status canary").unwrap();
-        let reader = std::fs::File::open(&path).unwrap();
-        reader.lock_shared().unwrap();
-        assert!(
-            !lock_held(&path),
-            "shared readers were mistaken for an exclusive producer"
-        );
-        let another = std::fs::File::open(&path).unwrap();
-        another.try_lock_shared().unwrap();
-        assert_eq!(
-            std::fs::read(path).unwrap(),
-            b"synthetic shared status canary"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn status_probe_rejects_links_and_non_regular_files() {
-        let home = tempfile::tempdir().unwrap();
-        let target = home.path().join("unrelated-held-file");
-        std::fs::write(&target, "synthetic unrelated canary").unwrap();
-        let held = std::fs::File::open(&target).unwrap();
-        held.lock().unwrap();
-        let link = home.path().join("linked.lock");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(
-            !lock_held(&link),
-            "status followed an unrelated held target"
-        );
-        assert!(
-            std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(
-            std::fs::read(&target).unwrap(),
-            b"synthetic unrelated canary"
-        );
-        assert!(!lock_held(home.path()));
-        let fifo = home.path().join("fifo.lock");
-        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: valid NUL-terminated path in a private synthetic directory.
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(!lock_held(&fifo));
-        use std::os::unix::fs::FileTypeExt;
-        assert!(
-            std::fs::symlink_metadata(fifo)
-                .unwrap()
-                .file_type()
-                .is_fifo()
-        );
-    }
-
-    #[test]
-    fn rebuild_retries_a_shared_status_probe_at_the_actual_blocked_attempt() {
-        struct ClearHook;
-        impl Drop for ClearHook {
-            fn drop(&mut self) {
-                REBUILD_STATUS_BLOCKED.with(|hook| {
-                    hook.borrow_mut().take();
-                });
-            }
-        }
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("synthetic rebuild status canary"))
+/// Forks can retain the dropped OFD until exec. Once every owned spawn round completes,
+/// the lock is strictly available again; no scheduler-duration promise is involved.
+#[cfg(unix)]
+#[test]
+fn a_lock_just_dropped_is_taken_again_while_other_threads_spawn() {
+    const ISOLATED: &str = "OBOETE_TEST_LOCK_SPAWN_ROUNDS";
+    if std::env::var_os(ISOLATED).is_none() {
+        // Other libtest tests also fork. Isolate only this fixture, not the entire suite.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "worker::tests::a_lock_just_dropped_is_taken_again_while_other_threads_spawn",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(key, _)| {
+                let key = key.to_string_lossy().to_ascii_uppercase();
+                !["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|word| key.contains(word))
+            }))
+            .env(ISOLATED, "1")
+            .stdin(std::process::Stdio::null())
+            .spawn()
             .unwrap();
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        let path = p.join("state/rebuild.lock");
-        std::fs::write(&path, "synthetic shared probe").unwrap();
-        let probe = std::fs::File::open(&path).unwrap();
-        probe.lock_shared().unwrap();
-        let called = std::rc::Rc::new(std::cell::Cell::new(0));
-        let count = called.clone();
-        let _clear = ClearHook;
-        REBUILD_STATUS_BLOCKED.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                count.set(count.get() + 1);
-                drop(probe);
+        let start = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "isolated lock fixture failed");
+                return;
+            }
+            if start.elapsed() >= Duration::from_secs(120) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated lock fixture stuck");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let _strict = contending(); // Existing test helper: every taking uses File::try_lock once.
+    let home = tempfile::tempdir().unwrap();
+    let taken = std::thread::scope(|scope| {
+        let (completed, results) = std::sync::mpsc::channel();
+        let mut rounds = Vec::new();
+        let mut spawners = Vec::new();
+        for spawner in 0..4 {
+            let (release, round) = std::sync::mpsc::channel();
+            rounds.push(release);
+            let completed = completed.clone();
+            spawners.push(scope.spawn(move || {
+                while let Ok(round) = round.recv() {
+                    let status = std::process::Command::new("true").env_clear().status();
+                    completed.send((spawner, round, status)).unwrap();
+                }
             }));
-        });
-        assert!(
-            rebuild(p).is_ok(),
-            "rebuild did not retry after a transient shared probe"
-        );
-        assert_eq!(
-            called.get(),
-            1,
-            "the actual blocked attempt did not consume the callback once"
-        );
-        assert!(REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow().is_none()));
-        assert!(p.join("knowledge.db").exists());
-        let released = std::fs::File::open(path).unwrap();
-        until("the rebuild status lock is released", || {
-            released.try_lock().is_ok()
-        });
-    }
-
-    /// A waiting worker wakes for a new op of its device as for a record (an owner's correction
-    /// appends only an op), so it is applied before the wait ends, not after.
-    #[test]
-    fn a_worker_picks_up_ops_that_arrive_while_it_waits() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        let device = {
-            let mut raw = raw::open(&p).unwrap();
-            raw.append(&raw::test_event("first")).unwrap();
-            raw.device().to_owned()
-        };
-        let writer = {
-            let p = p.clone();
-            let device = device.clone();
-            std::thread::spawn(move || {
-                // Once the worker has drained what was there and waits.
-                while knowledge::open(&p)
-                    .and_then(|k| checkpoint::get(&k, "seen", &device))
-                    .unwrap_or(0)
-                    < 1
-                {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                std::thread::sleep(Duration::from_millis(300));
-                let mut raw = raw::open(&p).unwrap();
-                raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])
-                    .unwrap();
-            })
-        };
-        // What the op consumer had passed when the first wait ended (a worker that finds more
-        // after it released the lock takes it again and waits once more).
-        let at_exit = std::cell::Cell::new(None);
-        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
-        run_with(&p, 2_000, consumers, || {
-            let k = knowledge::open(&p).unwrap();
-            let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device).unwrap();
-            at_exit.set(at_exit.get().or(Some(passed)));
-        })
-        .unwrap();
-        writer.join().unwrap();
-        assert_eq!(at_exit.get(), Some(1));
-    }
-
-    /// An op that lands after the consumers drained and before the worker waits (here from the
-    /// phase) still wakes it: the wait compares with what the pass read, not with what came after.
-    #[test]
-    fn an_op_that_lands_between_the_pass_and_the_wait_wakes_the_worker() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        let device = {
-            let mut raw = raw::open(&p).unwrap();
-            raw.append(&raw::test_event("first")).unwrap();
-            raw.device().to_owned()
-        };
-        let mut appended = false;
-        let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
-            if !appended {
-                appended = true;
-                raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])?;
-            }
-            Ok(Phase::Idle)
-        };
-        let at_exit = std::cell::Cell::new(None);
-        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
-        let held = lock(&p).unwrap();
-        run_holding(
-            &p,
-            2_000,
-            consumers,
-            || {
-                let k = knowledge::open(&p).unwrap();
-                let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device);
-                at_exit.set(at_exit.get().or(Some(passed.unwrap())));
-            },
-            held,
-            curating(&mut phase),
-        )
-        .unwrap();
-        assert_eq!(at_exit.get(), Some(1));
-    }
-
-    #[test]
-    fn a_worker_picks_up_records_that_arrive_while_it_waits() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        raw::open(&p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let writer = {
-            let p = p.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
-                raw::open(&p)
-                    .unwrap()
-                    .append(&raw::test_event("second"))
-                    .unwrap();
-            })
-        };
-        run_with(&p, 1_500, vec![Box::new(Seen)], || {}).unwrap();
-        writer.join().unwrap();
-        let device = raw::open(&p).unwrap().device().to_owned();
-        let k = knowledge::open(&p).unwrap();
-        assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
-        assert_eq!(seen(&k), vec![1, 2]);
-    }
-
-    /// R14: a worker that leaves notes why for doctor and when for `status`, and nothing in a home
-    /// that is not its own.
-    #[test]
-    fn a_worker_that_leaves_notes_why_and_when_in_its_own_home() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let held = lock(p).unwrap().unwrap();
-        let id = file_id(held.0.metadata());
-        note(p, held.1, STOPPED);
-        left(p, Some((0, 0)), 31);
-        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
-        assert!(left_line(p).is_none());
-        left(p, id, 31);
-        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(NO_PROGRESS));
-        assert!(
-            left_line(p).is_some_and(|l| l.contains("after 15 min without progress")),
-            "{:?}",
-            left_line(p)
-        );
-        drop(held);
-        assert!(last_failure(p).is_some_and(|why| why == NO_PROGRESS));
-    }
-
-    /// One record a batch, 30 ms each: a backlog that takes many batches.
-    struct Slow;
-    impl Consumer for Slow {
-        fn name(&self) -> &'static str {
-            "slow"
         }
-        fn step(&mut self, raw: &Raw, _k: &Connection, _device: &str, after: i64) -> Result<i64> {
-            std::thread::sleep(Duration::from_millis(30));
+        let mut taken = 0;
+        for round in 0..100 {
+            let held = lock(home.path()).unwrap().expect("initial round taking");
+            for release in &rounds {
+                release.send(round).unwrap();
+            }
+            drop(held);
+            let mut finished = [false; 4];
+            for _ in 0..4 {
+                let (spawner, completed_round, status) = results
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("owned spawn round stuck");
+                assert_eq!(completed_round, round);
+                assert!(!finished[spawner], "duplicate spawn completion");
+                finished[spawner] = true;
+                assert!(status.unwrap().success(), "owned child failed");
+            }
+            assert!(finished.into_iter().all(|done| done));
+            drop(
+                lock(home.path())
+                    .unwrap()
+                    .expect("a completed spawn round retained the dropped lock"),
+            );
+            taken += 1;
+        }
+        drop(rounds); // Stop every owned receiver before joining its spawner.
+        for spawner in spawners {
+            spawner.join().unwrap();
+        }
+        taken
+    });
+    assert_eq!(taken, 100, "a dropped lock was still held");
+}
+
+#[test]
+fn a_second_worker_exits_at_once() {
+    // The lock is held on purpose: found held at once, not after the wait for one just dropped
+    // (its 20 sleeps ran past the bound below on a loaded macOS runner).
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let _held = lock(home.path()).unwrap().expect("the first lock");
+    assert!(lock(home.path()).unwrap().is_none());
+    let t = Instant::now();
+    run(home.path(), 60_000).unwrap(); // returns at once: the lock is held
+    assert!(t.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn status_probe_detects_an_exclusive_read_only_lock_without_changing_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("read-only.lock");
+    std::fs::write(&path, "synthetic read-only status canary").unwrap();
+    let producer = std::fs::File::open(&path).unwrap();
+    producer.lock().unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        lock_held(&path),
+        "read-only exclusive holder was reported absent"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+}
+
+#[test]
+fn status_probe_does_not_create_missing_files_or_conflict_with_shared_readers() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("reader.lock");
+    assert!(!lock_held(&path));
+    assert!(!path.exists(), "status created a missing lock");
+    std::fs::write(&path, "synthetic shared status canary").unwrap();
+    let reader = std::fs::File::open(&path).unwrap();
+    reader.lock_shared().unwrap();
+    assert!(
+        !lock_held(&path),
+        "shared readers were mistaken for an exclusive producer"
+    );
+    let another = std::fs::File::open(&path).unwrap();
+    another.try_lock_shared().unwrap();
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        b"synthetic shared status canary"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn status_probe_rejects_links_and_non_regular_files() {
+    let home = tempfile::tempdir().unwrap();
+    let target = home.path().join("unrelated-held-file");
+    std::fs::write(&target, "synthetic unrelated canary").unwrap();
+    let held = std::fs::File::open(&target).unwrap();
+    held.lock().unwrap();
+    let link = home.path().join("linked.lock");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(
+        !lock_held(&link),
+        "status followed an unrelated held target"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"synthetic unrelated canary"
+    );
+    assert!(!lock_held(home.path()));
+    let fifo = home.path().join("fifo.lock");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: valid NUL-terminated path in a private synthetic directory.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(!lock_held(&fifo));
+    use std::os::unix::fs::FileTypeExt;
+    assert!(
+        std::fs::symlink_metadata(fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+}
+
+#[test]
+fn rebuild_retries_a_shared_status_probe_at_the_actual_blocked_attempt() {
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            REBUILD_STATUS_BLOCKED.with(|hook| {
+                hook.borrow_mut().take();
+            });
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("synthetic rebuild status canary"))
+        .unwrap();
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    let path = p.join("state/rebuild.lock");
+    std::fs::write(&path, "synthetic shared probe").unwrap();
+    let probe = std::fs::File::open(&path).unwrap();
+    probe.lock_shared().unwrap();
+    let called = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = called.clone();
+    let _clear = ClearHook;
+    REBUILD_STATUS_BLOCKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            count.set(count.get() + 1);
+            drop(probe);
+        }));
+    });
+    assert!(
+        rebuild(p).is_ok(),
+        "rebuild did not retry after a transient shared probe"
+    );
+    assert_eq!(
+        called.get(),
+        1,
+        "the actual blocked attempt did not consume the callback once"
+    );
+    assert!(REBUILD_STATUS_BLOCKED.with(|hook| hook.borrow().is_none()));
+    assert!(p.join("knowledge.db").exists());
+    let released = std::fs::File::open(path).unwrap();
+    until("the rebuild status lock is released", || {
+        released.try_lock().is_ok()
+    });
+}
+
+/// A waiting worker wakes for a new op of its device as for a record (an owner's correction
+/// appends only an op), so it is applied before the wait ends, not after.
+#[test]
+fn a_worker_picks_up_ops_that_arrive_while_it_waits() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let device = {
+        let mut raw = raw::open(&p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        raw.device().to_owned()
+    };
+    let writer = {
+        let p = p.clone();
+        let device = device.clone();
+        std::thread::spawn(move || {
+            // Once the worker has drained what was there and waits.
+            while knowledge::open(&p)
+                .and_then(|k| checkpoint::get(&k, "seen", &device))
+                .unwrap_or(0)
+                < 1
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            let mut raw = raw::open(&p).unwrap();
+            raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])
+                .unwrap();
+        })
+    };
+    // What the op consumer had passed when the first wait ended (a worker that finds more
+    // after it released the lock takes it again and waits once more).
+    let at_exit = std::cell::Cell::new(None);
+    let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+    run_with(&p, 2_000, consumers, || {
+        let k = knowledge::open(&p).unwrap();
+        let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device).unwrap();
+        at_exit.set(at_exit.get().or(Some(passed)));
+    })
+    .unwrap();
+    writer.join().unwrap();
+    assert_eq!(at_exit.get(), Some(1));
+}
+
+/// An op that lands after the consumers drained and before the worker waits (here from the
+/// phase) still wakes it: the wait compares with what the pass read, not with what came after.
+#[test]
+fn an_op_that_lands_between_the_pass_and_the_wait_wakes_the_worker() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let device = {
+        let mut raw = raw::open(&p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+        raw.device().to_owned()
+    };
+    let mut appended = false;
+    let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
+        if !appended {
+            appended = true;
+            raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])?;
+        }
+        Ok(Phase::Idle)
+    };
+    let at_exit = std::cell::Cell::new(None);
+    let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+    let held = lock(&p).unwrap();
+    run_holding(
+        &p,
+        2_000,
+        consumers,
+        || {
+            let k = knowledge::open(&p).unwrap();
+            let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device);
+            at_exit.set(at_exit.get().or(Some(passed.unwrap())));
+        },
+        held,
+        curating(&mut phase),
+    )
+    .unwrap();
+    assert_eq!(at_exit.get(), Some(1));
+}
+
+#[test]
+fn a_worker_picks_up_records_that_arrive_while_it_waits() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    raw::open(&p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let writer = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            raw::open(&p)
+                .unwrap()
+                .append(&raw::test_event("second"))
+                .unwrap();
+        })
+    };
+    run_with(&p, 1_500, vec![Box::new(Seen)], || {}).unwrap();
+    writer.join().unwrap();
+    let device = raw::open(&p).unwrap().device().to_owned();
+    let k = knowledge::open(&p).unwrap();
+    assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
+    assert_eq!(seen(&k), vec![1, 2]);
+}
+
+/// R14: a worker that leaves notes why for doctor and when for `status`, and nothing in a home
+/// that is not its own.
+#[test]
+fn a_worker_that_leaves_notes_why_and_when_in_its_own_home() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let held = lock(p).unwrap().unwrap();
+    let id = file_id(held.0.metadata());
+    note(p, held.1, STOPPED);
+    left(p, Some((0, 0)), 31);
+    assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
+    assert!(left_line(p).is_none());
+    left(p, id, 31);
+    assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(NO_PROGRESS));
+    assert!(
+        left_line(p).is_some_and(|l| l.contains("after 15 min without progress")),
+        "{:?}",
+        left_line(p)
+    );
+    drop(held);
+    assert!(last_failure(p).is_some_and(|why| why == NO_PROGRESS));
+}
+
+/// One record a batch, 30 ms each: a backlog that takes many batches.
+struct Slow;
+impl Consumer for Slow {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    fn step(&mut self, raw: &Raw, _k: &Connection, _device: &str, after: i64) -> Result<i64> {
+        std::thread::sleep(Duration::from_millis(30));
+        Ok(raw
+            .after(raw.device(), after, 1)?
+            .last()
+            .map_or(after, |r| r.seq))
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// R14: a worker marks each round, batch and tick of its waits, so neither a long backlog nor
+/// a long wait counts as stuck. Its watchdog here looks every 10 ms and allows 80 looks
+/// (800 ms): 30 batches of 30 ms, then a wait of 2 s whose ticks are 200 ms apart.
+#[test]
+fn neither_a_long_backlog_nor_a_wait_is_stuck() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..30 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    drop(raw);
+    let (tx, stuck) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let watched = crate::watchdog::Watched::here();
+        let _watch = crate::watchdog::watch(
+            watched,
+            Duration::from_millis(10),
+            80,
+            |_| {},
+            move |n| {
+                let _ = tx.send(n);
+            },
+        );
+        run_with(&p, 2_000, vec![Box::new(Slow)], || {})
+    });
+    worker.join().unwrap().unwrap();
+    assert!(
+        stuck.try_recv().is_err(),
+        "a backlog or a wait counted as stuck"
+    );
+}
+
+/// R14: the watchdog only tries the note's lock, as the loop it ends may hold it: it says when
+/// it left, and goes, without the note.
+#[test]
+fn a_worker_that_leaves_does_not_wait_for_the_notes_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let held = lock(p).unwrap().unwrap();
+    let id = file_id(held.0.metadata());
+    note(p, held.1, STOPPED);
+    let busy = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(p.join("state/worker-note.lock"))
+        .unwrap();
+    busy.lock().unwrap();
+    left(p, id, 31);
+    assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
+    assert!(left_line(p).is_some());
+    drop(busy);
+    drop(held);
+}
+
+/// R16: where `[worker] autostart = false` loads, `status` says that no hook starts a worker,
+/// while none runs and beside a running one (#678).
+#[test]
+fn status_says_no_hook_starts_one_where_autostart_is_off() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nautostart = false\n").unwrap();
+    assert_eq!(
+        status_lines(p),
+        ["worker: not running now (no hook starts one: [worker] autostart = false)"]
+    );
+    let held = lock(p).unwrap().unwrap();
+    assert_eq!(
+        status_lines(p),
+        [
+            "worker: running",
+            "worker: when it stops, no hook starts one ([worker] autostart = false)"
+        ]
+    );
+    std::fs::write(p.join("config.toml"), "").unwrap();
+    assert_eq!(status_lines(p), ["worker: running"]);
+    drop(held);
+}
+
+/// R15: `status` says whether a worker holds the lock, and what its watchdog last wrote only
+/// while that is fresh.
+#[test]
+fn status_reads_the_lock_and_a_fresh_progress_file() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    assert_eq!(
+        status_lines(p),
+        ["worker: not running now (the next hook starts it)"]
+    );
+    let held = lock(p).unwrap().unwrap();
+    let id = file_id(held.0.metadata());
+    assert_eq!(status_lines(p), ["worker: running"]);
+    write_progress(p, id, 0);
+    let pid = std::process::id();
+    assert_eq!(
+        status_lines(p),
+        [format!("worker: running (process {pid}), making progress")]
+    );
+    write_progress(p, id, 31);
+    assert_eq!(
+        status_lines(p),
+        [format!(
+            "worker: running (process {pid}), no progress for 15 min"
+        )]
+    );
+    // One a watchdog has not rewritten for two looks says nothing more than the lock.
+    let old = std::time::SystemTime::now() - crate::watchdog::EVERY * 3;
+    std::fs::File::options()
+        .write(true)
+        .open(p.join("state/worker-progress"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(status_lines(p), ["worker: running"]);
+    // Nor in another home's place.
+    write_progress(p, Some((0, 0)), 0);
+    assert_eq!(status_lines(p), ["worker: running"]);
+    drop(held);
+}
+
+// docs/resident.md: a worker that stays (R2, R3, R10, R12).
+
+/// A resident worker over `Seen` in a thread, with a short idle time: what `oboete worker`
+/// runs in a home whose config.toml says `resident = true`.
+#[cfg(target_os = "linux")]
+fn resident(p: &Path, idle_ms: u64) -> std::thread::JoinHandle<Result<()>> {
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let p = p.to_path_buf();
+    std::thread::spawn(move || {
+        let held = lock(&p)?;
+        let phases = Phases {
+            yields: true,
+            resident: true,
+            ..Phases::default()
+        };
+        run_holding(&p, idle_ms, vec![Box::new(Seen)], || {}, held, phases)
+    })
+}
+
+/// Waits up to 10 s for `done`.
+fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let t = Instant::now();
+    while !done() {
+        assert!(t.elapsed() < Duration::from_secs(10), "never: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A command's request to step aside, as a test makes one: the file, its folder made.
+fn yield_request(home: &Path) -> std::path::PathBuf {
+    let dir = yield_requests(home);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("test")
+}
+
+/// A session's flags last changed longer ago than a prune keeps them.
+#[cfg(target_os = "linux")]
+fn stale_flags(p: &Path) -> std::path::PathBuf {
+    let old = p.join("state").join("hooks").join("claude").join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    let long_ago = std::time::SystemTime::now() - crate::hookstate::KEEP - Duration::from_secs(60);
+    let dir = std::fs::File::open(&old).unwrap();
+    dir.set_modified(long_ago).unwrap();
+    old
+}
+
+/// Milestone 5 (docs/milestone-5-plan.md): raw.db put back to an old copy under a resident
+/// worker is opened again at its next check, so it reads the file hooks now write (and the
+/// forget logs are reconciled into it), not the one it held.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("first")).unwrap();
+    let device = raw.device().to_owned();
+    drop(raw);
+    // The copy holds the record: what the WAL kept is written into the file first.
+    rusqlite::Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    let old = p.join("raw-old.db");
+    std::fs::copy(p.join("raw.db"), &old).unwrap();
+    let worker = resident(p, 100);
+    let seen = |device: &str, n: i64| {
+        knowledge::open(p)
+            .ok()
+            .and_then(|k| checkpoint::get(&k, "seen", device).ok())
+            == Some(n)
+    };
+    until("the first record read", || seen(&device, 1));
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("second"))
+        .unwrap();
+    until("the second record read", || seen(&device, 2));
+    // The old copy takes raw.db's place, as a restore by hand would put it.
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(p.join(f));
+    }
+    let staged = p.join("raw.db.copy");
+    std::fs::copy(&old, &staged).unwrap();
+    std::fs::rename(&staged, p.join("raw.db")).unwrap();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("after the copy")).unwrap();
+    raw.append(&raw::test_event("and one more")).unwrap();
+    // A file put in raw.db's place is another device's (docs/cards.md S3).
+    let copy = raw.device().to_owned();
+    let last = raw.max_seq().unwrap();
+    drop(raw);
+    until("the replaced file read", || seen(&copy, last));
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// R3: at its idle time a resident worker backs up and prunes as a worker does before it
+/// exits, keeps the lock and waits. It does so again only after a round, and it exits at the
+/// idle time that finds `resident` turned off.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_stays_when_idle_until_its_config_says_otherwise() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("first")).unwrap();
+    let old = stale_flags(p);
+    let worker = resident(p, 100);
+    let segments = || std::fs::read_dir(p.join("backups")).map_or(0, |d| d.count());
+    // Its first idle step: the backup, then the prune.
+    until("the first idle step", || !old.exists());
+    let exported = segments();
+    assert!(exported > 0, "no backup at the idle time");
+    // Idle times pass with no round: it stays, and does that work only once.
+    let old = stale_flags(p);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(running(p) && !worker.is_finished(), "it left when idle");
+    assert!(old.exists(), "pruned again with no round since");
+    // A round, then its idle step.
+    raw.append(&raw::test_event("second")).unwrap();
+    until("the idle step after a round", || !old.exists());
+    assert!(segments() > exported);
+    // Turned off: it exits at its next idle time.
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(!running(p));
+}
+
+/// Codex on #507: a batch a consumer puts off (the rescan, when the dispatch hold is busy) is
+/// run again by a resident worker at its idle time, with no new record to wake it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_runs_a_put_off_batch_again_at_its_idle_time() {
+    struct PutOff(bool);
+    impl Consumer for PutOff {
+        fn name(&self) -> &'static str {
+            "put-off"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+            if !std::mem::replace(&mut self.0, true) {
+                return Ok(after);
+            }
             Ok(raw
-                .after(raw.device(), after, 1)?
+                .after(raw.device(), after, 100)?
                 .last()
                 .map_or(after, |r| r.seq))
         }
@@ -2958,137 +3232,1147 @@
             Ok(())
         }
     }
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("first")).unwrap();
+    let device = raw.device().to_owned();
+    drop(raw);
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let at = p.to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let held = lock(&at)?;
+        let phases = Phases {
+            yields: true,
+            resident: true,
+            ..Phases::default()
+        };
+        run_holding(&at, 100, vec![Box::new(PutOff(false))], || {}, held, phases)
+    });
+    until("the put-off batch read", || {
+        knowledge::open(p)
+            .ok()
+            .and_then(|k| checkpoint::get(&k, "put-off", &device).ok())
+            == Some(1)
+    });
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
 
-    /// R14: a worker marks each round, batch and tick of its waits, so neither a long backlog nor
-    /// a long wait counts as stuck. Its watchdog here looks every 10 ms and allows 80 looks
-    /// (800 ms): 30 batches of 30 ms, then a wait of 2 s whose ticks are 200 ms apart.
-    #[test]
-    fn neither_a_long_backlog_nor_a_wait_is_stuck() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        let mut raw = raw::open(&p).unwrap();
-        for i in 0..30 {
-            raw.append(&raw::test_event(&format!("record {i}")))
-                .unwrap();
+/// Codex on #507: a resident worker whose config.toml stops saying `resident = true` leaves at
+/// its idle time even while a consumer keeps putting its batch off (R3): the batch put off does
+/// not start a round before the switch is read.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_turned_off_leaves_while_a_batch_stays_put_off() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct PutOff(Arc<AtomicBool>);
+    impl Consumer for PutOff {
+        fn name(&self) -> &'static str {
+            "put-off"
         }
-        drop(raw);
-        let (tx, stuck) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let watched = crate::watchdog::Watched::here();
-            let _watch = crate::watchdog::watch(
-                watched,
-                Duration::from_millis(10),
-                80,
-                |_| {},
-                move |n| {
-                    let _ = tx.send(n);
-                },
-            );
-            run_with(&p, 2_000, vec![Box::new(Slow)], || {})
-        });
-        worker.join().unwrap().unwrap();
-        assert!(
-            stuck.try_recv().is_err(),
-            "a backlog or a wait counted as stuck"
-        );
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+            if !self.0.load(Ordering::SeqCst) {
+                return Ok(after);
+            }
+            Ok(raw
+                .after(raw.device(), after, 100)?
+                .last()
+                .map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
     }
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let free = Arc::new(AtomicBool::new(false));
+    let left = Arc::new(AtomicBool::new(false));
+    let (at, consumer, exited) = (p.to_path_buf(), PutOff(free.clone()), left.clone());
+    let worker = std::thread::spawn(move || {
+        let held = lock(&at)?;
+        let phases = Phases {
+            yields: true,
+            resident: true,
+            ..Phases::default()
+        };
+        let before_exit = move || exited.store(true, Ordering::SeqCst);
+        run_holding(
+            &at,
+            100,
+            vec![Box::new(consumer)],
+            before_exit,
+            held,
+            phases,
+        )
+    });
+    // A few idle times pass with the batch put off each time.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!left.load(Ordering::SeqCst), "it left while resident");
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    until("the worker leaving resident mode", || {
+        left.load(Ordering::SeqCst)
+    });
+    free.store(true, Ordering::SeqCst);
+    worker.join().unwrap().unwrap();
+}
 
-    /// R14: the watchdog only tries the note's lock, as the loop it ends may hold it: it says when
-    /// it left, and goes, without the note.
-    #[test]
-    fn a_worker_that_leaves_does_not_wait_for_the_notes_lock() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let held = lock(p).unwrap().unwrap();
-        let id = file_id(held.0.metadata());
-        note(p, held.1, STOPPED);
-        let busy = std::fs::OpenOptions::new()
+/// R2: only `oboete worker` started with no `--idle-ms` follows `[worker] resident`. With one
+/// it exits when idle whatever the file says, and the commands that borrow its loop return.
+/// R3: a config.toml that does not load leaves a resident worker as it is, and makes none.
+#[cfg(target_os = "linux")]
+#[test]
+fn only_a_worker_started_with_no_idle_time_follows_the_resident_switch() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let config = |text: &str| {
+        // The fixture publishes a complete snapshot. In-place truncation briefly exposes
+        // an empty valid config (resident=false), rather than the intended malformed one.
+        let staged = p.join("config.toml.next");
+        std::fs::write(&staged, text).unwrap();
+        std::fs::rename(staged, p.join("config.toml")).unwrap();
+    };
+    let hooks = |p: &Path| {
+        let p = p.to_path_buf();
+        std::thread::spawn(move || run_as(&p, 100, true))
+    };
+    config("[worker]\nresident = true\n");
+    run(p, 50).unwrap();
+    run_once(p).unwrap();
+    rebuild(p).unwrap();
+    let worker = hooks(p);
+    until("it holds the lock", || running(p));
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!worker.is_finished(), "it left a resident home when idle");
+    config("[worker\n");
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!worker.is_finished(), "a file that does not load ended it");
+    config("[worker]\nresident = false\n");
+    worker.join().unwrap().unwrap();
+    // Started while the file does not load: not resident.
+    config("[worker\n");
+    let worker = hooks(p);
+    until("a worker with no readable switch exits", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+}
+
+/// R3: no hook starts a resident worker again, so it is up for every wait of a phase, not
+/// only D10's short ones. The phase runs again at the time it named, not at each idle time,
+/// and the idle step is taken while it waits.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_runs_a_phase_again_at_the_time_it_waits_for() {
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("first")).unwrap();
+    let polls = std::sync::Arc::new(AtomicUsize::new(0));
+    // The first wait's end and the second poll, by the clock the worker waits by: a step of
+    // the system clock moves both.
+    let (due, again) = (
+        std::sync::Arc::new(AtomicI64::new(0)),
+        std::sync::Arc::new(AtomicI64::new(0)),
+    );
+    let worker = {
+        let (p, polls) = (p.to_path_buf(), polls.clone());
+        let (first, second) = (due.clone(), again.clone());
+        std::thread::spawn(move || {
+            let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                // First a wait of three idle times, then a long one; neither keeps a worker
+                // up that is not resident.
+                let now = crate::db::now_ms();
+                let wait = match polls.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        first.store(now + 300, Ordering::SeqCst);
+                        300
+                    }
+                    1 => {
+                        second.store(now, Ordering::SeqCst);
+                        600_000
+                    }
+                    _ => 600_000,
+                };
+                Ok(Phase::Waiting {
+                    until: now + wait,
+                    up: false,
+                })
+            };
+            let phases = Phases {
+                curation: Some(&mut phase),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    until("the phase ran again", || polls.load(Ordering::SeqCst) > 1);
+    assert!(
+        again.load(Ordering::SeqCst) >= due.load(Ordering::SeqCst),
+        "the phase ran again before its time"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(polls.load(Ordering::SeqCst), 2, "a round at each idle time");
+    assert!(
+        std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
+        "no idle step while a phase waits"
+    );
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
+/// says all is well, so that kill is no alarm; during a round it says "stopped", as before.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_workers_outcome_is_clean_while_it_waits_and_not_during_a_round() {
+    use std::sync::mpsc::channel;
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(p).unwrap();
+    raw.append(&raw::test_event("first")).unwrap();
+    let (entered, in_round) = channel();
+    let (go_on, gate) = channel::<()>();
+    let worker = {
+        let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let mut rounds = 0;
+            // The second round stops in its phase until the test lets it go on.
+            let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                rounds += 1;
+                if rounds == 2 {
+                    entered.send(()).ok();
+                    gate.recv().ok();
+                }
+                Ok(Phase::Idle)
+            };
+            let phases = Phases {
+                curation: Some(&mut phase),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    let waits = || outcome(p).is_some_and(|(_, why)| why.is_empty()) && running(p);
+    until("a clean outcome while it waits", waits);
+    raw.append(&raw::test_event("second")).unwrap();
+    in_round
+        .recv_timeout(Duration::from_secs(10))
+        .expect("no second round");
+    assert_eq!(
+        outcome(p).unwrap().1,
+        STOPPED,
+        "a round under a clean outcome"
+    );
+    go_on.send(()).unwrap();
+    until("a clean outcome after the round", waits);
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// R3: a home removed and made again is not the home this worker locked. It stops at its next
+/// write by path and leaves the new home as it found it: no backup, no outcome, and its
+/// stores with their `-wal` and `-shm` files (SQLite removes those by name when a store's
+/// last connection closes, but not once the store's file is no longer at its path).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_whose_home_was_replaced_leaves_the_new_one_alone() {
+    let _contending = contending();
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    {
+        let mut raw = raw::open(&p).unwrap();
+        raw.append(&raw::test_event("first")).unwrap();
+    }
+    let worker = resident(&p, 300);
+    // It waits, its idle step still before it.
+    until("it waits", || {
+        outcome(&p).is_some_and(|(_, why)| why.is_empty())
+    });
+    std::fs::remove_dir_all(&p).unwrap();
+    // The new home has a lock file of its own: the same path, another file.
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+    let mut made = vec!["config.toml".to_owned(), "state".to_owned()];
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    for store in ["raw.db", "knowledge.db"] {
+        for ext in ["", "-wal", "-shm"] {
+            std::fs::write(p.join(format!("{store}{ext}")), "the new home's").unwrap();
+            made.push(format!("{store}{ext}"));
+        }
+    }
+    until("the old worker stops", || worker.is_finished());
+    let why = worker.join().unwrap().unwrap_err();
+    assert!(why.is::<Gone>(), "{why:#}");
+    let mut left: Vec<String> = std::fs::read_dir(&p)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    made.sort();
+    assert_eq!(left, made, "the old worker changed the new home");
+    let state = std::fs::read_dir(p.join("state")).unwrap().count();
+    assert_eq!(
+        state, 1,
+        "the old worker wrote its outcome into the new home"
+    );
+}
+
+/// R12: a command that needs the worker lock asks the worker that holds it to step aside.
+/// #855: a worker a command asked before its first round steps aside there, and says so.
+#[test]
+fn a_worker_asked_before_its_round_says_it_stepped_aside() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(yield_request(p), "").unwrap();
+    let phases = Phases {
+        yields: true,
+        ..Phases::default()
+    };
+    run_holding(
+        p,
+        600_000,
+        vec![Box::new(Seen)],
+        || {},
+        lock(p).unwrap(),
+        phases,
+    )
+    .unwrap();
+    assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
+    assert!(last_failure(p).is_none());
+}
+
+/// #855: curation is paused while a rebuild or a rewrite of the stored records holds its lock,
+/// since the time set on it as its modification time; a lock not held is no pause, whatever its
+/// time. A rebuild and the purge's lock set it when they take their lock.
+#[test]
+fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    assert_eq!(curation_pause(p), None);
+    assert_eq!(paused_line(p), None);
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    // Taken as a rebuild or a purge takes it, its time set through the handle that holds it, as
+    // Windows allows.
+    let held = |name: &str, ms: u64| {
+        let path = p.join("state").join(name);
+        let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(p.join("state/worker-note.lock"))
+            .open(&path)
             .unwrap();
-        busy.lock().unwrap();
-        left(p, id, 31);
-        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(STOPPED));
-        assert!(left_line(p).is_some());
-        drop(busy);
-        drop(held);
-    }
-
-    /// R16: where `[worker] autostart = false` loads, `status` says that no hook starts a worker,
-    /// while none runs and beside a running one (#678).
-    #[test]
-    fn status_says_no_hook_starts_one_where_autostart_is_off() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nautostart = false\n").unwrap();
-        assert_eq!(
-            status_lines(p),
-            ["worker: not running now (no hook starts one: [worker] autostart = false)"]
-        );
-        let held = lock(p).unwrap().unwrap();
-        assert_eq!(
-            status_lines(p),
-            [
-                "worker: running",
-                "worker: when it stops, no hook starts one ([worker] autostart = false)"
-            ]
-        );
-        std::fs::write(p.join("config.toml"), "").unwrap();
-        assert_eq!(status_lines(p), ["worker: running"]);
-        drop(held);
-    }
-
-    /// R15: `status` says whether a worker holds the lock, and what its watchdog last wrote only
-    /// while that is fresh.
-    #[test]
-    fn status_reads_the_lock_and_a_fresh_progress_file() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        assert_eq!(
-            status_lines(p),
-            ["worker: not running now (the next hook starts it)"]
-        );
-        let held = lock(p).unwrap().unwrap();
-        let id = file_id(held.0.metadata());
-        assert_eq!(status_lines(p), ["worker: running"]);
-        write_progress(p, id, 0);
-        let pid = std::process::id();
-        assert_eq!(
-            status_lines(p),
-            [format!("worker: running (process {pid}), making progress")]
-        );
-        write_progress(p, id, 31);
-        assert_eq!(
-            status_lines(p),
-            [format!(
-                "worker: running (process {pid}), no progress for 15 min"
-            )]
-        );
-        // One a watchdog has not rewritten for two looks says nothing more than the lock.
-        let old = std::time::SystemTime::now() - crate::watchdog::EVERY * 3;
-        std::fs::File::options()
-            .write(true)
-            .open(p.join("state/worker-progress"))
+        lock.lock().unwrap();
+        lock.set_modified(std::time::UNIX_EPOCH + Duration::from_millis(ms))
+            .unwrap();
+        lock
+    };
+    let rebuild = held("rebuild.lock", 1_700_000_000_000);
+    assert_eq!(
+        curation_pause(p),
+        Some(("rebuild", Some(1_700_000_000_000)))
+    );
+    // #871: with curation off (the default) nothing waits, so doctor names the rebuild alone.
+    assert_eq!(
+        paused_line(p).as_deref(),
+        Some("knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
+    );
+    std::fs::write(p.join("config.toml"), "[summary\n").unwrap();
+    assert!(
+        paused_line(p)
             .unwrap()
-            .set_modified(old)
-            .unwrap();
-        assert_eq!(status_lines(p), ["worker: running"]);
-        // Nor in another home's place.
-        write_progress(p, Some((0, 0)), 0);
-        assert_eq!(status_lines(p), ["worker: running"]);
-        drop(held);
+            .starts_with("curation is paused while"),
+        "a config.toml that does not load"
+    );
+    std::fs::write(p.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
+    assert_eq!(
+        paused_line(p).as_deref(),
+        Some("curation is paused while knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
+    );
+    drop(rebuild);
+    assert_eq!(curation_pause(p), None, "a stamped lock not held");
+    // A purge's rebuild: both held, the rebuild named, since the purge's earlier time.
+    let both = held("rebuild.lock", 1_700_000_120_000);
+    let purging = held("purge.lock", 1_700_000_060_000);
+    assert_eq!(
+        curation_pause(p),
+        Some(("rebuild", Some(1_700_000_060_000)))
+    );
+    drop((both, purging));
+    let rewrite = held("purge.lock", 1_700_000_060_000);
+    assert_eq!(
+        curation_pause(p),
+        Some(("rewrite", Some(1_700_000_060_000)))
+    );
+    assert!(
+        paused_line(p)
+            .unwrap()
+            .ends_with("(a forget, the retention period or new masks), since 2023-11-14 22:14 UTC")
+    );
+    drop(rewrite);
+    // The purge's lock stamps its file when it takes it.
+    let before = crate::db::now_ms();
+    let purge = crate::forget::purge_lock(p).unwrap().unwrap();
+    let (kind, since) = curation_pause(p).unwrap();
+    assert!(
+        kind == "rewrite" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
+    );
+    drop(purge);
+    // And a rebuild while it fills the new store, an old one set aside.
+    drop(raw::open(p).unwrap());
+    drop(knowledge::open(p).unwrap());
+    let shown = preview_rebuild(p).unwrap();
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let during = seen.clone();
+    let home_path = p.to_path_buf();
+    AFTER_CARRY.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || during.set(curation_pause(&home_path))))
+    });
+    let before = crate::db::now_ms();
+    rebuild_report(
+        p,
+        Some(&shown.key),
+        crate::executable::CommandCaller::Worker,
+        &mut |_| {},
+    )
+    .unwrap();
+    let (kind, since) = seen.get().unwrap();
+    assert!(
+        kind == "rebuild" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
+    );
+    // The rebuild has let its lock go, but a child that another test's thread forked holds the
+    // open file until it execs (`run_once`): the pause ends once that child has.
+    until("the pause ends with the rebuild", || {
+        curation_pause(p).is_none()
+    });
+}
+
+/// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_steps_aside_for_a_command_that_needs_the_lock() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    // An idle time it never reaches: the backup below is the one it makes as it lets go.
+    let worker = resident(p, 600_000);
+    until("it waits", || {
+        outcome(p).is_some_and(|(_, why)| why.is_empty())
+    });
+    assert!(!p.join("backups").exists());
+    let held = lock_asking(p).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(
+        std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
+        "it let go without a backup"
+    );
+    assert!(!asked_aside(p));
+    // #855: it says it stepped aside, which is no failure.
+    assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
+    assert!(last_failure(p).is_none());
+    drop(held);
+    // `oboete rebuild` is such a command: it swaps knowledge.db as soon as it has the lock,
+    // so the worker's stores are closed by then.
+    // The next worker's own taking of the lock, not one a forked child still holds open.
+    let last = outcome(p).unwrap().0;
+    let worker = resident(p, 600_000);
+    until("the next worker waits", || {
+        outcome(p).is_some_and(|(taken, why)| taken > last && why.is_empty())
+    });
+    rebuild(p).unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// R12: a request left by a command that died is not obeyed for ever: after a minute it is
+/// ignored. A new one is obeyed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_request_to_step_aside_older_than_a_minute_is_ignored() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let ask = yield_request(p);
+    std::fs::write(&ask, "").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(61);
+    let file = std::fs::File::options().write(true).open(&ask).unwrap();
+    file.set_modified(old).unwrap();
+    let worker = resident(p, 100);
+    until("it holds the lock", || running(p));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!worker.is_finished(), "it obeyed a request a minute old");
+    std::fs::write(&ask, "").unwrap();
+    until("it obeys a new request", || worker.is_finished());
+    worker.join().unwrap().unwrap();
+}
+
+/// R3: a setting the owner changes is followed without a new record. At its idle time a
+/// resident worker that finds config.toml changed starts a round; otherwise it starts none.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_starts_a_round_when_config_toml_changed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let rounds = std::sync::Arc::new(AtomicUsize::new(0));
+    let worker = {
+        let (p, rounds) = (p.to_path_buf(), rounds.clone());
+        std::thread::spawn(move || {
+            let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                rounds.fetch_add(1, Ordering::SeqCst);
+                Ok(Phase::Idle)
+            };
+            let phases = Phases {
+                curation: Some(&mut phase),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    until("its first round", || rounds.load(Ordering::SeqCst) > 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rounds.load(Ordering::SeqCst), 1, "a round with nothing new");
+    let changed = "[worker]\nresident = true\n[summary]\ncurate = false\n";
+    // Published whole: written in place, the file is empty for a moment, which reads as
+    // `resident = false`, and a worker that reads it then leaves at its idle step (#462).
+    let staged = p.join("config.toml.next");
+    std::fs::write(&staged, changed).unwrap();
+    std::fs::rename(staged, p.join("config.toml")).unwrap();
+    // A worker that left says why (#462).
+    until("a round after the change", || {
+        rounds.load(Ordering::SeqCst) > 1 || worker.is_finished()
+    });
+    assert!(
+        !worker.is_finished() || rounds.load(Ordering::SeqCst) > 1,
+        "the worker left before the change: {:?}",
+        worker.join()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        rounds.load(Ordering::SeqCst),
+        2,
+        "a round at each idle time since"
+    );
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// `p` removed and made again, with a lock file of its own. The old lock file lives on under
+/// another name beside it: a file made after it is freed can get its inode number back and
+/// read as the same file (docs/resident.md, Limits).
+#[cfg(target_os = "linux")]
+fn replace_home(p: &Path) {
+    let _ = std::fs::hard_link(
+        p.join("state").join("worker.lock"),
+        p.with_extension("old-lock"),
+    );
+    std::fs::remove_dir_all(p).unwrap();
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+}
+
+/// R3 with a restore asked for: a home replaced while the worker waits, which asks for a
+/// restore, gets no outcome from the worker opening its stores again (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_home_that_asks_for_a_restore_gets_no_outcome() {
+    let _contending = contending();
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    raw::open(&p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let worker = resident(&p, 300);
+    until("it waits", || {
+        outcome(&p).is_some_and(|(_, why)| why.is_empty())
+    });
+    // As `replace_home`, the request written before the lock file.
+    let _ = std::fs::hard_link(
+        p.join("state").join("worker.lock"),
+        p.with_extension("old-lock"),
+    );
+    std::fs::remove_dir_all(&p).unwrap();
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    crate::backup::request_restore(&p);
+    std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
+    until("the old worker stops", || worker.is_finished());
+    let why = worker.join().unwrap().unwrap_err();
+    assert!(why.is::<Gone>(), "{why:#}");
+    let mut state: Vec<_> = std::fs::read_dir(p.join("state"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    state.sort();
+    assert_eq!(
+        state,
+        ["restore-wanted", "worker.lock"],
+        "written into the new home"
+    );
+}
+
+/// R3 at the first taking: a lock taken in a home replaced before the run records it gets
+/// the run's outcome nowhere (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_lock_taken_before_the_home_was_replaced_writes_nothing_into_the_new_one() {
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    raw::open(&p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let held = lock(&p).unwrap().unwrap();
+    replace_home(&p);
+    let why = run_holding(
+        &p,
+        0,
+        vec![Box::new(Seen)],
+        || {},
+        Some(held),
+        Phases::default(),
+    )
+    .unwrap_err();
+    assert!(why.is::<Gone>(), "{why:#}");
+    let state: Vec<_> = std::fs::read_dir(p.join("state"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(state, ["worker.lock"], "written into the new home");
+}
+
+/// R3 while the lock is taken: a home replaced after its lock file was opened gets no lock
+/// number, and the lock is not given (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_home_replaced_while_its_lock_is_taken_gets_no_lock_number() {
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    AFTER_OPEN.set(Some(replace_home));
+    let got = lock(&p);
+    AFTER_OPEN.set(None);
+    assert!(got.unwrap().is_none());
+    let state: Vec<_> = std::fs::read_dir(p.join("state"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(state, ["worker.lock"], "written into the new home");
+}
+
+/// R3 after the lock is released: a home replaced while a worker makes its last check gets
+/// no outcome and no lock number from it (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn no_outcome_goes_into_a_home_replaced_as_the_worker_exits() {
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    raw::open(&p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut once = true;
+    let why = run_with(&p, 0, vec![Box::new(Seen)], || {
+        if std::mem::take(&mut once) {
+            replace_home(&p);
+        }
+    })
+    .unwrap_err();
+    assert!(why.is::<Gone>(), "{why:#}");
+    let state: Vec<_> = std::fs::read_dir(p.join("state"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(state, ["worker.lock"], "written into the new home");
+}
+
+/// A consumer that replaces the home in its first step and reports progress each time.
+#[cfg(target_os = "linux")]
+struct Replaces(
+    std::path::PathBuf,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+);
+#[cfg(target_os = "linux")]
+impl Consumer for Replaces {
+    fn name(&self) -> &'static str {
+        "replaces"
     }
+    fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+        if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            replace_home(&self.0);
+        }
+        Ok((after + 1).min(raw.max_seq()?))
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
 
-    // docs/resident.md: a worker that stays (R2, R3, R10, R12).
+/// Stamps raw.db with a newer format in its first step (docs/store-format.md), counting steps.
+struct StampsNewer(
+    std::path::PathBuf,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+);
+impl Consumer for StampsNewer {
+    fn name(&self) -> &'static str {
+        "stamps-newer"
+    }
+    fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
+        if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            Connection::open(self.0.join("raw.db"))?
+                .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))?;
+        }
+        Ok((after + 1).min(raw.max_seq()?))
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
 
-    /// A resident worker over `Seen` in a thread, with a short idle time: what `oboete worker`
-    /// runs in a home whose config.toml says `resident = true`.
-    #[cfg(target_os = "linux")]
-    fn resident(p: &Path, idle_ms: u64) -> std::thread::JoinHandle<Result<()>> {
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+/// docs/store-format.md (Codex on #503): a newer oboete's stamp made while a worker drains a
+/// backlog stops it at the next batch, before the backup's deadline, not at the round's end.
+#[test]
+fn a_drain_stops_at_the_next_batch_once_a_newer_oboete_stamps_raw_db() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    {
+        let mut raw = raw::open(p).unwrap();
+        for text in ["a", "b", "c"] {
+            raw.append(&raw::test_event(text)).unwrap();
+        }
+    }
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let consumers: Vec<Box<dyn Consumer>> =
+        vec![Box::new(StampsNewer(p.to_owned(), steps.clone()))];
+    let why = run_consumers(p, 0, consumers).unwrap_err();
+    assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+    assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// R3 within a drain: the rescan opens raw.db by its path in each step, so a home replaced
+/// during a long drain is noticed between two batches, not only at the next round (Codex on
+/// #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_drain_stops_between_batches_when_its_home_was_replaced() {
+    let parent = tempfile::tempdir().unwrap();
+    let p = parent.path().join("home");
+    std::fs::create_dir(&p).unwrap();
+    {
+        let mut raw = raw::open(&p).unwrap();
+        for text in ["a", "b", "c"] {
+            raw.append(&raw::test_event(text)).unwrap();
+        }
+    }
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Replaces(p.clone(), steps.clone()))];
+    let why = run_consumers(&p, 0, consumers).unwrap_err();
+    assert!(why.is::<Gone>(), "{why:#}");
+    assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// R10 and R12 with an embedding call out: the worker is not waiting. Its outcome keeps
+/// saying stopped, and it steps aside only once the call's answer is settled, which the call
+/// was paid for (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_embedding_call_that_is_out_is_work_in_flight() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut embed = crate::embed_phase::Phase::new(p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    let worker = {
         let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    let device = raw::open(p).unwrap().device().to_owned();
+    until("the first round", || {
+        knowledge::open(p)
+            .and_then(|k| checkpoint::get(&k, "seen", &device))
+            .is_ok_and(|at| at == 1)
+    });
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(outcome(p).unwrap().1, STOPPED, "clean with a call out");
+    std::fs::write(yield_request(p), "").unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(!worker.is_finished(), "it left a call unsettled");
+    release.send(()).unwrap();
+    until("it steps aside once the call is settled", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+    assert!(last_failure(p).is_none());
+}
+
+/// R3 with an embedding call out: a worker whose config.toml stops saying `resident = true`
+/// leaves once the call's answer is settled, not at the next idle time (CodeRabbit on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_told_to_leave_settles_its_embedding_call_first() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut embed = crate::embed_phase::Phase::new(p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    let worker = {
+        let p = p.to_path_buf();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    let device = raw::open(p).unwrap().device().to_owned();
+    until("the first round", || {
+        knowledge::open(p)
+            .and_then(|k| checkpoint::get(&k, "seen", &device))
+            .is_ok_and(|at| at == 1)
+    });
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    // Several idle times.
+    std::thread::sleep(Duration::from_millis(1_200));
+    assert!(!worker.is_finished(), "it left a call unsettled");
+    release.send(()).unwrap();
+    until("it leaves once the call is settled", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+    assert!(last_failure(p).is_none());
+}
+
+/// R12 with more to embed: a worker asked to step aside settles the call that is out and
+/// sends no other, so a backlog of batches and queries cannot keep a command waiting (Codex
+/// on #359, second round).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_asked_to_step_aside_sends_no_new_embedding_call() {
+    let _contending = contending();
+    let mut s = crate::search::b::fixture::Store::new();
+    s.decided(
+        "github.com/o/r",
+        1_000,
+        "The parser reads one line at a time.",
+        &[],
+    );
+    s.run();
+    let stub = crate::embed::stub::Stub::start();
+    crate::embed_phase::fixture::config(&s, &stub);
+    let p = s.home.path().to_path_buf();
+    let mut embed = crate::embed_phase::Phase::new(&p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    // A command asks before the worker's first round.
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(yield_request(&p), "").unwrap();
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                yields: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(!worker.is_finished(), "it left a call unsettled");
+    assert_eq!(
+        stub.requests(),
+        0,
+        "a batch was sent for a command to wait on"
+    );
+    release.send(()).unwrap();
+    until("it steps aside once the call is settled", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+    assert_eq!(stub.requests(), 0);
+}
+
+/// R12 with curation to do: a worker asked to step aside while an embedding call is out
+/// settles that call and runs no curation, which would start a call the command waits for
+/// (Codex on #359, fourth round).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_asked_to_step_aside_runs_no_curation_while_it_settles_a_call() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut embed = crate::embed_phase::Phase::new(p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    // A command asks before the worker's first round.
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(yield_request(p), "").unwrap();
+    let curations = std::sync::Arc::new(AtomicUsize::new(0));
+    let worker = {
+        let (p, curations) = (p.to_path_buf(), curations.clone());
+        std::thread::spawn(move || {
+            let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                curations.fetch_add(1, Ordering::SeqCst);
+                Ok(Phase::Idle)
+            };
+            let phases = Phases {
+                embed: Some(&mut embed),
+                curation: Some(&mut phase),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(!worker.is_finished(), "it left a call unsettled");
+    release.send(()).unwrap();
+    until("it steps aside once the call is settled", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+    assert_eq!(curations.load(Ordering::SeqCst), 0);
+}
+
+/// R3 with curation to do: a resident worker told to leave while an embedding call is out
+/// settles it and leaves, with no curation round in between (Codex on #359, fourth round).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_resident_worker_told_to_leave_runs_no_curation_after_the_call() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let mut embed = crate::embed_phase::Phase::new(p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    let (released, after) = (
+        std::sync::Arc::new(AtomicBool::new(false)),
+        std::sync::Arc::new(AtomicUsize::new(0)),
+    );
+    let worker = {
+        let (p, released, after) = (p.to_path_buf(), released.clone(), after.clone());
+        std::thread::spawn(move || {
+            let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+                if released.load(Ordering::SeqCst) {
+                    after.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Phase::Idle)
+            };
+            let phases = Phases {
+                embed: Some(&mut embed),
+                curation: Some(&mut phase),
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
+        })
+    };
+    let device = raw::open(p).unwrap().device().to_owned();
+    until("the first round", || {
+        knowledge::open(p)
+            .and_then(|k| checkpoint::get(&k, "seen", &device))
+            .is_ok_and(|at| at == 1)
+    });
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
+    // Several idle times: it has seen the change.
+    std::thread::sleep(Duration::from_millis(1_200));
+    assert!(!worker.is_finished(), "it left a call unsettled");
+    released.store(true, Ordering::SeqCst);
+    release.send(()).unwrap();
+    until("it leaves once the call is settled", || {
+        worker.is_finished()
+    });
+    worker.join().unwrap().unwrap();
+    assert_eq!(after.load(Ordering::SeqCst), 0);
+}
+
+/// R12: a command that gives up while the worker backs up for it takes its request away, and
+/// the worker goes on: a hook that appended meanwhile started none (Codex on #359, fifth
+/// round).
+#[test]
+fn a_request_withdrawn_during_the_backup_keeps_the_worker() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let raw = raw::open(p).unwrap();
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(yield_request(p), "").unwrap();
+    AFTER_BACKUP.set(Some(|home| {
+        std::fs::remove_file(yield_request(home)).unwrap();
+    }));
+    let left = steps_aside(p, &raw, &Holding::default());
+    AFTER_BACKUP.set(None);
+    assert!(!left);
+}
+
+/// A consumer that takes the request to step aside away in its first step, as a command that
+/// gave up does.
+#[cfg(target_os = "linux")]
+struct Withdraws(std::path::PathBuf, bool);
+#[cfg(target_os = "linux")]
+impl Consumer for Withdraws {
+    fn name(&self) -> &'static str {
+        "withdraws"
+    }
+    fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, _after: i64) -> Result<i64> {
+        if !std::mem::replace(&mut self.1, true) {
+            let _ = std::fs::remove_file(yield_request(&self.0));
+        }
+        raw.max_seq()
+    }
+    fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// R12: a request that went away lets the embedding go on. A resident worker starts no round
+/// at its idle time, so it looks for that while it waits (Codex on #359, third round).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_withdrawn_request_lets_a_resident_worker_embed_again() {
+    let _contending = contending();
+    let mut s = crate::search::b::fixture::Store::new();
+    s.decided(
+        "github.com/o/r",
+        1_000,
+        "The parser reads one line at a time.",
+        &[],
+    );
+    s.run();
+    let stub = crate::embed::stub::Stub::start();
+    crate::embed_phase::fixture::config(&s, &stub);
+    let p = s.home.path().to_path_buf();
+    // A record for the consumer to step on, after what `run` covered.
+    s.raw.append(&raw::test_event("later")).unwrap();
+    let mut embed = crate::embed_phase::Phase::new(&p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    // A query that came back and is not settled yet: the worker does not step aside for the
+    // request it finds, and holds the phase.
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    release.send(()).unwrap();
+    until("the query's thread ends", || embed.done());
+    std::fs::write(yield_request(&p), "").unwrap();
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            let withdraws = Box::new(Withdraws(p.clone(), false));
+            run_holding(&p, 600_000, vec![withdraws], || {}, lock(&p)?, phases)
+        })
+    };
+    until("the embedding goes on", || stub.requests() >= 1);
+    assert!(!worker.is_finished());
+    std::fs::write(yield_request(&p), "").unwrap();
+    until("it steps aside for a new request", || worker.is_finished());
+    worker.join().unwrap().unwrap();
+}
+
+/// R10: a resident worker that waited with a clean outcome and is asked for a restore opens
+/// the stores again as work: a kill during the restore or the rounds after it is reported
+/// (Codex on #359).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restore_asked_for_while_it_waits_is_work_doctor_reports_a_kill_in() {
+    use std::sync::{Arc, Mutex};
+    struct Outcomes(std::path::PathBuf, Arc<Mutex<Vec<String>>>);
+    impl Consumer for Outcomes {
+        fn name(&self) -> &'static str {
+            "outcomes"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+            let why = outcome(&self.0).map(|(_, why)| why).unwrap_or_default();
+            self.1.lock().unwrap().push(why);
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    raw::open(&p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let worker = {
+        let (p, seen) = (p.clone(), seen.clone());
         std::thread::spawn(move || {
             let held = lock(&p)?;
             let phases = Phases {
@@ -3096,1585 +4380,297 @@
                 resident: true,
                 ..Phases::default()
             };
-            run_holding(&p, idle_ms, vec![Box::new(Seen)], || {}, held, phases)
+            let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Outcomes(p.clone(), seen))];
+            run_holding(&p, 600_000, consumers, || {}, held, phases)
         })
-    }
+    };
+    until("it waits", || {
+        outcome(&p).is_some_and(|(_, why)| why.is_empty())
+    });
+    seen.lock().unwrap().clear();
+    crate::backup::request_restore(&p);
+    until("it reads again", || !seen.lock().unwrap().is_empty());
+    assert_eq!(seen.lock().unwrap()[0], STOPPED);
+    let held = lock_asking(&p).unwrap();
+    worker.join().unwrap().unwrap();
+    drop(held);
+}
 
-    /// Waits up to 10 s for `done`.
-    fn until(what: &str, mut done: impl FnMut() -> bool) {
-        let t = Instant::now();
-        while !done() {
-            assert!(t.elapsed() < Duration::from_secs(10), "never: {what}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// A command's request to step aside, as a test makes one: the file, its folder made.
-    fn yield_request(home: &Path) -> std::path::PathBuf {
-        let dir = yield_requests(home);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("test")
-    }
-
-    /// A session's flags last changed longer ago than a prune keeps them.
-    #[cfg(target_os = "linux")]
-    fn stale_flags(p: &Path) -> std::path::PathBuf {
-        let old = p.join("state").join("hooks").join("claude").join("old");
-        std::fs::create_dir_all(&old).unwrap();
-        let long_ago =
-            std::time::SystemTime::now() - crate::hookstate::KEEP - Duration::from_secs(60);
-        let dir = std::fs::File::open(&old).unwrap();
-        dir.set_modified(long_ago).unwrap();
-        old
-    }
-
-    /// Milestone 5 (docs/milestone-5-plan.md): raw.db put back to an old copy under a resident
-    /// worker is opened again at its next check, so it reads the file hooks now write (and the
-    /// forget logs are reconciled into it), not the one it held.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_opens_raw_db_again_when_another_file_takes_its_place() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("first")).unwrap();
-        let device = raw.device().to_owned();
-        drop(raw);
-        // The copy holds the record: what the WAL kept is written into the file first.
-        rusqlite::Connection::open(p.join("raw.db"))
-            .unwrap()
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-        let old = p.join("raw-old.db");
-        std::fs::copy(p.join("raw.db"), &old).unwrap();
-        let worker = resident(p, 100);
-        let seen = |device: &str, n: i64| {
-            knowledge::open(p)
-                .ok()
-                .and_then(|k| checkpoint::get(&k, "seen", device).ok())
-                == Some(n)
-        };
-        until("the first record read", || seen(&device, 1));
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("second"))
-            .unwrap();
-        until("the second record read", || seen(&device, 2));
-        // The old copy takes raw.db's place, as a restore by hand would put it.
-        for f in ["raw.db-wal", "raw.db-shm"] {
-            let _ = std::fs::remove_file(p.join(f));
-        }
-        let staged = p.join("raw.db.copy");
-        std::fs::copy(&old, &staged).unwrap();
-        std::fs::rename(&staged, p.join("raw.db")).unwrap();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("after the copy")).unwrap();
-        raw.append(&raw::test_event("and one more")).unwrap();
-        // A file put in raw.db's place is another device's (docs/cards.md S3).
-        let copy = raw.device().to_owned();
-        let last = raw.max_seq().unwrap();
-        drop(raw);
-        until("the replaced file read", || seen(&copy, last));
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R3: at its idle time a resident worker backs up and prunes as a worker does before it
-    /// exits, keeps the lock and waits. It does so again only after a round, and it exits at the
-    /// idle time that finds `resident` turned off.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_stays_when_idle_until_its_config_says_otherwise() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("first")).unwrap();
-        let old = stale_flags(p);
-        let worker = resident(p, 100);
-        let segments = || std::fs::read_dir(p.join("backups")).map_or(0, |d| d.count());
-        // Its first idle step: the backup, then the prune.
-        until("the first idle step", || !old.exists());
-        let exported = segments();
-        assert!(exported > 0, "no backup at the idle time");
-        // Idle times pass with no round: it stays, and does that work only once.
-        let old = stale_flags(p);
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(running(p) && !worker.is_finished(), "it left when idle");
-        assert!(old.exists(), "pruned again with no round since");
-        // A round, then its idle step.
-        raw.append(&raw::test_event("second")).unwrap();
-        until("the idle step after a round", || !old.exists());
-        assert!(segments() > exported);
-        // Turned off: it exits at its next idle time.
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-        assert!(!running(p));
-    }
-
-    /// Codex on #507: a batch a consumer puts off (the rescan, when the dispatch hold is busy) is
-    /// run again by a resident worker at its idle time, with no new record to wake it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_runs_a_put_off_batch_again_at_its_idle_time() {
-        struct PutOff(bool);
-        impl Consumer for PutOff {
-            fn name(&self) -> &'static str {
-                "put-off"
-            }
-            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
-                if !std::mem::replace(&mut self.0, true) {
-                    return Ok(after);
-                }
-                Ok(raw
-                    .after(raw.device(), after, 100)?
-                    .last()
-                    .map_or(after, |r| r.seq))
-            }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
-        }
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("first")).unwrap();
-        let device = raw.device().to_owned();
-        drop(raw);
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let at = p.to_path_buf();
-        let worker = std::thread::spawn(move || {
-            let held = lock(&at)?;
-            let phases = Phases {
-                yields: true,
-                resident: true,
-                ..Phases::default()
-            };
-            run_holding(&at, 100, vec![Box::new(PutOff(false))], || {}, held, phases)
-        });
-        until("the put-off batch read", || {
-            knowledge::open(p)
-                .ok()
-                .and_then(|k| checkpoint::get(&k, "put-off", &device).ok())
-                == Some(1)
-        });
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// Codex on #507: a resident worker whose config.toml stops saying `resident = true` leaves at
-    /// its idle time even while a consumer keeps putting its batch off (R3): the batch put off does
-    /// not start a round before the switch is read.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_turned_off_leaves_while_a_batch_stays_put_off() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        struct PutOff(Arc<AtomicBool>);
-        impl Consumer for PutOff {
-            fn name(&self) -> &'static str {
-                "put-off"
-            }
-            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
-                if !self.0.load(Ordering::SeqCst) {
-                    return Ok(after);
-                }
-                Ok(raw
-                    .after(raw.device(), after, 100)?
-                    .last()
-                    .map_or(after, |r| r.seq))
-            }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
-        }
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let free = Arc::new(AtomicBool::new(false));
-        let left = Arc::new(AtomicBool::new(false));
-        let (at, consumer, exited) = (p.to_path_buf(), PutOff(free.clone()), left.clone());
-        let worker = std::thread::spawn(move || {
-            let held = lock(&at)?;
-            let phases = Phases {
-                yields: true,
-                resident: true,
-                ..Phases::default()
-            };
-            let before_exit = move || exited.store(true, Ordering::SeqCst);
-            run_holding(
-                &at,
-                100,
-                vec![Box::new(consumer)],
-                before_exit,
-                held,
-                phases,
-            )
-        });
-        // A few idle times pass with the batch put off each time.
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(!left.load(Ordering::SeqCst), "it left while resident");
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        until("the worker leaving resident mode", || {
-            left.load(Ordering::SeqCst)
-        });
-        free.store(true, Ordering::SeqCst);
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R2: only `oboete worker` started with no `--idle-ms` follows `[worker] resident`. With one
-    /// it exits when idle whatever the file says, and the commands that borrow its loop return.
-    /// R3: a config.toml that does not load leaves a resident worker as it is, and makes none.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn only_a_worker_started_with_no_idle_time_follows_the_resident_switch() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let config = |text: &str| {
-            // The fixture publishes a complete snapshot. In-place truncation briefly exposes
-            // an empty valid config (resident=false), rather than the intended malformed one.
-            let staged = p.join("config.toml.next");
-            std::fs::write(&staged, text).unwrap();
-            std::fs::rename(staged, p.join("config.toml")).unwrap();
-        };
-        let hooks = |p: &Path| {
-            let p = p.to_path_buf();
-            std::thread::spawn(move || run_as(&p, 100, true))
-        };
-        config("[worker]\nresident = true\n");
-        run(p, 50).unwrap();
-        run_once(p).unwrap();
-        rebuild(p).unwrap();
-        let worker = hooks(p);
-        until("it holds the lock", || running(p));
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(!worker.is_finished(), "it left a resident home when idle");
-        config("[worker\n");
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(!worker.is_finished(), "a file that does not load ended it");
-        config("[worker]\nresident = false\n");
-        worker.join().unwrap().unwrap();
-        // Started while the file does not load: not resident.
-        config("[worker\n");
-        let worker = hooks(p);
-        until("a worker with no readable switch exits", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R3: no hook starts a resident worker again, so it is up for every wait of a phase, not
-    /// only D10's short ones. The phase runs again at the time it named, not at each idle time,
-    /// and the idle step is taken while it waits.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_runs_a_phase_again_at_the_time_it_waits_for() {
-        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("first")).unwrap();
-        let polls = std::sync::Arc::new(AtomicUsize::new(0));
-        // The first wait's end and the second poll, by the clock the worker waits by: a step of
-        // the system clock moves both.
-        let (due, again) = (
-            std::sync::Arc::new(AtomicI64::new(0)),
-            std::sync::Arc::new(AtomicI64::new(0)),
-        );
-        let worker = {
-            let (p, polls) = (p.to_path_buf(), polls.clone());
-            let (first, second) = (due.clone(), again.clone());
-            std::thread::spawn(move || {
-                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-                    // First a wait of three idle times, then a long one; neither keeps a worker
-                    // up that is not resident.
-                    let now = crate::db::now_ms();
-                    let wait = match polls.fetch_add(1, Ordering::SeqCst) {
-                        0 => {
-                            first.store(now + 300, Ordering::SeqCst);
-                            300
-                        }
-                        1 => {
-                            second.store(now, Ordering::SeqCst);
-                            600_000
-                        }
-                        _ => 600_000,
-                    };
-                    Ok(Phase::Waiting {
-                        until: now + wait,
-                        up: false,
-                    })
-                };
-                let phases = Phases {
-                    curation: Some(&mut phase),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        until("the phase ran again", || polls.load(Ordering::SeqCst) > 1);
-        assert!(
-            again.load(Ordering::SeqCst) >= due.load(Ordering::SeqCst),
-            "the phase ran again before its time"
-        );
-        std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(polls.load(Ordering::SeqCst), 2, "a round at each idle time");
-        assert!(
-            std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
-            "no idle step while a phase waits"
-        );
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R10: a resident worker is killed at every shutdown of the PC. While it waits its outcome
-    /// says all is well, so that kill is no alarm; during a round it says "stopped", as before.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_workers_outcome_is_clean_while_it_waits_and_not_during_a_round() {
-        use std::sync::mpsc::channel;
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let mut raw = raw::open(p).unwrap();
-        raw.append(&raw::test_event("first")).unwrap();
-        let (entered, in_round) = channel();
-        let (go_on, gate) = channel::<()>();
-        let worker = {
-            let p = p.to_path_buf();
-            std::thread::spawn(move || {
-                let mut rounds = 0;
-                // The second round stops in its phase until the test lets it go on.
-                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-                    rounds += 1;
-                    if rounds == 2 {
-                        entered.send(()).ok();
-                        gate.recv().ok();
-                    }
-                    Ok(Phase::Idle)
-                };
-                let phases = Phases {
-                    curation: Some(&mut phase),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        let waits = || outcome(p).is_some_and(|(_, why)| why.is_empty()) && running(p);
-        until("a clean outcome while it waits", waits);
-        raw.append(&raw::test_event("second")).unwrap();
-        in_round
-            .recv_timeout(Duration::from_secs(10))
-            .expect("no second round");
-        assert_eq!(
-            outcome(p).unwrap().1,
-            STOPPED,
-            "a round under a clean outcome"
-        );
-        go_on.send(()).unwrap();
-        until("a clean outcome after the round", waits);
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R3: a home removed and made again is not the home this worker locked. It stops at its next
-    /// write by path and leaves the new home as it found it: no backup, no outcome, and its
-    /// stores with their `-wal` and `-shm` files (SQLite removes those by name when a store's
-    /// last connection closes, but not once the store's file is no longer at its path).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_worker_whose_home_was_replaced_leaves_the_new_one_alone() {
-        let _contending = contending();
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        {
-            let mut raw = raw::open(&p).unwrap();
-            raw.append(&raw::test_event("first")).unwrap();
-        }
-        let worker = resident(&p, 300);
-        // It waits, its idle step still before it.
-        until("it waits", || {
-            outcome(&p).is_some_and(|(_, why)| why.is_empty())
-        });
-        std::fs::remove_dir_all(&p).unwrap();
-        // The new home has a lock file of its own: the same path, another file.
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
-        let mut made = vec!["config.toml".to_owned(), "state".to_owned()];
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        for store in ["raw.db", "knowledge.db"] {
-            for ext in ["", "-wal", "-shm"] {
-                std::fs::write(p.join(format!("{store}{ext}")), "the new home's").unwrap();
-                made.push(format!("{store}{ext}"));
-            }
-        }
-        until("the old worker stops", || worker.is_finished());
-        let why = worker.join().unwrap().unwrap_err();
-        assert!(why.is::<Gone>(), "{why:#}");
-        let mut left: Vec<String> = std::fs::read_dir(&p)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
-        made.sort();
-        assert_eq!(left, made, "the old worker changed the new home");
-        let state = std::fs::read_dir(p.join("state")).unwrap().count();
-        assert_eq!(
-            state, 1,
-            "the old worker wrote its outcome into the new home"
-        );
-    }
-
-    /// R12: a command that needs the worker lock asks the worker that holds it to step aside.
-    /// #855: a worker a command asked before its first round steps aside there, and says so.
-    #[test]
-    fn a_worker_asked_before_its_round_says_it_stepped_aside() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(yield_request(p), "").unwrap();
-        let phases = Phases {
-            yields: true,
-            ..Phases::default()
-        };
-        run_holding(
-            p,
-            600_000,
-            vec![Box::new(Seen)],
-            || {},
-            lock(p).unwrap(),
-            phases,
-        )
-        .unwrap();
-        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
-        assert!(last_failure(p).is_none());
-    }
-
-    /// #855: curation is paused while a rebuild or a rewrite of the stored records holds its lock,
-    /// since the time set on it as its modification time; a lock not held is no pause, whatever its
-    /// time. A rebuild and the purge's lock set it when they take their lock.
-    #[test]
-    fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        assert_eq!(curation_pause(p), None);
-        assert_eq!(paused_line(p), None);
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        // Taken as a rebuild or a purge takes it, its time set through the handle that holds it, as
-        // Windows allows.
-        let held = |name: &str, ms: u64| {
-            let path = p.join("state").join(name);
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            lock.lock().unwrap();
-            lock.set_modified(std::time::UNIX_EPOCH + Duration::from_millis(ms))
-                .unwrap();
-            lock
-        };
-        let rebuild = held("rebuild.lock", 1_700_000_000_000);
-        assert_eq!(
-            curation_pause(p),
-            Some(("rebuild", Some(1_700_000_000_000)))
-        );
-        // #871: with curation off (the default) nothing waits, so doctor names the rebuild alone.
-        assert_eq!(
-            paused_line(p).as_deref(),
-            Some("knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
-        );
-        std::fs::write(p.join("config.toml"), "[summary\n").unwrap();
-        assert!(
-            paused_line(p)
-                .unwrap()
-                .starts_with("curation is paused while"),
-            "a config.toml that does not load"
-        );
-        std::fs::write(p.join("config.toml"), "[summary]\ncurate = true\n").unwrap();
-        assert_eq!(
-            paused_line(p).as_deref(),
-            Some(
-                "curation is paused while knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC"
-            )
-        );
-        drop(rebuild);
-        assert_eq!(curation_pause(p), None, "a stamped lock not held");
-        // A purge's rebuild: both held, the rebuild named, since the purge's earlier time.
-        let both = held("rebuild.lock", 1_700_000_120_000);
-        let purging = held("purge.lock", 1_700_000_060_000);
-        assert_eq!(
-            curation_pause(p),
-            Some(("rebuild", Some(1_700_000_060_000)))
-        );
-        drop((both, purging));
-        let rewrite = held("purge.lock", 1_700_000_060_000);
-        assert_eq!(
-            curation_pause(p),
-            Some(("rewrite", Some(1_700_000_060_000)))
-        );
-        assert!(paused_line(p).unwrap().ends_with(
-            "(a forget, the retention period or new masks), since 2023-11-14 22:14 UTC"
-        ));
-        drop(rewrite);
-        // The purge's lock stamps its file when it takes it.
-        let before = crate::db::now_ms();
-        let purge = crate::forget::purge_lock(p).unwrap().unwrap();
-        let (kind, since) = curation_pause(p).unwrap();
-        assert!(
-            kind == "rewrite" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
-        );
-        drop(purge);
-        // And a rebuild while it fills the new store, an old one set aside.
-        drop(raw::open(p).unwrap());
-        drop(knowledge::open(p).unwrap());
-        let shown = preview_rebuild(p).unwrap();
-        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
-        let during = seen.clone();
-        let home_path = p.to_path_buf();
-        AFTER_CARRY.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(move || during.set(curation_pause(&home_path))))
-        });
-        let before = crate::db::now_ms();
-        rebuild_report(
-            p,
-            Some(&shown.key),
-            crate::executable::CommandCaller::Worker,
-            &mut |_| {},
-        )
-        .unwrap();
-        let (kind, since) = seen.get().unwrap();
-        assert!(
-            kind == "rebuild" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
-        );
-        // The rebuild has let its lock go, but a child that another test's thread forked holds the
-        // open file until it execs (`run_once`): the pause ends once that child has.
-        until("the pause ends with the rebuild", || {
-            curation_pause(p).is_none()
-        });
-    }
-
-    /// The worker backs up (a restore reads the backups), lets go and exits; the command runs.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_steps_aside_for_a_command_that_needs_the_lock() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        // An idle time it never reaches: the backup below is the one it makes as it lets go.
-        let worker = resident(p, 600_000);
-        until("it waits", || {
-            outcome(p).is_some_and(|(_, why)| why.is_empty())
-        });
-        assert!(!p.join("backups").exists());
-        let held = lock_asking(p).unwrap();
-        worker.join().unwrap().unwrap();
-        assert!(
-            std::fs::read_dir(p.join("backups")).is_ok_and(|d| d.count() > 0),
-            "it let go without a backup"
-        );
-        assert!(!asked_aside(p));
-        // #855: it says it stepped aside, which is no failure.
-        assert_eq!(outcome(p).map(|(_, why)| why).as_deref(), Some(ASIDE));
-        assert!(last_failure(p).is_none());
-        drop(held);
-        // `oboete rebuild` is such a command: it swaps knowledge.db as soon as it has the lock,
-        // so the worker's stores are closed by then.
-        // The next worker's own taking of the lock, not one a forked child still holds open.
-        let last = outcome(p).unwrap().0;
-        let worker = resident(p, 600_000);
-        until("the next worker waits", || {
-            outcome(p).is_some_and(|(taken, why)| taken > last && why.is_empty())
-        });
-        rebuild(p).unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R12: a request left by a command that died is not obeyed for ever: after a minute it is
-    /// ignored. A new one is obeyed.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_request_to_step_aside_older_than_a_minute_is_ignored() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let ask = yield_request(p);
-        std::fs::write(&ask, "").unwrap();
-        let old = std::time::SystemTime::now() - Duration::from_secs(61);
-        let file = std::fs::File::options().write(true).open(&ask).unwrap();
-        file.set_modified(old).unwrap();
-        let worker = resident(p, 100);
-        until("it holds the lock", || running(p));
-        std::thread::sleep(Duration::from_millis(500));
-        assert!(!worker.is_finished(), "it obeyed a request a minute old");
-        std::fs::write(&ask, "").unwrap();
-        until("it obeys a new request", || worker.is_finished());
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R3: a setting the owner changes is followed without a new record. At its idle time a
-    /// resident worker that finds config.toml changed starts a round; otherwise it starts none.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_starts_a_round_when_config_toml_changed() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let rounds = std::sync::Arc::new(AtomicUsize::new(0));
-        let worker = {
-            let (p, rounds) = (p.to_path_buf(), rounds.clone());
-            std::thread::spawn(move || {
-                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-                    rounds.fetch_add(1, Ordering::SeqCst);
-                    Ok(Phase::Idle)
-                };
-                let phases = Phases {
-                    curation: Some(&mut phase),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 100, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        until("its first round", || rounds.load(Ordering::SeqCst) > 0);
-        std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(rounds.load(Ordering::SeqCst), 1, "a round with nothing new");
-        let changed = "[worker]\nresident = true\n[summary]\ncurate = false\n";
-        // Published whole: written in place, the file is empty for a moment, which reads as
-        // `resident = false`, and a worker that reads it then leaves at its idle step (#462).
-        let staged = p.join("config.toml.next");
-        std::fs::write(&staged, changed).unwrap();
-        std::fs::rename(staged, p.join("config.toml")).unwrap();
-        // A worker that left says why (#462).
-        until("a round after the change", || {
-            rounds.load(Ordering::SeqCst) > 1 || worker.is_finished()
-        });
-        assert!(
-            !worker.is_finished() || rounds.load(Ordering::SeqCst) > 1,
-            "the worker left before the change: {:?}",
-            worker.join()
-        );
-        std::thread::sleep(Duration::from_millis(500));
-        assert_eq!(
-            rounds.load(Ordering::SeqCst),
-            2,
-            "a round at each idle time since"
-        );
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        worker.join().unwrap().unwrap();
-    }
-
-    /// `p` removed and made again, with a lock file of its own. The old lock file lives on under
-    /// another name beside it: a file made after it is freed can get its inode number back and
-    /// read as the same file (docs/resident.md, Limits).
-    #[cfg(target_os = "linux")]
-    fn replace_home(p: &Path) {
-        let _ = std::fs::hard_link(
-            p.join("state").join("worker.lock"),
-            p.with_extension("old-lock"),
-        );
-        std::fs::remove_dir_all(p).unwrap();
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
-    }
-
-    /// R3 with a restore asked for: a home replaced while the worker waits, which asks for a
-    /// restore, gets no outcome from the worker opening its stores again (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_replaced_home_that_asks_for_a_restore_gets_no_outcome() {
-        let _contending = contending();
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        raw::open(&p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let worker = resident(&p, 300);
-        until("it waits", || {
-            outcome(&p).is_some_and(|(_, why)| why.is_empty())
-        });
-        // As `replace_home`, the request written before the lock file.
-        let _ = std::fs::hard_link(
-            p.join("state").join("worker.lock"),
-            p.with_extension("old-lock"),
-        );
-        std::fs::remove_dir_all(&p).unwrap();
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        crate::backup::request_restore(&p);
-        std::fs::write(p.join("state").join("worker.lock"), "").unwrap();
-        until("the old worker stops", || worker.is_finished());
-        let why = worker.join().unwrap().unwrap_err();
-        assert!(why.is::<Gone>(), "{why:#}");
-        let mut state: Vec<_> = std::fs::read_dir(p.join("state"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        state.sort();
-        assert_eq!(
-            state,
-            ["restore-wanted", "worker.lock"],
-            "written into the new home"
-        );
-    }
-
-    /// R3 at the first taking: a lock taken in a home replaced before the run records it gets
-    /// the run's outcome nowhere (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_lock_taken_before_the_home_was_replaced_writes_nothing_into_the_new_one() {
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        raw::open(&p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let held = lock(&p).unwrap().unwrap();
-        replace_home(&p);
-        let why = run_holding(
-            &p,
-            0,
-            vec![Box::new(Seen)],
-            || {},
-            Some(held),
-            Phases::default(),
-        )
-        .unwrap_err();
-        assert!(why.is::<Gone>(), "{why:#}");
-        let state: Vec<_> = std::fs::read_dir(p.join("state"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(state, ["worker.lock"], "written into the new home");
-    }
-
-    /// R3 while the lock is taken: a home replaced after its lock file was opened gets no lock
-    /// number, and the lock is not given (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_home_replaced_while_its_lock_is_taken_gets_no_lock_number() {
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        AFTER_OPEN.set(Some(replace_home));
-        let got = lock(&p);
-        AFTER_OPEN.set(None);
-        assert!(got.unwrap().is_none());
-        let state: Vec<_> = std::fs::read_dir(p.join("state"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(state, ["worker.lock"], "written into the new home");
-    }
-
-    /// R3 after the lock is released: a home replaced while a worker makes its last check gets
-    /// no outcome and no lock number from it (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn no_outcome_goes_into_a_home_replaced_as_the_worker_exits() {
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        raw::open(&p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut once = true;
-        let why = run_with(&p, 0, vec![Box::new(Seen)], || {
-            if std::mem::take(&mut once) {
-                replace_home(&p);
-            }
+/// R12 with two commands: one that gives up takes only its own request away, so the worker
+/// never sees the other's go (Codex on #359). A request a command that died left a minute ago
+/// goes with the next command that asks.
+#[test]
+fn a_command_that_gives_up_leaves_the_request_of_one_still_waiting() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let _held = lock(&p).unwrap().unwrap();
+    let dead = yield_request(&p);
+    std::fs::write(&dead, "").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(61);
+    let file = std::fs::File::options().write(true).open(&dead).unwrap();
+    file.set_modified(old).unwrap();
+    assert!(!asked_aside(&p));
+    let wait = |p: std::path::PathBuf| {
+        std::thread::spawn(move || {
+            let _contending = contending();
+            lock_asking(&p).map(drop)
         })
-        .unwrap_err();
-        assert!(why.is::<Gone>(), "{why:#}");
-        let state: Vec<_> = std::fs::read_dir(p.join("state"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(state, ["worker.lock"], "written into the new home");
-    }
+    };
+    let first = wait(p.clone());
+    until("the first asks", || asked_aside(&p));
+    std::thread::sleep(Duration::from_secs(1));
+    let second = wait(p.clone());
+    let why = first.join().unwrap().unwrap_err().to_string();
+    assert!(why.contains("the worker is busy"), "{why}");
+    assert!(asked_aside(&p), "the second's request went with the first");
+    assert!(second.join().unwrap().is_err());
+    assert!(!asked_aside(&p));
+    assert!(!dead.exists(), "the dead command's request stayed");
+}
 
-    /// A consumer that replaces the home in its first step and reports progress each time.
-    #[cfg(target_os = "linux")]
-    struct Replaces(
-        std::path::PathBuf,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    );
-    #[cfg(target_os = "linux")]
-    impl Consumer for Replaces {
-        fn name(&self) -> &'static str {
-            "replaces"
-        }
-        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
-            if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                replace_home(&self.0);
-            }
-            Ok((after + 1).min(raw.max_seq()?))
-        }
-        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-            Ok(())
-        }
-    }
+// M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.
 
-    /// Stamps raw.db with a newer format in its first step (docs/store-format.md), counting steps.
-    struct StampsNewer(
-        std::path::PathBuf,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    );
-    impl Consumer for StampsNewer {
-        fn name(&self) -> &'static str {
-            "stamps-newer"
-        }
-        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
-            if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                Connection::open(self.0.join("raw.db"))?
-                    .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))?;
-            }
-            Ok((after + 1).min(raw.max_seq()?))
-        }
-        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// docs/store-format.md (Codex on #503): a newer oboete's stamp made while a worker drains a
-    /// backlog stops it at the next batch, before the backup's deadline, not at the round's end.
-    #[test]
-    fn a_drain_stops_at_the_next_batch_once_a_newer_oboete_stamps_raw_db() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        {
-            let mut raw = raw::open(p).unwrap();
-            for text in ["a", "b", "c"] {
-                raw.append(&raw::test_event(text)).unwrap();
-            }
-        }
-        let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let consumers: Vec<Box<dyn Consumer>> =
-            vec![Box::new(StampsNewer(p.to_owned(), steps.clone()))];
-        let why = run_consumers(p, 0, consumers).unwrap_err();
-        assert!(why.is::<raw::NewerFormat>(), "{why:#}");
-        assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    /// R3 within a drain: the rescan opens raw.db by its path in each step, so a home replaced
-    /// during a long drain is noticed between two batches, not only at the next round (Codex on
-    /// #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_drain_stops_between_batches_when_its_home_was_replaced() {
-        let parent = tempfile::tempdir().unwrap();
-        let p = parent.path().join("home");
-        std::fs::create_dir(&p).unwrap();
-        {
-            let mut raw = raw::open(&p).unwrap();
-            for text in ["a", "b", "c"] {
-                raw.append(&raw::test_event(text)).unwrap();
-            }
-        }
-        let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Replaces(p.clone(), steps.clone()))];
-        let why = run_consumers(&p, 0, consumers).unwrap_err();
-        assert!(why.is::<Gone>(), "{why:#}");
-        assert_eq!(steps.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    /// R10 and R12 with an embedding call out: the worker is not waiting. Its outcome keeps
-    /// saying stopped, and it steps aside only once the call's answer is settled, which the call
-    /// was paid for (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn an_embedding_call_that_is_out_is_work_in_flight() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut embed = crate::embed_phase::Phase::new(p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        let worker = {
-            let p = p.to_path_buf();
-            std::thread::spawn(move || {
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        let device = raw::open(p).unwrap().device().to_owned();
-        until("the first round", || {
-            knowledge::open(p)
-                .and_then(|k| checkpoint::get(&k, "seen", &device))
-                .is_ok_and(|at| at == 1)
-        });
-        std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(outcome(p).unwrap().1, STOPPED, "clean with a call out");
-        std::fs::write(yield_request(p), "").unwrap();
-        std::thread::sleep(Duration::from_millis(600));
-        assert!(!worker.is_finished(), "it left a call unsettled");
-        release.send(()).unwrap();
-        until("it steps aside once the call is settled", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-        assert!(last_failure(p).is_none());
-    }
-
-    /// R3 with an embedding call out: a worker whose config.toml stops saying `resident = true`
-    /// leaves once the call's answer is settled, not at the next idle time (CodeRabbit on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_told_to_leave_settles_its_embedding_call_first() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut embed = crate::embed_phase::Phase::new(p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        let worker = {
-            let p = p.to_path_buf();
-            std::thread::spawn(move || {
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        let device = raw::open(p).unwrap().device().to_owned();
-        until("the first round", || {
-            knowledge::open(p)
-                .and_then(|k| checkpoint::get(&k, "seen", &device))
-                .is_ok_and(|at| at == 1)
-        });
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        // Several idle times.
-        std::thread::sleep(Duration::from_millis(1_200));
-        assert!(!worker.is_finished(), "it left a call unsettled");
-        release.send(()).unwrap();
-        until("it leaves once the call is settled", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-        assert!(last_failure(p).is_none());
-    }
-
-    /// R12 with more to embed: a worker asked to step aside settles the call that is out and
-    /// sends no other, so a backlog of batches and queries cannot keep a command waiting (Codex
-    /// on #359, second round).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_worker_asked_to_step_aside_sends_no_new_embedding_call() {
-        let _contending = contending();
-        let mut s = crate::search::b::fixture::Store::new();
-        s.decided(
-            "github.com/o/r",
-            1_000,
-            "The parser reads one line at a time.",
-            &[],
-        );
-        s.run();
-        let stub = crate::embed::stub::Stub::start();
-        crate::embed_phase::fixture::config(&s, &stub);
-        let p = s.home.path().to_path_buf();
-        let mut embed = crate::embed_phase::Phase::new(&p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        // A command asks before the worker's first round.
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(yield_request(&p), "").unwrap();
-        let worker = {
-            let p = p.clone();
-            std::thread::spawn(move || {
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    yields: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        std::thread::sleep(Duration::from_millis(800));
-        assert!(!worker.is_finished(), "it left a call unsettled");
-        assert_eq!(
-            stub.requests(),
-            0,
-            "a batch was sent for a command to wait on"
-        );
-        release.send(()).unwrap();
-        until("it steps aside once the call is settled", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-        assert_eq!(stub.requests(), 0);
-    }
-
-    /// R12 with curation to do: a worker asked to step aside while an embedding call is out
-    /// settles that call and runs no curation, which would start a call the command waits for
-    /// (Codex on #359, fourth round).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_worker_asked_to_step_aside_runs_no_curation_while_it_settles_a_call() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut embed = crate::embed_phase::Phase::new(p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        // A command asks before the worker's first round.
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(yield_request(p), "").unwrap();
-        let curations = std::sync::Arc::new(AtomicUsize::new(0));
-        let worker = {
-            let (p, curations) = (p.to_path_buf(), curations.clone());
-            std::thread::spawn(move || {
-                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-                    curations.fetch_add(1, Ordering::SeqCst);
-                    Ok(Phase::Idle)
-                };
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    curation: Some(&mut phase),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 600_000, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        std::thread::sleep(Duration::from_millis(600));
-        assert!(!worker.is_finished(), "it left a call unsettled");
-        release.send(()).unwrap();
-        until("it steps aside once the call is settled", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-        assert_eq!(curations.load(Ordering::SeqCst), 0);
-    }
-
-    /// R3 with curation to do: a resident worker told to leave while an embedding call is out
-    /// settles it and leaves, with no curation round in between (Codex on #359, fourth round).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_resident_worker_told_to_leave_runs_no_curation_after_the_call() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        raw::open(p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        let mut embed = crate::embed_phase::Phase::new(p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        let (released, after) = (
-            std::sync::Arc::new(AtomicBool::new(false)),
-            std::sync::Arc::new(AtomicUsize::new(0)),
-        );
-        let worker = {
-            let (p, released, after) = (p.to_path_buf(), released.clone(), after.clone());
-            std::thread::spawn(move || {
-                let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
-                    if released.load(Ordering::SeqCst) {
-                        after.fetch_add(1, Ordering::SeqCst);
-                    }
-                    Ok(Phase::Idle)
-                };
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    curation: Some(&mut phase),
-                    resident: true,
-                    ..Phases::default()
-                };
-                run_holding(&p, 300, vec![Box::new(Seen)], || {}, lock(&p)?, phases)
-            })
-        };
-        let device = raw::open(p).unwrap().device().to_owned();
-        until("the first round", || {
-            knowledge::open(p)
-                .and_then(|k| checkpoint::get(&k, "seen", &device))
-                .is_ok_and(|at| at == 1)
-        });
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = false\n").unwrap();
-        // Several idle times: it has seen the change.
-        std::thread::sleep(Duration::from_millis(1_200));
-        assert!(!worker.is_finished(), "it left a call unsettled");
-        released.store(true, Ordering::SeqCst);
-        release.send(()).unwrap();
-        until("it leaves once the call is settled", || {
-            worker.is_finished()
-        });
-        worker.join().unwrap().unwrap();
-        assert_eq!(after.load(Ordering::SeqCst), 0);
-    }
-
-    /// R12: a command that gives up while the worker backs up for it takes its request away, and
-    /// the worker goes on: a hook that appended meanwhile started none (Codex on #359, fifth
-    /// round).
-    #[test]
-    fn a_request_withdrawn_during_the_backup_keeps_the_worker() {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let raw = raw::open(p).unwrap();
-        std::fs::create_dir_all(p.join("state")).unwrap();
-        std::fs::write(yield_request(p), "").unwrap();
-        AFTER_BACKUP.set(Some(|home| {
-            std::fs::remove_file(yield_request(home)).unwrap();
-        }));
-        let left = steps_aside(p, &raw, &Holding::default());
-        AFTER_BACKUP.set(None);
-        assert!(!left);
-    }
-
-    /// A consumer that takes the request to step aside away in its first step, as a command that
-    /// gave up does.
-    #[cfg(target_os = "linux")]
-    struct Withdraws(std::path::PathBuf, bool);
-    #[cfg(target_os = "linux")]
-    impl Consumer for Withdraws {
-        fn name(&self) -> &'static str {
-            "withdraws"
-        }
-        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, _after: i64) -> Result<i64> {
-            if !std::mem::replace(&mut self.1, true) {
-                let _ = std::fs::remove_file(yield_request(&self.0));
-            }
-            raw.max_seq()
-        }
-        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// R12: a request that went away lets the embedding go on. A resident worker starts no round
-    /// at its idle time, so it looks for that while it waits (Codex on #359, third round).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_withdrawn_request_lets_a_resident_worker_embed_again() {
-        let _contending = contending();
-        let mut s = crate::search::b::fixture::Store::new();
-        s.decided(
-            "github.com/o/r",
-            1_000,
-            "The parser reads one line at a time.",
-            &[],
-        );
-        s.run();
-        let stub = crate::embed::stub::Stub::start();
-        crate::embed_phase::fixture::config(&s, &stub);
-        let p = s.home.path().to_path_buf();
-        // A record for the consumer to step on, after what `run` covered.
-        s.raw.append(&raw::test_event("later")).unwrap();
-        let mut embed = crate::embed_phase::Phase::new(&p);
-        let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
-        // A query that came back and is not settled yet: the worker does not step aside for the
-        // request it finds, and holds the phase.
-        let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
-        release.send(()).unwrap();
-        until("the query's thread ends", || embed.done());
-        std::fs::write(yield_request(&p), "").unwrap();
-        let worker = {
-            let p = p.clone();
-            std::thread::spawn(move || {
-                let phases = Phases {
-                    embed: Some(&mut embed),
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                let withdraws = Box::new(Withdraws(p.clone(), false));
-                run_holding(&p, 600_000, vec![withdraws], || {}, lock(&p)?, phases)
-            })
-        };
-        until("the embedding goes on", || stub.requests() >= 1);
-        assert!(!worker.is_finished());
-        std::fs::write(yield_request(&p), "").unwrap();
-        until("it steps aside for a new request", || worker.is_finished());
-        worker.join().unwrap().unwrap();
-    }
-
-    /// R10: a resident worker that waited with a clean outcome and is asked for a restore opens
-    /// the stores again as work: a kill during the restore or the rounds after it is reported
-    /// (Codex on #359).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_restore_asked_for_while_it_waits_is_work_doctor_reports_a_kill_in() {
-        use std::sync::{Arc, Mutex};
-        struct Outcomes(std::path::PathBuf, Arc<Mutex<Vec<String>>>);
-        impl Consumer for Outcomes {
-            fn name(&self) -> &'static str {
-                "outcomes"
-            }
-            fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
-                let why = outcome(&self.0).map(|(_, why)| why).unwrap_or_default();
-                self.1.lock().unwrap().push(why);
-                raw.max_seq()
-            }
-            fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
-                Ok(())
-            }
-        }
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        raw::open(&p)
-            .unwrap()
-            .append(&raw::test_event("first"))
-            .unwrap();
-        std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let worker = {
-            let (p, seen) = (p.clone(), seen.clone());
-            std::thread::spawn(move || {
-                let held = lock(&p)?;
-                let phases = Phases {
-                    yields: true,
-                    resident: true,
-                    ..Phases::default()
-                };
-                let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Outcomes(p.clone(), seen))];
-                run_holding(&p, 600_000, consumers, || {}, held, phases)
-            })
-        };
-        until("it waits", || {
-            outcome(&p).is_some_and(|(_, why)| why.is_empty())
-        });
-        seen.lock().unwrap().clear();
-        crate::backup::request_restore(&p);
-        until("it reads again", || !seen.lock().unwrap().is_empty());
-        assert_eq!(seen.lock().unwrap()[0], STOPPED);
-        let held = lock_asking(&p).unwrap();
-        worker.join().unwrap().unwrap();
-        drop(held);
-    }
-
-    /// R12 with two commands: one that gives up takes only its own request away, so the worker
-    /// never sees the other's go (Codex on #359). A request a command that died left a minute ago
-    /// goes with the next command that asks.
-    #[test]
-    fn a_command_that_gives_up_leaves_the_request_of_one_still_waiting() {
-        let _contending = contending();
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path().to_path_buf();
-        let _held = lock(&p).unwrap().unwrap();
-        let dead = yield_request(&p);
-        std::fs::write(&dead, "").unwrap();
-        let old = std::time::SystemTime::now() - Duration::from_secs(61);
-        let file = std::fs::File::options().write(true).open(&dead).unwrap();
-        file.set_modified(old).unwrap();
-        assert!(!asked_aside(&p));
-        let wait = |p: std::path::PathBuf| {
-            std::thread::spawn(move || {
-                let _contending = contending();
-                lock_asking(&p).map(drop)
-            })
-        };
-        let first = wait(p.clone());
-        until("the first asks", || asked_aside(&p));
-        std::thread::sleep(Duration::from_secs(1));
-        let second = wait(p.clone());
-        let why = first.join().unwrap().unwrap_err().to_string();
-        assert!(why.contains("the worker is busy"), "{why}");
-        assert!(asked_aside(&p), "the second's request went with the first");
-        assert!(second.join().unwrap().is_err());
-        assert!(!asked_aside(&p));
-        assert!(!dead.exists(), "the dead command's request stayed");
-    }
-
-    // M2 (spec 8.2): a crash at 20 points gives the rows of a run with none.
-
-    /// A curator that is a function of its prompt: a claim quoting the end of each line.
-    fn fake_curator(
-        _: &str,
-        prompt: &str,
-        check: &crate::provider::AnswerCheck,
-        _: &crate::provider::Gate,
-    ) -> Result<crate::provider::ChainResult> {
-        let claims: Vec<serde_json::Value> = prompt
-            .lines()
-            .filter_map(|l| {
-                let (id, text) = l.split_once(' ')?;
-                id.strip_prefix('L')?.parse::<u32>().ok()?;
-                let chars: Vec<char> = text.chars().collect();
-                let end: String = chars[chars.len().saturating_sub(16)..].iter().collect();
-                let quote = end.trim().to_owned();
-                (quote.chars().count() >= 8).then(|| (id.to_owned(), quote))
-            })
-            .enumerate()
-            .map(|(i, (line, quote))| {
-                let status = if i % 2 == 0 { "decided" } else { "proposed" };
-                serde_json::json!({"id": format!("c{i}"), "kind": "decision", "status": status,
+/// A curator that is a function of its prompt: a claim quoting the end of each line.
+fn fake_curator(
+    _: &str,
+    prompt: &str,
+    check: &crate::provider::AnswerCheck,
+    _: &crate::provider::Gate,
+) -> Result<crate::provider::ChainResult> {
+    let claims: Vec<serde_json::Value> = prompt
+        .lines()
+        .filter_map(|l| {
+            let (id, text) = l.split_once(' ')?;
+            id.strip_prefix('L')?.parse::<u32>().ok()?;
+            let chars: Vec<char> = text.chars().collect();
+            let end: String = chars[chars.len().saturating_sub(16)..].iter().collect();
+            let quote = end.trim().to_owned();
+            (quote.chars().count() >= 8).then(|| (id.to_owned(), quote))
+        })
+        .enumerate()
+        .map(|(i, (line, quote))| {
+            let status = if i % 2 == 0 { "decided" } else { "proposed" };
+            serde_json::json!({"id": format!("c{i}"), "kind": "decision", "status": status,
                     "speaker": "user", "scope": "repo", "body": quote, "quote": quote,
                     "line": line, "supersedes": []})
-            })
-            .collect();
-        let output = serde_json::json!({"claims": claims, "summary": "s"});
-        assert_eq!(check(&output), None, "{output}");
-        Ok(crate::provider::ChainResult {
-            provider: "fake".into(),
-            output,
-            tier: 1,
         })
-    }
+        .collect();
+    let output = serde_json::json!({"claims": claims, "summary": "s"});
+    assert_eq!(check(&output), None, "{output}");
+    Ok(crate::provider::ChainResult {
+        provider: "fake".into(),
+        output,
+        tier: 1,
+    })
+}
 
-    /// A summarizer that answers each turn with a request and what was completed.
-    fn fake_summarizer(
-        _: &str,
-        prompt: &str,
-        check: &crate::provider::AnswerCheck,
-        _: &crate::provider::Gate,
-    ) -> Result<crate::provider::ChainResult> {
-        let output = serde_json::json!({"skip": false, "request": format!("a turn of {}", prompt.len()),
+/// A summarizer that answers each turn with a request and what was completed.
+fn fake_summarizer(
+    _: &str,
+    prompt: &str,
+    check: &crate::provider::AnswerCheck,
+    _: &crate::provider::Gate,
+) -> Result<crate::provider::ChainResult> {
+    let output = serde_json::json!({"skip": false, "request": format!("a turn of {}", prompt.len()),
             "investigated": "", "learned": "", "completed": "it ran", "next_steps": "",
             "notes": ""});
-        assert_eq!(check(&output), None, "{output}");
-        Ok(crate::provider::ChainResult {
-            provider: "fake".into(),
-            output,
-            tier: 1,
-        })
-    }
+    assert_eq!(check(&output), None, "{output}");
+    Ok(crate::provider::ChainResult {
+        provider: "fake".into(),
+        output,
+        tier: 1,
+    })
+}
 
-    /// A worker run with the fake roles curating and summarizing, in small windows.
-    fn curate_all(home: &Path) -> Result<()> {
-        let rules = crate::capture::Settings::load(home)?.rules;
-        let summary = crate::config::Summary {
-            curate: true,
-            window_tokens: 1_500,
-            ..Default::default()
-        };
-        let db = crate::providers_db::open(home)?;
-        let mut phase = |raw: &mut Raw, k: &Connection| {
-            crate::turns::round(
-                raw,
-                k,
-                &db,
-                &rules,
-                &summary,
-                "",
-                &mut fake_summarizer,
-                &mut fake_curator,
-                &mut |_, _, _, _| Ok(Phase::Idle),
-            )
-        };
-        let held = lock(home)?.expect("no other worker");
-        run_holding(
-            home,
-            0,
-            consumers(home),
-            || {},
-            Some(held),
-            curating(&mut phase),
+/// A worker run with the fake roles curating and summarizing, in small windows.
+fn curate_all(home: &Path) -> Result<()> {
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let summary = crate::config::Summary {
+        curate: true,
+        window_tokens: 1_500,
+        ..Default::default()
+    };
+    let db = crate::providers_db::open(home)?;
+    let mut phase = |raw: &mut Raw, k: &Connection| {
+        crate::turns::round(
+            raw,
+            k,
+            &db,
+            &rules,
+            &summary,
+            "",
+            &mut fake_summarizer,
+            &mut fake_curator,
+            &mut |_, _, _, _| Ok(Phase::Idle),
         )
-    }
+    };
+    let held = lock(home)?.expect("no other worker");
+    run_holding(
+        home,
+        0,
+        consumers(home),
+        || {},
+        Some(held),
+        curating(&mut phase),
+    )
+}
 
-    /// Every row a run derives, each table sorted: raw.db's ops and knowledge.db's tables (an FTS
-    /// table by its text, not its shadow tables), and providers.db's pending. Without the columns
-    /// that hold when the run wrote them: an op's `ts` and the copies of it in knowledge.db, and
-    /// `rewinds.ts`, `gaps.checked_at` and `manifests.built_at`.
-    fn derived(home: &Path) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut dump = |c: &Connection, table: &str, cols: &str| {
-            let mut s = c.prepare(&format!("SELECT {cols} FROM {table}")).unwrap();
-            let n = s.column_count();
-            let mut rows: Vec<String> = s
-                .query_map([], |r| {
-                    let cells: Vec<String> = (0..n)
-                        .map(|i| match r.get_ref(i).unwrap() {
-                            rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into(),
-                            v => format!("{v:?}"),
-                        })
-                        .collect();
-                    Ok(format!("{table}: {}", cells.join(" | ")))
-                })
-                .unwrap()
-                .map(Result::unwrap)
-                .collect();
-            rows.sort();
-            out.extend(rows);
-        };
-        let raw = Connection::open(home.join("raw.db")).unwrap();
-        dump(&raw, "ops", "device, op_seq, type, body, batch");
-        let k = Connection::open(home.join("knowledge.db")).unwrap();
-        let tables: Vec<(String, String)> = k
-            .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
-            .unwrap()
+/// Every row a run derives, each table sorted: raw.db's ops and knowledge.db's tables (an FTS
+/// table by its text, not its shadow tables), and providers.db's pending. Without the columns
+/// that hold when the run wrote them: an op's `ts` and the copies of it in knowledge.db, and
+/// `rewinds.ts`, `gaps.checked_at` and `manifests.built_at`.
+fn derived(home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut dump = |c: &Connection, table: &str, cols: &str| {
+        let mut s = c.prepare(&format!("SELECT {cols} FROM {table}")).unwrap();
+        let n = s.column_count();
+        let mut rows: Vec<String> = s
             .query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                ))
+                let cells: Vec<String> = (0..n)
+                    .map(|i| match r.get_ref(i).unwrap() {
+                        rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into(),
+                        v => format!("{v:?}"),
+                    })
+                    .collect();
+                Ok(format!("{table}: {}", cells.join(" | ")))
             })
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        let fts: Vec<&str> = tables
-            .iter()
-            .filter(|(_, sql)| sql.contains("USING fts5"))
-            .map(|(name, _)| name.as_str())
-            .collect();
-        for (name, _) in &tables {
-            let shadow = fts.iter().any(|f| {
-                name.strip_prefix(f)
-                    .is_some_and(|rest| rest.starts_with('_'))
-            });
-            if shadow || name.starts_with("sqlite_") {
-                continue;
-            }
-            let cols = if fts.contains(&name.as_str()) {
-                "rowid, *".to_owned()
-            } else {
-                k.prepare(&format!("SELECT name FROM pragma_table_info('{name}')"))
-                    .unwrap()
-                    .query_map([], |r| r.get::<_, String>(0))
-                    .unwrap()
-                    .map(Result::unwrap)
-                    .filter(|c| !["ts", "checked_at", "built_at"].contains(&c.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            dump(&k, name, &cols);
+        rows.sort();
+        out.extend(rows);
+    };
+    let raw = Connection::open(home.join("raw.db")).unwrap();
+    dump(&raw, "ops", "device, op_seq, type, body, batch");
+    let k = Connection::open(home.join("knowledge.db")).unwrap();
+    let tables: Vec<(String, String)> = k
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let fts: Vec<&str> = tables
+        .iter()
+        .filter(|(_, sql)| sql.contains("USING fts5"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    for (name, _) in &tables {
+        let shadow = fts.iter().any(|f| {
+            name.strip_prefix(f)
+                .is_some_and(|rest| rest.starts_with('_'))
+        });
+        if shadow || name.starts_with("sqlite_") {
+            continue;
         }
-        let p = Connection::open(home.join("providers.db")).unwrap();
-        dump(&p, "pending", "*");
-        out
-    }
-
-    /// Copies a home, stores and all, and gives the copy of raw.db the copy's file identity, so
-    /// it keeps the device id (a copied file is otherwise another device, `db::ensure_device`).
-    fn copy_home(from: &Path, to: &Path) {
-        copy(from, to);
-        let path = to.join("raw.db");
-        Connection::open(&path)
-            .unwrap()
-            .execute(
-                "UPDATE meta SET value = ?1 WHERE key = 'store_file'",
-                [crate::db::store_file(&path)],
-            )
-            .unwrap();
-    }
-
-    fn copy(from: &Path, to: &Path) {
-        for entry in std::fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let target = to.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                std::fs::create_dir_all(&target).unwrap();
-                copy(&entry.path(), &target);
-            } else {
-                std::fs::copy(entry.path(), target).unwrap();
-            }
-        }
-    }
-
-    /// M2's crash half (spec 8.2): the worker dies at 20 points of a curating run, among them
-    /// between a window's ops landing in raw.db and the claims derived from them in knowledge.db,
-    /// and the next worker leaves the same rows as a run that never stopped.
-    #[test]
-    fn a_crash_at_twenty_points_gives_the_rows_of_a_run_with_none() {
-        let base = tempfile::tempdir().unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/testdata/fixtures/overturn-cross.jsonl");
-        crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap();
-        let clean = tempfile::tempdir().unwrap();
-        copy_home(base.path(), clean.path());
-        crate::crash::off();
-        curate_all(clean.path()).unwrap();
-        let commits = crate::crash::count();
-        let want = derived(clean.path());
-        let count = |table: &str| {
-            want.iter()
-                .filter(|r| r.starts_with(&format!("{table}: ")))
-                .count()
+        let cols = if fts.contains(&name.as_str()) {
+            "rowid, *".to_owned()
+        } else {
+            k.prepare(&format!("SELECT name FROM pragma_table_info('{name}')"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|c| !["ts", "checked_at", "built_at"].contains(&c.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
-        assert!(
-            count("claims") > 0 && count("derivations") > 0 && count("turns") > 0,
-            "{want:#?}"
-        );
-        assert!(commits >= 40, "{commits} commits");
-        // Crashes that left ops in raw.db the claims consumer had not read yet.
-        let mut underived = 0;
-        for i in 0..20 {
-            let at = 1 + i * commits / 20 + i % 3;
-            let home = tempfile::tempdir().unwrap();
-            copy_home(base.path(), home.path());
-            crate::crash::at(at);
-            let crashed = curate_all(home.path());
-            crate::crash::off();
-            assert!(crashed.is_err(), "no crash at commit {at} of {commits}");
-            let ops: i64 = Connection::open(home.path().join("raw.db"))
-                .unwrap()
-                .query_row("SELECT COALESCE(MAX(op_seq), 0) FROM ops", [], |r| r.get(0))
-                .unwrap();
-            let read: i64 = Connection::open(home.path().join("knowledge.db"))
-                .unwrap()
-                .query_row(
-                    "SELECT COALESCE(MAX(seq), 0) FROM op_checkpoints WHERE consumer = 'claims'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            underived += usize::from(ops > read);
-            curate_all(home.path()).unwrap();
-            let got = derived(home.path());
-            let lost: Vec<&String> = want.iter().filter(|r| !got.contains(r)).collect();
-            let added: Vec<&String> = got.iter().filter(|r| !want.contains(r)).collect();
-            assert!(
-                got == want,
-                "a crash at commit {at} of {commits}: lost {lost:#?}, added {added:#?}"
-            );
-        }
-        assert!(underived > 0, "no crash fell between an op and its claims");
+        dump(&k, name, &cols);
     }
+    let p = Connection::open(home.join("providers.db")).unwrap();
+    dump(&p, "pending", "*");
+    out
+}
+
+/// Copies a home, stores and all, and gives the copy of raw.db the copy's file identity, so
+/// it keeps the device id (a copied file is otherwise another device, `db::ensure_device`).
+fn copy_home(from: &Path, to: &Path) {
+    copy(from, to);
+    let path = to.join("raw.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'store_file'",
+            [crate::db::store_file(&path)],
+        )
+        .unwrap();
+}
+
+fn copy(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// M2's crash half (spec 8.2): the worker dies at 20 points of a curating run, among them
+/// between a window's ops landing in raw.db and the claims derived from them in knowledge.db,
+/// and the next worker leaves the same rows as a run that never stopped.
+#[test]
+fn a_crash_at_twenty_points_gives_the_rows_of_a_run_with_none() {
+    let base = tempfile::tempdir().unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/fixtures/overturn-cross.jsonl");
+    crate::replay::run(base.path(), &fixture, None, 0, &[1], "claude", 0, 0).unwrap();
+    let clean = tempfile::tempdir().unwrap();
+    copy_home(base.path(), clean.path());
+    crate::crash::off();
+    curate_all(clean.path()).unwrap();
+    let commits = crate::crash::count();
+    let want = derived(clean.path());
+    let count = |table: &str| {
+        want.iter()
+            .filter(|r| r.starts_with(&format!("{table}: ")))
+            .count()
+    };
+    assert!(
+        count("claims") > 0 && count("derivations") > 0 && count("turns") > 0,
+        "{want:#?}"
+    );
+    assert!(commits >= 40, "{commits} commits");
+    // Crashes that left ops in raw.db the claims consumer had not read yet.
+    let mut underived = 0;
+    for i in 0..20 {
+        let at = 1 + i * commits / 20 + i % 3;
+        let home = tempfile::tempdir().unwrap();
+        copy_home(base.path(), home.path());
+        crate::crash::at(at);
+        let crashed = curate_all(home.path());
+        crate::crash::off();
+        assert!(crashed.is_err(), "no crash at commit {at} of {commits}");
+        let ops: i64 = Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .query_row("SELECT COALESCE(MAX(op_seq), 0) FROM ops", [], |r| r.get(0))
+            .unwrap();
+        let read: i64 = Connection::open(home.path().join("knowledge.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM op_checkpoints WHERE consumer = 'claims'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        underived += usize::from(ops > read);
+        curate_all(home.path()).unwrap();
+        let got = derived(home.path());
+        let lost: Vec<&String> = want.iter().filter(|r| !got.contains(r)).collect();
+        let added: Vec<&String> = got.iter().filter(|r| !want.contains(r)).collect();
+        assert!(
+            got == want,
+            "a crash at commit {at} of {commits}: lost {lost:#?}, added {added:#?}"
+        );
+    }
+    assert!(underived > 0, "no crash fell between an op and its claims");
+}
