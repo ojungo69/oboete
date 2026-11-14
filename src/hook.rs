@@ -3953,10 +3953,22 @@ pub(crate) fn compact(v: &Value) -> String {
     }
 }
 
-/// The markers that open and close a key block, in ASCII lower case, as `clip` looks for a block
-/// the cut leaves open.
-const KEY_OPENS: &str = "-----begin";
-const KEY_CLOSES: &str = "-----end";
+/// Where a private key block that no footer closes starts in `head`: the first header after the
+/// last footer, each in the shape and any case the bundled `private-key` rule reads a key's, so
+/// that a second open block does not keep the first one's lines, and a line such as
+/// `-----beginning of a log-----` opens nothing.
+fn open_key_block(head: &str) -> Option<usize> {
+    static HEADER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----")
+            .expect("a key header's pattern")
+    });
+    static FOOTER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)-----END[ A-Z0-9_-]{0,100}KEY(?: BLOCK)?-----")
+            .expect("a key footer's pattern")
+    });
+    let closed = FOOTER.find_iter(head).last().map_or(0, |m| m.end());
+    HEADER.find_at(head, closed).map(|m| m.start())
+}
 
 /// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
 /// it: the cut of the claude-mem import's prompts. A mask the cut falls inside is kept whole,
@@ -3981,13 +3993,7 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     let s = &s;
     let total = s.chars().count();
     if total <= MAX_FIELD {
-        // Not cut: under a rule of the home's it is masked as capture masks a live prompt, by
-        // all of the rules at once, so that no mask takes the text another rule needs.
-        return if rules.is_off() || rules.counts().0 == 0 {
-            redact::redact_unless_off(s, rules)
-        } else {
-            redact::scan(s, rules).0
-        };
+        return redact::redact_unless_off(s, rules);
     }
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
     let masked = redact::redact_unless_off(&window, rules);
@@ -4023,14 +4029,20 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
     let head = redact::redact_unless_off(&masked[..cut], rules);
-    // A key block the cut leaves open goes, in whatever case its markers are written, unless
-    // redaction is off (owner decision 43): what is kept ends at the first header that no
-    // footer follows, so a second open block after it does not keep the first one's lines.
-    let lower = head.to_ascii_lowercase();
-    let closed = lower.rfind(KEY_CLOSES).unwrap_or(0);
-    let kept = match lower[closed..].find(KEY_OPENS) {
-        Some(open) if !rules.is_off() => closed + open,
-        _ => head.len(),
+    // A key block the cut leaves open goes, unless redaction is off (owner decision 43): what is
+    // kept ends at the last `-----BEGIN` that no `-----END` follows, or at a private key's header
+    // the bundled rule would read, in any case, that no footer follows, whichever is first.
+    let kept = if rules.is_off() {
+        head.len()
+    } else {
+        let begin = head
+            .rfind("-----BEGIN")
+            .filter(|&at| !head[at..].contains("-----END"));
+        begin
+            .into_iter()
+            .chain(open_key_block(&head))
+            .min()
+            .unwrap_or(head.len())
     };
     let head = if rules.is_off() || rules.counts().0 == 0 {
         head[..kept].to_owned()
@@ -4046,10 +4058,12 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
 /// untouched text and put on the text as runs before anything is masked, as `redact::joined_with`
 /// gates a text's views, so that no mask takes the context another rule needs: a mask of the
 /// home's put in before the bundled rules read what is kept took the word `generic-api-key`
-/// needs, and a value it masks was stored (the review of #998). One mask when the gate masks all
-/// of the head, when the rules find the text one value (`whole_runs`), or when what the bundled
-/// rules masked is not the text with the runs `redact::hidden` gives masked: the looks again of a
-/// scan (`curl-auth-user`, #537) mask a value the gate's runs do not hold.
+/// needs, and a value it masks was stored (the review of #998). Where the home's rules find
+/// nothing the bundled rules alone do not, it is `head[..kept]`, as under no rule of the home's.
+/// Where they do, one mask when the gate masks all of the head, when the rules find the text one
+/// value (`whole_runs`), or when what the bundled rules masked is not the text with the runs
+/// `redact::hidden` gives masked: the looks again of a scan (`curl-auth-user`, #537) mask a value
+/// the gate's runs do not hold.
 fn ruled_head(
     s: &str,
     window: &str,
@@ -4061,6 +4075,23 @@ fn ruled_head(
 ) -> String {
     let one = || redact::MASK.to_owned();
     let bundled = redact::Rules::default();
+    // What the rules find in what is kept, as the gate reads it, and in all of the text up to the
+    // end of the window (what is kept is in it). Where the home's rules find nothing there that
+    // the bundled rules alone do not, what is kept is what it is under no rule of the home's.
+    let gate = redact::hidden(&head[..kept], rules);
+    let whole = whole_runs(s, rules).map(|runs| {
+        runs.into_iter()
+            .filter(|&(at, _)| at < window.len())
+            .collect::<Vec<_>>()
+    });
+    if !adds(gate.as_deref(), || redact::hidden(&head[..kept], &bundled))
+        && !adds(whole.as_deref(), || whole_runs(s, &bundled))
+    {
+        return head[..kept].to_owned();
+    }
+    let (Some(gate), Some(whole)) = (gate, whole) else {
+        return one();
+    };
     let (Some(first), Some(second)) = (
         redact::hidden(window, &bundled),
         redact::hidden(&masked[..cut], &bundled),
@@ -4083,10 +4114,6 @@ fn ruled_head(
         Some(&(at, _)) => at,
         None => in_masked.get(cut).map_or(window.len(), |&(at, _)| at),
     };
-    let (Some(gate), Some(whole)) = (redact::hidden(&head[..kept], rules), whole_runs(s, rules))
-    else {
-        return one();
-    };
     let runs = first
         .into_iter()
         .chain(second.iter().map(|&(a, b)| hull(&in_masked[a..b])))
@@ -4094,6 +4121,23 @@ fn ruled_head(
         .chain(whole)
         .collect();
     redact::masked_part(s, 0..end, &redact::merged_runs(runs))
+}
+
+/// Whether the runs the rules with the home's give (`None`: all of the text) hold one that the
+/// bundled rules' alone (`bundled`, read only when needed) do not cover.
+fn adds(
+    home: Option<&[(usize, usize)]>,
+    bundled: impl FnOnce() -> Option<Vec<(usize, usize)>>,
+) -> bool {
+    match home {
+        Some([]) => false,
+        Some(home) => bundled().is_some_and(|runs| {
+            let runs = redact::merged_runs(runs);
+            home.iter()
+                .any(|&(x, y)| !runs.iter().any(|&(a, b)| a <= x && y <= b))
+        }),
+        None => bundled().is_some(),
+    }
 }
 
 /// How often `whole_runs` reads a text again once its masks are in, as a scan's rescan does.
@@ -4138,25 +4182,41 @@ fn hull(from: &[(usize, usize)]) -> (usize, usize) {
 /// For each byte of `masked`, the range of `text` it stands for, where `masked` is `text` with
 /// each of `runs` (sorted, apart) put as one mask or more: a scan keeps a mask its rescan puts
 /// beside another apart (`[REDACTED][REDACTED]`), where `redact::hidden` gives one run of the
-/// two. `None` when `masked` is not that.
+/// two. A run's masks are the most of them that what follows the run in `text` can come after,
+/// so a `[REDACTED]` the text holds after a run is its own. `None` when `masked` is not that.
 fn aligned(text: &str, runs: &[(usize, usize)], masked: &str) -> Option<Vec<(usize, usize)>> {
+    let len = redact::MASK.len();
     let mut from = Vec::with_capacity(masked.len());
     let (mut at, mut m) = (0, 0);
-    for &(s, e) in runs {
+    for (i, &(s, e)) in runs.iter().enumerate() {
         let plain = &text[at..s];
         if masked.get(m..m + plain.len()) != Some(plain) {
             return None;
         }
         from.extend((at..s).map(|i| (i, i + 1)));
         m += plain.len();
-        let first = m;
-        while masked[m..].starts_with(redact::MASK) {
-            from.extend(std::iter::repeat_n((s, e), redact::MASK.len()));
-            m += redact::MASK.len();
-        }
-        if m == first {
-            return None;
-        }
+        let next = runs.get(i + 1);
+        let after = &text[e..next.map_or(text.len(), |&(start, _)| start)];
+        let masks = (0..)
+            .take_while(|&k| {
+                masked
+                    .get(m + k * len..)
+                    .is_some_and(|rest| rest.starts_with(redact::MASK))
+            })
+            .count();
+        // What follows the run comes next, then the next run's mask, or the end of the text.
+        let fits = |k: usize| {
+            let rest = &masked[m + k * len..];
+            match next {
+                Some(_) => rest
+                    .strip_prefix(after)
+                    .is_some_and(|r| r.starts_with(redact::MASK)),
+                None => rest == after,
+            }
+        };
+        let k = (1..=masks).rev().find(|&k| fits(k))?;
+        from.extend(std::iter::repeat_n((s, e), k * len));
+        m += k * len;
         at = e;
     }
     if masked.get(m..) != Some(&text[at..]) {

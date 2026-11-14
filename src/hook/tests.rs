@@ -9274,4 +9274,26 @@ fn aligned_puts_one_mask_or_more_on_a_run_and_nothing_else() {
     assert_eq!(aligned(text, &runs, text), None);
     assert_eq!(aligned(text, &runs, "ab-[REDACTED]-ce"), None);
     assert_eq!(aligned(text, &[], text).map(|f| f.len()), Some(text.len()));
+    // A `[REDACTED]` the text holds after a run is its own, after one mask of the run or two.
+    let held = "aSECRET[REDACTED]z";
+    for masks in 1..=2 {
+        let masked = format!("a{}[REDACTED]z", "[REDACTED]".repeat(masks));
+        let from = aligned(held, &[(1, 7)], &masked).unwrap();
+        let own = 1 + 10 * masks;
+        assert!(from[1..own].iter().all(|&r| r == (1, 7)), "{masks}");
+        assert_eq!(from[own], (7, 8), "{masks}");
+        assert_eq!(from[masked.len() - 1], (17, 18), "{masks}");
+    }
+    // And one between two runs, and part of one after a run's two masks.
+    let between = "aS1[REDACTED]S2z";
+    let from = aligned(
+        between,
+        &[(1, 3), (13, 15)],
+        "a[REDACTED][REDACTED][REDACTED]z",
+    )
+    .unwrap();
+    assert_eq!((from[1], from[11], from[21]), ((1, 3), (3, 4), (13, 15)));
+    let part = "aSECRET[RED";
+    let from = aligned(part, &[(1, 7)], "a[REDACTED][REDACTED][RED").unwrap();
+    assert_eq!((from[20], from[21]), ((1, 7), (7, 8)));
 }
