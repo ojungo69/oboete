@@ -1286,3 +1286,23 @@ fn its_prompt_writes_in_the_language_set() {
         );
     }
 }
+
+/// A forgotten rule leaves the page at once, as agents stop getting it: knowledge.db holds it
+/// until the forget's purge rebuilds the store, and the page listed it under the owner's rules
+/// until then. It is under the removed ones, as a rule forgotten and purged is.
+#[test]
+fn a_forgotten_rule_leaves_the_page_before_the_purge() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+        .unwrap();
+    let uid = got["uid"].as_str().unwrap().to_owned();
+    assert_eq!(h.yours().len(), 1);
+    let h = h.closed(|home| {
+        let target = crate::forget::Target::Uid { uid };
+        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+    });
+    assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+    assert_eq!(h.page()["removed"][0]["id"], "s1");
+}

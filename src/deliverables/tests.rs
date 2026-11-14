@@ -2391,3 +2391,29 @@ fn a_purged_reply_still_ends_its_turn_and_gap() {
     let titles: Vec<String> = copies(home.path()).into_iter().map(|c| c.0).collect();
     assert_eq!(titles, ["second.pdf", "control.pdf"]);
 }
+
+/// What is recorded while `[capture] deliverables` is off is not copied once it is on again, as
+/// no history is copied when it is first turned on: the checkpoint follows the newest record while
+/// it is off. It stayed where it was, and the next round copied the files of every turn made while
+/// it was off.
+#[test]
+fn a_turn_made_while_deliverables_is_off_is_not_copied_once_it_is_on() {
+    let (home, mut raw) = ready();
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    std::fs::write(w.join("report.pdf"), b"%PDF made").unwrap();
+    let write = [("Write", json!({"file_path": w.join("report.pdf")}))];
+    let config = home.path().join("config.toml");
+    std::fs::write(&config, "[capture]\ndeliverables = false\n").unwrap();
+    turn(&mut raw, "s1", w, &write);
+    assert!(!step(home.path(), &raw));
+    std::fs::remove_file(&config).unwrap();
+    assert!(
+        !step(home.path(), &raw),
+        "nothing of the turn made while it was off"
+    );
+    assert!(copies(home.path()).is_empty());
+    turn(&mut raw, "s2", w, &write);
+    assert!(step(home.path(), &raw));
+    assert_eq!(copies(home.path()).len(), 1);
+}

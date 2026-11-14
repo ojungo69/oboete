@@ -400,11 +400,15 @@ impl Oboete {
             since,
             until,
             history: a.history == Some(true),
-            types: match search::types(a.kind.as_deref()) {
+            types: match search::types(a.kind.as_deref().filter(|s| !s.trim().is_empty())) {
                 Ok(types) => types,
                 Err(e) => return failed(format!("{e:#}")),
             },
-            order: match a.order_by.as_deref().map(str::parse).transpose() {
+            order: match (a.order_by.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::parse)
+                .transpose()
+            {
                 Ok(order) => order.unwrap_or_default(),
                 Err(e) => return failed(format!("{e:#}")),
             },
@@ -438,7 +442,9 @@ impl Oboete {
         annotations(read_only_hint = true)
     )]
     fn get(&self, Parameters(a): Parameters<GetArgs>) -> Result<CallToolResult, ErrorData> {
-        match (a.id, a.ids) {
+        // `""` and an empty list are left out, as `scope` and timeline take them.
+        let id = a.id.filter(|s| !s.trim().is_empty());
+        match (id, a.ids.filter(|ids| !ids.is_empty())) {
             (Some(id), None) => match search::get(&self.home, &id).map_err(internal)? {
                 Some(t) => Ok(CallToolResult::success(vec![ContentBlock::text(replied(
                     &t,

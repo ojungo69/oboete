@@ -215,12 +215,17 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
         Some((raw, k)) => {
             let s = shown(&raw, &k)?;
             let with_on = |claims: Vec<crate::claims::Claim>| -> Result<Vec<Rule>> {
-                (claims.into_iter())
-                    .map(|c| {
-                        let on = !crate::claims::muted(&k, &c.uid)?;
-                        Ok((c, on))
-                    })
-                    .collect()
+                let mut rules = Vec::new();
+                for c in claims {
+                    // A forgotten rule is gone at once, as agents stop getting it: knowledge.db
+                    // keeps it until the forget's purge rebuilds the store.
+                    if raw.forgotten(&c.uid)? {
+                        continue;
+                    }
+                    let on = !crate::claims::muted(&k, &c.uid)?;
+                    rules.push((c, on));
+                }
+                Ok(rules)
             };
             scopes[0].1 = with_on(crate::claims::global(&k)?)?;
             for repo in crate::claims::owned_repos(&k)? {
