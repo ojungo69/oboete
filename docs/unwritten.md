@@ -69,6 +69,7 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   for the rows written back.
 - **U4. What cannot be written back** (an unknown version, unreadable JSON, an event raw refuses)
   moves to `unwritten/bad/` under the keep lock (U5), never deleted by oboete; doctor counts it.
+  Decision 110 puts it within a forget's reach (milestone-5-plan.md Slice 5, 5f; not built yet).
 - **U5. Bound.** Nothing more is kept while `unwritten/` holds 64 MiB, the new file and `bad/`
   counted (oboete never deletes what it set aside): the marker alone says the write failed, as
   before. One keep at a time checks the bound, names its file and renames it (a lock beside the
@@ -86,7 +87,8 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   version: a rule added since reaches it as it reaches every record stored before the rule
   (rescan). It was shaped by the capture settings of its time (`store_prompts`, `tool_output`).
 - **U8. Forget and the deletion canary.** A kept event is no record yet: no forget can name it
-  until it is written. Its file holds record text, so the canary's file list (spec, M4 deletion
+  until it is written (decision 110 changes this for a forget of a session, a repository or a time
+  range: milestone-5-plan.md Slice 5, 5f; not built yet). Its file holds record text, so the canary's file list (spec, M4 deletion
   canary) covers `unwritten/`. Once written back it is a live record, which a forget names by
   where and when it was recorded (milestone 5 slice 3a), and U3's hash keeps a file left behind
   from writing it again.

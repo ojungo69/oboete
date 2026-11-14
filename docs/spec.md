@@ -5,7 +5,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 ## 読み方 (Reading guide)
 
 - この文書は oboete の設計の正本です。実装するときの参照先なので、本文は英語で書いています。
-- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜108 は 0.1 にまとめてあります。
+- 0 章は決定と出典の一覧です。owner(あなた)の決定 1〜110 は 0.1 にまとめてあります。
 - 1 章は全体の形です(端末ごとの処理の流れ、AI の使い方の段階、あなたが変えられる設定)。
 - 2 章は記録です(フック=エージェントが動くたびに呼ばれる仕組み、伏せ字、何を保存するか、バックアップ)。
 - 3 章は知識づくりです。記録を区切り(window)ごとに AI(curator)が読み、決定・好み・教訓などの claim(知識 1 件)にします。
@@ -23,7 +23,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 
 ### 0.1 Owner decisions
 
-A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-108 up to 2026-11-13; they are recorded here.
+A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26, decision 30 on 2026-09-28 and decisions 31-32 on 2026-09-30, and decisions 33-110 up to 2026-11-14; they are recorded here.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
@@ -133,6 +133,8 @@ A later decision wins over an earlier one and over any section text. Decisions 1
 106. (2026-11-13) Whether a trial build's draft is made public is Claude's to judge, each time, once the draft is checked (its archives, their checksums and their provenance); it is reported when done. This is for decision 92's trial builds only: an npm package and a release are still decided each time (decision 103).
 107. (2026-11-13) The curator's prompt cache is to work about as well as claude-mem's observer's, at about the present bill, by the two things that do it there ([curator-conversation.md](curator-conversation.md)): a long tool output is sent short (3.5 (a)'s deterministic rule, for every tool call or for subagents' alone), and what an entry was sent before goes again with each call, as one growing conversation that the entry reads from its prompt cache. "Each record is sent once" ([prompt-cache.md](prompt-cache.md), decision 86) is given up for it. Measured on this PC's calls of 2026-11-10 to 11-13: about 85 to 90% of a paid entry's prompt tokens read from the cache, where about 15% are now, for 0.73 to 0.89 times the Messages API's bill. A stretch sent again passes the egress gate again; a forget, an expiry, an exclusion or a rule change restarts the conversation, and a window's op names the stretches it was shown, so a forget reaches what was made with them. Both parts are built behind settings that are off. Neither becomes the default before the memory's quality is measured once (decision 34: its cost shown first), the share of answers the checks refuse first: 3.5 (a)'s condition stands for the shorter text.
 108. (2026-11-13) The timeout `oboete setup` writes for a hook of Claude Code, Codex and Grok is 10 s more than it was: 15 s where it was 5 s, 20 s where it was 10 s; a session's end keeps 3 s, and agy's and Cursor's hooks their 10 s ([hook-time.md](hook-time.md), "The timeout `setup` writes"). The room is for a hook that starts late and for a statement that takes seconds on a cold store, which the 1 s between a hook's own deadline and its agent's cancellation did not cover. A hook's own time for what it injects is not lengthened: it is still counted from the shorter timeout, so a settings file an older `setup` wrote is kept to, and a slow store holds a prompt up no longer than before. The new timeouts reach an agent's settings when `setup` is run for it again; until then its hooks work as they did, and `oboete doctor` and the settings page say so.
+109. (2026-11-14) A forget of a repository also removes that repository's work state, the notes agents saved in it and the history imported for it ([milestone-5-plan.md](milestone-5-plan.md) Slice 5; not built yet: the forget of a repository reaches its records only).
+110. (2026-11-14) What could not be written, `unwritten/` and `unwritten/bad/` ([unwritten.md](unwritten.md)), is within a forget's reach ([milestone-5-plan.md](milestone-5-plan.md) Slice 5, 5f; not built yet).
 
 **Later owner direction on decision 38 (2026-10-06, [#336](https://github.com/ojungo69/oboete/issues/336)).** Both A, selection before summarization, and B, relevance/evidence selection after retrieval, are adopted. This adopts the two feature goals, not a model, backend, default, threshold or implementation date. The earlier §3.5(b) veto on `decided/supersedes` is separate and is not adopted by this direction. Decision 38 remains the record of the earlier Clef-specific assessment; its then-current conclusion does not permanently reject the later A/B request. Decision 34's finish-first, held-evaluation and cost-disclosure rules remain in force. The #336 direction does not assign A/B to a phase or to either side of cutover; the approved build order remains unchanged.
 
@@ -178,7 +180,7 @@ Earlier decisions that still hold (RD/owner-decisions.md:16). Where the 2026-09-
 
 ### 0.3 Sources
 
-- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-108 are in 0.1).
+- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-110 are in 0.1).
 - The settled sections this spec compiles: `RD/sections-1-4.md` and `RD/section-5-revised.md` … `RD/section-8-revised.md`. Their text is sections 1-8 here.
 - Other RD/ files the sections cite: `RD/options-draft.md`, `RD/improvements-synthesis.md`, `RD/constraints-synthesis.md`, `RD/issue50.md`, `RD/hub-platform.md`, `RD/phase0.md`, `RD/critique.md`, and `RD/improvements-result.json` (workflow output, not committed).
 - `docs/research/curator-providers-2026-09-25.md`: the research behind decisions 23, 25 and 26 and Claude decision C1 (cited by §).
