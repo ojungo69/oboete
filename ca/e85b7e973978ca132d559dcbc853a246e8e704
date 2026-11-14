@@ -1,0 +1,21 @@
+src/redact.rs
+  s_76c95352747315::t_8a89a29e2cfbb1 4428-4431,4550-4555,4567-4584
+docs/milestone-2.md
+  s_76c95352747315::t_8a89a29e2cfbb1 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cae85b7e973978ca132d559dcbc853a246e8e704",
+  "prompts": {},
+  "sessions": {
+    "s_76c95352747315": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "85c9c838-1efe-4bce-8363-c07637811bb4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
