@@ -317,10 +317,8 @@ pub fn claude_mem_with(
                 stats.empty += 1;
                 return Ok(());
             }
-            // Then the home's rules gate what `clip` kept, as they do a title and a body.
-            // shortcut: a value only a rule of the home's finds keeps its start when the cut
-            // falls inside it; mask over `clip`'s window before the cut once a home has such a
-            // rule and prompts this long.
+            // Then the home's rules gate what `clip` kept, as they do a title and a body. A
+            // value of theirs the cut would fall inside, `clip` kept none of.
             let body = redact::outbound_with(&kept, &settings.rules);
             if body.is_empty() {
                 stats.empty += 1;

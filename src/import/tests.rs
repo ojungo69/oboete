@@ -592,6 +592,47 @@ fn a_prompt_is_gated_with_the_homes_rules_too() {
     assert_eq!(typed[2], texts[2]);
 }
 
+/// A value only a rule of the home's finds, with the cut at 8,000 characters inside it:
+/// nothing of it is stored. `clip` kept its start, and the home's gate, which runs on what
+/// was kept, no longer took those characters for the value. Under no rule of the home's the
+/// cut is where it was.
+#[test]
+fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("claude-mem.db");
+    claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+    let text = format!("{}acme-482915 {}", "a".repeat(7_992), "b".repeat(3_000));
+    prompt(&src, 32, &text);
+    let body = |settings: &crate::capture::Settings, home: &Path| -> String {
+        let mut raw = crate::raw::open(home).unwrap();
+        raw.gates_with(&settings.rules);
+        claude_mem(&mut raw, &src, settings).unwrap();
+        let stored = docs(&raw);
+        stored
+            .iter()
+            .find(|d| d.source_id == "p32")
+            .unwrap()
+            .body
+            .clone()
+    };
+    let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+    let (home, ruled) = home_with(rule);
+    let stored = body(&ruled, home.path());
+    assert!(!stored.contains("acme"), "{}", &stored[7_980..]);
+    assert_eq!(
+        stored,
+        format!("{}\n…[clipped, 11004 chars in full]", "a".repeat(7_992))
+    );
+    let (home, plain) = home_with("");
+    assert_eq!(
+        body(&plain, home.path()),
+        format!(
+            "{}acme-482\n…[clipped, 11004 chars in full]",
+            "a".repeat(7_992)
+        )
+    );
+}
+
 /// A harness notification is told before the home's rules run: a rule that masks its opening
 /// tag does not make it a prompt (a security review of this change, 2026-11-12). A prompt
 /// the home's rules leave nothing of is none.

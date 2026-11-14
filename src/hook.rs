@@ -3963,13 +3963,25 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
         return redact::redact_unless_off(s, rules);
     }
     let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
-    let head: String = redact::redact_unless_off(&window, rules)
-        .chars()
-        .take(MAX_FIELD)
-        .collect();
+    let masked = redact::redact_unless_off(&window, rules);
+    let mut cut = masked
+        .char_indices()
+        .nth(MAX_FIELD)
+        .map_or(masked.len(), |(at, _)| at);
+    // A value a rule of the home's finds with the cut inside it goes whole, as a key block the
+    // cut leaves open does: the caller gates what is kept with the home's rules, and the start
+    // of a value is no finding to them. Under no rule of the home's the cut is where it was.
+    if !rules.is_off()
+        && rules.counts().0 > 0
+        && let Some((start, _)) = redact::ranges(&masked, rules)
+            .into_iter()
+            .find(|&(start, end)| start < cut && cut < end)
+    {
+        cut = start;
+    }
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
-    let mut head = redact::redact_unless_off(&head, rules);
+    let mut head = redact::redact_unless_off(&masked[..cut], rules);
     // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
     if !rules.is_off()
         && let Some(begin) = head.rfind("-----BEGIN")
