@@ -1522,9 +1522,16 @@ fn claude_cli_at(
 ) -> ClaudeCliExit {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+    // An empty directory of its own, as a curator call has: npm's `claude.cmd` starts a bare `node`
+    // when no `node.exe` sits beside it, and cmd.exe looks for that in the working directory first,
+    // which may be a checkout that holds one (Codex's security review of #1009).
+    let Ok(scratch) = crate::provider::scratch_dir() else {
+        return ClaudeCliExit::SpawnFailed;
+    };
     let mut command = Command::new(launcher);
     command
         .args(args)
+        .current_dir(&scratch.0)
         .env_clear()
         .envs(crate::provider::curator_env(
             std::env::vars_os(),

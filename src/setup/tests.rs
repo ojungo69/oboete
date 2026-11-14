@@ -213,6 +213,30 @@ fn w6a_native_claude_command_is_bounded_and_discards_private_output() {
     assert!(start.elapsed() < Duration::from_millis(500));
 }
 
+/// `claude mcp` runs in an empty directory of its own, not in the one oboete was started in: on
+/// Windows npm's `claude.cmd` starts a bare `node` when no `node.exe` sits beside it, and cmd.exe
+/// looks for that in the working directory first, which may be a checkout holding one (Codex's
+/// security review of #1009).
+#[test]
+fn claude_mcp_runs_in_a_directory_of_its_own() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("cwd.txt");
+    let out = out.to_str().unwrap();
+    let exit = if cfg!(windows) {
+        let launcher = dir.path().join("claude.cmd");
+        std::fs::write(&launcher, "@cd > \"%~1\"\r\n").unwrap();
+        claude_cli_at(&launcher, &[out], Duration::from_secs(30))
+    } else {
+        let shell = Path::new("/bin/sh");
+        claude_cli_at(shell, &["-c", "pwd > \"$0\"", out], Duration::from_secs(30))
+    };
+    assert_eq!(exit, ClaudeCliExit::Success);
+    let ran_in = std::fs::read_to_string(out).unwrap();
+    let here = std::env::current_dir().unwrap();
+    assert_ne!(Path::new(ran_in.trim()), here.as_path(), "{ran_in}");
+}
+
 #[test]
 #[cfg(unix)]
 fn w6a_first_backup_preserves_a_dangling_existing_backup_alias() {
