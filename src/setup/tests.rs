@@ -1993,29 +1993,43 @@ fn a_path_entry_that_is_not_absolute_gives_no_launcher() {
 
 /// A `.cmd` launcher found on `PATH` starts, with arguments as oboete gives a curator CLI (JSON
 /// with quotes and braces, and an empty one): Rust runs it through cmd.exe and refuses an
-/// argument it cannot escape there.
+/// argument it cannot escape there, and node behind it, as behind npm's, gets each as it was
+/// given (CodeRabbit on #1009).
 #[cfg(windows)]
 #[test]
 fn a_cmd_launcher_on_the_path_starts_with_a_curators_arguments() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("oboete-fake.cmd"), "@echo launched\r\n").unwrap();
+    // As npm's launcher does, the `.cmd` hands its arguments (`%*`) to node, here to print the
+    // ones it was given; without node it only says it started.
+    let node = on_path("node");
+    let body = if node {
+        "@node -e \"process.stdout.write(JSON.stringify(process.argv.slice(1)))\" -- %*\r\n"
+    } else {
+        "@echo launched\r\n"
+    };
+    std::fs::write(dir.path().join("oboete-fake.cmd"), body).unwrap();
     let path = std::env::join_paths([dir.path()]).unwrap();
     let found = launcher_in(&path, "oboete-fake", true).unwrap();
+    let args = [
+        "--settings",
+        r#"{"disableAllHooks":true,"enabledPlugins":{"a@b":false}}"#,
+        "--setting-sources",
+        "",
+        "--json-schema",
+        r#"{"type":"object","properties":{"a":{"type":"string"}}}"#,
+    ];
     let out = std::process::Command::new(&found)
-        .args([
-            "--settings",
-            r#"{"disableAllHooks":true,"enabledPlugins":{"a@b":false}}"#,
-        ])
-        .args(["--setting-sources", ""])
-        .args([
-            "--json-schema",
-            r#"{"type":"object","properties":{"a":{"type":"string"}}}"#,
-        ])
+        .args(args)
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("launched"),
-        "{out:?}"
-    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if node {
+        let got: Vec<String> =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {out:?}"));
+        assert_eq!(got, args);
+    } else {
+        eprintln!("the arguments' check skipped: node is not on PATH");
+        assert!(stdout.contains("launched"), "{out:?}");
+    }
 }
