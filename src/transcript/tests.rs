@@ -1108,10 +1108,11 @@ fn a_forget_between_a_files_batches_refuses_that_file_and_the_next_is_read() {
     raw.append_with_ledger(&live[0].event, &live[0].ledger, "test")
         .unwrap();
     drop(raw);
-    let mut forgot = false;
+    let of_big = |home: &Path| records(home).iter().filter(|e| e.session == "big").count();
+    // How many of the session's events the store held once the forget was registered.
+    let mut forgot = None;
     let result = run(&home, &[("codex", &root)], None, &mut |c| {
-        if !forgot && matches!(c, Committed::Transcripts { .. }) {
-            forgot = true;
+        if forgot.is_none() && matches!(c, Committed::Transcripts { .. }) {
             // The hook's record is the store's first.
             let (device, seq) = {
                 let raw = raw::open(&home).unwrap();
@@ -1121,12 +1122,14 @@ fn a_forget_between_a_files_batches_refuses_that_file_and_the_next_is_read() {
             let target = crate::forget::Target::Record { device, seq };
             let preview = crate::forget::preview(&home, target).unwrap();
             crate::forget::start(&home, &preview).unwrap();
+            forgot = Some(of_big(&home));
         }
     })
     .unwrap_err();
-    assert!(forgot);
     assert_eq!(result.code, crate::preview::FailureCode::Refused);
     assert_eq!(result.outcome.stats.agents["codex"].refused, 1);
+    // The refused file stopped where it stood: no later batch of it was stored.
+    assert_eq!(Some(of_big(&home)), forgot);
     assert!(
         records(&home).iter().any(|e| e.session == "next"),
         "the file after the refused one was not read"

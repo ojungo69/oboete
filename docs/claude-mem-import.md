@@ -118,10 +118,12 @@ the cut as it is): `hook::clip` masks
 it with the bundled rules, so that its check for a key block the cut leaves open sees every
 header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
 prompt was masked with the bundled rules alone. A value a rule of the home's finds with the cut
-inside it is not kept in part, however far past the cut it ends: what is kept ends where that
-value starts (2026-11-14; its start used to stay). A mask the cut falls inside is kept whole
-(2026-11-14; its first characters used to stay). While `[capture] store_prompts` is off no
-prompt's text is
+inside it is not kept in part: what is kept ends where that value starts (2026-11-14; its start
+used to stay). The rule looks for it in the 12,000 characters `clip` masked, as the bundled
+rules left them: a value that ends past them, one that holds a value the bundled rules masked,
+and one whose rule needs what follows the cut are not found, and a part of them can stay (#994).
+A mask the cut falls inside is kept whole (2026-11-14; its first characters used to stay). While
+`[capture] store_prompts` is off no prompt's text is
 stored, as a live prompt's is not: the rows are counted with the empty ones (`empty`) and come in
 once the setting is on again. A label names something, so the gate must leave it as it is: a row
 whose repository (`claude-mem:<project>`) or session id the gate changes, by a mask or by its

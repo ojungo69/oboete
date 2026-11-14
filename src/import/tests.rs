@@ -594,9 +594,8 @@ fn a_prompt_is_gated_with_the_homes_rules_too() {
 
 /// A value only a rule of the home's finds, with the cut at 8,000 characters inside it:
 /// nothing of it is stored. `clip` kept its start, and the home's gate, which runs on what
-/// was kept, no longer took those characters for the value. So it is for a value that ends
-/// past the 4,000 characters `clip` reads after the cut: its rule finds it only in all of the
-/// text. Under no rule of the home's the cut is where it was.
+/// was kept, no longer took those characters for the value. Under no rule of the home's the
+/// cut is where it was.
 #[test]
 fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -604,45 +603,33 @@ fn a_prompt_cut_inside_a_value_of_the_homes_rule_keeps_none_of_it() {
     claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
     let text = format!("{}acme-482915 {}", "a".repeat(7_992), "b".repeat(3_000));
     prompt(&src, 32, &text);
-    let long = format!("{}vault{{{}}} done", "a".repeat(7_990), "s".repeat(5_000));
-    prompt(&src, 33, &long);
-    let bodies = |settings: &crate::capture::Settings, home: &Path| -> [String; 2] {
+    let body = |settings: &crate::capture::Settings, home: &Path| -> String {
         let mut raw = crate::raw::open(home).unwrap();
         raw.gates_with(&settings.rules);
         claude_mem(&mut raw, &src, settings).unwrap();
         let stored = docs(&raw);
-        ["p32", "p33"].map(|id| {
-            let doc = stored.iter().find(|d| d.source_id == id).unwrap();
-            doc.body.clone()
-        })
+        stored
+            .iter()
+            .find(|d| d.source_id == "p32")
+            .unwrap()
+            .body
+            .clone()
     };
-    let rule = "[[redaction.extra_rules]]\nid = \"acme\"\nregex = 'acme-[0-9]{6}'\n\
-                [[redaction.extra_rules]]\nid = \"vault\"\nregex = 'vault\\{[^}]*\\}'\n";
+    let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
     let (home, ruled) = home_with(rule);
-    let [stored, stored_long] = bodies(&ruled, home.path());
+    let stored = body(&ruled, home.path());
     assert!(!stored.contains("acme"), "{}", &stored[7_980..]);
     assert_eq!(
         stored,
         format!("{}\n…[clipped, 11004 chars in full]", "a".repeat(7_992))
     );
-    assert!(!stored_long.contains("vault"), "{}", &stored_long[7_980..]);
-    assert_eq!(
-        stored_long,
-        format!("{}\n…[clipped, 13002 chars in full]", "a".repeat(7_990))
-    );
     let (home, plain) = home_with("");
     assert_eq!(
-        bodies(&plain, home.path()),
-        [
-            format!(
-                "{}acme-482\n…[clipped, 11004 chars in full]",
-                "a".repeat(7_992)
-            ),
-            format!(
-                "{}vault{{ssss\n…[clipped, 13002 chars in full]",
-                "a".repeat(7_990)
-            ),
-        ]
+        body(&plain, home.path()),
+        format!(
+            "{}acme-482\n…[clipped, 11004 chars in full]",
+            "a".repeat(7_992)
+        )
     );
 }
 

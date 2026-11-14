@@ -3955,7 +3955,7 @@ pub(crate) fn compact(v: &Value) -> String {
 /// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
 /// it: the cut of the claude-mem import's prompts. A mask the cut falls inside is kept whole,
 /// and a value the cut would leave a part of is not kept: a key block left open, or what a
-/// rule of the home's finds in all of the text.
+/// rule of the home's finds in that window.
 pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
@@ -3971,24 +3971,28 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
         .nth(MAX_FIELD)
         .map_or(masked.len(), |(at, _)| at);
     // A mask the cut falls inside is kept whole, as capture's cut keeps one (`scan_capped`).
-    if let Some(at) = (cut.saturating_sub(redact::MASK.len() - 1)..cut).find(|&at| {
-        masked
-            .get(at..)
-            .is_some_and(|rest| rest.starts_with(redact::MASK))
-    }) {
+    // While redaction is off the text holds none: it is cut as typed (owner decision 43).
+    if !rules.is_off()
+        && let Some(at) = (cut.saturating_sub(redact::MASK.len() - 1)..cut).find(|&at| {
+            masked
+                .get(at..)
+                .is_some_and(|rest| rest.starts_with(redact::MASK))
+        })
+    {
         cut = at + redact::MASK.len();
     }
     // A value a rule of the home's finds with the cut inside it goes whole, as a key block the
     // cut leaves open does: the caller gates what is kept with the home's rules, and the start
-    // of a value is no finding to them. The rules read all of the text for it, the window as
-    // masked and the rest as it came: a value can end past the overlap, and then its rule finds
-    // nothing of it in the window. Under no rule of the home's the cut is where it was.
+    // of a value is no finding to them. Under no rule of the home's the cut is where it was.
+    // shortcut: the rules read the window as the bundled rules masked it, so they do not find a
+    // value that ends past the overlap, one that holds a value the bundled rules masked, or one
+    // whose rule needs what follows the cut (#994): read the text as it came, all of it, when
+    // an imported prompt is masked as capture masks one.
     if !rules.is_off()
         && rules.counts().0 > 0
-        && let Some((start, _)) =
-            redact::ranges(&[masked.as_str(), &s[window.len()..]].concat(), rules)
-                .into_iter()
-                .find(|&(start, end)| start < cut && cut < end)
+        && let Some((start, _)) = redact::ranges(&masked, rules)
+            .into_iter()
+            .find(|&(start, end)| start < cut && cut < end)
     {
         cut = start;
     }

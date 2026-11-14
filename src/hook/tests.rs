@@ -8722,6 +8722,25 @@ fn a_mask_the_cut_falls_inside_is_kept_whole() {
             "a".repeat(MAX_FIELD - 5)
         )
     );
+    // While redaction is off the text holds no mask: one typed there is cut as any text is.
+    let off = redact::Rules::new(
+        &crate::config::parse_capture(Some("[redaction]\nenabled = false\n"))
+            .unwrap()
+            .redaction,
+    )
+    .unwrap();
+    let typed = format!(
+        "{} [REDACTED] {}",
+        "a".repeat(MAX_FIELD - 5),
+        "b".repeat(3_000)
+    );
+    assert_eq!(
+        clip(&typed, &off),
+        format!(
+            "{} [RED\n…[clipped, 11007 chars in full]",
+            "a".repeat(MAX_FIELD - 5)
+        )
+    );
 }
 
 #[test]
