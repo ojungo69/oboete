@@ -11,6 +11,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::claims::{self, Claim};
+use crate::forget::history::Applied;
 use crate::import::{imported_match, imported_repos, imported_scope};
 use crate::raw::Raw;
 use crate::redact;
@@ -355,6 +356,10 @@ pub struct Hit {
 pub struct Answer {
     pub hits: Vec<Hit>,
     pub vector: Vector,
+    /// Decision 109: the imported documents were not read, knowledge.db not having applied a
+    /// forget of their history yet, so the hits hold none of them; which says nothing of whether
+    /// any would have matched (`forget::history::WITHHELD`).
+    pub withheld: bool,
 }
 
 /// Whether the hits' vector side ran (spec 4.10, A93): when it did not, they are full text alone,
@@ -787,6 +792,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         return Ok(Answer {
             hits: Vec::new(),
             vector: Vector::Skipped(VectorSkip::NoVectors),
+            withheld: false,
         });
     }
     // raw.db first: its shared hold on raw.lock keeps a restore from swapping the stores while
@@ -795,6 +801,9 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
     // Milestone 5 D5 (#439): no forget commits until the answer is built, the query's call too.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
+    // Decision 109: the imported documents only once knowledge.db has applied every forget of
+    // their history; the claims, cards, summaries and records are read either way.
+    let applied = raw.imported_open(&k)?;
     // The index the vector side reads: the active embedder's (Step 8's switch to a new one comes
     // with the second embedder, Task 10).
     let active: Option<String> = k
@@ -856,7 +865,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
         let forgotten = raw.forgotten_set()?;
         let imported = match q.raw {
             RawArm::Only => None,
-            _ => Some(imported_fts(&k, q, depth + forgotten.len())),
+            _ => Some(
+                applied
+                    .as_ref()
+                    .map(|a| imported_fts(&k, a, q, depth + forgotten.len())),
+            ),
         };
         let raw_order = || {
             super::raw_order(
@@ -886,8 +899,11 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         if let Some(fts) = imported {
             (hits, lowered) = claims_leg(&raw, &k, q, depth, &terms, near.as_ref())?;
-            let found = (fts?, &forgotten);
-            imports = imported_leg(&k, q, depth, &terms, found, near.as_ref(), &rules)?;
+            if let (Some(applied), Some(fts)) = (&applied, fts) {
+                let found = (fts?, &forgotten);
+                let near = near.as_ref();
+                imports = imported_leg(&k, applied, q, depth, &terms, found, near, &rules)?;
+            }
             let cards = curated_leg(&raw, &k, q, depth, &terms, &rules, false, near.as_ref())?;
             let summaries = curated_leg(&raw, &k, q, depth, &terms, &rules, true, near.as_ref())?;
             let lists = [&cards, &summaries, &imports];
@@ -919,7 +935,7 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
                 None => raw_order()?,
             };
             if let Some(near) = &near {
-                order = rrf(&order, &near.query_knn(&k, q, "r", depth)?);
+                order = rrf(&order, &near.query_knn(&k, None, q, "r", depth)?);
                 order.truncate(depth);
             }
             // The records read and their snippets gated now, whatever became of the call: the
@@ -956,7 +972,12 @@ fn search(home: &Path, q: &Query, ask: Ask) -> Result<Answer> {
             Order::DateAsc => hits.sort_by_key(|h| h.when),
         }
         hits = page_units(hits, page);
-        Ok(Answer { hits, vector })
+        let withheld = applied.is_none() && q.raw != RawArm::Only;
+        Ok(Answer {
+            hits,
+            vector,
+            withheld,
+        })
     })
 }
 
@@ -1494,6 +1515,11 @@ pub fn trec_run(
     // Milestone 5 D5 (#439): one fence for every query and the sidecar read after them.
     let read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let k = crate::knowledge::open(home)?;
+    // Decision 109: a run whose search legs left the imported documents out would judge a store
+    // that is not the one asked about.
+    let Some(applied) = raw.imported_open(&k)? else {
+        anyhow::bail!("{}", crate::forget::history::WITHHELD);
+    };
     claims::schema(&k)?;
     let claims: bool = k.query_row("SELECT EXISTS (SELECT 1 FROM active)", [], |r| r.get(0))?;
     anyhow::ensure!(
@@ -1553,7 +1579,7 @@ pub fn trec_run(
     if let Some(between) = BETWEEN.take() {
         between();
     }
-    let docs = sidecar(&raw, &k, &printed)?;
+    let docs = sidecar(&raw, &k, &applied, &printed)?;
     // The files are written outside it, as every answer is (Greptile on #446).
     drop(read);
     std::fs::create_dir_all(out)?;
@@ -1594,7 +1620,7 @@ fn question(line: &str, depth: usize) -> Result<(String, Query)> {
 /// The run's sidecar (Task 6): one JSON line per printed key, its session, time, kind and text,
 /// gated as embedding gates it (`outbound_lines`; an imported document's fields each alone,
 /// `composed_out`) and cut where the judge cuts. A record's text is raw.db's as it is now (#317).
-fn sidecar(raw: &Raw, k: &Connection, keys: &[String]) -> Result<String> {
+fn sidecar(raw: &Raw, k: &Connection, _: &Applied, keys: &[String]) -> Result<String> {
     let mut out = String::new();
     for key in keys {
         let row: Option<(Option<String>, i64, String, String)> = match key.strip_prefix("r:") {
@@ -1665,9 +1691,12 @@ impl Near {
     /// Q5: keep the existing bounded KNN candidate pool, but remove unselected kinds before
     /// taking the leg's depth and fusing its ranks. This reads only kind metadata for filtering;
     /// the display readers below still decide visibility and gate the actual hits.
+    /// An imported document's kind is read only with `applied` (decision 109): without it, none
+    /// of the family `i` is kept.
     fn query_knn(
         &self,
         k: &Connection,
+        applied: Option<&Applied>,
         q: &Query,
         family: &str,
         depth: usize,
@@ -1707,15 +1736,12 @@ impl Near {
                     })
                     .optional()?,
                 ),
-                "i" => (
-                    Class::Imported,
-                    k.query_row(
-                        "SELECT kind FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
-                        [&key],
-                        |r| r.get(0),
-                    )
-                    .optional()?,
-                ),
+                "i" => {
+                    let Some(applied) = applied else {
+                        continue;
+                    };
+                    (Class::Imported, imported_kind(k, applied, &key)?)
+                }
                 // A card's kind is its type, or `summary` without one, as `curated_leg` says.
                 "o" => {
                     let Some((device, op_seq, n)) = crate::cards::id_parts(&key, "") else {
@@ -2056,7 +2082,7 @@ fn claims_leg(
     // full-text one (D8).
     if let Some(near) = near {
         let (mut near_shown, mut near_ended) = (Vec::new(), Vec::new());
-        for uid in near.query_knn(k, q, "c", depth)? {
+        for uid in near.query_knn(k, None, q, "c", depth)? {
             if !hidden(&uid)? {
                 place_claim(
                     k,
@@ -2351,8 +2377,10 @@ fn on_this_device(raw: &Raw, device: &str, seq: i64) -> Result<bool> {
 /// The imported documents `q` finds, once per uid (two devices' imports of one are one): the
 /// documents in one full-text list (Q2), fused with their vector side's. Both imported vector
 /// partitions (`k` knowledge and `p` prompts) take part in that one list.
+#[allow(clippy::too_many_arguments)]
 fn imported_leg(
     k: &Connection,
+    applied: &Applied,
     q: &Query,
     depth: usize,
     terms: &[String],
@@ -2363,21 +2391,21 @@ fn imported_leg(
     let mut out = Vec::new();
     uids.retain(|u| !forgotten.contains(u));
     if let Some(near) = near {
-        let mut by_meaning = near.query_knn(k, q, "i", depth + forgotten.len())?;
+        let mut by_meaning = near.query_knn(k, Some(applied), q, "i", depth + forgotten.len())?;
         by_meaning.retain(|u| !forgotten.contains(u));
         uids = rrf(&uids, &by_meaning);
     }
     uids.truncate(depth);
     for uid in uids {
-        out.extend(imported_hit(k, &uid, terms, rules)?);
+        out.extend(imported_hit(k, applied, &uid, terms, rules)?);
     }
     Ok(out)
 }
 
 /// The full-text side of `imported_leg`: uids, the best first, regardless of kind (Q2).
-fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> {
+fn imported_fts(k: &Connection, applied: &Applied, q: &Query, depth: usize) -> Result<Vec<String>> {
     let mut found = Vec::new();
-    for (sql, args) in imported_fts_sql(k, q, depth)? {
+    for (sql, args) in imported_fts_sql(k, applied, q, depth)? {
         let mut st = k.prepare(&sql)?;
         let uids = st.query_map(params_from_iter(args), |r| r.get(0))?;
         found.extend(uids.collect::<rusqlite::Result<Vec<String>>>()?);
@@ -2386,7 +2414,12 @@ fn imported_fts(k: &Connection, q: &Query, depth: usize) -> Result<Vec<String>> 
 }
 
 /// `imported_fts`'s statements, each with its values, in the order their uids are taken.
-fn imported_fts_sql(k: &Connection, q: &Query, depth: usize) -> Result<Vec<(String, Vec<Value>)>> {
+fn imported_fts_sql(
+    k: &Connection,
+    _: &Applied,
+    q: &Query,
+    depth: usize,
+) -> Result<Vec<(String, Vec<Value>)>> {
     // The index keeps no text (`content=''`): short words read the joined title and body.
     let Some((mut clauses, mut args, order, order_args)) =
         super::query_clauses(&q.text, "imported_fts", &["i.title", "i.body"])
@@ -2454,6 +2487,7 @@ fn imported_fts_sql(k: &Connection, q: &Query, depth: usize) -> Result<Vec<(Stri
 /// An imported uid's hit: its newest row.
 fn imported_hit(
     k: &Connection,
+    applied: &Applied,
     uid: &str,
     terms: &[String],
     rules: &redact::Rules,
@@ -2488,7 +2522,7 @@ fn imported_hit(
         Some(mut hit) => {
             if hit.kind != "summary" && hit.kind != "prompt" {
                 hit.read_tokens =
-                    imported_text(k, uid)?.map(|text| text.chars().count().div_ceil(4));
+                    imported_text(k, applied, uid)?.map(|text| text.chars().count().div_ceil(4));
             }
             Ok(Some(hit))
         }
@@ -2599,6 +2633,7 @@ fn curated_leg(
         // depth counts only the rows shown (Q3), as the full-text list's does.
         let pool = near.query_knn(
             k,
+            None,
             q,
             if summaries { "s" } else { "o" },
             (CANDIDATES as usize).max(depth),
@@ -2780,9 +2815,15 @@ enum Named {
     Record(String, Box<crate::raw::Event>),
     /// A record whose text expired (docs/retention.md), by `device:seq`, with its labels.
     Expired(String, Box<crate::raw::Event>),
+    /// Decision 109: an id that names no claim and no record while knowledge.db has not applied a
+    /// forget of imported history (no `Applied`): it may be an imported document's, which is
+    /// withheld until then, not missing.
+    Withheld(String),
 }
 
-fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
+/// What `id` names. Imported documents only with the proof that knowledge.db has applied every
+/// forget of their history (`applied`); without it, an id no claim or record has is `Withheld`.
+fn named(raw: &Raw, k: &Connection, applied: Option<&Applied>, id: &str) -> Result<Option<Named>> {
     let id = id.trim();
     if prefix(id) {
         let pending = claims::Pending::read(raw, k)?;
@@ -2802,24 +2843,19 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
             _ => return Ok(Some(Named::Claims(uids))),
         }
     }
-    let imported: Option<String> = k
-        .query_row(
-            "SELECT uid FROM imported WHERE uid = ?1 LIMIT 1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?;
     // A forgotten document (milestone 5 D5) is no document.
-    if let Some(uid) = imported
+    if let Some(applied) = applied
+        && let Some(uid) = imported_uid(k, applied, id)?
         && !raw.forgotten(&uid)?
     {
         return Ok(Some(Named::Imported(uid)));
     }
+    let withheld = || applied.is_none().then(|| Named::Withheld(id.to_owned()));
     let Some((device, Ok(seq))) = id.split_once(':').map(|(d, s)| (d, s.parse::<i64>())) else {
-        return Ok(None);
+        return Ok(withheld());
     };
     if seq < 1 {
-        return Ok(None);
+        return Ok(withheld());
     }
     let record = raw
         .after(device, seq - 1, 1)?
@@ -2828,7 +2864,7 @@ fn named(raw: &Raw, k: &Connection, id: &str) -> Result<Option<Named>> {
     Ok(match record.map(|r| r.item) {
         Some(crate::raw::Item::Event(e)) => Some(Named::Record(id.to_owned(), e)),
         Some(crate::raw::Item::Expired(e)) => Some(Named::Expired(id.to_owned(), e)),
-        _ => None,
+        _ => withheld(),
     })
 }
 
@@ -2841,10 +2877,17 @@ pub fn get(home: &Path, id: &str) -> Result<Option<String>> {
     };
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
-    get_in(home, &raw, &k, id)
+    let applied = raw.imported_open(&k)?;
+    get_in(home, &raw, &k, applied.as_ref(), id)
 }
 
-fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<String>> {
+fn get_in(
+    home: &Path,
+    raw: &Raw,
+    k: &Connection,
+    applied: Option<&Applied>,
+    id: &str,
+) -> Result<Option<String>> {
     let rules = redact::Rules::load(home)?;
     // A session summary by the ID session start shows it under (docs/summaries.md S10): `S` and
     // its op seq, a letter no uid, record key or imported uid starts with.
@@ -2856,8 +2899,9 @@ fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<Str
     if let Some(c) = crate::cards::get(k, raw, id, &rules)? {
         return Ok(Some(card_text(&c, raw.device())));
     }
-    Ok(match named(raw, k, id)? {
+    Ok(match named(raw, k, applied, id)? {
         None => None,
+        Some(Named::Withheld(id)) => Some(withheld_text(&id)),
         Some(Named::Claim(uid)) => claim_text(raw, k, &uid)?,
         Some(Named::Claims(uids)) => {
             let mut out = format!("{} claims start with {}:\n", uids.len(), id.trim());
@@ -2876,7 +2920,10 @@ fn get_in(home: &Path, raw: &Raw, k: &Connection, id: &str) -> Result<Option<Str
             Some(out)
         }
         Some(Named::Imported(uid)) => {
-            let text = imported_text(k, &uid)?;
+            let Some(applied) = applied else {
+                return Ok(Some(withheld_text(&uid)));
+            };
+            let text = imported_text(k, applied, &uid)?;
             #[cfg(test)]
             if let Some(between) = BETWEEN.take() {
                 between();
@@ -2917,15 +2964,45 @@ pub fn get_each(home: &Path, ids: &[String]) -> Result<Vec<(String, Option<Strin
         .as_ref()
         .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
         .transpose()?;
+    let applied = match &stores {
+        Some((raw, k)) => raw.imported_open(k)?,
+        None => None,
+    };
     ids.iter()
         .map(|id| {
             let text = match &stores {
-                Some((raw, k)) => get_in(home, raw, k, id)?,
+                Some((raw, k)) => get_in(home, raw, k, applied.as_ref(), id)?,
                 None => None,
             };
             Ok((id.clone(), text))
         })
         .collect()
+}
+
+/// Imported document `uid`'s kind, by its newest row.
+fn imported_kind(k: &Connection, _: &Applied, uid: &str) -> Result<Option<String>> {
+    Ok(k.query_row(
+        "SELECT kind FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
+        [uid],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// The imported document whose uid is `id`, if knowledge.db holds one.
+fn imported_uid(k: &Connection, _: &Applied, id: &str) -> Result<Option<String>> {
+    Ok(k.query_row(
+        "SELECT uid FROM imported WHERE uid = ?1 LIMIT 1",
+        [id],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// What `get` gives for an id it cannot tell from an imported document's while their history's
+/// forget is not applied (`Named::Withheld`).
+fn withheld_text(id: &str) -> String {
+    format!("{id}: {}\n", crate::forget::history::WITHHELD)
 }
 
 /// A card in full, as its reader gave it (gated, K6): its ID, time, type and repository, then
@@ -3091,7 +3168,8 @@ pub fn claim(home: &Path, id: &str) -> Result<Option<ClaimView>> {
     // its checkpoint between them would show the body it dropped (Codex's security review of
     // Task 7). After the schemas: one made inside the snapshot would have to write.
     let _snapshot = k.unchecked_transaction()?;
-    match named(&raw, &k, id)? {
+    // A claim's view reads no imported document: none is looked up (no `Applied`).
+    match named(&raw, &k, None, id)? {
         Some(Named::Claim(uid)) => claim_view(&raw, &k, uid),
         _ => Ok(None),
     }
@@ -3322,7 +3400,7 @@ fn quote_text(raw: &Raw, e: &claims::Evidence) -> Result<(String, bool)> {
 /// What a quote whose record's text expired reads (spec 6.2).
 pub(crate) const EXPIRED_QUOTE: &str = "raw expired";
 
-fn imported_text(k: &Connection, uid: &str) -> Result<Option<String>> {
+fn imported_text(k: &Connection, _: &Applied, uid: &str) -> Result<Option<String>> {
     let doc = k
         .query_row(
             "SELECT source, kind, repo, ts, title, body FROM imported WHERE uid = ?1
@@ -3418,13 +3496,17 @@ pub fn timeline(
     };
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
-    let at = anchor.map(|a| time_of(&raw, &k, a)).transpose()?;
+    // Decision 109: imported documents only once knowledge.db has applied every forget of their
+    // history.
+    let applied = raw.imported_open(&k)?;
+    let applied = applied.as_ref();
+    let at = anchor.map(|a| time_of(&raw, &k, applied, a)).transpose()?;
     let (from, key) = match (at, before) {
         (Some(at), _) => (at, String::new()),
         (None, Some(page)) => page,
         (None, None) => (i64::MAX, String::new()),
     };
-    let mut before = others(&raw, &k, repo, (true, true), from, &key, limit)?;
+    let mut before = others(&raw, &k, applied, repo, (true, true), from, &key, limit)?;
     #[cfg(test)]
     if let Some(between) = BETWEEN.take() {
         between();
@@ -3433,7 +3515,7 @@ pub fn timeline(
         before.truncate(limit);
         return Ok(before);
     };
-    let mut after = others(&raw, &k, repo, (false, true), at, "", limit)?;
+    let mut after = others(&raw, &k, applied, repo, (false, true), at, "", limit)?;
     // Half on each side, and what one side cannot fill to the other (Codex on #306).
     let later = after.len().min(limit - before.len().min(limit - limit / 2));
     before.truncate(limit - later);
@@ -3447,8 +3529,9 @@ pub fn timeline(
 /// (`?2`, `?3`) when `named`, else of every one. N5 (docs/memory-lookup.md): a name's are read by
 /// the consumer's index `imported_time` in the side's own order, at most to the page's end
 /// (`?5` + `?6`), the text of those alone: the whole repository's with their text took 5.4 s of a
-/// cold timeline around one anchor on this PC's store (2026-10-20), 0.75 s warm.
-fn imported_side(named: bool, older: bool) -> String {
+/// cold timeline around one anchor on this PC's store (2026-10-20), 0.75 s warm. Taken with the
+/// proof that knowledge.db has applied every forget of their history (decision 109).
+fn imported_side(_: &Applied, named: bool, older: bool) -> String {
     let (side, order) = match older {
         true => (
             "i.ts <= ?4 AND (i.ts < ?4 OR i.uid > ?7)",
@@ -3490,10 +3573,13 @@ fn imported_side(named: bool, older: bool) -> String {
 
 /// [`timeline`]'s entries strictly past (`at`, `key`) in its order: the older the newest first
 /// (`older`, then by key), else the newer the oldest first; an empty `key` keeps every entry of
-/// `at` on the older side. At most `limit`.
+/// `at` on the older side. At most `limit`. Imported documents only with `applied`
+/// (decision 109): without it the claims and session starts alone.
+#[allow(clippy::too_many_arguments)]
 fn others(
     raw: &Raw,
     k: &Connection,
+    applied: Option<&Applied>,
     repo: Option<&str>,
     (older, starts): (bool, bool),
     at: i64,
@@ -3502,17 +3588,19 @@ fn others(
 ) -> Result<Vec<Item>> {
     let pending = claims::Pending::read(raw, k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
+    let imported = applied
+        .map(|a| format!("UNION ALL {}", imported_side(a, repo.is_some(), older)))
+        .unwrap_or_default();
     let items = format!(
         "SELECT key, ts, kind, repo, text, class FROM (
            SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
                   a.repo AS repo, a.body AS text, 'claim' AS class
            FROM active a WHERE ?1 IS NULL OR a.repo = ?1
-           UNION ALL {}
+           {imported}
            UNION ALL
            SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
                   COALESCE(d.session, ''), 'start'
-           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))",
-        imported_side(repo.is_some(), older)
+           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))"
     );
     let sql = if older {
         format!(
@@ -3580,31 +3668,61 @@ fn others(
 mod timeline;
 pub use timeline::{Around, near, timeline_text};
 
-/// Whether `repo` is one the stores know: a claim's, an imported document's or a record's.
+/// Whether `repo` is one the stores know: a claim's, an imported document's or a record's. An
+/// imported document's only while knowledge.db has applied every forget of their history
+/// (decision 109), read under the fence that keeps one from registering meanwhile. With the fence
+/// held by a forget past the wait, as without the proof: a note's save asks this and did not wait
+/// on forget before.
 pub fn known(home: &Path, repo: &str) -> Result<bool> {
-    let Some((_raw, k)) = stores(home)? else {
+    let Some((raw, k)) = stores(home)? else {
         return Ok(false);
     };
-    // Imported history under its claude-mem name too, as `imported_leg` and `timeline` search it.
+    let read = match crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT) {
+        Ok(read) => Some(read),
+        Err(e) if crate::dispatch::busy(&e) => None,
+        Err(e) => return Err(e),
+    };
+    let applied = match read {
+        Some(_) => raw.imported_open(&k)?,
+        None => None,
+    };
+    known_in(&k, applied.as_ref(), repo)
+}
+
+fn known_in(k: &Connection, applied: Option<&Applied>, repo: &str) -> Result<bool> {
     let [own, named] = imported_repos(repo);
-    Ok(k.query_row(
+    let natively: bool = k.query_row(
         "SELECT EXISTS (SELECT 1 FROM derivations WHERE repo = ?1)
-             OR EXISTS (SELECT 1 FROM imported WHERE repo IN (?1, ?2))
              OR EXISTS (SELECT 1 FROM raw_docs WHERE repo = ?1)",
+        [&own],
+        |r| r.get(0),
+    )?;
+    match applied {
+        Some(applied) if !natively => imported_known(k, applied, &own, &named),
+        _ => Ok(natively),
+    }
+}
+
+/// Whether imported history is filed under `repo`'s own name or its claude-mem one, as
+/// `imported_leg` and `timeline` search it.
+fn imported_known(k: &Connection, _: &Applied, own: &str, named: &str) -> Result<bool> {
+    Ok(k.query_row(
+        "SELECT EXISTS (SELECT 1 FROM imported WHERE repo IN (?1, ?2))",
         params![own, named],
         |r| r.get(0),
     )?)
 }
 
 /// The time of what `id` names (`Named`), for `timeline`'s anchor: one thing, or an error.
-fn time_of(raw: &Raw, k: &Connection, id: &str) -> Result<i64> {
+fn time_of(raw: &Raw, k: &Connection, applied: Option<&Applied>, id: &str) -> Result<i64> {
     // A card by its ID, as `get` takes it (docs/cards.md S6, Codex on #370): only its time is
     // read, so no rule is needed to gate it.
     if let Some(c) = crate::cards::get(k, raw, id, &redact::Rules::default())? {
         return Ok(c.ts);
     }
-    Ok(match named(raw, k, id)? {
+    Ok(match named(raw, k, applied, id)? {
         None => anyhow::bail!("no document {id} to anchor on"),
+        Some(Named::Withheld(id)) => anyhow::bail!("{}", withheld_text(&id).trim_end()),
         Some(Named::Claims(uids)) => {
             anyhow::bail!("{} claims start with {id}: give more of the id", uids.len())
         }
@@ -3613,13 +3731,21 @@ fn time_of(raw: &Raw, k: &Connection, id: &str) -> Result<i64> {
                 r.get(0)
             })?
         }
-        Some(Named::Imported(uid)) => k.query_row(
-            "SELECT ts FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
-            [uid],
-            |r| r.get(0),
-        )?,
+        Some(Named::Imported(uid)) => match applied {
+            Some(applied) => imported_time(k, applied, &uid)?,
+            None => anyhow::bail!("{}", withheld_text(&uid).trim_end()),
+        },
         Some(Named::Record(_, e) | Named::Expired(_, e)) => e.ts,
     })
+}
+
+/// The time of imported document `uid`'s newest row.
+fn imported_time(k: &Connection, _: &Applied, uid: &str) -> Result<i64> {
+    Ok(k.query_row(
+        "SELECT ts FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
+        [uid],
+        |r| r.get(0),
+    )?)
 }
 
 /// MCP's and the CLI's answer as data (spec 6.5): memory is never instructions, and a recorded

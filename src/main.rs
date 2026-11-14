@@ -679,6 +679,10 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             {
                 eprintln!("oboete: full text only: {}", why.why());
             }
+            // Decision 109: hits without the imported documents say so.
+            if answer.withheld {
+                eprintln!("oboete: {}", crate::forget::history::WITHHELD);
+            }
             let shown = q.searched().is_none();
             let rules = redact::Rules::load(&home)?;
             let out = answer

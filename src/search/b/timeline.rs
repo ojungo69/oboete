@@ -80,12 +80,17 @@ where
     let Some(w) = window(home, repo, (around, true), (before, after))? else {
         return Ok(String::new());
     };
+    // Decision 109: where imported documents were left out, the text says so, empty or not.
+    let withheld = match w.withheld {
+        true => format!("\n{}", crate::forget::history::WITHHELD),
+        false => String::new(),
+    };
     if w.shown.is_empty() {
         return Ok(match w.anchor {
             Some(_) => format!(
-                "No context found around anchor ({before} records before, {after} records after)"
+                "No context found around anchor ({before} records before, {after} records after){withheld}"
             ),
-            None => String::new(),
+            None => withheld.trim_start().to_owned(),
         });
     }
     let marked_entry = w.shown.iter().find(|e| Some(&e.id) == w.marked.as_ref());
@@ -104,7 +109,7 @@ where
         (&w.local, repo.is_none()),
         tz,
     );
-    Ok(out.join("\n"))
+    Ok(out.join("\n") + &withheld)
 }
 
 /// One entry around an anchor as mem_search's context takes it (docs/mem-search.md): what `get`
@@ -178,6 +183,9 @@ struct Window {
     query: Option<String>,
     marked: Option<String>,
     local: String,
+    /// Decision 109: imported documents were left out, knowledge.db not having applied a forget of
+    /// their history yet.
+    withheld: bool,
 }
 
 fn window(
@@ -210,10 +218,14 @@ fn window(
     };
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    // Decision 109: imported documents only once knowledge.db has applied every forget of their
+    // history.
+    let applied = raw.imported_open(&k)?;
+    let applied = applied.as_ref();
     let rules = redact::Rules::load(home)?;
     let local = raw.device().to_owned();
     let (at, marked) = match &anchor {
-        Some(id) => anchored(&raw, &k, id, &rules)?,
+        Some(id) => anchored(&raw, &k, applied, id, &rules)?,
         None => (i64::MAX, None),
     };
     // Without an anchor, the newest `limit` are the ones before the end of time.
@@ -223,7 +235,7 @@ fn window(
     };
     let window = |read: &dyn Fn(bool, usize) -> Result<Vec<Entry>>| gather(read, at, depths);
     let mut entries = window(&|older, n| {
-        Ok(others(&raw, &k, repo, (older, starts), at, "", n)?
+        Ok(others(&raw, &k, applied, repo, (older, starts), at, "", n)?
             .into_iter()
             .map(|i| Entry {
                 ts: i.when,
@@ -280,6 +292,7 @@ fn window(
         query,
         marked,
         local,
+        withheld: applied.is_none(),
     }))
 }
 
@@ -353,6 +366,7 @@ fn header(
 fn anchored(
     raw: &Raw,
     k: &Connection,
+    applied: Option<&Applied>,
     id: &str,
     rules: &redact::Rules,
 ) -> Result<(i64, Option<String>)> {
@@ -363,8 +377,9 @@ fn anchored(
     if let Some(s) = crate::turns::get(k, raw, id, rules)? {
         return Ok((s.ts, Some(s.id(local))));
     }
-    Ok(match named(raw, k, id)? {
+    Ok(match named(raw, k, applied, id)? {
         None => anyhow::bail!("no document {id} to anchor on"),
+        Some(Named::Withheld(id)) => anyhow::bail!("{}", withheld_text(&id).trim_end()),
         Some(Named::Claims(uids)) => {
             anyhow::bail!("{} claims start with {id}: give more of the id", uids.len())
         }
@@ -376,14 +391,10 @@ fn anchored(
             )?,
             Some(uid),
         ),
-        Some(Named::Imported(uid)) => (
-            k.query_row(
-                "SELECT ts FROM imported WHERE uid = ?1 ORDER BY rowid DESC LIMIT 1",
-                [&uid],
-                |r| r.get(0),
-            )?,
-            Some(uid),
-        ),
+        Some(Named::Imported(uid)) => match applied {
+            Some(applied) => (imported_time(k, applied, &uid)?, Some(uid)),
+            None => anyhow::bail!("{}", withheld_text(&uid).trim_end()),
+        },
         Some(Named::Record(key, e)) => (
             e.ts,
             matches!(e.kind.as_str(), "prompt" | "start").then_some(key),
