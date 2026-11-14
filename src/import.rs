@@ -309,16 +309,20 @@ pub fn claude_mem_with(
                 return Ok(());
             }
             // Blocks out, secrets masked, notifications dropped, and 8,000 characters kept, where
-            // a live prompt keeps 64 KiB. `clip` masks with the bundled rules alone, so that its
-            // check for a key block it cuts sees every header.
-            let kept = hook::clip(&hook::strip_blocks(&text, true), &settings.rules);
-            // A notification is told here, before a rule of the home's can mask its tag.
-            if kept.is_empty() || hook::is_envelope(&kept) {
+            // a live prompt keeps 64 KiB.
+            let typed = hook::strip_blocks(&text, true);
+            // A notification is told here, in the text `clip` reads and before a rule of the
+            // home's can mask its tag.
+            let read = hook::without_blocks(&typed, false);
+            if read.is_empty() || hook::is_envelope(&read) {
                 stats.empty += 1;
                 return Ok(());
             }
-            // Then the home's rules gate what `clip` kept, as they do a title and a body. A
-            // value of theirs the cut would fall inside, `clip` kept none of.
+            // The home's rules read all of the prompt as it came, the bundled rules mask the
+            // window, alone, so that the check for a key block the cut leaves open sees every
+            // header (`hook::clip`). Then the home's rules gate what was kept, as they do a title
+            // and a body.
+            let kept = hook::clip(&typed, &settings.rules);
             let body = redact::outbound_with(&kept, &settings.rules);
             if body.is_empty() {
                 stats.empty += 1;

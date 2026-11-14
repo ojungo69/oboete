@@ -1520,6 +1520,23 @@ pub fn ranges(text: &str, rules: &Rules) -> Vec<(usize, usize)> {
     merged(&spans(text, rules))
 }
 
+/// Byte ranges of a text, sorted, as `ranges` gives them.
+pub(crate) type Ranges = Vec<(usize, usize)>;
+
+/// `ranges`, and the ranges among them that the home's own rules (`[[redaction.extra_rules]]`)
+/// found, before they are merged with the bundled rules' (`hook::clip` keeps a prompt as under no
+/// rule of the home's where these find nothing). It matches as `ranges` does.
+pub(crate) fn ranges_with_home(text: &str, rules: &Rules) -> (Ranges, Ranges) {
+    let found = spans(text, rules);
+    let bundled = bundled().rules.len();
+    let home = found
+        .iter()
+        .filter(|x| x.2 >= bundled)
+        .map(|&(s, e, _)| (s, e))
+        .collect();
+    (merged(&found), home)
+}
+
 /// The content of each JSON string literal of `text`, keys too, as byte ranges of `text`.
 /// Capture scans a body field by field, so a rule anchored to a field's start or end (`^`, `$`)
 /// is only ever matched against one field.

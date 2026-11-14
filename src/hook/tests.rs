@@ -9252,3 +9252,90 @@ fn imported_v1_documents_resolve_and_are_never_injected() {
     .unwrap_or_default();
     assert!(!shown.contains("We use tabs."), "{shown}");
 }
+
+/// `aligned` puts a scan's masks back on the text by the runs `redact::hidden` gives of them: a run
+/// stands for one mask or more, as a scan's rescan can put a mask beside another, and a text that
+/// is not the runs masked gives nothing.
+#[test]
+fn aligned_puts_one_mask_or_more_on_a_run_and_nothing_else() {
+    let text = "ab-SECRETxyz-cd";
+    let runs = [(3, 12)];
+    let one = "ab-[REDACTED]-cd";
+    let from = aligned(text, &runs, one).unwrap();
+    assert_eq!(from.len(), one.len());
+    assert_eq!(from[2], (2, 3));
+    assert!(from[3..13].iter().all(|&r| r == (3, 12)));
+    assert_eq!(from[13], (12, 13));
+    let two = "ab-[REDACTED][REDACTED]-cd";
+    let from = aligned(text, &runs, two).unwrap();
+    assert_eq!(from.len(), two.len());
+    assert!(from[3..23].iter().all(|&r| r == (3, 12)));
+    assert_eq!(from[23], (12, 13));
+    assert_eq!(aligned(text, &runs, text), None);
+    assert_eq!(aligned(text, &runs, "ab-[REDACTED]-ce"), None);
+    assert_eq!(aligned(text, &[], text).map(|f| f.len()), Some(text.len()));
+    // A `[REDACTED]` the text holds after a run is its own, after one mask of the run or two.
+    let held = "aSECRET[REDACTED]z";
+    for masks in 1..=2 {
+        let masked = format!("a{}[REDACTED]z", "[REDACTED]".repeat(masks));
+        let from = aligned(held, &[(1, 7)], &masked).unwrap();
+        let own = 1 + 10 * masks;
+        assert!(from[1..own].iter().all(|&r| r == (1, 7)), "{masks}");
+        assert_eq!(from[own], (7, 8), "{masks}");
+        assert_eq!(from[masked.len() - 1], (17, 18), "{masks}");
+    }
+    // And one between two runs, and part of one after a run's two masks.
+    let between = "aS1[REDACTED]S2z";
+    let from = aligned(
+        between,
+        &[(1, 3), (13, 15)],
+        "a[REDACTED][REDACTED][REDACTED]z",
+    )
+    .unwrap();
+    assert_eq!((from[1], from[11], from[21]), ((1, 3), (3, 4), (13, 15)));
+    let part = "aSECRET[RED";
+    let from = aligned(part, &[(1, 7)], "a[REDACTED][REDACTED][RED").unwrap();
+    assert_eq!((from[20], from[21]), ((1, 7), (7, 8)));
+}
+
+/// A long prompt whose read of all of it ends in one span (a `curl` line with more `-u` than a
+/// scan looks again for), with a value of the home's that the cut falls inside and that ends past
+/// the window: one mask. The read could not tell what the home's rules found, and what is kept
+/// under none of them was kept, with the value's start (OpenCodeReview on #998's ee4798a7). Under
+/// a rule that finds nothing, what is kept is what is kept under none.
+#[test]
+fn a_prompt_whose_read_ends_in_one_span_is_one_mask_where_a_rule_of_the_homes_finds() {
+    let home = tempfile::tempdir().unwrap();
+    let rules = |rule: &str| {
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[redaction]\nextra_rules = [{{ id = \"r\", regex = '{rule}' }}]\n"),
+        )
+        .unwrap();
+        crate::capture::Settings::load(home.path()).unwrap().rules
+    };
+    let users: String = (0..70)
+        .map(|i| format!("-u user{i}:Pw{i}xN3kL7 "))
+        .collect();
+    let text = format!(
+        "{}vault{{{}}} {}\ncurl {users}https://h.test\n",
+        "a".repeat(7_900),
+        "s".repeat(5_000),
+        "b ".repeat(1_000)
+    );
+    let bundled = redact::Rules::default();
+    assert!(
+        whole_runs(&text, &bundled).runs.is_none(),
+        "the read ends in one span"
+    );
+    let kept = clip(&text, &rules(r"vault\{[^}]*\}"));
+    assert!(
+        !kept.contains("vault{") && !kept.contains("sssss"),
+        "{}",
+        &kept[kept.len().saturating_sub(120)..]
+    );
+    assert_eq!(
+        clip(&text, &rules("zz-never-[0-9]{9}")),
+        clip(&text, &bundled)
+    );
+}

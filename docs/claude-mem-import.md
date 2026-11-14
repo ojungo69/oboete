@@ -117,12 +117,44 @@ them). A prompt keeps its first 8,000 characters (a live prompt keeps 64 KiB; de
 the cut as it is): `hook::clip` masks
 it with the bundled rules, so that its check for a key block the cut leaves open sees every
 header, and the home's rules then gate what it kept, as they do a title and a body. Until then a
-prompt was masked with the bundled rules alone. A value a rule of the home's finds with the cut
-inside it is not kept in part: what is kept ends where that value starts (2026-11-14; its start
-used to stay). The rule looks for it in the 12,000 characters `clip` masked, as the bundled
-rules left them: a value that ends past them, one that holds a value the bundled rules masked,
-and one whose rule needs what follows the cut are not found, and a part of them can stay (#994).
-A mask the cut falls inside is kept whole (2026-11-14; its first characters used to stay). While
+prompt was masked with the bundled rules alone. The home's rules also read all of the prompt as
+it came (#994), as capture's scan reads a live prompt, again with their masks in until nothing
+new is found, as a scan's rescan does; what they find, and what the home's gate finds in what
+was kept, is masked where the kept text shows it (`hook::ruled_head`). Each is found on its own
+untouched text and put on the prompt as runs before anything is masked, so no mask takes the
+context another rule needs, and what is kept is what is kept under no rule of the home's with
+more of it masked (2026-11-14: masking what the home's rules find before the bundled rules read
+what was kept took the word `generic-api-key` needs, and a value it masks on a line the cut left
+without its allowlisted end was stored). So a value the cut falls inside, one that ends far past
+it, one whose rule needs the text after it, one that holds a value the bundled rules mask and
+one a rule finds only behind another rule's mask are each masked where the kept text shows them
+(their parts used to stay). Where the home's own rules find nothing in a long prompt up to the
+end of the window, what is kept is what is kept under none of them; a value of theirs that a
+bundled rule's match holds is a find of theirs, since that rule may need what follows the cut. A prompt that is not cut is
+masked as before, by the bundled rules and then the home's gate on what they masked (2026-11-14:
+read with all of the rules at once, a rule of the home's that holds a mask lost the value the
+gate finds, so such a prompt keeps what follows a bundled mask in a value of the home's, as
+before: #1005). A prompt in which one of the home's rules matches
+more times than a scan holds, or that is one value whole, is one mask, as capture stores a live
+prompt with that many; a bundled rule's matches are a mask each, however many. So is a prompt
+in which the home's own rules find something and whose bundled masks cannot be put on it as
+the runs the gate gives of them, a mask that a rescan puts beside another counted as one: the
+looks again of a scan (#537, `curl-auth-user`) mask a value those runs do not hold. A
+`[REDACTED]` the prompt holds after a value is its own (2026-11-14: such a prompt was one mask,
+as was any whose masks could not be put on it, under a rule that finds nothing too). The check
+for a key block the cut leaves
+open reads the text the bundled rules masked, before any rule of the home's, so it sees every
+header. What is kept ends at the last `-----BEGIN` that no `-----END` follows, as before, or at
+a private key's header after the last private key's footer, in any case and in the shapes the
+bundled `private-key` rule reads (`-----BEGIN … PRIVATE KEY-----`, `-----END … KEY-----`),
+whichever is first (2026-11-14: upper case alone was found, and the last header was looked at
+alone, so a second open block kept the first one's lines; for a while any `-----end` closed a
+block and any `-----begin` opened one). Under a rule of the
+home's the `<private>`-style blocks are taken out until none is left before the rules read: a
+mask put in a tag would keep the gate's own removal from finding a block that only a later
+removal finds. Under no rule of the home's what is stored is what was stored, but for a private
+key block written in lower case, or the first of two, that the cut leaves open, which now goes. A
+mask the cut falls inside is kept whole (2026-11-14; its first characters used to stay). While
 `[capture] store_prompts` is off no prompt's text is
 stored, as a live prompt's is not: the rows are counted with the empty ones (`empty`) and come in
 once the setting is on again. A label names something, so the gate must leave it as it is: a row

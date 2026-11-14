@@ -3953,14 +3953,44 @@ pub(crate) fn compact(v: &Value) -> String {
     }
 }
 
+/// Where a private key block that no footer closes starts in `head`: the first header after the
+/// last footer, each in the shape and any case the bundled `private-key` rule reads a key's, so
+/// that a second open block does not keep the first one's lines, and a line such as
+/// `-----beginning of a log-----` opens nothing.
+fn open_key_block(head: &str) -> Option<usize> {
+    static HEADER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----")
+            .expect("a key header's pattern")
+    });
+    static FOOTER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)-----END[ A-Z0-9_-]{0,100}KEY(?: BLOCK)?-----")
+            .expect("a key footer's pattern")
+    });
+    let closed = FOOTER.find_iter(head).last().map_or(0, |m| m.end());
+    HEADER.find_at(head, closed).map(|m| m.start())
+}
+
 /// Redact the head (plus the overlap) with the bundled rules and keep MAX_FIELD characters of
 /// it: the cut of the claude-mem import's prompts. A mask the cut falls inside is kept whole,
-/// and a value the cut would leave a part of is not kept: a key block left open, or what a
-/// rule of the home's finds in that window.
+/// and a key block the cut leaves open is not kept. Under a rule of the home's, what the rules
+/// find in all of the text as it came is masked in what is kept too (`ruled_head`).
 pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
-    let s = &without_blocks(s, false);
+    let mut s = without_blocks(s, false);
+    // Under a rule of the home's the blocks go to the last one before the rules read: a mask
+    // put in a tag would keep the caller's gate from taking out a block that only a later
+    // removal finds (tags that close into one once a block between them is gone).
+    if !rules.is_off() && rules.counts().0 > 0 {
+        loop {
+            let next = without_blocks(&s, false);
+            if next == s {
+                break;
+            }
+            s = next;
+        }
+    }
+    let s = &s;
     let total = s.chars().count();
     if total <= MAX_FIELD {
         return redact::redact_unless_off(s, rules);
@@ -3985,10 +4015,9 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     // A value a rule of the home's finds with the cut inside it goes whole, as a key block the
     // cut leaves open does: the caller gates what is kept with the home's rules, and the start
     // of a value is no finding to them. Under no rule of the home's the cut is where it was.
-    // shortcut: the rules read the window as the bundled rules masked it, so they do not find a
-    // value that ends past the overlap, one that holds a value the bundled rules masked, or one
-    // whose rule needs what follows the cut (#994): read the text as it came, all of it, when
-    // an imported prompt is masked as capture masks one.
+    // What the rules find only in all of the text as it came (#994: a value that ends past the
+    // overlap, one that holds a value the bundled rules masked, one whose rule needs what
+    // follows the cut) is masked in what is kept after the bundled rules' reads (`ruled_head`).
     if !rules.is_off()
         && rules.counts().0 > 0
         && let Some((start, _)) = redact::ranges(&masked, rules)
@@ -3999,15 +4028,212 @@ pub fn clip(s: &str, rules: &redact::Rules) -> String {
     }
     // Second pass over what is kept: gitleaks' line-scoped allowlists must judge the stored
     // line, not the wider window. Then drop a key block the rules could not match (no END).
-    let mut head = redact::redact_unless_off(&masked[..cut], rules);
-    // A key block the cut leaves open goes, unless redaction is off (owner decision 43).
-    if !rules.is_off()
-        && let Some(begin) = head.rfind("-----BEGIN")
-        && !head[begin..].contains("-----END")
-    {
-        head.truncate(begin);
-    }
+    let head = redact::redact_unless_off(&masked[..cut], rules);
+    // A key block the cut leaves open goes, unless redaction is off (owner decision 43): what is
+    // kept ends at the last `-----BEGIN` that no `-----END` follows, or at a private key's header
+    // the bundled rule would read, in any case, that no footer follows, whichever is first.
+    let kept = if rules.is_off() {
+        head.len()
+    } else {
+        let begin = head
+            .rfind("-----BEGIN")
+            .filter(|&at| !head[at..].contains("-----END"));
+        begin
+            .into_iter()
+            .chain(open_key_block(&head))
+            .min()
+            .unwrap_or(head.len())
+    };
+    let head = if rules.is_off() || rules.counts().0 == 0 {
+        head[..kept].to_owned()
+    } else {
+        ruled_head(s, &window, &masked, cut, &head, kept, rules)
+    };
     format!("{head}\n…[clipped, {total} chars in full]")
+}
+
+/// What `clip` keeps of a long text under a rule of the home's (#994): `head[..kept]`, which the
+/// bundled rules alone masked as under no rule of the home's, with what the home's gate finds in
+/// it and what the rules find in all of the text as it came masked too. Each is found on its own
+/// untouched text and put on the text as runs before anything is masked, as `redact::joined_with`
+/// gates a text's views, so that no mask takes the context another rule needs: a mask of the
+/// home's put in before the bundled rules read what is kept took the word `generic-api-key`
+/// needs, and a value it masks was stored (the review of #998). Where the home's own rules find
+/// nothing in all of the text up to the end of the window, it is `head[..kept]`, as under no rule
+/// of the home's. Where they do, one mask when the gate masks all of the head, when the rules find the text one
+/// value (`whole_runs`), or when what the bundled rules masked is not the text with the runs
+/// `redact::hidden` gives masked: the looks again of a scan (`curl-auth-user`, #537) mask a value
+/// the gate's runs do not hold.
+fn ruled_head(
+    s: &str,
+    window: &str,
+    masked: &str,
+    cut: usize,
+    head: &str,
+    kept: usize,
+    rules: &redact::Rules,
+) -> String {
+    let one = || redact::MASK.to_owned();
+    let bundled = redact::Rules::default();
+    // What the rules find in all of the text up to the end of the window (what is kept is in it).
+    // Where the home's own rules find nothing there, what is kept is what it is under none of
+    // them, and the caller's gate reads it as it reads it then. A value of the home's that a
+    // bundled rule's match holds in all of the text is a find of the home's: the bundled rule may
+    // need what follows the cut and mask nothing in the window (the review of #998).
+    let whole = whole_runs(s, rules);
+    if !whole.home.iter().any(|&(at, _)| at < window.len()) {
+        return head[..kept].to_owned();
+    }
+    let (Some(gate), Some(runs)) = (redact::hidden(&head[..kept], rules), whole.runs) else {
+        return one();
+    };
+    let whole: Vec<_> = runs
+        .into_iter()
+        .filter(|&(at, _)| at < window.len())
+        .collect();
+    let (Some(first), Some(second)) = (
+        redact::hidden(window, &bundled),
+        redact::hidden(&masked[..cut], &bundled),
+    ) else {
+        return one();
+    };
+    // For each byte of `masked`, and of `head`, the range of the text it stands for.
+    let (Some(in_masked), Some(in_cut)) = (
+        aligned(window, &first, masked),
+        aligned(&masked[..cut], &second, head),
+    ) else {
+        return one();
+    };
+    let in_head: Vec<(usize, usize)> = in_cut
+        .into_iter()
+        .map(|(a, b)| hull(&in_masked[a..b]))
+        .collect();
+    // Where what is kept ends in the text.
+    let end = match in_head.get(kept) {
+        Some(&(at, _)) => at,
+        None => in_masked.get(cut).map_or(window.len(), |&(at, _)| at),
+    };
+    let runs = first
+        .into_iter()
+        .chain(second.iter().map(|&(a, b)| hull(&in_masked[a..b])))
+        .chain(gate.iter().map(|&(a, b)| hull(&in_head[a..b])))
+        .chain(whole)
+        .collect();
+    redact::masked_part(s, 0..end, &redact::merged_runs(runs))
+}
+
+/// How often `whole_runs` reads a text again once its masks are in, as a scan's rescan does.
+/// Still finding after them, the text is one mask.
+const READ_PASSES: usize = 64;
+
+/// What the rules find in all of `s` as it came, as capture's scan finds it in a live prompt
+/// (#994), as runs of `s`: read again with its masks in until nothing new is found, so a value a
+/// rule finds only behind another rule's mask is one too. Its runs are `None` for one span of all
+/// of the text (a value that is the whole text, or more matches of one rule than a scan holds:
+/// `redact::ranges`) or still finding after `READ_PASSES`: the text is one mask, as capture stores
+/// a live prompt with that many. What the home's own rules found is kept either way.
+fn whole_runs(s: &str, rules: &redact::Rules) -> Whole {
+    let (mut text, mut from) = (s.to_owned(), sources(s.len(), &[]));
+    let (mut runs, mut home) = (Vec::new(), Vec::new());
+    for _ in 0..READ_PASSES {
+        let (found, homes) = redact::ranges_with_home(&text, rules);
+        let homes = homes.iter().map(|&(a, b)| hull(&from[a..b]));
+        if found == [(0, text.len())] {
+            home.extend(homes);
+            return Whole { runs: None, home };
+        }
+        let next = redact::masked_part(&text, 0..text.len(), &found);
+        // Nothing found, or a rule matching its own mask: nothing new to hide.
+        if next == text {
+            return Whole {
+                runs: Some(runs),
+                home,
+            };
+        }
+        home.extend(homes);
+        runs.extend(found.iter().map(|&(a, b)| hull(&from[a..b])));
+        from = sources(text.len(), &found)
+            .into_iter()
+            .map(|(a, b)| hull(&from[a..b]))
+            .collect();
+        text = next;
+    }
+    Whole { runs: None, home }
+}
+
+/// What `whole_runs` finds, as runs of the text: all of it, and what the home's own rules found.
+struct Whole {
+    runs: Option<Vec<(usize, usize)>>,
+    home: Vec<(usize, usize)>,
+}
+
+/// The smallest range of a text that holds each of `from`'s.
+fn hull(from: &[(usize, usize)]) -> (usize, usize) {
+    from.iter()
+        .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)))
+}
+
+/// For each byte of `masked`, the range of `text` it stands for, where `masked` is `text` with
+/// each of `runs` (sorted, apart) put as one mask or more: a scan keeps a mask its rescan puts
+/// beside another apart (`[REDACTED][REDACTED]`), where `redact::hidden` gives one run of the
+/// two. A run's masks are the most of them that what follows the run in `text` can come after,
+/// so a `[REDACTED]` the text holds after a run is its own. `None` when `masked` is not that.
+fn aligned(text: &str, runs: &[(usize, usize)], masked: &str) -> Option<Vec<(usize, usize)>> {
+    let len = redact::MASK.len();
+    let mut from = Vec::with_capacity(masked.len());
+    let (mut at, mut m) = (0, 0);
+    for (i, &(s, e)) in runs.iter().enumerate() {
+        let plain = &text[at..s];
+        if masked.get(m..m + plain.len()) != Some(plain) {
+            return None;
+        }
+        from.extend((at..s).map(|i| (i, i + 1)));
+        m += plain.len();
+        let next = runs.get(i + 1);
+        let after = &text[e..next.map_or(text.len(), |&(start, _)| start)];
+        let masks = (0..)
+            .take_while(|&k| {
+                masked
+                    .get(m + k * len..)
+                    .is_some_and(|rest| rest.starts_with(redact::MASK))
+            })
+            .count();
+        // What follows the run comes next, then the next run's mask, or the end of the text.
+        let fits = |k: usize| {
+            let rest = &masked[m + k * len..];
+            match next {
+                Some(_) => rest
+                    .strip_prefix(after)
+                    .is_some_and(|r| r.starts_with(redact::MASK)),
+                None => rest == after,
+            }
+        };
+        let k = (1..=masks).rev().find(|&k| fits(k))?;
+        from.extend(std::iter::repeat_n((s, e), k * len));
+        m += k * len;
+        at = e;
+    }
+    if masked.get(m..) != Some(&text[at..]) {
+        return None;
+    }
+    from.extend((at..text.len()).map(|i| (i, i + 1)));
+    Some(from)
+}
+
+/// For each byte of `redact::masked_part(text, 0..len, runs)`, the range of `text` it stands
+/// for: its own byte, or for each byte of a mask the run the mask hides.
+fn sources(len: usize, runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let (mut from, mut at) = (Vec::with_capacity(len), 0);
+    for &(s, e) in runs {
+        let (s, e) = (s.max(at), e.min(len));
+        if s < e {
+            from.extend((at..s).map(|i| (i, i + 1)));
+            from.extend(std::iter::repeat_n((s, e), redact::MASK.len()));
+            at = e;
+        }
+    }
+    from.extend((at..len).map(|i| (i, i + 1)));
+    from
 }
 
 /// Tail read by the hooks that run during a turn.
