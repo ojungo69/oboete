@@ -1,0 +1,402 @@
+sonar-project.properties
+  h_c2efce2f38e110 16,19-20,25-27
+src/backup.rs
+  h_c2efce2f38e110 2832
+src/backup/tests.rs
+  h_c2efce2f38e110 1-2445
+src/budget.rs
+  h_c2efce2f38e110 686
+src/budget/tests.rs
+  h_c2efce2f38e110 1-1614
+src/capture.rs
+  h_c2efce2f38e110 1265
+src/capture/tests.rs
+  h_c2efce2f38e110 1-1375
+src/cards.rs
+  h_c2efce2f38e110 1115
+src/cards/tests.rs
+  h_c2efce2f38e110 1-717
+src/claims.rs
+  h_c2efce2f38e110 1434
+src/claims/tests.rs
+  h_c2efce2f38e110 1-22
+src/codex_probe.rs
+  h_c2efce2f38e110 386
+src/codex_probe/tests.rs
+  h_c2efce2f38e110 1-287
+src/config.rs
+  h_c2efce2f38e110 1824
+src/config/tests.rs
+  h_c2efce2f38e110 1-1173
+src/consumer/cards.rs
+  h_c2efce2f38e110 250
+src/consumer/cards/tests.rs
+  h_c2efce2f38e110 1-752
+src/consumer/claims.rs
+  h_c2efce2f38e110 657
+src/consumer/claims/tests.rs
+  h_c2efce2f38e110 1-1623
+src/consumer/compress.rs
+  h_c2efce2f38e110 52
+src/consumer/compress/tests.rs
+  h_c2efce2f38e110 1-41
+src/consumer/fts.rs
+  h_c2efce2f38e110 481
+src/consumer/fts/tests.rs
+  h_c2efce2f38e110 1-205
+src/consumer/gaps.rs
+  h_c2efce2f38e110 261
+src/consumer/gaps/tests.rs
+  h_c2efce2f38e110 1-151
+src/consumer/imported.rs
+  h_c2efce2f38e110 296
+src/consumer/imported/tests.rs
+  h_c2efce2f38e110 1-225
+src/consumer/manifest.rs
+  h_c2efce2f38e110 1481
+src/consumer/manifest/tests.rs
+  h_c2efce2f38e110 1-3164
+src/consumer/products.rs
+  h_c2efce2f38e110 71
+src/consumer/products/tests.rs
+  h_c2efce2f38e110 1-73
+src/consumer/rescan.rs
+  h_c2efce2f38e110 219
+src/consumer/rescan/tests.rs
+  h_c2efce2f38e110 1-454
+src/consumer/subagents.rs
+  h_c2efce2f38e110 244
+src/consumer/subagents/tests.rs
+  h_c2efce2f38e110 1-206
+src/curate.rs
+  h_c2efce2f38e110 5731
+src/curate/tests.rs
+  h_c2efce2f38e110 1-9571
+src/db.rs
+  h_c2efce2f38e110 913
+src/db/tests.rs
+  h_c2efce2f38e110 1-505
+src/deliverables.rs
+  h_c2efce2f38e110 1877
+src/deliverables/tests.rs
+  h_c2efce2f38e110 1-2395
+src/dispatch.rs
+  h_c2efce2f38e110 313
+src/dispatch/tests.rs
+  h_c2efce2f38e110 1-555
+src/embed.rs
+  h_c2efce2f38e110 356,359
+src/embed/stub.rs
+  h_c2efce2f38e110 1-214
+src/embed/tests.rs
+  h_c2efce2f38e110 1-124
+src/embed_local.rs
+  h_c2efce2f38e110 164
+src/embed_local/tests.rs
+  h_c2efce2f38e110 1-95
+src/embed_phase.rs
+  h_c2efce2f38e110 2266,2269
+src/embed_phase/fixture.rs
+  h_c2efce2f38e110 1-102
+src/embed_phase/tests.rs
+  h_c2efce2f38e110 1-2884
+src/executable.rs
+  h_c2efce2f38e110 435
+src/executable/tests.rs
+  h_c2efce2f38e110 1-233
+src/failure.rs
+  h_c2efce2f38e110 519
+src/failure/tests.rs
+  h_c2efce2f38e110 1-350
+src/forget.rs
+  h_c2efce2f38e110 2479
+src/forget/tests.rs
+  h_c2efce2f38e110 1-8562
+src/gates.rs
+  h_c2efce2f38e110 858
+src/gates/tests.rs
+  h_c2efce2f38e110 1-1301
+src/hide.rs
+  h_c2efce2f38e110 190
+src/hide/tests.rs
+  h_c2efce2f38e110 1-20
+src/hook.rs
+  h_c2efce2f38e110 4161
+src/hook/tests.rs
+  h_c2efce2f38e110 1-9050
+src/hook_time.rs
+  h_c2efce2f38e110 415
+src/hook_time/tests.rs
+  h_c2efce2f38e110 1-311
+src/hookstate.rs
+  h_c2efce2f38e110 188
+src/hookstate/tests.rs
+  h_c2efce2f38e110 1-122
+src/import.rs
+  h_c2efce2f38e110 1039
+src/import/tests.rs
+  h_c2efce2f38e110 1-1689
+src/isolation.rs
+  h_c2efce2f38e110 445
+src/isolation/tests.rs
+  h_c2efce2f38e110 1-338
+src/judge.rs
+  h_c2efce2f38e110 517
+src/judge/listener.rs
+  h_c2efce2f38e110 132
+src/judge/listener/tests.rs
+  h_c2efce2f38e110 1-112
+src/judge/tests.rs
+  h_c2efce2f38e110 1-727
+src/keyfile.rs
+  h_c2efce2f38e110 904
+src/keyfile/tests.rs
+  h_c2efce2f38e110 1-1004
+src/knowledge.rs
+  h_c2efce2f38e110 199
+src/knowledge/tests.rs
+  h_c2efce2f38e110 1-109
+src/main.rs
+  h_c2efce2f38e110 1270
+src/manifest.rs
+  h_c2efce2f38e110 191
+src/manifest/tests.rs
+  h_c2efce2f38e110 1-115
+src/mcp.rs
+  h_c2efce2f38e110 894
+src/mcp/tests.rs
+  h_c2efce2f38e110 1-2864
+src/mem_search.rs
+  h_c2efce2f38e110 1091
+src/mem_search/tests.rs
+  h_c2efce2f38e110 1-169
+src/memory_lookup.rs
+  h_c2efce2f38e110 600
+src/memory_lookup/tests.rs
+  h_c2efce2f38e110 1-222
+src/migrate.rs
+  h_c2efce2f38e110 1929
+src/migrate/tests.rs
+  h_c2efce2f38e110 1-2115
+src/model_fetch.rs
+  h_c2efce2f38e110 643
+src/model_fetch/tests.rs
+  h_c2efce2f38e110 1-552
+src/my_work.rs
+  h_c2efce2f38e110 2835
+src/my_work/tests.rs
+  h_c2efce2f38e110 1-3084
+src/my_work_focus.rs
+  h_c2efce2f38e110 572
+src/my_work_focus/tests.rs
+  h_c2efce2f38e110 1-567
+src/my_work_goals.rs
+  h_c2efce2f38e110 923
+src/my_work_goals/tests.rs
+  h_c2efce2f38e110 1-1139
+src/my_work_group.rs
+  h_c2efce2f38e110 969
+src/my_work_group/tests.rs
+  h_c2efce2f38e110 1-937
+src/my_work_judge.rs
+  h_c2efce2f38e110 512
+src/my_work_judge/tests.rs
+  h_c2efce2f38e110 1-1304
+src/my_work_ops.rs
+  h_c2efce2f38e110 353
+src/my_work_ops/tests.rs
+  h_c2efce2f38e110 1-151
+src/my_work_place.rs
+  h_c2efce2f38e110 717
+src/my_work_place/tests.rs
+  h_c2efce2f38e110 1-1006
+src/my_work_progress.rs
+  h_c2efce2f38e110 723
+src/my_work_progress/tests.rs
+  h_c2efce2f38e110 1-1461
+src/my_work_rules.rs
+  h_c2efce2f38e110 738
+src/my_work_rules/tests.rs
+  h_c2efce2f38e110 1-1297
+src/my_work_run.rs
+  h_c2efce2f38e110 993
+src/my_work_run/tests.rs
+  h_c2efce2f38e110 1-1216
+src/my_work_story.rs
+  h_c2efce2f38e110 558
+src/my_work_story/tests.rs
+  h_c2efce2f38e110 1-496
+src/my_work_subagents.rs
+  h_c2efce2f38e110 388
+src/my_work_subagents/tests.rs
+  h_c2efce2f38e110 1-447
+src/preview.rs
+  h_c2efce2f38e110 256
+src/preview/tests.rs
+  h_c2efce2f38e110 1-30
+src/provenance.rs
+  h_c2efce2f38e110 138
+src/provenance/tests.rs
+  h_c2efce2f38e110 1-101
+src/provider.rs
+  h_c2efce2f38e110 4664
+src/provider/tests.rs
+  h_c2efce2f38e110 1-6299
+src/providers_db.rs
+  h_c2efce2f38e110 1136
+src/providers_db/tests.rs
+  h_c2efce2f38e110 1-477
+src/raw.rs
+  h_c2efce2f38e110 9793
+src/raw/tests.rs
+  h_c2efce2f38e110 1-3233
+src/redact.rs
+  h_c2efce2f38e110 2061,2064
+src/redact/fixture_scan.rs
+  h_c2efce2f38e110 1-40
+src/redact/tests.rs
+  h_c2efce2f38e110 1-3545
+src/replay.rs
+  h_c2efce2f38e110 580
+src/replay/tests.rs
+  h_c2efce2f38e110 1-240
+src/repo.rs
+  h_c2efce2f38e110 258
+src/repo/tests.rs
+  h_c2efce2f38e110 1-171
+src/resident.rs
+  h_c2efce2f38e110 173
+src/resident/tests.rs
+  h_c2efce2f38e110 1-171
+src/retention.rs
+  h_c2efce2f38e110 444
+src/retention/tests.rs
+  h_c2efce2f38e110 1-866
+src/search.rs
+  h_c2efce2f38e110 519
+src/search/b.rs
+  h_c2efce2f38e110 3637,3640
+src/search/b/fixture.rs
+  h_c2efce2f38e110 1-279
+src/search/b/tests.rs
+  h_c2efce2f38e110 1-4380
+src/search/b/timeline.rs
+  h_c2efce2f38e110 615
+src/search/b/timeline/tests.rs
+  h_c2efce2f38e110 1-600
+src/search/tests.rs
+  h_c2efce2f38e110 1-651
+src/settings.rs
+  h_c2efce2f38e110 2021
+src/settings/claims.rs
+  h_c2efce2f38e110 218
+src/settings/claims/tests.rs
+  h_c2efce2f38e110 1-745
+src/settings/embedding.rs
+  h_c2efce2f38e110 379
+src/settings/embedding/tests.rs
+  h_c2efce2f38e110 1-565
+src/settings/forget.rs
+  h_c2efce2f38e110 194
+src/settings/forget/tests.rs
+  h_c2efce2f38e110 1-296
+src/settings/hide.rs
+  h_c2efce2f38e110 197
+src/settings/hide/tests.rs
+  h_c2efce2f38e110 1-666
+src/settings/judge.rs
+  h_c2efce2f38e110 194
+src/settings/judge/tests.rs
+  h_c2efce2f38e110 1-358
+src/settings/maintenance.rs
+  h_c2efce2f38e110 823
+src/settings/maintenance/tests.rs
+  h_c2efce2f38e110 1-588
+src/settings/privacy.rs
+  h_c2efce2f38e110 624
+src/settings/privacy/tests.rs
+  h_c2efce2f38e110 1-1164
+src/settings/providers.rs
+  h_c2efce2f38e110 955
+src/settings/providers/tests.rs
+  h_c2efce2f38e110 1-1264
+src/settings/tests.rs
+  h_c2efce2f38e110 1-2580
+src/setup.rs
+  h_c2efce2f38e110 4041
+src/setup/agents/files.rs
+  h_c2efce2f38e110 320
+src/setup/agents/files/input_tests.rs
+  h_c2efce2f38e110 1-175
+src/setup/agents/plan.rs
+  h_c2efce2f38e110 491
+src/setup/agents/plan/tests.rs
+  h_c2efce2f38e110 1-350
+src/setup/doctor.rs
+  h_c2efce2f38e110 1407
+src/setup/doctor/retained.rs
+  h_c2efce2f38e110 650
+src/setup/doctor/retained/tests.rs
+  h_c2efce2f38e110 1-163
+src/setup/doctor/tests.rs
+  h_c2efce2f38e110 1-1567
+src/setup/readiness.rs
+  h_c2efce2f38e110 725
+src/setup/readiness/tests.rs
+  h_c2efce2f38e110 1-714
+src/setup/tests.rs
+  h_c2efce2f38e110 1-1919
+src/shortlist.rs
+  h_c2efce2f38e110 729
+src/shortlist/tests.rs
+  h_c2efce2f38e110 1-1395
+src/tests.rs
+  h_c2efce2f38e110 1-169
+src/transcript.rs
+  h_c2efce2f38e110 1586
+src/transcript/tests.rs
+  h_c2efce2f38e110 1-2350
+src/turns.rs
+  h_c2efce2f38e110 968
+src/turns/tests.rs
+  h_c2efce2f38e110 1-1521
+src/typed.rs
+  h_c2efce2f38e110 320
+src/typed/tests.rs
+  h_c2efce2f38e110 1-378
+src/unwritten.rs
+  h_c2efce2f38e110 324
+src/unwritten/tests.rs
+  h_c2efce2f38e110 1-517
+src/view.rs
+  h_c2efce2f38e110 3727
+src/view/tests.rs
+  h_c2efce2f38e110 1-7687
+src/watchdog.rs
+  h_c2efce2f38e110 157
+src/watchdog/tests.rs
+  h_c2efce2f38e110 1-105
+src/work_product.rs
+  h_c2efce2f38e110 1022
+src/work_product/tests.rs
+  h_c2efce2f38e110 1-1195
+src/work_state.rs
+  h_c2efce2f38e110 854
+src/work_state/tests.rs
+  h_c2efce2f38e110 1-943
+src/worker.rs
+  h_c2efce2f38e110 2569
+src/worker/tests.rs
+  h_c2efce2f38e110 1-4680
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2e7ff6596ba46fae80be9b611914a40b1a11a612",
+  "prompts": {},
+  "humans": {
+    "h_c2efce2f38e110": {
+      "author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
