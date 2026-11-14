@@ -122,20 +122,30 @@ struct Said {
     text: Option<String>,
 }
 
-/// The first `max` characters of `text` as a request shows them: the gate reads `OVERLAP` more,
-/// and a key block the cut leaves open goes, as `hook::clip` keeps a field. The gate reads no more
-/// of a long prompt (a delegated review's runs to 20,000 characters).
+/// The first `max` characters of `text` as a request shows them, as `hook::clip` keeps a field: the
+/// gate reads `OVERLAP` more, and what is kept is gated once more, so that a line-scoped allowlist
+/// judges the line as it is shown, not the longer one; then a key block the cut leaves open goes,
+/// its markers read in any case. The gate reads no more of a long prompt (a delegated review's
+/// runs to 20,000 characters).
 pub(crate) fn shown(text: &str, max: usize, rules: &Rules) -> String {
     let window: String = text.chars().take(max + OVERLAP).collect();
-    let mut gated = crate::redact::outbound_with(&window, rules);
-    if window.len() < text.len()
-        && !rules.is_off()
-        && let Some(begin) = gated.rfind("-----BEGIN")
-        && !gated[begin..].contains("-----END")
+    let gated = crate::redact::outbound_with(&window, rules);
+    let mut kept = if gated.chars().count() > max {
+        crate::redact::outbound_with(&clip(&gated, max), rules)
+    } else if window.len() < text.len() {
+        gated
+    } else {
+        return gated;
+    };
+    // ASCII lowercasing keeps byte offsets.
+    let lower = kept.to_ascii_lowercase();
+    if !rules.is_off()
+        && let Some(begin) = lower.rfind("-----begin")
+        && !lower[begin..].contains("-----end")
     {
-        gated.truncate(begin);
+        kept.truncate(begin);
     }
-    clip(&gated, max)
+    clip(&kept, max)
 }
 
 /// A session summary, with the records it summarizes.
@@ -267,11 +277,14 @@ struct Work {
 impl Work {
     /// claude-mem's `fieldText` of its own fields: the first of `keys` that holds text, as the
     /// gate shows it beside its key, as work state's own lines show it (a rule may match a value
-    /// only with its key), whole before the cut: a field is at most 2,000 characters (L3).
+    /// only with its key), whole before the cut: a field is at most 2,000 characters (L3). What the
+    /// cut keeps is gated beside its key once more, so that a line-scoped allowlist judges the line
+    /// as it is shown (`shown`).
     fn text(&self, keys: &[&str], max: usize, rules: &Rules) -> Option<String> {
+        let beside = |k: &str, t: &str| crate::work_state::beside(k, t, rules);
         keys.iter()
             .find_map(|k| Some((*k, self.fields.get(*k).and_then(meaningful)?)))
-            .map(|(k, t)| cut(&crate::work_state::beside(k, &t, rules), max))
+            .map(|(k, t)| beside(k, &cut(&beside(k, &t), max)))
     }
 
     /// A request field: its own, else its list's.
@@ -518,18 +531,22 @@ fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
 
 /// The calls that sent `write`: of its repository, list and fields, within `CALL_MS`, each with
 /// its conversation and record. The tool records near a write are found by time through the fts
-/// consumer's index `raw_docs_tools`, and each is read once (CodeRabbit on #574).
+/// consumer's index `raw_docs_tools`, and each is read once (CodeRabbit on #574). The hook gates
+/// a call's record and capture gates the write each its own way (a rule can mask a value beside
+/// its key but not in the call's text), so when no call's list and fields are the write's, the
+/// calls are compared again as work state keeps both now (`settings`); a call that is the write's
+/// as stored is never joined by another masked alike (#574).
 fn senders(
     raw: &Raw,
     near: &mut rusqlite::CachedStatement<'_>,
     read: &mut HashMap<(String, i64), Option<Call>>,
-    write: &WorkWrite,
+    (write, settings): (&WorkWrite, &crate::capture::Settings),
 ) -> Result<Vec<(Key, String, i64)>> {
     let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
     let rows: Vec<(String, i64)> = near
         .query_map(span, |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut sent = Vec::new();
+    let (mut sent, mut other) = (Vec::new(), Vec::new());
     for record in rows {
         if !read.contains_key(&record) {
             let c = call(raw, (&record.0, record.1))?;
@@ -537,11 +554,26 @@ fn senders(
         }
         if let Some(c) = &read[&record]
             && c.repo.as_deref() == Some(write.repo.as_str())
-            && c.list == write.list
-            && c.fields == write.fields
         {
-            sent.push((c.key.clone(), c.device.clone(), c.seq));
+            if c.list == write.list && c.fields == write.fields {
+                sent.push((c.key.clone(), c.device.clone(), c.seq));
+            } else {
+                other.push(record);
+            }
         }
+    }
+    // shortcut: a mask that breaks the call's text as JSON, or a run the record's gate alone
+    // masks (`base64_runs`), still leaves the write with no sender; read the call from the hook's
+    // payload before its gate if such writes are seen unlinked.
+    if sent.is_empty() && !other.is_empty() {
+        let kept = |list: &str, fields: &Map<String, Value>| {
+            crate::capture::work_state(list, fields, settings)
+        };
+        let written = kept(&write.list, &write.fields);
+        sent = (other.iter().filter_map(|record| read[record].as_ref()))
+            .filter(|c| kept(&c.list, &c.fields) == written)
+            .map(|c| (c.key.clone(), c.device.clone(), c.seq))
+            .collect();
     }
     Ok(sent)
 }
@@ -555,11 +587,19 @@ fn senders(
 /// index every item is such. An item shows what each of its writes left, a task the state of its
 /// list too, so while a session is excluded it is also left out unless a call of a session not
 /// excluded, and none of an excluded one's, sent each of those writes (Codex on #574).
-fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> Result<Vec<Work>> {
+fn link(
+    (raw, k, rules): (&Raw, &Connection, &Rules),
+    work: Vec<Work>,
+    excluded: &HashSet<Key>,
+) -> Result<Vec<Work>> {
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
         let shown = if excluded.is_empty() { WORK } else { 0 };
         return Ok(work.into_iter().take(shown).collect());
     }
+    let settings = crate::capture::Settings {
+        rules: rules.clone(),
+        ..crate::capture::Settings::default()
+    };
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
@@ -571,7 +611,7 @@ fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> 
             break;
         }
         for write in w.writes.iter().rev() {
-            if let [c] = &senders(raw, &mut near, &mut read, write)?[..] {
+            if let [c] = &senders(raw, &mut near, &mut read, (write, &settings))?[..] {
                 w.by = Some(c.clone());
                 break;
             }
@@ -583,7 +623,7 @@ fn link(raw: &Raw, k: &Connection, work: Vec<Work>, excluded: &HashSet<Key>) -> 
             (w.by.as_ref()).map_or(excluded.is_empty(), |(key, ..)| !excluded.contains(key));
         if shown && !excluded.is_empty() {
             for write in w.writes.iter().chain(&w.list_writes) {
-                let sent = senders(raw, &mut near, &mut read, write)?;
+                let sent = senders(raw, &mut near, &mut read, (write, &settings))?;
                 if sent.is_empty() || sent.iter().any(|(key, ..)| excluded.contains(key)) {
                     shown = false;
                     break;
@@ -750,28 +790,32 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
         .collect();
     let mut convs: BTreeMap<Key, Conversation> = BTreeMap::new();
     // A summary's and a card's span and session as their tables hold them: the readers gate the
-    // labels they return.
+    // labels they return. A row gone since its page was read (a forget, a purge, a recuration) is
+    // none, and takes no part.
+    type SummaryRow = ((i64, i64), Key);
     let summaries = newest(
         SUMMARIES,
         |before| {
             let (page, more) = crate::turns::page(k, raw, (None, None), before, SUMMARIES, rules)?;
             let rows = (page.into_iter())
                 .map(|s| {
-                    let (span, key) = k.query_row(
-                        "SELECT from_seq, through, agent, session FROM turns
-                         WHERE device = ?1 AND op_seq = ?2",
-                        params![s.device, s.op_seq],
-                        |r| Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?))),
-                    )?;
-                    Ok((s, span, key))
+                    let row: Option<SummaryRow> = k
+                        .query_row(
+                            "SELECT from_seq, through, agent, session FROM turns
+                             WHERE device = ?1 AND op_seq = ?2",
+                            params![s.device, s.op_seq],
+                            |r| Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?))),
+                        )
+                        .optional()?;
+                    Ok((s, row))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok((rows, more))
         },
-        |(s, ..)| s.position(),
-        |(_, _, key)| !excluded.contains(key),
+        |(s, _)| s.position(),
+        |(_, row)| row.as_ref().is_some_and(|(_, key)| !excluded.contains(key)),
     )?;
-    for (s, span, key) in summaries {
+    for (s, (span, key)) in (summaries.into_iter()).filter_map(|(s, row)| Some((s, row?))) {
         let c = convs.entry(key).or_default();
         c.repos.extend(s.repo.clone());
         c.turns.push(Turn { s, span });
@@ -783,23 +827,31 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
             let rows = (page.into_iter())
                 .map(|c| {
                     type Row = ((i64, i64), Option<String>, Option<String>, String);
-                    let (span, agent, session, files): Row = k.query_row(
-                        "SELECT from_seq, to_seq, agent, session, files_modified FROM cards
-                         WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
-                        params![c.device, c.op_seq, c.n],
-                        |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?)),
-                    )?;
+                    let row: Option<Row> = k
+                        .query_row(
+                            "SELECT from_seq, to_seq, agent, session, files_modified FROM cards
+                             WHERE device = ?1 AND op_seq = ?2 AND n = ?3",
+                            params![c.device, c.op_seq, c.n],
+                            |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?)),
+                        )
+                        .optional()?;
+                    let Some((span, agent, session, files)) = row else {
+                        return Ok((c, None));
+                    };
                     // As `cards::read` parses them before it gates each.
                     let files: Vec<String> = serde_json::from_str(&files).unwrap_or_default();
-                    Ok((c, span, agent.zip(session), files))
+                    Ok((c, Some((span, agent.zip(session), files))))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok((rows, more))
         },
-        |(c, ..)| c.position(),
-        |(_, _, key, _)| key.as_ref().is_some_and(|key| !excluded.contains(key)),
+        |(c, _)| c.position(),
+        |(_, row)| {
+            (row.as_ref())
+                .is_some_and(|(_, key, _)| key.as_ref().is_some_and(|k| !excluded.contains(k)))
+        },
     )?;
-    for (card, span, key, files) in cards {
+    for (card, (span, key, files)) in (cards.into_iter()).filter_map(|(c, row)| Some((c, row?))) {
         let Some(key) = key else { continue };
         let c = convs.entry(key).or_default();
         c.repos.extend(card.repo.clone());
@@ -812,7 +864,7 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
     let writes = (raw.native_work_writes()?.into_iter())
         .filter(|w| !excluded_repos.contains(&w.repo))
         .collect();
-    let work = link(raw, k, fold(writes), &excluded)?;
+    let work = link((raw, k, rules), fold(writes), &excluded)?;
     // Every prompt of the sessions read (`PROMPTS`): the work's, the summaries', the cards', and
     // those of the newest live prompts whose text is there, each prompt kept only as `at`
     // returns it: what a forget took or an expiry left without text takes no part (Codex on #574).
@@ -900,6 +952,15 @@ fn read_held(
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
     };
+    // The page's list (`listed`) is read in the readers' hold from its first read to its answer
+    // (#439), as a request's page is: a forget registered before it leaves out what it took, and
+    // one registered meanwhile waits. `reviewing`, which the owner's actions read under the
+    // reviews' lock, takes none, as a purge holds the readers' hold while it waits for that lock
+    // (Codex on slice 2).
+    let _read = match cards {
+        Some(_) => Some(crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?),
+        None => None,
+    };
     let rules = Rules::load(home)?;
     let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
     let Built {
@@ -947,13 +1008,8 @@ fn read_held(
     let (mut answers, held): (Vec<Value>, Vec<Held>) = answers.into_iter().unzip();
     // Slice 2 of docs/deliverables.md: each request's copies, read once, for a fingerprint by which
     // the page reads its products again when one lands or goes and, in the list's answer, for its
-    // card (slice 2b), both in the readers' hold there (#439), as a request's page builds them: a
-    // forget registered before it leaves its copies out, and one registered meanwhile waits. A
+    // card (slice 2b), both in the readers' hold there (#439), as a request's page builds them. A
     // copies' store that does not read leaves the list without them, not without its requests.
-    let _read = match cards {
-        Some(_) => Some(crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?),
-        None => None,
-    };
     let copies = (|| -> Result<Option<Vec<Vec<crate::deliverables::Row>>>> {
         let Some(db) = crate::deliverables::open_read(home)? else {
             return Ok(None);
@@ -984,7 +1040,6 @@ fn read_held(
             }
         }
     }
-    drop(_read);
     // F2, F7: where each request sits, and the areas.
     let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
     for (a, h) in answers.iter_mut().zip(&held) {
@@ -1007,9 +1062,7 @@ fn read_held(
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
     let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
-    // The page's read alone (`listed`): `reviewing`, which the owner's actions read under the
-    // reviews' lock, takes no readers' hold, which a purge holds while it waits for that lock
-    // (Codex on slice 2).
+    // The page's read alone (`listed`), in its readers' hold.
     let subagents = match cards {
         Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,
         None => Vec::new(),
@@ -1021,8 +1074,8 @@ fn read_held(
 }
 
 /// Slice 2 of docs/subagents.md: the subagents of the `listed` conversations as the answer gives
-/// them, each conversation by the id its request's `sessions` give it. Read in the readers' hold,
-/// taken here: a forget registers before this read or after it.
+/// them, each conversation by the id its request's `sessions` give it. Read in the list's readers'
+/// hold, which the caller holds: a forget registers before this read or after it.
 fn subagents_of(
     home: &Path,
     (raw, k, rules): (&Raw, &Connection, &Rules),
@@ -1030,7 +1083,6 @@ fn subagents_of(
     now: i64,
     key: &mut Option<Vec<u8>>,
 ) -> Result<Vec<Value>> {
-    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let found =
         crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>(), rules)?;
     let mut conversations: HashMap<Key, (String, Option<String>)> = HashMap::new();
@@ -1424,7 +1476,7 @@ pub(crate) struct Seen {
 /// Every conversation My Work reads (`gather`), as grouping reads it.
 pub(crate) fn seen(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Vec<Seen>> {
     let Gathered { convs, work, named } = gather(raw, k, rules)?;
-    let mut lists = writers(raw, k, &work)?;
+    let mut lists = writers((raw, k, rules), &work)?;
     let mut out = Vec::new();
     for (key, c) in convs {
         let said = |p: &Said| {
@@ -1471,14 +1523,17 @@ pub(crate) fn seen(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Vec<Seen>
 /// the calls that sent it (`senders`), where `link` reads an item's newest write alone. None
 /// before the worker has made `raw_docs_tools`.
 fn writers(
-    raw: &Raw,
-    k: &Connection,
+    (raw, k, rules): (&Raw, &Connection, &Rules),
     work: &[Work],
 ) -> Result<HashMap<Key, BTreeSet<(String, String)>>> {
     let mut out: HashMap<Key, BTreeSet<(String, String)>> = HashMap::new();
     if !crate::consumer::manifest::exists(k, "index", "raw_docs_tools")? {
         return Ok(out);
     }
+    let settings = crate::capture::Settings {
+        rules: rules.clone(),
+        ..crate::capture::Settings::default()
+    };
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
@@ -1486,7 +1541,7 @@ fn writers(
     let mut read = HashMap::new();
     for w in work {
         for write in w.writes.iter().chain(&w.list_writes) {
-            for (key, ..) in senders(raw, &mut near, &mut read, write)? {
+            for (key, ..) in senders(raw, &mut near, &mut read, (write, &settings))? {
                 out.entry(key)
                     .or_default()
                     .insert((w.repo.clone(), w.list.clone()));
@@ -1889,35 +1944,57 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
 /// (Codex on slice 3).
 pub(crate) struct ReviewsLock(#[allow(dead_code)] std::fs::File);
 
+/// The reviews' lock as a forget's sweep takes it: waited for as long as it is held.
 pub(crate) fn reviews_lock(home: &Path) -> Result<ReviewsLock> {
     let lock = state_file(home, "my-work-reviews.lock")?;
     lock.lock()?;
     Ok(ReviewsLock(lock))
 }
 
+/// The reviews' lock as a check or its Undo takes it on a viewer's connection: waited for `wait`
+/// at most, none past it, and by `WAITERS` at most at once, as Mark finished's.
+pub(crate) fn reviews_lock_within(
+    home: &Path,
+    wait: std::time::Duration,
+) -> Result<Option<ReviewsLock>> {
+    static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    Ok(waited(home, "my-work-reviews.lock", wait, &WAITING)?.map(ReviewsLock))
+}
+
 /// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
 /// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
 /// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, and by
-/// `FINISHED_WAITERS` at most at once, so requests do not keep the viewer's connections waiting
+/// `WAITERS` at most at once, so requests do not keep the viewer's connections waiting
 /// (CodeRabbit on #850).
 pub(crate) fn finished_lock(
     home: &Path,
     wait: std::time::Duration,
 ) -> Result<Option<std::fs::File>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static WAITING: AtomicUsize = AtomicUsize::new(0);
-    struct Waiting;
+    static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    waited(home, "my-work-finished.lock", wait, &WAITING)
+}
+
+/// `state/<name>` locked, waited for `wait` at most and by `WAITERS` at most at once (`waiting`
+/// counts them): none past either.
+fn waited(
+    home: &Path,
+    name: &str,
+    wait: std::time::Duration,
+    waiting: &'static std::sync::atomic::AtomicUsize,
+) -> Result<Option<std::fs::File>> {
+    use std::sync::atomic::Ordering;
+    struct Waiting(&'static std::sync::atomic::AtomicUsize);
     impl Drop for Waiting {
         fn drop(&mut self) {
-            WAITING.fetch_sub(1, Ordering::SeqCst);
+            self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    if WAITING.fetch_add(1, Ordering::SeqCst) >= FINISHED_WAITERS {
-        WAITING.fetch_sub(1, Ordering::SeqCst);
+    if waiting.fetch_add(1, Ordering::SeqCst) >= WAITERS {
+        waiting.fetch_sub(1, Ordering::SeqCst);
         return Ok(None);
     }
-    let _waiting = Waiting;
-    let lock = state_file(home, "my-work-finished.lock")?;
+    let _waiting = Waiting(waiting);
+    let lock = state_file(home, name)?;
     let deadline = std::time::Instant::now() + wait;
     loop {
         match lock.try_lock() {
@@ -1936,13 +2013,15 @@ pub(crate) fn finished_lock(
     }
 }
 
-/// How many Mark finished requests may hold or wait for its lock at once, well under the viewer's
-/// 32 connections; one more is answered at once (CodeRabbit on #850).
-const FINISHED_WAITERS: usize = 4;
+/// How many requests may hold or wait for Mark finished's lock at once, and how many the
+/// reviews', well under the viewer's 32 connections; one more is answered at once (CodeRabbit on
+/// #850).
+const WAITERS: usize = 4;
 
 #[cfg(test)]
 thread_local! {
-    /// One-shot for this thread's next wait for Mark finished's lock: a test's sign that it waits.
+    /// One-shot for this thread's next wait for Mark finished's lock or the reviews': a test's sign
+    /// that it waits.
     pub(crate) static FINISHED_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -1973,7 +2052,9 @@ fn change_reviews(
 }
 
 /// Rule 6: a check of `version` filed for `held`, or its Undo, with the checks of the requests no
-/// longer read (`current`) dropped, so that a request a forget took leaves nothing here.
+/// longer read (`current`) dropped, so that a request a forget took leaves nothing here. A check
+/// of a session an exclusion hides now stays: the exclusion can be lifted, and the request is read
+/// again.
 pub(crate) fn set_review(
     (home, lock): (&Path, &ReviewsLock),
     (held, current): (&Held, &[Held]),
@@ -1982,8 +2063,11 @@ pub(crate) fn set_review(
     now: i64,
 ) -> Result<()> {
     let read: HashSet<&str> = current.iter().map(|h| h.key.as_str()).collect();
+    let hidden = excluded_sessions(home)?;
     change_reviews(home, lock, |all| {
-        all.retain(|key, _| read.contains(key.as_str()));
+        all.retain(|key, r| {
+            read.contains(key.as_str()) || r.sessions.iter().any(|s| hidden.contains(s))
+        });
         if checked {
             let review = Review {
                 version: version.to_owned(),
@@ -1997,6 +2081,19 @@ pub(crate) fn set_review(
         }
         true
     })
+}
+
+/// The sessions of the repositories excluded now, as a check names its sessions (`Held::sessions`).
+fn excluded_sessions(home: &Path) -> Result<HashSet<String>> {
+    if !crate::raw::exists(home) {
+        return Ok(HashSet::new());
+    }
+    let raw = crate::raw::open(home)?;
+    let mut key = None;
+    (raw.sessions_in(&raw.exclusions_now()?)?.iter())
+        .filter_map(|s| s.split_once('\0'))
+        .map(|(agent, session)| keyed(&crate::forget::session(agent, session), home, &mut key))
+        .collect()
 }
 
 /// Rule 6: a forget's sweep at its step 5: the checks of the forgotten `sessions` (each target's
@@ -2024,35 +2121,57 @@ pub(crate) fn forget_reviews(home: &Path, sessions: &[String]) -> Result<()> {
 /// The home's key of the fingerprints of masked ids and of the versions checks are of (`answer`):
 /// 32 random bytes in `state/my-work.key`, made the first time a request is read and never in an
 /// answer, so that neither tells anything of a guess at what it stands for (CodeRabbit on #574).
-/// Whoever can read the file can read the stores, which hold the ids themselves.
+/// Whoever can read the file can read the stores, which hold the ids themselves. It is the owner's
+/// alone to read (0600), and on disk before it is published, as the checks it keys are.
 fn mask_key(home: &Path) -> Result<Vec<u8>> {
-    let path = home.join("state").join("my-work.key");
-    let read = || std::fs::read(&path).ok().filter(|key| key.len() == 32);
-    if let Some(key) = read() {
+    use std::io::Write;
+    let state = home.join("state");
+    let path = state.join("my-work.key");
+    // None for no file, or one that holds no key; a file that does not read is an error, not a
+    // reason to make a new key over the one every check is filed under.
+    let read = || -> Result<Option<Vec<u8>>> {
+        match std::fs::read(&path) {
+            Ok(key) => Ok(Some(key).filter(|key| key.len() == 32)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    };
+    if let Some(key) = read()? {
         return Ok(key);
     }
     let (mut key, mut tag) = ([0u8; 32], [0u8; 8]);
     getrandom::fill(&mut key).map_err(|e| anyhow::anyhow!("random key: {e}"))?;
     getrandom::fill(&mut tag).map_err(|e| anyhow::anyhow!("random key: {e}"))?;
-    std::fs::create_dir_all(home.join("state"))?;
+    std::fs::create_dir_all(&state)?;
     let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
-    let tmp = home.join("state").join(format!("my-work.key.{tag}"));
-    std::fs::write(&tmp, key)?;
-    // Published whole: a link fails on a name another read took first, whose key stays.
-    if let Err(e) = std::fs::hard_link(&tmp, &path) {
-        if let Some(theirs) = (e.kind() == std::io::ErrorKind::AlreadyExists)
-            .then(read)
-            .flatten()
-        {
-            let _ = std::fs::remove_file(&tmp);
-            return Ok(theirs);
-        }
-        // No links on this filesystem, or a file of the name that holds no key: this one's.
-        std::fs::rename(&tmp, &path)?;
-        return Ok(key.to_vec());
-    }
+    let tmp = state.join(format!("my-work.key.{tag}"));
+    let published = (|| -> Result<Vec<u8>> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
+        file.write_all(&key)?;
+        file.sync_all()?;
+        // Published whole: a link fails on a name another read took first, whose key stays.
+        let mine = if std::fs::hard_link(&tmp, &path).is_ok() {
+            key.to_vec()
+        } else if let Some(theirs) = read()? {
+            theirs
+        } else {
+            // No links on this filesystem, or a file of the name that holds no key: this one's.
+            // shortcut: two first reads on a filesystem without links can both rename, the later
+            // key standing; publish with a rename that replaces nothing if such a home loses checks.
+            std::fs::rename(&tmp, &path)?;
+            key.to_vec()
+        };
+        #[cfg(unix)]
+        std::fs::File::open(&state)?.sync_all()?;
+        Ok(mine)
+    })();
+    // The temporary name goes, whether the key was published under the other or not.
     let _ = std::fs::remove_file(&tmp);
-    Ok(key.to_vec())
+    published
 }
 
 /// A request's id as the answer shows it, and the fingerprint of the stored one when the gate
@@ -2358,10 +2477,7 @@ fn answer(
     } else {
         let field = |names: &[&str]| {
             turns.iter().find_map(|t| {
-                names
-                    .iter()
-                    .find_map(|n| t.s.fields.get(*n))
-                    .filter(|v| !v.trim().is_empty())
+                (names.iter()).find_map(|n| t.s.fields.get(*n).filter(|v| !v.trim().is_empty()))
             })
         };
         let summary = field(&["completed", "learned", "investigated"]).map(|t| cut(t, SUMMARY));
@@ -2580,9 +2696,9 @@ fn lifecycle(items: &[&Work]) -> Option<(Stamp, bool, String)> {
 }
 
 /// P5, claude-mem's `progress`: the percent of `review`, the one the card shows; 100 for shipped.
-/// When it was reviewed; for shipped, the day the newest recorded status completed the request
-/// (`completed_at`), else the review's shipped date; and the estimate. None with no review and no
-/// ship.
+/// When it was reviewed; for shipped, the UTC day the newest recorded status completed the request
+/// and its time (`completed_at`), else the review's shipped date; and the estimate. None with no
+/// review and no ship.
 fn progress(
     readings: &[crate::my_work_progress::Reviewed],
     review: Option<&crate::my_work_progress::Reviewed>,
@@ -2609,6 +2725,9 @@ fn progress(
         "percent": percent,
         "reviewed": review.map(|r| r.ts),
         "completed": completed,
+        // The time of that status, which the page shows as its own day, the UTC day `completed`
+        // gives staying for "Asked again after ship" (#731).
+        "completed_at": completed_at.filter(|_| shipped),
         "estimate": (!shipped).then(|| crate::my_work_progress::estimate(readings)).flatten(),
     })
 }

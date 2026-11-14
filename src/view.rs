@@ -2322,8 +2322,10 @@ impl Viewer {
         };
         let now = crate::db::now_ms();
         // Held from the read the check is tested against to its write (`ReviewsLock`).
-        let lock = match crate::my_work::reviews_lock(&self.home) {
-            Ok(lock) => lock,
+        let lock = match crate::my_work::reviews_lock_within(&self.home, crate::db::OPEN_WRITE_WAIT)
+        {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return refused(503, "busy", ""),
             Err(e) => return failed(&e),
         };
         let (answer, held) = match crate::my_work::reviewing(&self.home, now) {

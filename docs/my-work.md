@@ -26,7 +26,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   human request are counted apart: "N work records need a linked human request".
 - **Its work** is what `work_state_write` recorded (lists and tasks with `status`), each entry tied to
   a session only through the tool call that wrote it: same project, list and fields, within 5 s,
-  and only when exactly one call matches (`agent-view.mjs`). Each prompt with observations is a
+  and only when exactly one call matches (`agent-view.mjs`); a call's list and fields that differ
+  from the write's are compared again as work state keeps both now, since the hook gates the call
+  and capture the write each its own way. Each prompt with observations is a
   work record of its own, with that prompt's session summary's `next_steps` and `completed` as its
   next step and outcome; an observation is the activity of the request whose work was written, or
   recorded, in the same prompt. Bounds: 240 work items, 300 observations, 100 summaries, the
@@ -300,8 +302,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   An id the gate masks takes `#` and the first 12 hex digits of the SHA-256 of the home's own key
   and the stored id, so that two masked alike stay two and each keeps its id from read to read
   (Codex on #574), and the fingerprint tells nothing of a guess at the id (CodeRabbit on #574):
-  the key is 32 random bytes in `state/my-work.key`, made the first time an id is masked and
-  never in an answer; whoever can read it can read the stores, which hold the ids themselves. The
+  the key is 32 random bytes in `state/my-work.key` (0600, on disk before it is published), made
+  the first time a request is read (its version, and the name its checks are filed under, are
+  made with it too) and never in an answer; whoever can read it can read the stores,
+  which hold the ids themselves. A key file that does not read is an error, never a reason to make
+  another key: every check and fingerprint is made with it. The
   stored id goes through the gate as assembled too, since a rule may match it and neither of its
   parts, which the route's own gate (`view::answered`) would then mask alike in two ids, or a
   part's mask may hide what that rule would match: then nothing of the id is shown but its kind
@@ -495,10 +500,12 @@ them; nothing else in it changes.
   checked}`, the request named by its id as the route shows it. A request not read is 404
   `not_found`; a version that is not its current one 409 `stale`; a check of a request not
   reported complete 409 `not_ready`. Undo is `checked: false`, and takes back only a check of that
-  version. Each write drops the checks of requests no longer read, as a request a forget took.
+  version. Each write drops the checks of requests no longer read, as a request a forget took, but
+  not those of a session an exclusion hides now, which is read again once the exclusion is lifted.
   `state/my-work-reviews.lock` is held from the read a check is tested against to its write, and by
   a forget's sweep, so that a check of an older version replaces no newer one and a stale check
-  brings back nothing a sweep took.
+  brings back nothing a sweep took. A check waits 10 seconds for it at most, and four at most wait
+  at once, as Mark finished's lock; one more, or one past the wait, is 503 `busy`.
 - **Forget**: a forget of a session drops its checks at its purge's step 5, under that hold.
 - **The page**: a checked request is Checked (its badge, the Checked tab's count, last in
   attention order). A request reported complete opens to a review in its page: claude-mem's

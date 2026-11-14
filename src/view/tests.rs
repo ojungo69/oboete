@@ -2317,6 +2317,30 @@ fn the_my_work_review_route_checks_a_version_and_refuses_the_rest() {
         "{}",
         read()
     );
+    // Four checks at most wait for the hold, well under the viewer's connections; one more is
+    // answered busy at once, and the four go on when it is let go. A fifth waited as the others.
+    let hold = crate::my_work::reviews_lock(home).unwrap();
+    std::thread::scope(|scope| {
+        let posting: Vec<_> = (0..5)
+            .map(|_| scope.spawn(|| post(&check, "t0k", ours).0))
+            .collect();
+        // Only the one answered busy ends while the hold is held, and long before a waiter
+        // gives up: it is looked for, not timed.
+        let started = std::time::Instant::now();
+        while !posting.iter().any(|p| p.is_finished()) {
+            assert!(
+                started.elapsed() < crate::db::OPEN_WRITE_WAIT / 2,
+                "no check was answered busy while four waited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let done: Vec<bool> = posting.iter().map(|p| p.is_finished()).collect();
+        drop(hold);
+        let mut statuses: Vec<u16> = posting.into_iter().map(|p| p.join().unwrap()).collect();
+        statuses.sort_unstable();
+        assert_eq!(done.iter().filter(|d| **d).count(), 1, "{done:?}");
+        assert_eq!(statuses, [200, 200, 200, 200, 503]);
+    });
     assert_eq!(post(&body("r:rel", &version, false), "t0k", ours).0, 200);
     assert_eq!(request(&read(), "r:rel")["checked"], Value::Null);
 }

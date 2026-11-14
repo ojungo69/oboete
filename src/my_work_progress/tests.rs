@@ -1368,6 +1368,27 @@ fn a_recorded_ship_shows_100_and_its_day() {
     assert_eq!(h.page()["progress"]["completed"], json!(today));
 }
 
+/// A recorded ship's time is sent beside its UTC day (`completed_at`), so that the page shows the
+/// day it was in the viewer's time zone, as it shows when the request was reviewed; the UTC day
+/// stays for "Asked again after ship" (#731). The UTC day alone was sent, and the page showed
+/// it as a local day: the day before, for a ship before 09:00 in UTC+9.
+#[test]
+fn a_recorded_ships_time_is_sent_beside_its_day() {
+    let mut h = Home::new();
+    h.said("s1", 0, "Build the parser.");
+    let before = crate::db::now_ms();
+    h.wrote(
+        "s1",
+        "parser",
+        json!({"task": "parse", "request_status": "shipped"}),
+    );
+    let after = crate::db::now_ms();
+    let p = &h.page()["progress"];
+    let at = p["completed_at"].as_i64().unwrap_or_else(|| panic!("{p}"));
+    assert!((before..=after).contains(&at), "{p}");
+    assert_eq!(p["completed"], json!(crate::db::utc(at)[..10].to_owned()));
+}
+
 /// The build story is gated as the page reads it: a rule added after the review masks its
 /// narrative and milestones before any rescan.
 #[test]

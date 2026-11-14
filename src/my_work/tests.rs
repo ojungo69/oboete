@@ -1955,6 +1955,43 @@ fn a_check_is_of_one_version_and_goes_with_its_session() {
     assert_eq!(file, "{}");
 }
 
+/// Rule 6: a check of a request that an exclusion hides now stays through a check of another, and
+/// shows again when the exclusion is lifted: an exclusion is undone, where a forget is not. The
+/// check of the hidden request went with the next check of any other.
+#[test]
+fn a_check_an_exclusion_hides_stays_through_another_check() {
+    let mut h = Home::new();
+    let private = "github.com/o/private";
+    h.said("s1", -60_000, "Fix the parser.");
+    h.s.said("s2", private, h.t - 50_000, "Fix the private thing.");
+    h.run_read();
+    let home = h.s.home.path().to_owned();
+    let now = h.t + 10_000;
+    let at = |v: &Value, id: &str| -> Option<usize> {
+        (v["requests"].as_array().unwrap().iter()).position(|r| r["id"] == id)
+    };
+    let check = |id: &str| {
+        let (v, held) = super::reviewing(&home, now).unwrap();
+        let i = at(&v, id).unwrap();
+        let version = v["requests"][i]["version"].as_str().unwrap().to_owned();
+        let lock = super::reviews_lock(&home).unwrap();
+        super::set_review((&home, &lock), (&held[i], &held), &version, true, now).unwrap();
+    };
+    check("c:claude:s1");
+    check("c:claude:s2");
+    h.s.exclude(private);
+    assert_eq!(
+        at(&super::reviewing(&home, now).unwrap().0, "c:claude:s2"),
+        None
+    );
+    check("c:claude:s1");
+    let undo = json!({"repo": private, "undo": true});
+    h.s.raw.append_ops(&[(OpKind::Exclusion, undo)]).unwrap();
+    let (v, _) = super::reviewing(&home, now).unwrap();
+    let two = at(&v, "c:claude:s2").expect("shown again");
+    assert_eq!(v["requests"][two]["checked"], json!(now), "{v}");
+}
+
 /// Codex on slice 3: a request status written again is a new version, though its value is not:
 /// a check of a result reported complete does not hide the blocked state a later write records.
 #[test]
@@ -2300,6 +2337,167 @@ fn a_masked_ids_fingerprint_is_keyed_by_the_homes_own_key() {
     assert!(!a[0].ends_with(unkeyed), "{a:?}");
     assert!(key(&homes[0]).exists());
     assert_eq!(read(&homes[0]), a);
+}
+
+/// The home's key is the owner's alone to read, as the other files of `state/` are: it is made
+/// with mode 0600, where it was made with the umask's (0644 as a rule).
+#[cfg(unix)]
+#[test]
+fn the_homes_key_is_made_for_the_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Home::new();
+    h.said("s1", -60_000, "Fix the parser.");
+    h.read(Range::All, h.t + 10_000);
+    let key = h.s.home.path().join("state").join("my-work.key");
+    let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+}
+
+/// A key that fails to read for any reason but its absence is an error, and the key stays: every
+/// check is filed under it. A key that did not read was replaced, and every check went.
+#[cfg(unix)]
+#[test]
+fn a_key_that_fails_to_read_is_an_error_and_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Home::new();
+    h.said("s1", -60_000, "Fix the parser.");
+    let done = json!({"task": "parser", "status": "done", "request_status": "done"});
+    h.wrote("s1", "fix", done);
+    h.run_read();
+    let home = h.s.home.path().to_owned();
+    let now = h.t + 10_000;
+    let (v, held) = super::reviewing(&home, now).unwrap();
+    let version = v["requests"][0]["version"].as_str().unwrap().to_owned();
+    let lock = super::reviews_lock(&home).unwrap();
+    super::set_review((&home, &lock), (&held[0], &held), &version, true, now).unwrap();
+    drop(lock);
+    let path = home.join("state").join("my-work.key");
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        // A reader that no mode stops (root) cannot fail this read.
+        return;
+    }
+    let read = super::reviewing(&home, now);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(read.is_err(), "{:?}", read.map(|(v, _)| v));
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the key stays");
+    let (v, _) = super::reviewing(&home, now).unwrap();
+    assert_eq!(v["requests"][0]["checked"], json!(now));
+}
+
+/// A line that the bundled generic-api-key rule passes over for its ending, and the value in it.
+fn passed_over_line() -> (String, String) {
+    let value = format!("q9Zx8mL2vB4nR7tY1wK3{}", "pS6dJ0aF5hU2cE8g");
+    let line = format!(
+        "auth = \"{value}\" {}--mount=type=secret,id=x",
+        "lorem ".repeat(200)
+    );
+    assert!(
+        crate::redact::outbound_with(&line, &Rules::default()).contains(&value),
+        "the line whole is passed over"
+    );
+    (line, value)
+}
+
+/// A prompt's shown part is gated once more as it is kept, as `hook::clip` keeps a field: a
+/// line-scoped allowlist judged the longer line, and the cut takes away what it allowed the value
+/// for. The kept part showed the value.
+#[test]
+fn a_prompts_shown_part_is_gated_again_as_it_is_kept() {
+    let (line, value) = passed_over_line();
+    let kept = super::shown(&line, 500, &Rules::default());
+    assert!(!kept.contains(&value), "{kept}");
+    assert!(kept.starts_with("auth = \"[REDACTED]\""), "{kept}");
+    assert!(kept.chars().count() <= 500 && kept.ends_with('…'), "{kept}");
+}
+
+/// A work item's text is gated once more beside its key as it is cut: a line-scoped allowlist
+/// judged the field whole, and the cut takes away what it allowed the value for. The next step
+/// showed the value.
+#[test]
+fn a_work_items_text_is_gated_again_as_it_is_cut() {
+    let (line, value) = passed_over_line();
+    let mut h = Home::new();
+    h.said("s1", -60_000, "Fix the parser.");
+    h.wrote(
+        "s1",
+        "fix",
+        json!({"task": "parser", "status": "doing", "next": line}),
+    );
+    let v = h.read(Range::All, h.t + 10_000);
+    let next = by_id(&v, "c:claude:s1")["next"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!next.contains(&value), "{next}");
+    assert!(next.starts_with("auth = \"[REDACTED]\""), "{next}");
+}
+
+/// `lines` lines of 64 Base64 characters that read as a key's, made from `seed`.
+fn key_lines(seed: u64, lines: usize) -> String {
+    let b64: Vec<u8> = (b'A'..=b'Z')
+        .chain(b'a'..=b'z')
+        .chain(b'0'..=b'9')
+        .chain(*b"+/")
+        .collect();
+    let mut x = seed;
+    let mut out = String::new();
+    for _ in 0..lines {
+        for _ in 0..64 {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            out.push(b64[(x >> 58) as usize] as char);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// A key block stored as it was typed, whose footer the gate's window cuts, or written in lower
+/// case, shows none of its lines in a prompt's shown part.
+#[test]
+fn a_key_block_the_window_cuts_shows_none_of_its_lines() {
+    let (begin, end) = (
+        format!("-----{} RSA PRIVATE KEY-----", "BEGIN"),
+        format!("-----{} RSA PRIVATE KEY-----", "END"),
+    );
+    // 5 + 32 + 76 lines of 65: the footer starts 23 characters before the window's end.
+    let body = key_lines(7, 76);
+    let cut = format!("Key:\n{begin}\n{body}{end}\n");
+    assert_eq!(cut.find(&end), Some(1_000 + OVERLAP - 23));
+    let lower = format!(
+        "Key:\n{}\n{}{}\n",
+        begin.to_lowercase(),
+        key_lines(9, 120),
+        end.to_lowercase()
+    );
+    for text in [&cut, &lower] {
+        let kept = super::shown(text, 1_000, &Rules::default());
+        for line in text.lines().filter(|l| l.len() == 64) {
+            assert!(!kept.contains(&line[..24]), "{kept}");
+        }
+    }
+    // A block the window cuts, which the masks leave shorter than the part shown, goes too.
+    let open = format!("Key:\n{begin}\n{}", key_lines(11, 90));
+    let kept = super::shown(&open, 1_000, &Rules::default());
+    assert_eq!(kept, "Key:\n");
+}
+
+/// A key that does not read leaves no file of a new one in `state/`: no new key is made for it,
+/// and what a failed publish made is taken back. A new key was left beside it each time.
+#[test]
+fn a_key_that_does_not_read_leaves_no_new_key_beside_it() {
+    let mut h = Home::new();
+    h.said("s1", -60_000, "Fix the parser.");
+    h.run_read();
+    let home = h.s.home.path().to_owned();
+    std::fs::create_dir_all(home.join("state").join("my-work.key")).unwrap();
+    assert!(super::reviewing(&home, h.t + 10_000).is_err());
+    let left: Vec<String> = (std::fs::read_dir(home.join("state")).unwrap())
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("my-work.key."))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 /// A grouping op that decided `groups` (each its conversations, the anchor first, and its
@@ -3024,6 +3222,116 @@ fn the_cards_are_built_in_the_readers_hold() {
     go.send(()).unwrap();
     assert_eq!(reader.join().unwrap().unwrap(), 1);
     assert!(crate::dispatch::exclusive_within(&home, wait).is_ok());
+}
+
+/// A request's summary is the first of its newest summary's completed, learned and investigated
+/// that holds text as the gate shows it: a field the gate leaves blank (a private block alone)
+/// passes to the next of the same summary. An older summary's text was shown.
+#[test]
+fn a_summary_field_the_gate_leaves_blank_passes_to_the_next_of_its_summary() {
+    let mut h = Home::new();
+    let asked = h.said("s1", -60_000, "Fix the parser.");
+    let replied = h.reply("s1", -59_000);
+    h.turn(
+        "s1",
+        (asked, replied),
+        -58_000,
+        json!({"completed": "The parser was fixed."}),
+    );
+    let again = h.said("s1", -50_000, "And the docs.");
+    let replied = h.reply("s1", -49_000);
+    let newest = json!({"completed": "<private>kept back</private>",
+            "learned": "The docs were fixed."});
+    h.turn("s1", (again, replied), -48_000, newest);
+    let v = h.read(Range::All, h.t + 10_000);
+    assert_eq!(
+        by_id(&v, "c:claude:s1")["summary"],
+        "The docs were fixed.",
+        "{v}"
+    );
+}
+
+/// A write is its call's though a rule masks one of its fields: the call as the hook records it
+/// and the write as work state stores it are compared as work state keeps them now. A value a
+/// rule masks beside its key, but not in the call's record, left the write with no sender.
+#[test]
+fn a_write_whose_field_a_rule_masks_keeps_its_sender() {
+    let mut h = Home::new();
+    let home = h.s.home.path().to_owned();
+    let toml = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
+    std::fs::write(home.join("config.toml"), toml).unwrap();
+    let settings = crate::capture::Settings {
+        rules: Rules::load(&home).unwrap(),
+        ..crate::capture::Settings::default()
+    };
+    h.said("s1", -60_000, "Fix the parser.");
+    let sent = json!({"task": "parser", "status": "doing", "ticket": "sess-7"});
+    let (_, stored) = crate::capture::work_state("fix", sent.as_object().unwrap(), &settings);
+    assert_eq!(stored["ticket"], "[REDACTED]");
+    let (ts, _) = h.write("fix", Value::Object(stored));
+    let payload = json!({"hook_event_name": "PostToolUse", "session_id": "s1",
+        "tool_name": "mcp__oboete__work_state_write",
+        "tool_input": {"list": "fix", "fields": sent}, "tool_response": "Saved."});
+    let mut captured =
+        crate::capture::events("claude", "PostToolUse", &payload, ts + 20, &settings);
+    let mut call = captured.remove(0).event;
+    call.repo = Some(R.into());
+    assert!(
+        call.body.contains("sess-7"),
+        "the call's record keeps it: {}",
+        call.body
+    );
+    h.s.raw.append(&call).unwrap();
+    let v = h.read(Range::All, h.t + 10_000);
+    assert_eq!(tasks(by_id(&v, "c:claude:s1")), ["parser"], "{v}");
+    // An excluded session's write so made is its sender's, and stays out.
+    let private = "github.com/o/private";
+    h.s.said("x", private, h.t - 40_000, "Fix the private thing.");
+    h.s.exclude(private);
+    let sent = json!({"task": "hidden-task", "status": "doing", "ticket": "sess-8"});
+    let (_, stored) = crate::capture::work_state("fix", sent.as_object().unwrap(), &settings);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let (ts, _) = h.write("fix", Value::Object(stored));
+    let payload = json!({"hook_event_name": "PostToolUse", "session_id": "x",
+        "tool_name": "mcp__oboete__work_state_write",
+        "tool_input": {"list": "fix", "fields": sent}, "tool_response": "Saved."});
+    let mut captured =
+        crate::capture::events("claude", "PostToolUse", &payload, ts + 20, &settings);
+    let mut call = captured.remove(0).event;
+    call.repo = Some(R.into());
+    h.s.raw.append(&call).unwrap();
+    let v = h.read(Range::All, h.t + 10_000);
+    assert!(!v.to_string().contains("hidden-task"), "{v}");
+    assert_eq!(tasks(by_id(&v, "c:claude:s1")), ["parser"], "{v}");
+}
+
+/// The list's read is in the readers' hold from its first read of the stores (#439): what is
+/// recorded while a forget's registration holds the store is in the answer the read gives after
+/// it. The requests were built before the hold, so a forget registered meanwhile could commit
+/// while the answer still held what it took.
+#[test]
+fn the_lists_requests_are_read_in_the_readers_hold() {
+    let mut h = Home::new();
+    h.said("s1", -60_000, "Fix the parser.");
+    h.run_read();
+    let home = h.s.home.path().to_owned();
+    let registering = crate::dispatch::exclusive(&home).unwrap();
+    let (begun, started) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn({
+        let (home, now) = (home.clone(), h.t + 10_000);
+        move || {
+            begun.send(()).unwrap();
+            let tag = |r: &crate::deliverables::Row| Ok(format!("tag{}", r.id));
+            super::listed(&home, Range::All, now, &tag).unwrap()
+        }
+    });
+    started.recv().unwrap();
+    // Time for the read the reader has begun, which only the hold keeps back.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    h.said("s1", -50_000, "And the docs.");
+    drop(registering);
+    let v = reader.join().unwrap();
+    assert!(v.to_string().contains("And the docs."), "{v}");
 }
 
 /// Slice 2b's measurement (docs/deliverables.md): on a copy of a store, never the live one,
