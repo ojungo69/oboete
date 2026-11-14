@@ -1251,6 +1251,11 @@ fn spans_in(
         let Some(re) = rule.regex.as_deref().and_then(compiled) else {
             continue;
         };
+        // While this rule judges its values, the regexes of the allowlists are this thread's
+        // own (`Warm`), from the first value that gets as far as them: taken anew for every
+        // value, each use built its cache from nothing (the review of #985: 100,000 values on
+        // one line that go through every entry, 16 s).
+        let mut held: Option<Warm> = None;
         for caps in re.captures_iter(text) {
             let all = caps.get(0).expect("group 0");
             let secret = match rule.secret_group {
@@ -1270,12 +1275,23 @@ fn spans_in(
             {
                 continue;
             }
-            let line = line_of(text, all.start());
+            if held.is_none() {
+                held = Some(warm());
+            }
+            // The line is read only for an allowlist that targets it: finding a line reads it to
+            // both its ends, and one long line of values a rule passes over was read once for
+            // each of them (the review of #985: 100,000 on a line of 1.7 MiB, 28 s).
             let allowed = rule
                 .allowlists
                 .iter()
                 .chain(std::iter::once(&r.global))
-                .any(|a| allows(a, secret.as_str(), all.as_str(), line));
+                .any(|a| {
+                    let line = match a.regex_target.as_deref() {
+                        Some("line") => line_of(text, all.start()),
+                        _ => "",
+                    };
+                    allows(a, secret.as_str(), all.as_str(), line)
+                });
             if allowed {
                 continue;
             }
@@ -4182,6 +4198,10 @@ extra_rules = [
                 &c,
                 " https://h.test && echo ok",
             ),
+            // a cluster of any length, and a key with no password right after the option
+            row("curl -sssssssssu ", &c, " https://h.test && echo ok"),
+            row("curl -u", &format!("Zq8v{m}abcd:"), " https://h.test/v1/x"),
+            row("x=$(curl -su", &format!("Zq8v{m}abcd:"), ")"),
             // beside a value the rules pass over, a single space apart (with `)` after it, so
             // that gitleaks' rule does not take it either)
             row(
@@ -4349,6 +4369,7 @@ extra_rules = [
             "curl -s https://h.test/a | sort -u",
             "curl -s https://h.test/a | sort -u\",name:xyz,key:12345\"",
             "curl -s https://h.test/a; awk -u 'BEGIN {x = 1}\nEND {print \"a: b\"}' f; echo 'done'",
+            "curl -s https://h.test/a; awk -u 'BEGIN {x = 1}\nEND {print \"a:b\"}' f; echo 'done'",
             // a variable, a template, a placeholder
             "curl -s -u \"$K:\" https://h.test/v1/x",
             "curl -s -u \"$STRIPE_KEY:\" https://h.test/v1/x",
@@ -4379,6 +4400,24 @@ extra_rules = [
             "echo '{\"cmd\":\"curl -s -u \\\"username:password\\\" https://h.test\"}'",
             "echo '{\"cmd\":\"curl --user \\\"xxx:yyy\\\"\"}'",
             "echo '{\"cmd\":\"curl -s https://h.test; date -u\",\"note\":\"at: noon\"}'",
+            // a quote that closes a string after `user:` opens no password: what follows a
+            // string in a JSON text (white space, a comma, a colon, `}`, `]`) starts none
+            "{\"command\": \"curl -u admin:\",  \"X-Foo\": \"abc\"}",
+            "{\"command\": \"curl -u admin:\"  ,  \"X-Foo\": \"abc\"}",
+            "{'command': 'curl -u admin:',  'X-Foo': 'abc'}",
+            "{\"curl -u admin:\":   \"abc\", \"b\": 1}",
+            // nor does a value quoted whole hold a password that starts so: `key: value` and a
+            // path in quotes after another tool's option, a command that ends on the option and
+            // a blank
+            "grep -rU \"name: curl\" docs/",
+            "rg -U 'redact::tests' src/ # as curl does",
+            "curl -s https://h.test/a; bash -c 'date -u '; echo \"at: noon\"; echo 'done'",
+            // and what follows a string in code: `)`, `;`, `+`, `.`
+            "run(\"curl -u admin:\"); h(\"X-Foo\", \"abc\")",
+            "x = \"curl -u admin:\";h[\"X-Foo\"] = \"abc\"",
+            "cmd = \"curl -u admin:\"+pw+\" https://h.test\"",
+            "$c = \"curl -u admin:\".$pw.\" https://h.test\";",
+            "run('curl -u admin:'); h('X-Foo', 'abc')",
         ] {
             assert_eq!(alone(line), vec![], "{line}");
             let flat =
@@ -4395,8 +4434,79 @@ extra_rules = [
                 "curl -s https://h.test/a; rsync -avz{} deploy@h.test:/srv/www/ ./backup/",
                 "u"
             ),
+            // a quote that closes a string after `user:`, where another character than those
+            // of a JSON text or of a call follows it and another quote stands on the line
+            "s = \"curl -u admin:\"%f(\"X-Foo\", \"abc\")".to_owned(),
+            // a pattern of a search after ripgrep's -U, in a text that names curl
+            "rg -U '\"scripts\":\\s*\\{[^}]*curl' package.json".to_owned(),
         ] {
             assert_eq!(alone(&line).len(), 1, "{line}");
+        }
+    }
+
+    /// The line a match stands on is read only for an allowlist that targets the line (the
+    /// review of #985: it was read for every value a rule judged, and one long line of values a
+    /// rule passes over was read once for each). gitleaks' generic-api-key has such an
+    /// allowlist: a line of a Dockerfile that mounts a secret. It is given the line of the
+    /// match and no other: the same value on the line after it, or before it, is found.
+    #[test]
+    fn an_allowlist_that_targets_the_line_is_given_the_line_of_the_match() {
+        let rules = Rules::default();
+        let generic = bundled()
+            .rules
+            .iter()
+            .position(|r| r.id == "generic-api-key")
+            .expect("the rule");
+        let found = |text: &str| spans_in(text, &rules, Some(generic), &mut Vec::new());
+        let key = format!("Kd7wQ2mX9tB4{}", "Zq8vN3kL7pW2"); // split: scanners
+        let mount = format!("RUN --mount=type=secret,id=k api_key={key} ./build.sh");
+        let bare = format!("RUN api_key={key} ./build.sh");
+        let at = bare.find(&key).expect("the key");
+        assert_eq!(found(&mount), vec![]);
+        assert_eq!(found(&bare), vec![(at, at + key.len(), generic)]);
+        let after = mount.len() + 1 + at;
+        assert_eq!(
+            found(&format!("{mount}\n{bare}\n")),
+            vec![(after, after + key.len(), generic)]
+        );
+        assert_eq!(
+            found(&format!("{bare}\n{mount}\n")),
+            vec![(at, at + key.len(), generic)]
+        );
+    }
+
+    /// The review of #985 (Codex): a user with no password that ends a string has the quote that
+    /// closes the string after its colon, and what follows that quote is no password in quotes:
+    /// white space, `,`, `:`, `}`, `]` in a JSON text, `)`, `;`, `+`, `.` in code. Read as one, it took
+    /// the closing quote and the quote that opens the next string, and a user's rule that reads
+    /// the masked text lost its context (here one that masks the value beside a name that was
+    /// masked): the value `main` masks was stored and let out. A key that holds a digit is still
+    /// masked, alone.
+    #[test]
+    fn a_quote_that_closes_a_string_after_a_user_and_a_colon_opens_no_password() {
+        let own = user(
+            r#"[redaction]
+extra_rules = [
+  { id = "name", regex = 'X-Foo' },
+  { id = "value", regex = '"\[REDACTED\]"[:,] "([A-Za-z0-9]+)"' },
+]"#,
+        )
+        .unwrap();
+        let far = format!("Kd7w{}", "Q2mX9tB4"); // split: scanners
+        for (name, stored) in [("admin:", "admin:"), ("admin1:", MASK)] {
+            for (text, want) in [
+                (
+                    format!("{{\"command\": \"curl {U} {name}\",  \"X-Foo\": \"{far}\"}}"),
+                    format!("{{\"command\": \"curl -u {stored}\",  \"{MASK}\": \"{MASK}\"}}"),
+                ),
+                (
+                    format!("run(\"curl {U} {name}\"); h(\"X-Foo\", \"{far}\")"),
+                    format!("run(\"curl -u {stored}\"); h(\"{MASK}\", \"{MASK}\")"),
+                ),
+            ] {
+                assert_eq!(scan(&text, &own).0, want, "{text}");
+                assert_eq!(outbound_with(&text, &own), want, "{text}");
+            }
         }
     }
 
@@ -5174,7 +5284,7 @@ extra_rules = [
                 MATCHING,
                 short_hash(&[code, &crates.join("\n")].concat()).as_str()
             ),
-            ("2", "613a84622f8c93e2")
+            ("2", "c9aaa31c0db6b844")
         );
     }
 
