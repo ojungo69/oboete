@@ -1,0 +1,29 @@
+src/transcript/tests.rs
+  s_d546e4e9d39962::t_691490a4c08ce3 1075-1135
+src/raw.rs
+  s_4ad733e5faf7e6::t_b155e1f098f3a0 717-724
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4286e077aea2fcc5ee90562440b0cb45db1dd857",
+  "prompts": {},
+  "sessions": {
+    "s_4ad733e5faf7e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a703ce990c4e36b81",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
