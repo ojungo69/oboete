@@ -1529,10 +1529,16 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   SQL までの表を作り、ガードを通ることを確かめる。通常時は世代の照合 1 回だけで、10 万件を
   `depth + forgotten.len()` に足さない。同じ表に、Import op から作られて文面を持つもの（`cards.rs` の 2 か所、
   要約など）を載せ、元を消しても残るものが無いようにする。
-- **測ってから決める（5c の実装の前）**: ガードは消し終わるまで全 repo の取り込み履歴を閉じる。owner の store の
-  写しで、登録が排他の lock を持つ時間と、knowledge.db の対象の行を消す時間を測る。消すのが数秒なら上の形、
-  分単位なら「反映待ちのラベルだけを除く」形に狭める。消すのは forget のコマンド自身（worker は再開の役）で、
-  閉じたままのときは doctor に出す。
+- **測った時間（2026-11-15、ある利用者の store、1 つの repo の分）**: ガードは消し終わるまで全 repo の取り込み
+  履歴を閉じるので、閉じる長さを測った。
+  - knowledge.db の写しで、対象の取り込みの行 62,915 件とその全文検索の行、ファイルの行 81,095 件、ベクトルの key
+    62,915 件とベクトル 62,914 件を 1 つの transaction で消すのに 18.1 秒（文が 7.6 秒、commit が 10.5 秒）。分単位
+    ではないので、上の「消し終わるまで閉じる」形にする。消すのは forget のコマンド自身で（worker は再開の役）、
+    閉じたままのときは doctor に出す。
+  - 登録で対象を選ぶのは、raw.db の 527,539 op のうち対象の Import op 105,896 件（uid 62,915 個）。Import op の
+    repo には索引が無く全体を走査して、cache が冷えていると 8.2 秒、温まっていると 0.7 秒。登録は排他の lock の
+    中で選び直すので、Import op の repo に部分索引を足す（索引だけなら古い binary も読めるので FORMAT は上げない、
+    `docs/store-format.md`）。work state op（1,140 件）は既存の `ops_work_state` で 0.01 秒。
 - **raw.db の読み手**（`work_state_in`、`native_work_writes`、`imported_list_fields`、`work_state_keys`）は
   拒否表を見る。`work_state_keys` は本文の source_id だけでなく拒否の identity も重複として扱う（purge で
   本文が消えると source_id が消え、次の取り込みで戻るため）。
@@ -1579,7 +1585,7 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
 #### 順番と完了条件
 
 main は PR の合間に利用者の PC に入るので、読み手が除く前に登録ができてはならない。だから登録の入口は最後に開く:
-1. 5c の世代のガードと 5d の取り込みの拒否（入口なし: 版 6 の要求はまだ作れない）。到達表と測定を先に。
+1. 5c の世代のガードと 5d の取り込みの拒否（入口なし: 版 6 の要求はまだ作れない）。到達表を先に作る。
 2. 5e の purge と backup の腕（版 6 の job を、テストで直に作って確かめる）。
 3. 5a・5b（preview・版 6・一括の拒否・FORMAT 7）で登録の入口を開ける。最初の赤いテスト: forget → purge →
    取り込みを再実行 → 文書も work state も戻らない。登録の直後・knowledge.db の削除の途中・その commit の直後で
