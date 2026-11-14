@@ -1,0 +1,23 @@
+docs/milestone-2.md
+  s_d546e4e9d39962::t_a991ca5bd4eb24 57
+config/oboete-rules.toml
+  s_d546e4e9d39962::t_c87ba13b71c6b3 115-116,139-142
+src/redact.rs
+  s_d546e4e9d39962::t_a991ca5bd4eb24 4436-4443,4457,4580-4591
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "80ac0f8232e67af13b4063ba6eac59fa981d7bae",
+  "prompts": {},
+  "sessions": {
+    "s_d546e4e9d39962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5972e508-8ac6-4980-a2b6-9662a77d5b28",
+        "model": "claude-mythos-5-2"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
