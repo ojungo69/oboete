@@ -136,7 +136,8 @@ fn a_prompt_names_an_imported_document_by_its_newest_row() {
     let k = crate::knowledge::open(home.path()).unwrap();
     let device = raw.device().to_owned();
     Imported.step(&raw, &k, &device, 0).unwrap();
-    let line = |uid: &str| prompt_line(&k, &raw, uid).unwrap();
+    let applied = crate::forget::history::fixture::proof();
+    let line = |uid: &str| prompt_line(&k, &applied, &raw, uid).unwrap();
     let at = |what: &str, words: &str| Some((1_000, what.to_owned(), words.to_owned()));
     assert_eq!(
         line("claude-mem:abc:o1"),

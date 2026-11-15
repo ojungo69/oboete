@@ -84,16 +84,14 @@ enum Reach {
     /// A reader not yet made to take the proof: which surface. Registration (5b) waits for none
     /// to be left.
     Later(&'static str),
+    /// A constant of SQL that only functions taking the proof read.
+    Through,
 }
 
 /// 5c's reach table: every item of `src/` whose SQL reads `imported`, `imported_fts` or
 /// `imported_files`, by file and name.
 const READERS: &[(&str, &str, Reach)] = &[
-    (
-        "src/cards.rs",
-        "imported_by_file",
-        Reach::Later("the file notes of PreToolUse"),
-    ),
+    ("src/cards.rs", "imported_by_file", Reach::Proof),
     (
         "src/consumer/imported.rs",
         "step",
@@ -104,16 +102,8 @@ const READERS: &[(&str, &str, Reach)] = &[
         "rewind",
         Reach::Without("drops rows past raw.db's commits"),
     ),
-    (
-        "src/consumer/imported.rs",
-        "maps",
-        Reach::Later("prompt_near, the prompt's meaning side"),
-    ),
-    (
-        "src/consumer/imported.rs",
-        "prompt_line",
-        Reach::Later("the prompt hooks' picks"),
-    ),
+    ("src/consumer/imported.rs", "maps", Reach::Proof),
+    ("src/consumer/imported.rs", "prompt_line", Reach::Proof),
     (
         "src/embed_phase.rs",
         "doctor_facts_in",
@@ -144,21 +134,9 @@ const READERS: &[(&str, &str, Reach)] = &[
         "save_memory",
         Reach::Without("a note's op, which its append checks again"),
     ),
-    (
-        "src/search/b.rs",
-        "IMPORTED_SESSIONS",
-        Reach::Later("prompt_near"),
-    ),
-    (
-        "src/search/b.rs",
-        "imported_sessions",
-        Reach::Later("prompt_near"),
-    ),
-    (
-        "src/search/b.rs",
-        "imported_projects",
-        Reach::Later("prompt_near"),
-    ),
+    ("src/search/b.rs", "IMPORTED_SESSIONS", Reach::Through),
+    ("src/search/b.rs", "imported_sessions", Reach::Proof),
+    ("src/search/b.rs", "imported_projects", Reach::Proof),
     ("src/search/b.rs", "sidecar", Reach::Proof),
     ("src/search/b.rs", "imported_fts_sql", Reach::Proof),
     ("src/search/b.rs", "imported_hit", Reach::Proof),
@@ -185,17 +163,44 @@ const READERS: &[(&str, &str, Reach)] = &[
     ),
 ];
 
-/// Each item of `src/` (test files left out) whose SQL reads an imported table, with whether its
-/// signature names `Applied`: the nearest `fn` or constant above each statement.
-fn sql_readers() -> std::collections::BTreeMap<(String, String), bool> {
+/// Whether a signature takes the proof: a parameter of type `&Applied`, not an optional one
+/// (`Option<&Applied>` lets its body run without it), nor one that only names the type
+/// (`impl Fn(&Applied)`, a where clause).
+fn takes_proof(signature: &str) -> bool {
+    regex::Regex::new(
+        r"[(,]\s*(?:mut\s+)?\w+\s*:\s*&(?:'\w+\s+)?(?:crate::forget::history::)?Applied\b",
+    )
+    .unwrap()
+    .is_match(signature)
+}
+
+/// The item line regex: a `fn`, or a constant or static of SQL.
+fn item_line() -> regex::Regex {
+    regex::Regex::new(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe)\s+)*fn\s+(\w+)|^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Z_][A-Z0-9_]*)\s*:",
+    )
+    .unwrap()
+}
+
+/// The signature of the item at line `at`: its lines up to its body's brace.
+fn signature_at(lines: &[&str], at: usize) -> String {
+    let joined = lines[at..(at + 30).min(lines.len())].join(" ");
+    joined.split('{').next().unwrap_or_default().to_owned()
+}
+
+type Readers = std::collections::BTreeMap<(String, String), bool>;
+
+/// Each item of `src/` (test files left out) whose SQL reads an imported table, with whether it
+/// takes the proof (`takes_proof`; two items of one name in a file take it only if both do): the
+/// nearest `fn` or constant above each statement. And each file's text, by its path.
+// shortcut: a line scan, not a parse: SQL in an outer function below a nested `fn`, or a
+// statement built from pieces, is the review's to catch; parse with `syn` if one slips by.
+fn sql_readers() -> (Readers, std::collections::BTreeMap<String, String>) {
     let statement = regex::Regex::new(
         r"\b(?:FROM|JOIN|INTO|UPDATE|EXISTS\s*\(\s*SELECT\s+1\s+FROM)\s+imported(?:_fts|_files)?\b",
     )
     .unwrap();
-    let item = regex::Regex::new(
-        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe)\s+)*fn\s+(\w+)|^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+([A-Z_][A-Z0-9_]*)\s*:",
-    )
-    .unwrap();
+    let item = item_line();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     let mut dirs = vec![root.join("src")];
@@ -221,7 +226,8 @@ fn sql_readers() -> std::collections::BTreeMap<(String, String), bool> {
             }
         }
     }
-    let mut found = std::collections::BTreeMap::new();
+    let mut found = Readers::new();
+    let mut texts = std::collections::BTreeMap::new();
     for path in files {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -240,12 +246,47 @@ fn sql_readers() -> std::collections::BTreeMap<(String, String), bool> {
             }) else {
                 panic!("{file}:{}: an imported table read outside any item", i + 1);
             };
-            let signature = lines[at..(at + 30).min(lines.len())].join(" ");
-            let signature = signature.split('{').next().unwrap_or_default();
-            found.insert((file.clone(), name), signature.contains("Applied"));
+            let proof = takes_proof(&signature_at(&lines, at));
+            found
+                .entry((file.clone(), name))
+                .and_modify(|p: &mut bool| *p = *p && proof)
+                .or_insert(proof);
+        }
+        texts.insert(file, text);
+    }
+    (found, texts)
+}
+
+/// The functions of `texts` that read `constant`, by file and name, each with whether it takes
+/// the proof: a function runs from its `fn` line to the next one, its comments and the
+/// constant's own definition left out.
+fn readers_of(
+    texts: &std::collections::BTreeMap<String, String>,
+    constant: &str,
+) -> Vec<(String, bool)> {
+    let item = item_line();
+    let word = regex::Regex::new(&format!(r"\b{constant}\b")).unwrap();
+    let mut out = Vec::new();
+    for (file, text) in texts {
+        let lines: Vec<&str> = text.lines().collect();
+        let fns: Vec<(usize, String)> = (lines.iter().enumerate())
+            .filter_map(|(j, line)| Some((j, item.captures(line)?.get(1)?.as_str().to_owned())))
+            .collect();
+        for (n, (at, name)) in fns.iter().enumerate() {
+            let end = fns.get(n + 1).map_or(lines.len(), |(next, _)| *next);
+            let reads = lines[*at..end].iter().any(|line| {
+                let defines = (item.captures(line))
+                    .and_then(|c| c.get(2))
+                    .is_some_and(|m| m.as_str() == constant);
+                !line.trim_start().starts_with("//") && !defines && word.is_match(line)
+            });
+            if reads {
+                let proof = takes_proof(&signature_at(&lines, *at));
+                out.push((format!("{file}:{name}"), proof));
+            }
         }
     }
-    found
+    out
 }
 
 /// 5c: every reader of knowledge.db's imported documents is in the reach table, and each one it
@@ -253,7 +294,7 @@ fn sql_readers() -> std::collections::BTreeMap<(String, String), bool> {
 /// reader listed for later that takes the proof is moved to `Proof`.
 #[test]
 fn every_reader_of_the_imported_documents_is_in_the_reach_table() {
-    let found = sql_readers();
+    let (found, texts) = sql_readers();
     let listed: std::collections::BTreeMap<(String, String), &Reach> = READERS
         .iter()
         .map(|(file, name, reach)| (((*file).to_owned(), (*name).to_owned()), reach))
@@ -278,6 +319,62 @@ fn every_reader_of_the_imported_documents_is_in_the_reach_table() {
                     "{key:?} takes the proof: list it as Proof, not as {why:?}"
                 )
             }
+            Reach::Through => {
+                let readers = readers_of(&texts, &key.1);
+                assert!(
+                    !readers.is_empty() && readers.iter().all(|(_, proof)| *proof),
+                    "{key:?} is listed as read only by functions taking the proof: {readers:?}"
+                )
+            }
         }
     }
+}
+
+/// The reach test's proof check: a parameter of type `&Applied`, not an optional one, and a
+/// constant's readers are every function that names it outside a comment, wherever it is.
+#[test]
+fn the_reach_test_counts_only_a_proof_its_reader_cannot_run_without() {
+    assert!(takes_proof("fn a(k: &Connection, _: &Applied, uid: &str)"));
+    assert!(takes_proof(
+        "fn a(k: &Connection, _: &crate::forget::history::Applied)"
+    ));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, applied: Option<&Applied>)"
+    ));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, applied: Option<&crate::forget::history::Applied>)"
+    ));
+    assert!(takes_proof("fn a<'a>(k: &Connection, proof: &'a Applied)"));
+    assert!(!takes_proof("fn a(k: &Connection) -> &Applied"));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, applied: Option< &Applied>)"
+    ));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, f: impl Fn(&Applied) -> bool)"
+    ));
+    assert!(!takes_proof(
+        "fn a<F>(k: &Connection, f: F) where F: Fn(&Applied)"
+    ));
+    let texts = [
+        (
+            "a.rs".to_owned(),
+            "fn before(k: &Connection) {}\n/// QUERY's text.\nconst QUERY: &str = \"FROM imported\";\n\
+             fn reader(k: &Connection, _: &Applied) {\n    k.prepare(QUERY);\n}\n\
+             fn guarded(k: &Connection, _: &Applied) {\n    // not QUERY\n}\n"
+                .to_owned(),
+        ),
+        (
+            "b.rs".to_owned(),
+            "fn other(k: &Connection) {\n    k.prepare(a::QUERY);\n}\n".to_owned(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        readers_of(&texts, "QUERY"),
+        [
+            ("a.rs:reader".to_owned(), true),
+            ("b.rs:other".to_owned(), false)
+        ]
+    );
 }

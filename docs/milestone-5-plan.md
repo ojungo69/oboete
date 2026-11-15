@@ -1535,6 +1535,12 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   読み手でテストが落ちる）。検索・get・timeline・known・評価の run がこの PR で証拠を取り、残りは表の `Later`。
   SQL を持たないので表に載らない残り: mem_search の `Cursors`（MCP の続きの呼び出しに、前の呼び出しの行を
   読み直さずに渡す）は、作ったときの raw.db の組を覚え、組が変わっていたら期限切れにする（次の PR）。
+  as built（2 本目、2026-11-15）: prompt の block（意味の側の `prompt_near`、viewer が返した取り込み文書、Grok の
+  turn が最初の tool call で読み直すもの）とファイルのメモも証拠を取る。証拠が無い間、hook はその文書を省き、
+  見せたことにもしないので、消し終われば同じ session でも出る。`known` は forget が fence を待ち時間より長く
+  持つ間、取り込み履歴を見ずに答える（メモの保存が聞き、これまで forget を待たなかったため）。到達表のテストは
+  `Option<&Applied>` を証拠と数えず、同じファイルの同じ名前の 2 つは両方が取るときだけ取るとし、SQL の定数
+  （`Through`）はそれを名指す関数（コメントを除く、どのファイルでも）がすべて証拠を取ることを確かめる。
 - **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ

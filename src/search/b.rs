@@ -575,10 +575,18 @@ pub fn prompt_near(
     // `SESSION_FILTER` of them, by the projects their documents are filed under. Since decision
     // 52 the documents filed under the checkout's claude-mem names map too, their sessions and
     // projects with them. `maps` keeps each hit to the mapping either way.
-    let sessions = imported_sessions(&k, repo, names)?;
-    let imported = match sessions.len() > SESSION_FILTER {
-        true => ("repo", imported_projects(&k, repo, names)?),
-        false => ("session", sessions),
+    // Decision 109: no imported document while knowledge.db has not applied a forget of their
+    // history; the hook leaves that part of its block out within its time.
+    let applied = raw.imported_open(&k)?;
+    let imported = match &applied {
+        Some(applied) => {
+            let sessions = imported_sessions(&k, applied, repo, names)?;
+            match sessions.len() > SESSION_FILTER {
+                true => ("repo", imported_projects(&k, applied, repo, names)?),
+                false => ("session", sessions),
+            }
+        }
+        None => ("session", Vec::new()),
     };
     for (family, kind, filter) in [
         ("c", "claim", ("repo", &own[..])),
@@ -605,11 +613,15 @@ pub fn prompt_near(
                         && claims::delivered_one(&k, &key)?.is_some()
                         && !pending.touches(&k, &key)?
                 }
-                "k" => {
-                    !shown.contains(&key)
-                        && crate::consumer::imported::maps(&k, &key, repo, names)?
-                        && crate::consumer::imported::prompt_line(&k, &raw, &key)?.is_some()
-                }
+                "k" => match &applied {
+                    Some(applied) => {
+                        !shown.contains(&key)
+                            && crate::consumer::imported::maps(&k, applied, &key, repo, names)?
+                            && crate::consumer::imported::prompt_line(&k, applied, &raw, &key)?
+                                .is_some()
+                    }
+                    None => false,
+                },
                 _ => shows_doc(&k, &raw, family, &key, &rules)?
                     .is_some_and(|id| !shown.contains(&id)),
             };
@@ -682,7 +694,12 @@ const IMPORTED_SESSIONS: &str =
          AND i.kind <> 'prompt'
          AND i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = i.uid))";
 
-fn imported_sessions(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
+fn imported_sessions(
+    k: &Connection,
+    _: &Applied,
+    repo: &str,
+    names: &[String],
+) -> Result<Vec<String>> {
     use crate::consumer::manifest::exists;
     if !exists(k, "table", "imported")? || !exists(k, "table", "session_start")? {
         return Ok(Vec::new());
@@ -706,7 +723,12 @@ fn imported_sessions(k: &Connection, repo: &str, names: &[String]) -> Result<Vec
 /// #506: the projects `repo`'s mapped imported documents are filed under, as the vectors file them
 /// (`embed_phase::vec_repo`), and `repo` itself, where its notes are; since decision 52 with the
 /// projects of the checkout's claude-mem `names` as stored, whatever their case.
-fn imported_projects(k: &Connection, repo: &str, names: &[String]) -> Result<Vec<String>> {
+fn imported_projects(
+    k: &Connection,
+    _: &Applied,
+    repo: &str,
+    names: &[String],
+) -> Result<Vec<String>> {
     let mut projects = vec![repo.to_owned()];
     let mut st = k.prepare(
         "SELECT i.repo FROM session_start s JOIN imported i ON i.session = s.session
