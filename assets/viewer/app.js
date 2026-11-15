@@ -638,7 +638,7 @@ function updateFeedState(state) {
     : state.error ? t('feed_error', { reason: failureMessage(state.error) })
       : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
   // Decision 109: the notes a forget of imported history withholds are not "no items".
-  if (state.withheld && !state.loading && !state.error) message = [t('feed_withheld'), message].filter(Boolean).join(' ');
+  if (state.withheld && !state.loading && !state.error) message = [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ');
   state.notice.textContent = message;
   state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
   state.notice.classList.toggle('loading', state.loading);
@@ -672,6 +672,15 @@ async function readFeed(state, mode) {
       const page = await api('feed', params);
       if (!activeFeed(state)) return false;
       state.withheld = Boolean(page.withheld);
+      // Decision 109: notes shown before a forget of imported history came to wait leave the page
+      // (Codex on #1020); a Refresh shows them in their place once it is applied.
+      if (state.withheld) {
+        for (const shown of [...state.list.children]) {
+          if (!shown.dataset?.key?.startsWith('note:')) continue;
+          state.keys.delete(shown.dataset.key);
+          shown.remove();
+        }
+      }
       const entries = [];
       const unseen = new Set();
       let joined = false;
@@ -689,6 +698,7 @@ async function readFeed(state, mode) {
         if (unseen.has(key)) continue;
         const entry = feedEntry(item);
         entry.dataset.category = feedCategory(item);
+        entry.dataset.key = key;
         entries.push(entry);
         unseen.add(key);
       }

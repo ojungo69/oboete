@@ -10,6 +10,7 @@ class Node {
     this.classList={toggle(){},add(){},remove(){},contains(){return false;}};
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
+  prepend(...nodes){this.children.unshift(...nodes);for(const node of nodes)if(node&&typeof node==='object')node.parentElement=this;}
   // A browser moves the focus to the body when the focused element leaves the page (#810), and
   // Chrome blurs it as it goes, the element still in the page then (69b-3c).
   replaceChildren(...nodes){
@@ -7726,4 +7727,32 @@ for(const b of buttons)
 delete ctx.__rows;
 run(`view=${JSON.stringify(shown)}`);
 console.log('PASS: A6-01: each button in a My Work card but its link is above the link that covers the card');
+}
+
+// Decision 109 (Codex on #1020): notes the feed shows leave it when a live read says imported
+// history is withheld, and the notice says why; the cards stay.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const response=value=>({ok:true,status:200,json:async()=>value});
+const card={kind:'card',id:'5.0',ts:30,type:'feature',agent:'claude',repo_name:'fern',repo:'example.test/team/fern',title:'Parser built',subtitle:'',narrative:'Built.',facts:[],concepts:[],files_read:[],files_modified:[]};
+const note={kind:'note',id:'oboete-note:0123456789abcdef',ts:20,agent:null,repo_name:'fern',repo:'example.test/team/fern',title:'Release tagging',subtitle:'',narrative:'Releases are tagged from main.',facts:[],concepts:[],files_read:[],files_modified:[]};
+let page={items:[card,note],next:null};
+ctx.fetch=url=>{
+  if(url.startsWith('/api/feed?'))return Promise.resolve(response(page));
+  if(url.startsWith('/api/repos'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+run('reposLoaded=true;setView("timeline")');
+await run('show()');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+const list=document.getElementById('list');
+assert(text(list).includes('Release tagging')&&text(list).includes('Parser built'),text(list));
+page={items:[card],next:null,withheld:true};
+await run('readFeed(feed,"live")');
+assert(!text(list).includes('Release tagging'),`a withheld note leaves the page: ${text(list)}`);
+assert(text(list).includes('Parser built'),text(list));
+const notice=run('feed.notice.textContent');
+assert(notice.includes('is not shown until a forget of it has finished'),notice);
+console.log('PASS: a note the feed showed leaves it once imported history is withheld, and the page says why');
 }
