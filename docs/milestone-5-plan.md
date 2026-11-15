@@ -1541,6 +1541,13 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   持つ間、取り込み履歴を見ずに答える（メモの保存が聞き、これまで forget を待たなかったため）。到達表のテストは
   `Option<&Applied>` を証拠と数えず、同じファイルの同じ名前の 2 つは両方が取るときだけ取るとし、SQL の定数
   （`Through`）はそれを名指す関数（コメントを除く、どのファイルでも）がすべて証拠を取ることを確かめる。
+  as built（3 本目、2026-11-15）: 埋め込みの段は、取り込み履歴の forget が反映されるまで丸ごと休む（rule 12 の
+  `curate::lagging` の隣で証拠を取り、無ければ何もしない。claims やカードも反映を待つ）。ここでは証拠を読みの
+  fence の外で取るが、先に読んだ `Reading` の fence が履歴の forget を数えるので、その後に登録された forget は
+  送る直前の `still` が止める（外へ出る呼び出しは dispatch の guard の下で。手元のモデルは何も外へ出さない）。
+  ページ（`read_page`）と分割の残り（`next_half`）は `&Applied` を取る。mem_search の続きの呼び出しは、最初の
+  呼び出しが index を読む前の raw.db の組を覚え、組が変わっていたら期限切れにする（index の行の題名が、反映待ち
+  の文書でも出たため）。hook の経路は続きを作らないので組を読まない。
 - **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ

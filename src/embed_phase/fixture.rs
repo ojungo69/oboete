@@ -25,7 +25,17 @@ pub(crate) fn vectors(s: &Store) {
     let rules = crate::redact::Rules::load(s.home.path()).unwrap();
     let id = crate::embed::EMBEDDER;
     cleared(&k, id, &reading, &rules).unwrap();
-    while let Some(batch) = pending(&s.raw, &k, id, &reading, &rules, false).unwrap() {
+    while let Some(batch) = pending(
+        &s.raw,
+        &k,
+        &crate::forget::history::fixture::proof(),
+        id,
+        &reading,
+        &rules,
+        false,
+    )
+    .unwrap()
+    {
         let vectors: Vec<_> = batch
             .texts
             .iter()

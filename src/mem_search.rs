@@ -161,6 +161,8 @@ struct State {
     eligible: Vec<Row>,
     /// What each step did, for auto mode's line: "index", "context", "selected details".
     trace: Vec<&'static str>,
+    /// Decision 109: raw.db's forgets of imported history before the first step read its index.
+    history: std::collections::BTreeSet<(String, String)>,
 }
 
 /// The continuations of one server (`MemoryProgressiveCursorStore`): bounded by entries, bytes
@@ -326,6 +328,14 @@ impl Search<'_> {
                 Ok(state) => state,
                 Err(r) => return Ok(Err(r)),
             };
+            // Decision 109: rows read before a forget of imported history registered, titles
+            // among them, are not shown on: the continuation has expired.
+            if self.history_forgets()? != state.history {
+                return Ok(refuse(
+                    "expired_continuation",
+                    "Mem-search continuation expired. Restart with a query.",
+                ));
+            }
             let (o, f) = (&state.options, &input.fields);
             let changed = f.query.as_ref().is_some_and(|q| *q != o.query)
                 || f.project.is_some() && f.project != o.project
@@ -402,6 +412,13 @@ impl Search<'_> {
             Ok(repo) => repo,
             Err(m) => return Ok(refuse("invalid_input", m)),
         };
+        // Decision 109: the forgets of imported history before the index is read, so one
+        // registered from here on expires the continuation. None on the hook's path or dumb
+        // search's, which make none.
+        let history = match self.hook || dumb {
+            true => Default::default(),
+            false => self.history_forgets()?,
+        };
         let mut index = self.index(&options.query, &options)?;
         let mut trace = vec!["index"];
         let first = |index: &Vec<Row>| {
@@ -412,6 +429,7 @@ impl Search<'_> {
                 options: options.clone(),
                 eligible: index.clone(),
                 trace: vec!["index"],
+                history: history.clone(),
             })
         };
         if !auto {
@@ -535,6 +553,14 @@ impl Search<'_> {
             largest.truncated = true;
         }
         Ok(answer)
+    }
+
+    /// Decision 109: the forgets of imported history raw.db holds now.
+    fn history_forgets(&self) -> anyhow::Result<std::collections::BTreeSet<(String, String)>> {
+        match crate::raw::exists(self.home) {
+            true => crate::raw::open(self.home)?.history_forgets(),
+            false => Ok(Default::default()),
+        }
     }
 
     fn decode(&self, token: &str) -> Result<State, Refused> {

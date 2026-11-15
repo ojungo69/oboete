@@ -3120,6 +3120,13 @@ impl Raw {
         Ok(self.conn.query_row(FENCE_COUNT, [], |r| r.get(0))?)
     }
 
+    /// Decision 109 (5c): the history forgets this raw.db holds, each job with its token.
+    pub(crate) fn history_forgets(
+        &self,
+    ) -> Result<std::collections::BTreeSet<crate::forget::history::Pair>> {
+        crate::forget::history::registered(&self.conn)
+    }
+
     /// Decision 109 (5c): whether knowledge.db `k` has applied every history forget this raw.db
     /// holds, and the proof when it has (`forget::history::imported_open`).
     pub(crate) fn imported_open(

@@ -61,9 +61,17 @@ fn a_native_forget_orders_with_dispatch_without_waiting_for_embedding_headers() 
     let embedder = Embedder::from_config(&loaded.embedding).unwrap().unwrap();
     let reading = Reading::now(&s.raw, Reads::Live).unwrap();
     let rules = crate::redact::Rules::load(&home).unwrap();
-    let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
-        .unwrap()
-        .unwrap();
+    let batch = pending(
+        &s.raw,
+        &k,
+        &crate::forget::history::fixture::proof(),
+        &embedder.id,
+        &reading,
+        &rules,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert!(batch.texts.iter().any(|t| t.contains(CANARY)));
     let (checked_at, checked) = sync_channel(1);
     let (transmit, begin) = sync_channel(1);
@@ -813,9 +821,17 @@ fn a_batch_read_before_an_exclusion_is_never_sent() {
     let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
     let reading = Reading::now(&s.raw, Reads::Live).unwrap();
     let rules = crate::redact::Rules::load(home).unwrap();
-    let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
-        .unwrap()
-        .unwrap();
+    let batch = pending(
+        &s.raw,
+        &k,
+        &crate::forget::history::fixture::proof(),
+        &embedder.id,
+        &reading,
+        &rules,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let db = crate::providers_db::open(home).unwrap();
     let call = reserve(&db, ROLE, "1 documents", "Open words.", 160, 1.0)
         .unwrap()
@@ -853,9 +869,17 @@ fn a_paused_send_rejects_changed_or_invalid_rules() {
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
         let rules = crate::redact::Rules::load(home).unwrap();
-        let batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
-            .unwrap()
-            .unwrap();
+        let batch = pending(
+            &s.raw,
+            &k,
+            &crate::forget::history::fixture::proof(),
+            &embedder.id,
+            &reading,
+            &rules,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         let gate = std::sync::Barrier::new(2);
         let (sent, ms) = std::thread::scope(|scope| {
             let sending = scope.spawn(|| {
@@ -892,9 +916,17 @@ fn a_paused_send_rejects_a_new_tombstone() {
         let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
         let rules = crate::redact::Rules::load(&home).unwrap();
-        let mut batch = pending(&s.raw, &k, &embedder.id, &reading, &rules, false)
-            .unwrap()
-            .unwrap();
+        let mut batch = pending(
+            &s.raw,
+            &k,
+            &crate::forget::history::fixture::proof(),
+            &embedder.id,
+            &reading,
+            &rules,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         if query {
             batch.docs.clear();
         }
@@ -948,7 +980,16 @@ fn pending_tombstones_keep_raw_and_claim_text_out_of_batches() {
         let k = crate::knowledge::open(s.home.path()).unwrap();
         let reading = Reading::now(&s.raw, Reads::Live).unwrap();
         let rules = crate::redact::Rules::default();
-        let batch = pending(&s.raw, &k, crate::embed::EMBEDDER, &reading, &rules, false).unwrap();
+        let batch = pending(
+            &s.raw,
+            &k,
+            &crate::forget::history::fixture::proof(),
+            crate::embed::EMBEDDER,
+            &reading,
+            &rules,
+            false,
+        )
+        .unwrap();
         assert!(
             batch
                 .as_ref()
@@ -1630,9 +1671,17 @@ fn a_batch_composed_under_other_rules_is_not_sent_after_the_waits() {
     let embedder = Embedder::from_config(&loaded.embedding).unwrap().unwrap();
     let reading = Reading::now(&s.raw, Reads::Live).unwrap();
     let off = crate::redact::Rules::load(&home).unwrap();
-    let batch = pending(&s.raw, &k, &embedder.id, &reading, &off, false)
-        .unwrap()
-        .unwrap();
+    let batch = pending(
+        &s.raw,
+        &k,
+        &crate::forget::history::fixture::proof(),
+        &embedder.id,
+        &reading,
+        &off,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert!(batch.texts.iter().any(|t| t.contains(&key)));
     let config_home = home.clone();
     WHILE_STILL_WAITS.set(Some(Box::new(move || {
@@ -2867,4 +2916,113 @@ fn an_excluded_repositorys_records_reach_no_local_model() {
     assert_eq!(skipped(&s, &s.key(open)), None);
     let k = crate::knowledge::open(s.home.path()).unwrap();
     assert_eq!(indexed_count(&k), 1);
+}
+
+/// Decision 109: a forget of imported history registered after a batch's reading stops it before
+/// the call, as a tombstone does: the reading's fence counts the history forgets.
+#[test]
+fn a_history_forget_registered_after_the_reading_keeps_the_batch_home() {
+    let mut s = Store::new();
+    config_at(&s, "http://127.0.0.1:1/run/bge-m3");
+    s.imported(
+        "o1",
+        "r",
+        1_000,
+        "Gateway retries",
+        "Imported canary words.",
+    );
+    s.run();
+    let home = s.home.path().to_owned();
+    let k = crate::knowledge::open(&home).unwrap();
+    let config = crate::config::load(&home).unwrap();
+    let embedder = Embedder::from_config(&config.embedding).unwrap().unwrap();
+    let reading = Reading::now(&s.raw, Reads::Live).unwrap();
+    let rules = crate::redact::Rules::load(&home).unwrap();
+    let proof = crate::forget::history::fixture::proof();
+    let batch = pending(&s.raw, &k, &proof, &embedder.id, &reading, &rules, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batch.texts,
+        ["decision: Gateway retries\nImported canary words."]
+    );
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    let (sent, ms) = send(&home, &batch, &embedder, Duration::from_millis(100));
+    assert!(
+        matches!(sent, Sent::Unsent(_)),
+        "imported text reached the embedder"
+    );
+    assert_eq!(ms, 0);
+}
+
+/// Decision 109: while a forget of imported history is not applied, the phase reads and sends
+/// nothing; once it is applied, the imported documents go with the rest.
+#[test]
+fn the_phase_idles_while_a_history_forget_is_not_applied() {
+    let stub = Stub::start();
+    let mut s = Store::new();
+    config(&s, &stub);
+    s.imported(
+        "o1",
+        "r",
+        1_000,
+        "Gateway retries",
+        "Imported canary words.",
+    );
+    s.said("s", R, 2_000, "Native words.");
+    s.run();
+    let home = s.home.path().to_owned();
+    let k = crate::knowledge::open(&home).unwrap();
+    let mut phase = Phase::new(&home);
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+    assert_eq!(stub.requests(), 0);
+    crate::forget::history::fixture::mark_applied(&home, "j1", "t1");
+    until_idle(&s.raw, &k, &mut phase);
+    let sent = stub.texts().concat();
+    assert!(
+        sent.iter()
+            .any(|t| t == "decision: Gateway retries\nImported canary words."),
+        "{sent:?}"
+    );
+}
+
+/// Decision 109: a split's rest waits too: its documents are read again only once a forget of
+/// imported history registered meanwhile is applied.
+#[test]
+fn a_splits_rest_waits_while_a_history_forget_is_not_applied() {
+    let stub = Stub::start();
+    let mut s = Store::new();
+    config(&s, &stub);
+    stub.refuse("decision: Poison\nPoison words.");
+    s.imported("o1", "r", 1_000, "Poison", "Poison words.");
+    s.imported("o2", "r", 2_000, "Fine", "Fine words.");
+    s.run();
+    let home = s.home.path().to_owned();
+    let k = crate::knowledge::open(&home).unwrap();
+    let mut phase = Phase::new(&home);
+    // The batch goes and is refused whole: its halves wait.
+    assert!(matches!(
+        phase.poll(&s.raw, &k).unwrap(),
+        Step::Waiting { .. }
+    ));
+    while !phase.done() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Covered);
+    assert!(phase.split.is_some());
+    let asked = stub.requests();
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    assert_eq!(phase.poll(&s.raw, &k).unwrap(), Step::Idle);
+    assert_eq!(stub.requests(), asked);
+    crate::forget::history::fixture::mark_applied(&home, "j1", "t1");
+    assert!(matches!(
+        phase.poll(&s.raw, &k).unwrap(),
+        Step::Waiting { .. }
+    ));
+    assert!(phase.flight.is_some(), "the split's rest did not go on");
+    while !phase.done() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(stub.requests(), asked + 1);
 }

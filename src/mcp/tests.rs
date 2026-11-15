@@ -2896,3 +2896,41 @@ fn an_empty_string_is_a_left_out_argument_in_search_and_get() {
     assert_ne!(error, Some(true), "{text}");
     assert!(text.contains("Use the trigram tokenizer"), "{text}");
 }
+
+/// Decision 109: a continuation made before a forget of imported history registered has expired,
+/// at each step: its rows were read before the forget, an imported document's title among them.
+/// With none registered in between it goes on (`mem_search_guides_index_context_and_details`).
+#[test]
+fn a_continuation_expires_once_a_history_forget_registers() {
+    let (mut s, server, _) = seeded("Retries are capped at three.");
+    let doc = s.imported(
+        "o1",
+        "r",
+        1_700_000_001_000,
+        "Gateway retries",
+        "Payments retry on a gateway timeout.",
+    );
+    s.run();
+    let first = body(mem(&server, json!({"query": "gateway retries"})));
+    assert!(first.contains(&format!("- [{doc}] ")), "{first}");
+    let token = continuation(&first);
+    let second = body(mem(
+        &server,
+        json!({"continuation": token, "selectedIds": [doc]}),
+    ));
+    assert!(second.contains(&format!("- [{doc}] ")), "{second}");
+    let token2 = continuation(&second);
+    crate::forget::history::fixture::register(s.home.path(), "j1", "t1");
+    for (token, step) in [(token2, 3), (token, 2)] {
+        let answer = mem(
+            &server,
+            json!({"continuation": token, "selectedIds": [doc]}),
+        );
+        assert_eq!(answer.is_error, Some(true), "step {step}");
+        let text = body(answer);
+        assert!(
+            text.contains("Mem-search continuation expired.") && !text.contains("Gateway retries"),
+            "step {step}: {text}"
+        );
+    }
+}

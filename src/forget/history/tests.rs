@@ -112,17 +112,16 @@ const READERS: &[(&str, &str, Reach)] = &[
     (
         "src/embed_phase.rs",
         "QUEUE",
-        Reach::Later("the embedding phase, which sends the text"),
+        Reach::Without("the embedding queue: uids and times, no text"),
     ),
-    (
-        "src/embed_phase.rs",
-        "read_page",
-        Reach::Later("the embedding phase"),
-    ),
+    ("src/embed_phase.rs", "read_page", Reach::Proof),
     (
         "src/embed_phase.rs",
         "current",
-        Reach::Later("the embedding phase"),
+        Reach::Without(
+            "a document as stored: the vectors' write-back and upkeep, which go on removing what \
+             is gone; `next_half`, which sends what it reads, takes the proof",
+        ),
     ),
     (
         "src/forget.rs",
