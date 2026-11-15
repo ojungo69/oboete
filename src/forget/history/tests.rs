@@ -664,3 +664,47 @@ fn forget_continue_applies_a_history_forget_waiting() {
     assert_eq!(held(&k, &covered, &[])[0], 0);
     assert_eq!(super::apply_due(&home).unwrap(), 0);
 }
+
+/// 5c (CodeRabbit on #1023): a drain outside the worker's rounds applies a waiting history forget
+/// first too: `worker::drained` (a command's plan, replay) and a maintenance report's drain (a
+/// restore, a recuration).
+#[test]
+fn every_drain_applies_a_history_forget_waiting_first() {
+    use super::fixture::register_covering;
+    for report in [false, true] {
+        let mut s = crate::search::b::fixture::Store::new();
+        let home = s.home.path().to_owned();
+        let covered = s.imported(
+            "o1",
+            "alpha",
+            1_000,
+            "Zebrafinch retries",
+            "Zebrafinch retries.",
+        );
+        s.run();
+        register_covering(&home, "j1", "t1", &[&covered]);
+        // With no store open, as a command opens them.
+        let crate::search::b::fixture::Store { home: _dir, raw } = s;
+        drop(raw);
+        if report {
+            // What the plan reads, right after the report's drain.
+            let (_, prepared) = crate::worker::prepare_report(
+                &home,
+                crate::executable::CommandCaller::Worker,
+                &mut |_| {},
+                |_, k| super::applied(k),
+            );
+            let (planned, ..) = prepared.unwrap();
+            assert_eq!(planned, pairs(&[("j1", "t1")]));
+        } else {
+            drop(crate::worker::drained(&home, false).unwrap());
+        }
+        let k = crate::knowledge::open(&home).unwrap();
+        assert_eq!(held(&k, &covered, &[])[0], 0, "report: {report}");
+        assert_eq!(
+            super::applied(&k).unwrap(),
+            pairs(&[("j1", "t1")]),
+            "report: {report}"
+        );
+    }
+}
