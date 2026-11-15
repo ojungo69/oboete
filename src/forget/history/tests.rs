@@ -345,6 +345,10 @@ fn the_reach_test_counts_only_a_proof_its_reader_cannot_run_without() {
         "fn a(k: &Connection, applied: Option<&crate::forget::history::Applied>)"
     ));
     assert!(takes_proof("fn a<'a>(k: &Connection, proof: &'a Applied)"));
+    assert!(!takes_proof("fn a(k: &Connection) -> &Applied"));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, applied: Option< &Applied>)"
+    ));
     assert!(!takes_proof(
         "fn a(k: &Connection, f: impl Fn(&Applied) -> bool)"
     ));
