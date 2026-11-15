@@ -1,0 +1,35 @@
+docs/milestone-5-plan.md
+  s_d169cd080e079e::t_13a8d2cab31999 1511-1516,1574-1581
+src/consumer/imported.rs
+  s_d169cd080e079e::t_010c4db2f0564b 85-89,188-191
+src/embed_phase.rs
+  s_d169cd080e079e::t_c21711c4683d3d 1184,1186
+src/forget.rs
+  s_d169cd080e079e::t_d604913a84bc48 2191-2203
+src/forget/history.rs
+  s_d169cd080e079e::t_a6f888dea521a8 10-11,62-63,68-206
+src/forget/history/fixture.rs
+  s_d169cd080e079e::t_d49ab56967e42f 32-61
+src/forget/history/tests.rs
+  s_d169cd080e079e::t_0022a794e30d01 131-135,390-391,399-666
+src/raw.rs
+  s_d169cd080e079e::t_c02bb7b648c8c1 123-130,617-622,980-982,3153-3170
+src/worker.rs
+  s_d169cd080e079e::t_51e5128cca34b9 1198-1206,2137-2138,2142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a3f10753954f9aad2ebed501e4768098bc026ef",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
