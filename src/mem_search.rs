@@ -161,9 +161,13 @@ struct State {
     eligible: Vec<Row>,
     /// What each step did, for auto mode's line: "index", "context", "selected details".
     trace: Vec<&'static str>,
-    /// Decision 109: raw.db's forgets of imported history before the first step read its index.
-    history: std::collections::BTreeSet<(String, String)>,
+    /// Decision 109: raw.db's forgets of imported history before the first step read its index,
+    /// and raw.db's file (`history_mark`).
+    history: HistoryMark,
 }
+
+/// raw.db's forgets of imported history, each job with its token, and raw.db's file.
+type HistoryMark = (std::collections::BTreeSet<(String, String)>, String);
 
 /// The continuations of one server (`MemoryProgressiveCursorStore`): bounded by entries, bytes
 /// and their expiry, the oldest given up first. One `oboete mcp` serves one agent session, so a
@@ -330,9 +334,11 @@ impl Search<'_> {
             };
             // Decision 109: rows read before a forget of imported history registered, titles
             // among them, are not shown on: the continuation has expired. This rests on raw.db's
-            // pairs only growing (no job leaves `forget_history`): a change that removes one
-            // must expire continuations another way.
-            if self.history_forgets()? != state.history {
+            // pairs only growing while its file stays the one it was (no job leaves
+            // `forget_history`); a restore puts another file in place, whose pairs may be fewer
+            // (CodeRabbit on #1020). A change that removes a pair from the same file must expire
+            // continuations another way.
+            if self.history_mark()? != state.history {
                 return Ok(refuse(
                     "expired_continuation",
                     "Mem-search continuation expired. Restart with a query.",
@@ -419,7 +425,7 @@ impl Search<'_> {
         // search's, which make none.
         let history = match self.hook || dumb {
             true => Default::default(),
-            false => self.history_forgets()?,
+            false => self.history_mark()?,
         };
         let mut index = self.index(&options.query, &options)?;
         let mut trace = vec!["index"];
@@ -557,12 +563,13 @@ impl Search<'_> {
         Ok(answer)
     }
 
-    /// Decision 109: the forgets of imported history raw.db holds now.
-    fn history_forgets(&self) -> anyhow::Result<std::collections::BTreeSet<(String, String)>> {
-        match crate::raw::exists(self.home) {
-            true => crate::raw::open(self.home)?.history_forgets(),
-            false => Ok(Default::default()),
+    /// Decision 109: the forgets of imported history raw.db holds now, and its file.
+    fn history_mark(&self) -> anyhow::Result<HistoryMark> {
+        if !crate::raw::exists(self.home) {
+            return Ok(Default::default());
         }
+        let forgets = crate::raw::open(self.home)?.history_forgets()?;
+        Ok((forgets, crate::db::store_file(&crate::raw::path(self.home))))
     }
 
     fn decode(&self, token: &str) -> Result<State, Refused> {

@@ -671,7 +671,15 @@ async function readFeed(state, mode) {
       if (mode === 'more') params.before = state.next;
       const page = await api('feed', params);
       if (!activeFeed(state)) return false;
+      const was = state.withheld;
       state.withheld = Boolean(page.withheld);
+      // Decision 109: once the forget is applied, the notes it withheld go in their place: a live
+      // read stops at the newest item shown and More goes on below the oldest, so the feed is read
+      // again from the top (CodeRabbit on #1020).
+      if (was && !state.withheld && mode !== 'initial') {
+        void show();
+        return true;
+      }
       // Decision 109: notes shown before a forget of imported history came to wait leave the page
       // (Codex on #1020); a Refresh shows them in their place once it is applied.
       if (state.withheld) {
@@ -5090,6 +5098,8 @@ function hiddenSection(f) {
 // The page's reads of the privacy state, numbered as they start: only the last one started is
 // drawn, whichever form it reaches (Codex and CodeRabbit on #806).
 let privacyReads = 0;
+// A change the poll saw that the privacy state has not been read again for (`poll`).
+let privacyStale = false;
 
 async function refreshPrivacy(f) {
   if (!f) return false;
@@ -11009,6 +11019,14 @@ async function poll() {
       || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
     // Settings reads no list at a change: the next view that uses it does (`show`).
     if (view === 'settings' && changed) reposStale = true;
+    // The privacy state is read again in place: a forget of imported history registered or applied
+    // changes which repositories it names (decision 109; CodeRabbit on #1020). Not over a write on
+    // its way, whose read of its receipt a later read would take: a later poll reads it.
+    if (view === 'settings' && changed) privacyStale = true;
+    if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
+      privacyStale = false;
+      void refreshPrivacy(form);
+    }
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;

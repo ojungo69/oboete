@@ -7754,5 +7754,49 @@ assert(!text(list).includes('Release tagging'),`a withheld note leaves the page:
 assert(text(list).includes('Parser built'),text(list));
 const notice=run('feed.notice.textContent');
 assert(notice.includes('is not shown until a forget of it has finished'),notice);
-console.log('PASS: a note the feed showed leaves it once imported history is withheld, and the page says why');
+// Once the forget is applied, the feed is read again from the top: a live read alone stops at the
+// card shown, and the note below it never came back (CodeRabbit on #1020).
+page={items:[card,note],next:null};
+await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+const relisted=document.getElementById('list');
+assert(text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note is back in its place: ${text(relisted)}`);
+const after=run('feed.notice.textContent');
+assert(!after.includes('is not shown until'),after);
+console.log('PASS: a note the feed showed leaves it once imported history is withheld, the page says why, and it comes back once the forget is applied');
+}
+
+// Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again at a change the poll
+// sees, as a forget of imported history changes which repositories it names; not over a write on
+// its way, whose read of its receipt a later read would take, and the next poll reads it then.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const response=value=>({ok:true,status:200,json:async()=>value});
+let v='p1',reads=0;
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}));}
+  return Promise.resolve(response({}));
+};
+const settings=new Node('div');settings.className='settings';
+document.getElementById('panel').replaceChildren(settings);
+run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled};
+view='settings';form={privacy:{available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}};
+version='p0';reposLoaded=true;restsPolled=new Promise(()=>{})`);
+document.visibilityState='visible';
+const polled=async()=>{run('polling=false');await run('poll()');await settle();};
+await polled();
+assert.equal(reads,1,'a change the poll sees reads the privacy state again');
+await polled();
+assert.equal(reads,1,'no change, no read');
+settings.inert=true;v='p2';
+await polled();
+assert.equal(reads,1,'not over a write on its way');
+settings.inert=false;
+await polled();
+assert.equal(reads,2,'the next poll reads it');
+delete document.visibilityState;
+run(`({view,form,version,reposLoaded,restsPolled}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
+console.log('PASS: Settings reads the privacy state again at a change, and not over a write on its way');
 }
