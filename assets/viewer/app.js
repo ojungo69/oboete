@@ -11018,10 +11018,9 @@ async function poll() {
     if (view === 'settings' && changed) privacyStale = true;
     if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
       privacyStale = false;
-      // A form drawn from another meanwhile (a provider's write keeps the state it had) did not take
-      // the read: a later poll reads it again (CodeRabbit on #1020).
-      const f = form;
-      void refreshPrivacy(f).then(() => { if (form !== f) privacyStale = true; });
+      // A read that failed, or that a form drawn from another meanwhile did not take (a provider's
+      // write keeps the state it had), is read again at a later poll (Codex and CodeRabbit on #1020).
+      void refreshPrivacy(form).then((drawn) => { if (!drawn) privacyStale = true; });
     }
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.

@@ -7832,6 +7832,24 @@ await polled();
 assert.equal(reads,4,'a read the form drawn meanwhile did not take is read again');
 release();
 await settle();
+// A read that fails (the reading fence busy past its wait) is read again at the next poll, until
+// one answers (Codex on #1020).
+let available=false;
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(available?answer:{ok:false,status:503,json:async()=>({})});}
+  return Promise.resolve(response({}));
+};
+v='p4';
+await polled();
+assert.equal(reads,5,'a change reads it');
+await polled();
+assert.equal(reads,6,'a read that failed is read again');
+available=true;
+await polled();
+assert.equal(reads,7);
+await polled();
+assert.equal(reads,7,'one that answers is not read again');
 delete document.visibilityState;
 run(`({view,form,version,reposLoaded,restsPolled}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
 console.log('PASS: Settings reads the privacy state again at a change, and not over a write on its way');
