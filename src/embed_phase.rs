@@ -7,6 +7,7 @@
 
 use crate::curate::{Phase as Step, Reading, Reads};
 use crate::embed::{Embedder, Failure};
+use crate::forget::history::Applied;
 use crate::raw::Raw;
 use crate::resident::{Busy, Resident};
 use anyhow::Result;
@@ -519,13 +520,21 @@ impl Phase {
         if crate::curate::lagging(raw, k)? {
             return Ok(Step::Idle);
         }
+        // Decision 109: nor while it has not applied a forget of imported history, whose text a
+        // page or a split's rest would read. Taken outside the reading fence: `reading` was read
+        // first and its fence counts the history forgets, so one registered from here on makes
+        // `still` stop the batch before the call (under the dispatch guard when the call leaves
+        // the machine; a local run sends nothing out).
+        let Some(applied) = raw.imported_open(k)? else {
+            return Ok(Step::Idle);
+        };
         cleared(k, crate::embed::EMBEDDER, &reading, &rules)?;
         if self.masked_under.as_deref() != Some(rules.version()) {
             unmask(k, crate::embed::EMBEDDER, rules.version())?;
             self.masked_under = Some(rules.version().to_owned());
         }
         let Some(embedder) = embedder else {
-            return self.local_batch(raw, k, &reading, &rules);
+            return self.local_batch(raw, k, &applied, &reading, &rules);
         };
         self.local = None;
         let wait = match self.held_back(&cfg) {
@@ -537,7 +546,7 @@ impl Phase {
             }
         };
         let half = match wait {
-            None => self.next_half(raw, k, &embedder.id, &reading, &rules)?,
+            None => self.next_half(raw, k, &applied, &embedder.id, &reading, &rules)?,
             Some(_) => None,
         };
         let batch = match half {
@@ -545,7 +554,15 @@ impl Phase {
             // Cached vectors are mapped and documents passed over are marked whatever the rest
             // or the cap, each kind up to its first page with a text to send; only the call waits.
             None => {
-                let Some(b) = pending(raw, k, &embedder.id, &reading, &rules, wait.is_some())?
+                let Some(b) = pending(
+                    raw,
+                    k,
+                    &applied,
+                    &embedder.id,
+                    &reading,
+                    &rules,
+                    wait.is_some(),
+                )?
                 else {
                     return Ok(Step::Idle);
                 };
@@ -599,6 +616,7 @@ impl Phase {
         &mut self,
         raw: &Raw,
         k: &Connection,
+        applied: &Applied,
         reading: &Reading,
         rules: &crate::redact::Rules,
     ) -> Result<Step> {
@@ -616,7 +634,7 @@ impl Phase {
             self.local = None;
             // As while a Workers AI call waits, cached vectors are mapped and documents passed
             // over are marked; only the model waits (Codex on #426).
-            if pending(raw, k, embedder, reading, rules, true)?.is_none() {
+            if pending(raw, k, applied, embedder, reading, rules, true)?.is_none() {
                 return Ok(Step::Idle);
             }
             let up = rest - now <= crate::curate::STAY_UP_MS;
@@ -626,7 +644,8 @@ impl Phase {
         // With no model yet, every kind is read, so its threshold counts the whole backlog.
         let mut seen = Seen::default();
         let counting = loaded.is_none().then_some(&mut seen);
-        let Some(batch) = pending_seen(raw, k, embedder, reading, rules, false, counting)? else {
+        let Some(batch) = pending_seen(raw, k, applied, embedder, reading, rules, false, counting)?
+        else {
             self.local = None;
             return Ok(Step::Idle);
         };
@@ -657,11 +676,13 @@ impl Phase {
     /// The split's next half, its documents read again (D8): one whose stored text changed or
     /// went since is left out (a fresh page brings it back), and the rest are sorted out and gated
     /// as a page's are, under the list read now, so a mask, a rule or an exclusion made while it
-    /// waited holds.
+    /// waited holds. With the proof that no forget of imported history waits (decision 109): the
+    /// rest may hold imported documents, read again through `current`.
     fn next_half(
         &mut self,
         raw: &Raw,
         k: &Connection,
+        _: &Applied,
         embedder: &str,
         reading: &Reading,
         rules: &crate::redact::Rules,
@@ -1324,12 +1345,13 @@ struct Read {
 fn pending(
     raw: &Raw,
     k: &Connection,
+    applied: &Applied,
     embedder: &str,
     reading: &Reading,
     rules: &crate::redact::Rules,
     waiting: bool,
 ) -> Result<Option<Batch>> {
-    pending_seen(raw, k, embedder, reading, rules, waiting, None)
+    pending_seen(raw, k, applied, embedder, reading, rules, waiting, None)
 }
 
 /// What `pending` read past its batch, for the local model's threshold (D14): the documents of
@@ -1342,9 +1364,11 @@ struct Seen {
 
 /// `pending`, which with `seen` reads each kind's first page with a text to send and counts it
 /// there, the batch still the first kind's.
+#[allow(clippy::too_many_arguments)] // the step's stores and proof, and what `pending` and the count ask
 fn pending_seen(
     raw: &Raw,
     k: &Connection,
+    applied: &Applied,
     embedder: &str,
     reading: &Reading,
     rules: &crate::redact::Rules,
@@ -1361,7 +1385,7 @@ fn pending_seen(
     let mut waits = None;
     for kind in ["c", "o", "s", "i", "r"] {
         loop {
-            let page = read_page(raw, k, embedder, kind)?;
+            let page = read_page(raw, k, applied, embedder, kind)?;
             if page.is_empty() {
                 break;
             }
@@ -1596,8 +1620,15 @@ fn queued(
 
 /// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
 /// the newest first: claims from `active`, current cards (`o`) from `cards`, summaries not skipped
-/// (`s`) from `turns`, the rest from the queue.
-fn read_page(raw: &Raw, k: &Connection, embedder: &str, kind: &str) -> Result<Vec<Read>> {
+/// (`s`) from `turns`, the rest from the queue. With the proof that no forget of imported history
+/// waits (decision 109), for the `i` page.
+fn read_page(
+    raw: &Raw,
+    k: &Connection,
+    _: &Applied,
+    embedder: &str,
+    kind: &str,
+) -> Result<Vec<Read>> {
     let limit = PAGE as i64;
     Ok(match kind {
         "c" => k

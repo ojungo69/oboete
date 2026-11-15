@@ -17,6 +17,7 @@ fn state(scope: &str, expires_at: i64) -> State {
         },
         eligible: Vec::new(),
         trace: vec!["index"],
+        history: Default::default(),
     }
 }
 
