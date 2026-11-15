@@ -21,6 +21,10 @@ struct PrivacyState {
     /// Parity row 14: the folder names and claude-mem patterns never recorded.
     patterns: Vec<Folder>,
     rescan: RescanState,
+    /// Decision 109: a forget of imported history waits, so the repositories only its documents
+    /// name are not listed until knowledge.db has applied it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    history_withheld: bool,
 }
 
 #[derive(Serialize)]
@@ -101,6 +105,7 @@ pub fn show(home: &Path) -> Value {
             processed: None,
             total: None,
         },
+        history_withheld: false,
     });
     serde_json::to_value(state).expect("typed privacy state serializes")
 }
@@ -117,12 +122,15 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
                 processed: Some(0),
                 total: Some(0),
             },
+            history_withheld: false,
         });
     };
+    // Milestone 5 D5 (#439): no forget commits until the page is built.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
     let settings = crate::capture::Settings::load(home)?;
     let excluded = crate::raw::exclusions_in(&raw.conn)?;
     let never = crate::raw::capture_exclusions_in(&raw.conn)?;
-    let (labels, rescan) = if let Some((mut k, identity)) = knowledge(home)? {
+    let (labels, rescan, withheld) = if let Some((mut k, identity)) = knowledge(home)? {
         let path = &raw.sqlite_path;
         let uri = format!(
             "file:{}?mode=ro",
@@ -136,14 +144,17 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         k.execute("ATTACH DATABASE ?1 AS privacy_raw", [uri])?;
         let tx = k.transaction()?;
         let state = rescan_in(&tx, settings.rules.version(), &crate::db::store_file(path))?;
-        let labels = labels(Some(&tx), RawRepos::Attached(&tx), &[])?;
+        // Decision 109: the proof from raw.db's own connection: the attached copy's tables are
+        // not in the main schema `forget::history` looks in, and would read as no forget.
+        let applied = crate::forget::history::imported_open(&raw.conn, &tx)?;
+        let labels = labels(Some(&tx), RawRepos::Attached(&tx), &[], applied.as_ref())?;
         tx.commit()?;
         anyhow::ensure!(
             std::fs::symlink_metadata(home.join("knowledge.db")).is_ok_and(|m| m.is_file())
                 && crate::db::store_file(&home.join("knowledge.db")) == identity,
             "knowledge changed during a read"
         );
-        (labels, state)
+        (labels, state, applied.is_none())
     } else {
         let (_, total): (String, i64) = raw.conn.query_row(
             "SELECT value, (SELECT COALESCE(MAX(seq), 0) FROM main.records
@@ -153,12 +164,13 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         (
-            labels(None, RawRepos::Main(&raw.conn), &[])?,
+            labels(None, RawRepos::Main(&raw.conn), &[], None)?,
             RescanState {
                 state: RescanPhase::Pending,
                 processed: None,
                 total: Some(total),
             },
+            false,
         )
     };
     raw.current()?;
@@ -205,6 +217,7 @@ fn read(home: &Path) -> anyhow::Result<PrivacyState> {
         folders,
         patterns,
         rescan,
+        history_withheld: withheld,
     })
 }
 
@@ -345,6 +358,7 @@ fn labels(
     k: Option<&Connection>,
     raw: RawRepos<'_>,
     excluded: &[String],
+    applied: Option<&crate::forget::history::Applied>,
 ) -> anyhow::Result<BTreeSet<String>> {
     let mut labels: BTreeSet<String> = excluded.iter().cloned().collect();
     // Every device's and every kind's: a rule's record and another device's records are in no
@@ -364,7 +378,7 @@ fn labels(
         if tables == 3 {
             // Their names alone: the list's counts are not shown here, and take seconds on a
             // large store (#899 W2).
-            labels.extend(crate::view::repo_names_in(k)?);
+            labels.extend(crate::view::repo_names_in(k, applied)?);
         }
     }
     Ok(labels)
@@ -379,7 +393,7 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (raw, label, _) = listed_repository(home, &posted.selector)?;
+    let (raw, label, _, _) = listed_repository(home, &posted.selector)?;
     let mut writer = raw
         .into_writer(home)
         .map_err(|_| refused(503, "privacy_unavailable", ""))?;
@@ -397,21 +411,33 @@ pub fn exclude(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
 /// The repository `selector` names in the list a GET shows, read fresh, with the read-only store
 /// the write goes on with.
 /// The listed repository `wanted` selects, with the labels the records and knowledge.db name
-/// (`rows`'s `history`).
+/// (`rows`'s `history`), and whether a forget of imported history waiting left the names only its
+/// documents hold out of them (decision 109). Read under the reading fence, let go before the
+/// write, which takes the dispatch lock alone.
 fn listed_repository(
     home: &Path,
     wanted: &str,
-) -> Result<(crate::raw::ReadOnly, String, BTreeSet<String>), Refusal> {
+) -> Result<(crate::raw::ReadOnly, String, BTreeSet<String>, bool), Refusal> {
     let unavailable = || refused(503, "privacy_unavailable", "");
     let raw = crate::raw::read_only(home)
         .map_err(|_| unavailable())?
         .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
+    let _read =
+        crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT).map_err(|_| unavailable())?;
     let excluded = crate::raw::exclusions_in(&raw.conn).map_err(|_| unavailable())?;
     let k = knowledge(home).map_err(|_| unavailable())?;
+    let applied = match &k {
+        Some((conn, _)) => {
+            crate::forget::history::imported_open(&raw.conn, conn).map_err(|_| unavailable())?
+        }
+        None => None,
+    };
+    let withheld = k.is_some() && applied.is_none();
     let history = labels(
         k.as_ref().map(|(conn, _)| conn),
         RawRepos::Main(&raw.conn),
         &[],
+        applied.as_ref(),
     )
     .map_err(|_| unavailable())?;
     let selected: BTreeSet<String> = history
@@ -421,13 +447,15 @@ fn listed_repository(
         .cloned()
         .collect();
     let mut selected = selected.into_iter();
-    let label = selected
-        .next()
-        .ok_or_else(|| refused(404, "repo_not_found", "selector"))?;
+    // A name the withheld documents alone hold may be the one asked for: not "not found" yet.
+    let label = selected.next().ok_or_else(|| match withheld {
+        true => unavailable(),
+        false => refused(404, "repo_not_found", "selector"),
+    })?;
     if selected.next().is_some() {
         return Err(refused(409, "repo_changed", "selector"));
     }
-    Ok((raw, label, history))
+    Ok((raw, label, history, withheld))
 }
 
 /// Slice 4b's request: a listed repository by its `selector`, a folder to stop recording in by its
@@ -471,7 +499,7 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
             if !is_selector(&wanted) {
                 return Err(refused(422, "privacy_selector", "selector"));
             }
-            let (raw, row, history) = listed_repository(home, &wanted)?;
+            let (raw, row, history, withheld) = listed_repository(home, &wanted)?;
             // Stored as its records name it, the one name the page has for it (owner,
             // 2026-10-13: what is never recorded is stored as given); an undo takes back the
             // entry stored for it, as the CLI's does (Codex on #491), or the one its row
@@ -488,6 +516,9 @@ pub fn capture(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Re
                         .downcast_ref::<crate::capture::ReadAlike>()
                         .map(|alike| alike.entries.as_slice())
                     {
+                        // Decision 109: whether the row stands for the entry depends on every
+                        // name that reads as it, the withheld documents' among them.
+                        Some([_]) if withheld => return Err(unavailable()),
                         Some([entry]) if stands_for(&history, &settings, &row, entry) => {
                             entry.clone()
                         }

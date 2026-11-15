@@ -1548,6 +1548,16 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   ページ（`read_page`）と分割の残り（`next_half`）は `&Applied` を取る。mem_search の続きの呼び出しは、最初の
   呼び出しが index を読む前の raw.db の組を覚え、組が変わっていたら期限切れにする（index の行の題名が、反映待ち
   の文書でも出たため）。hook の経路は続きを作らないので組を読まない。
+  as built（4 本目、2026-11-15）: viewer の一覧（保存メモ）、リポジトリの一覧と名前、プライバシーのページも証拠を
+  取る。無い間は、一覧は保存メモを出さず `withheld` を返し、リポジトリの行は取り込みの件数を持たない（0 とは
+  出さない）。取り込み文書にだけ名前があるリポジトリは一覧に出ず、プライバシーのページはそう書く。その証拠は
+  raw.db 自身の接続から取る（ATTACH した写しの表は `forget::history` が見る main の schema に無く、forget が無い
+  と読めてしまう）。除外・送信の POST は fence をその関数の中だけで持ち（書き込みが取る dispatch の lock と
+  ぶつかるため）、反映待ちの間に見つからない selector と、取り込み文書の名前も見て決める取り消しは 503。
+  ページの version は履歴の forget の登録と反映で動く。doctor は反映待ちの数を出す。forget --uid の preview は
+  所有者自身の操作で、op log にも同じ題名があるので証拠を取らない。到達表の `Later` はこれで 0 になったが、
+  5b が登録を開く前に、表に見えないもの（反映とその再開、raw.db の取り込み work state の読み手、登録が
+  dispatch の排他を取ること、OpenCode の plugin が持つ写し）が要る。
 - **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ

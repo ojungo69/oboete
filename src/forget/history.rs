@@ -51,6 +51,18 @@ pub(crate) fn imported_open(raw: &Connection, k: &Connection) -> Result<Option<A
     Ok(registered.is_subset(&applied(k)?).then_some(Applied(())))
 }
 
+/// Doctor's line (decision 109): how many of the history forgets raw.db holds knowledge.db has
+/// not applied, the relation `imported_open` reads; none when it has applied them all.
+pub(crate) fn doctor_line(registered: &BTreeSet<Pair>, applied: &BTreeSet<Pair>) -> Option<String> {
+    let waiting = registered.difference(applied).count();
+    (waiting > 0).then(|| {
+        format!(
+            "imported history is withheld: {waiting} forget(s) of a repository's history not \
+             yet applied in knowledge.db"
+        )
+    })
+}
+
 /// What a reader says where it left knowledge.db's imported documents out (`imported_open` gave no
 /// proof): they are not read until a forget's deletion is applied, which is no answer of "none".
 pub(crate) const WITHHELD: &str = "Imported history is withheld until a forget's deletion reaches knowledge.db; try again shortly.";

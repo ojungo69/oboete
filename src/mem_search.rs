@@ -329,7 +329,9 @@ impl Search<'_> {
                 Err(r) => return Ok(Err(r)),
             };
             // Decision 109: rows read before a forget of imported history registered, titles
-            // among them, are not shown on: the continuation has expired.
+            // among them, are not shown on: the continuation has expired. This rests on raw.db's
+            // pairs only growing (no job leaves `forget_history`): a change that removes one
+            // must expire continuations another way.
             if self.history_forgets()? != state.history {
                 return Ok(refuse(
                     "expired_continuation",
