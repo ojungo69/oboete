@@ -129,6 +129,11 @@ const READERS: &[(&str, &str, Reach)] = &[
         ),
     ),
     (
+        "src/forget/history.rs",
+        "remove",
+        Reach::Without("the apply, which removes the rows a history forget covers"),
+    ),
+    (
         "src/mcp.rs",
         "save_memory",
         Reach::Without("a note's op, which its append checks again"),
@@ -382,11 +387,280 @@ fn doctor_names_the_history_forgets_not_yet_applied() {
         super::doctor_line(&registered, &set(&[("j1", "t1")])).as_deref(),
         Some(
             "imported history is withheld: 1 forget(s) of a repository's history not yet \
-             applied in knowledge.db"
+             applied in knowledge.db (`oboete forget --continue` applies them; the worker does \
+             too)"
         )
     );
     assert!(super::doctor_line(&registered, &set(&[])).is_some_and(|l| l.contains(": 2 forget")));
     assert_eq!(super::doctor_line(&registered, &registered), None);
     assert!(super::doctor_line(&set(&[("j1", "t2")]), &set(&[("j1", "t1")])).is_some());
     assert_eq!(super::doctor_line(&set(&[]), &set(&[])), None);
+}
+
+/// What knowledge.db holds of imported document `uid`: its rows, its files' rows, its vectors'
+/// keys, the vec0 index rows `ids` (its keys' ids, read before), and its place in the embedding
+/// queue (none before the queue is made).
+fn held(k: &Connection, uid: &str, ids: &[i64]) -> [i64; 5] {
+    let one = |sql: &str| k.query_row(sql, [uid], |r| r.get::<_, i64>(0)).unwrap();
+    let queued = match crate::consumer::manifest::exists(k, "table", "vector_todo").unwrap() {
+        true => one("SELECT COUNT(*) FROM vector_todo WHERE family = 'i' AND key = ?1"),
+        false => 0,
+    };
+    let indexed = ids
+        .iter()
+        .map(|id| {
+            k.query_row(
+                "SELECT COUNT(*) FROM vec_index WHERE rowid = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        })
+        .sum();
+    [
+        one("SELECT COUNT(*) FROM imported WHERE uid = ?1"),
+        one("SELECT COUNT(*) FROM imported_files WHERE uid = ?1"),
+        one("SELECT COUNT(*) FROM vector_keys WHERE kind IN ('k', 'p') AND key = ?1"),
+        indexed,
+        queued,
+    ]
+}
+
+/// The ids of imported document `uid`'s vector keys.
+fn key_ids(k: &Connection, uid: &str) -> Vec<i64> {
+    k.prepare("SELECT id FROM vector_keys WHERE kind IN ('k', 'p') AND key = ?1")
+        .unwrap()
+        .query_map([uid], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// How many imported documents' full-text rows hold `word`.
+fn indexed(k: &Connection, word: &str) -> i64 {
+    k.query_row(
+        "SELECT COUNT(*) FROM imported_fts WHERE imported_fts MATCH ?1",
+        [format!("\"{word}\"")],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn pairs(list: &[(&str, &str)]) -> std::collections::BTreeSet<super::Pair> {
+    list.iter()
+        .map(|(j, t)| ((*j).to_owned(), (*t).to_owned()))
+        .collect()
+}
+
+/// 5c's apply: every row knowledge.db made from a document a history forget covers goes, under
+/// whichever repository it was filed, with its full-text rows, files, vectors and place in the
+/// embedding queue; the forget is recorded and the readers open; what it does not cover stays. A
+/// second pass changes nothing.
+#[test]
+fn the_apply_removes_what_a_history_forget_covers_and_opens_the_readers() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let read = &["src/pay.rs"][..];
+    let covered = s.imported_with_files(
+        "o1",
+        ("alpha", "cm"),
+        "decision",
+        1_000,
+        "Zebrafinch retries",
+        read,
+        &[],
+    );
+    // claude-mem moved it to another project: the same uid comes in again, filed under that one.
+    s.imported(
+        "o1",
+        "beta",
+        1_100,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    let kept = s.imported_with_files(
+        "o2",
+        ("alpha", "cm"),
+        "decision",
+        1_200,
+        "Heron backoff",
+        read,
+        &[],
+    );
+    s.run();
+    crate::embed_phase::fixture::vectors(&s);
+    // Imported after the embedding: it waits in the queue.
+    let queued = s.imported(
+        "o3",
+        "alpha",
+        1_300,
+        "Zebrafinch limits",
+        "Zebrafinch limits.",
+    );
+    s.run();
+    let mut k = crate::knowledge::open(&home).unwrap();
+    let (covered_ids, kept_ids) = (key_ids(&k, &covered), key_ids(&k, &kept));
+    assert_eq!(held(&k, &covered, &covered_ids), [2, 1, 1, 1, 0]);
+    assert_eq!(held(&k, &queued, &[]), [1, 0, 0, 0, 1]);
+    assert_eq!(indexed(&k, "Zebrafinch"), 3);
+    register_covering(&home, "j1", "t1", &[&covered, &queued]);
+    assert!(s.raw.imported_open(&k).unwrap().is_none());
+    assert_eq!(s.raw.apply_history(&mut k).unwrap(), 1);
+    assert_eq!(held(&k, &covered, &covered_ids), [0; 5]);
+    assert_eq!(held(&k, &queued, &[]), [0; 5]);
+    assert_eq!(indexed(&k, "Zebrafinch"), 0);
+    assert_eq!(held(&k, &kept, &kept_ids), [1, 1, 1, 1, 0]);
+    assert_eq!(indexed(&k, "Heron"), 1);
+    assert_eq!(super::applied(&k).unwrap(), pairs(&[("j1", "t1")]));
+    assert!(s.raw.imported_open(&k).unwrap().is_some());
+    assert_eq!(s.raw.apply_history(&mut k).unwrap(), 0);
+    assert_eq!(held(&k, &kept, &kept_ids), [1, 1, 1, 1, 0]);
+}
+
+/// 5c: a knowledge.db made new (a rebuild) records a history forget at its first round, before it
+/// projects anything, and then projects none of what the forget covers, documents or files; no
+/// vector of them comes over from the old file. What the forget does not cover comes back whole.
+#[test]
+fn a_rebuild_records_the_forget_first_and_brings_back_nothing_it_covers() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let read = &["src/pay.rs"][..];
+    let covered = s.imported_with_files(
+        "o1",
+        ("alpha", "cm"),
+        "decision",
+        1_000,
+        "Zebrafinch retries",
+        read,
+        &[],
+    );
+    let kept = s.imported_with_files(
+        "o2",
+        ("alpha", "cm"),
+        "decision",
+        1_200,
+        "Heron backoff",
+        read,
+        &[],
+    );
+    s.run();
+    crate::embed_phase::fixture::vectors(&s);
+    let sha = |k: &Connection, uid: &str| -> String {
+        k.query_row(
+            "SELECT src_sha FROM vector_keys WHERE kind IN ('k', 'p') AND key = ?1",
+            [uid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let (covered_sha, kept_sha) = {
+        let k = crate::knowledge::open(&home).unwrap();
+        (sha(&k, &covered), sha(&k, &kept))
+    };
+    register_covering(&home, "j1", "t1", &[&covered]);
+    // With no store open, as `oboete rebuild` runs.
+    let crate::search::b::fixture::Store { home: _dir, raw } = s;
+    drop(raw);
+    crate::worker::rebuild(&home).unwrap();
+    let k = crate::knowledge::open(&home).unwrap();
+    assert_eq!(super::applied(&k).unwrap(), pairs(&[("j1", "t1")]));
+    let raw = crate::raw::open(&home).unwrap();
+    assert!(raw.imported_open(&k).unwrap().is_some());
+    assert_eq!(held(&k, &covered, &[])[..2], [0, 0]);
+    assert_eq!(held(&k, &kept, &[])[..2], [1, 1]);
+    let cached = |sha: &str| -> i64 {
+        k.query_row(
+            "SELECT COUNT(*) FROM vectors WHERE src_sha = ?1",
+            [sha],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!((cached(&covered_sha), cached(&kept_sha)), (0, 1));
+}
+
+/// 5c's resume: the worker's round applies a history forget knowledge.db has not, before it
+/// drains.
+#[test]
+fn a_worker_round_applies_a_history_forget_waiting() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let covered = s.imported(
+        "o1",
+        "alpha",
+        1_000,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    s.run();
+    register_covering(&home, "j1", "t1", &[&covered]);
+    s.run();
+    let k = crate::knowledge::open(&home).unwrap();
+    assert_eq!(held(&k, &covered, &[])[0], 0);
+    assert_eq!(super::applied(&k).unwrap(), pairs(&[("j1", "t1")]));
+    assert!(s.raw.imported_open(&k).unwrap().is_some());
+}
+
+/// 5c's first red test: raw.db restored to before a job loses it, a document it covered comes in
+/// again and is projected; the job applied again from its log gets another token, which closes
+/// the readers though knowledge.db applied the job before, and the apply that follows removes the
+/// document again.
+#[test]
+fn a_forget_applied_again_with_another_token_removes_what_came_in_meanwhile() {
+    use super::fixture::{lose, register_covering};
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let covered = s.imported(
+        "o1",
+        "alpha",
+        1_000,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    s.run();
+    register_covering(&home, "j1", "t1", &[&covered]);
+    s.run();
+    lose(&home, "j1");
+    s.imported(
+        "o1",
+        "alpha",
+        1_000,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    s.run();
+    let k = crate::knowledge::open(&home).unwrap();
+    assert_eq!(held(&k, &covered, &[])[0], 1);
+    register_covering(&home, "j1", "t2", &[&covered]);
+    assert!(s.raw.imported_open(&k).unwrap().is_none());
+    s.run();
+    assert_eq!(held(&k, &covered, &[])[0], 0);
+    assert_eq!(super::applied(&k).unwrap(), pairs(&[("j1", "t2")]));
+    assert!(s.raw.imported_open(&k).unwrap().is_some());
+}
+
+/// 5c: `oboete forget --continue` applies a history forget knowledge.db has not, and with none
+/// waiting it opens nothing to write.
+#[test]
+fn forget_continue_applies_a_history_forget_waiting() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let covered = s.imported(
+        "o1",
+        "alpha",
+        1_000,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    s.run();
+    assert_eq!(super::apply_due(&home).unwrap(), 0);
+    register_covering(&home, "j1", "t1", &[&covered]);
+    assert_eq!(super::apply_due(&home).unwrap(), 1);
+    let k = crate::knowledge::open(&home).unwrap();
+    assert_eq!(held(&k, &covered, &[])[0], 0);
+    assert_eq!(super::apply_due(&home).unwrap(), 0);
 }

@@ -1195,6 +1195,15 @@ fn serve(
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
         // Decision 70: a refresh request the page leaves after this round began wakes the wait.
         let began = crate::db::now_ms();
+        // Decision 109 (5c): a history forget raw.db holds is applied before the consumers drain:
+        // a knowledge.db made new (a rebuild, a restore) records it before it projects anything,
+        // which then leaves what it covers out. One that fails keeps the readers withheld, which
+        // doctor names, and the drain goes on.
+        if let Err(e) = raw.apply_history(&mut k) {
+            eprintln!(
+                "oboete: a forget of imported history was not applied in knowledge.db: {e:#}"
+            );
+        }
         while pass_report(&raw, &mut k, consumers, report)? {
             // Between two batches too: a consumer opens the home's files by path (the rescan).
             if gone(home, holding) {
@@ -2125,11 +2134,12 @@ fn carry_rebuild_vectors(
     if kept.exists() {
         let carried = crate::knowledge::open(home).and_then(|k| {
             // Milestone 5 D5: no forgotten claim's or document's vector comes back, nor one whose
-            // forget only the logs hold yet: the pass after this reconciles them.
+            // forget only the logs hold yet: the pass after this reconciles them. Nor one a
+            // history forget covers (decision 109).
             let (forgotten, home_id) = match crate::raw::read_only(home)? {
                 Some(raw) => (
                     crate::forget::Forgotten {
-                        uids: raw.forgotten_set()?,
+                        uids: raw.carry_forgotten()?,
                         records: raw.forgotten_record_keys()?,
                     },
                     raw.home_id()?,

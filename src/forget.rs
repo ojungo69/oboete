@@ -2188,6 +2188,19 @@ pub fn run(
         reconcile_or_say(home, &mut crate::raw::open(home)?)?;
     }
     if resume {
+        // Decision 109 (5c): a forget of imported history knowledge.db has not applied, first. One
+        // that fails (a worker that did not step aside in time) leaves it to the worker's next
+        // round, and the purge goes on.
+        match history::apply_due(home) {
+            Ok(0) => {}
+            Ok(applied) => println!(
+                "Imported history is shown again: {applied} forget(s) of a repository's history \
+                 applied in knowledge.db."
+            ),
+            Err(e) => eprintln!(
+                "oboete: a forget of imported history was not applied in knowledge.db: {e:#}"
+            ),
+        }
         // Nothing to continue says nothing: the worker starts it when a job waits (D5 item 8).
         if let Some(p) = purge(home)?.filter(|p| p.jobs > 0 || p.masks) {
             say_purged(&p)?;

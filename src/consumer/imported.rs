@@ -82,6 +82,11 @@ impl Consumer for Imported {
             let Ok(d) = serde_json::from_value::<ImportDoc>(op.body) else {
                 continue;
             };
+            // Decision 109 (5c): what a history forget covers is not given to knowledge.db, so no
+            // rebuild brings it back.
+            if raw.import_covered(&d.uid)? {
+                continue;
+            }
             k.execute(
                 "INSERT INTO imported(op_device, op_seq, uid, source, source_id, kind, repo,
                    session, ts, title, body)
@@ -180,6 +185,10 @@ impl Consumer for ImportedFiles {
             let Ok(f) = serde_json::from_value::<crate::raw::ImportFiles>(op.body) else {
                 continue;
             };
+            // Decision 109 (5c): the files of a document a history forget covers, as `Imported`.
+            if raw.import_covered(&f.uid)? {
+                continue;
+            }
             let named = (f.files_read.len() + f.files_modified.len()) as i64;
             for (modified, list) in [(false, &f.files_read), (true, &f.files_modified)] {
                 for path in list {
