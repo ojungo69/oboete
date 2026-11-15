@@ -2722,7 +2722,12 @@ impl Viewer {
             "context" => return Ok(Response::json(&self.context(arg("repo"))?)),
             "repos" => {
                 let (current, branch) = self.checkout()?.unwrap_or_default();
-                json!({ "current": current, "branch": branch, "repos": repos(&self.home)? })
+                let (repos, withheld) = repos(&self.home)?;
+                let mut answer = json!({ "current": current, "branch": branch, "repos": repos });
+                if withheld {
+                    answer["withheld"] = json!(true);
+                }
+                answer
             }
             // A copy made or swept, and a viewer whose links changed (docs/deliverables.md, slice
             // 2), move the page's version too.
@@ -2803,7 +2808,9 @@ impl Viewer {
 /// A route's failure (D11): a restore holding raw.db past `raw::open`'s wait, or SQLite busy or
 /// locked during a rebuild, is 503 "try again"; anything else is 500, its text gated (spec 6.5).
 fn failed(e: &anyhow::Error) -> Response {
-    let again = e.chain().any(|c| {
+    // A forget that holds the reading fence past its wait (`dispatch::busy`) is one to retry too.
+    let again = crate::dispatch::busy(e)
+        || e.chain().any(|c| {
         c.is::<crate::raw::Restoring>()
             || matches!(
                 c.downcast_ref::<rusqlite::Error>(),
@@ -3159,9 +3166,10 @@ type NotePosition = (i64, String, i64);
 /// Parity row N3: the notes agents saved (`save_memory`), the newest first after `before`, at most
 /// `limit`, as claude-mem's feed shows a manual memory among its observations: each note's newest
 /// row, none a forget names, its title and text gated as every reader gates them. Whether another
-/// remains.
+/// remains. With the proof that no forget of imported history waits (decision 109).
 fn notes_page(
     k: &rusqlite::Connection,
+    _: &crate::forget::history::Applied,
     raw: &crate::raw::Raw,
     repo: Option<&str>,
     before: Option<&NotePosition>,
@@ -3352,6 +3360,10 @@ fn feed(
     let Some((raw, k)) = search::b::stores(home)? else {
         return Ok(json!({"items": [], "next": null}));
     };
+    // Milestone 5 D5 (#439): no forget commits until the page is built. Decision 109: the saved
+    // notes only once knowledge.db has applied every forget of imported history.
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let applied = raw.imported_open(&k)?;
     // A session's page (S4): the agent and session its key names; a key of no session hooks
     // recorded has no items.
     let named = match session {
@@ -3371,10 +3383,28 @@ fn feed(
         crate::turns::page(&k, &raw, scope, cursor.summaries.as_ref(), limit, &rules)?;
     let (prompts, prompts_more) = raw.prompts(scope, cursor.prompts.as_ref(), limit, &rules)?;
     // A note is its repository's document, of no session's work: a session's page shows none.
-    let (notes, notes_more) = if named.is_some() {
-        (Vec::new(), false)
-    } else {
-        notes_page(&k, &raw, repo, cursor.notes.as_ref(), limit, &rules)?
+    // Withheld, the notes' place in the cursor stays; the page reads again from the top once the
+    // forget is applied (`history_forgets` below).
+    let withheld = named.is_none() && applied.is_none();
+    // How many forgets of imported history raw.db holds: a page read before one reads again from
+    // the top, though a registration and its apply between two of its reads show it no
+    // withholding, as the notes it shows may be gone (Codex on #1020). None, no key: a store with
+    // no history forget answers as before.
+    let forgets = match named {
+        None => raw.history_forgets()?.len(),
+        Some(_) => 0,
+    };
+    let (notes, notes_more) = match (&named, &applied) {
+        (None, Some(applied)) => notes_page(
+            &k,
+            applied,
+            &raw,
+            repo,
+            cursor.notes.as_ref(),
+            limit,
+            &rules,
+        )?,
+        _ => (Vec::new(), false),
     };
     let name =
         |repo: Option<&str>| crate::consumer::manifest::repo_name(repo.unwrap_or(""), &rules);
@@ -3438,7 +3468,14 @@ fn feed(
     } else {
         None
     };
-    Ok(json!({"items": items, "next": next}))
+    let mut page = json!({"items": items, "next": next});
+    if withheld {
+        page["withheld"] = json!(true);
+    }
+    if forgets > 0 {
+        page["history_forgets"] = json!(forgets);
+    }
+    Ok(page)
 }
 
 /// The page's search as the search core takes it (MUST-M11 to M13); its `caller` is the
@@ -3484,26 +3521,38 @@ fn newest_branch(home: &Path, repo: &str) -> Result<String> {
 }
 
 /// The repositories the stores know, the most recent first: claims (by their derivations),
-/// imported documents and records, each counted, with the newest time.
-fn repos(home: &Path) -> Result<Vec<Value>> {
-    let Some((_raw, k)) = search::b::stores(home)? else {
-        return Ok(Vec::new());
+/// imported documents and records, each counted, with the newest time; and whether the imported
+/// documents were left out, a forget of imported history waiting (decision 109).
+fn repos(home: &Path) -> Result<(Vec<Value>, bool)> {
+    let Some((raw, k)) = search::b::stores(home)? else {
+        return Ok((Vec::new(), false));
     };
-    repos_in(&k)
+    let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+    let applied = raw.imported_open(&k)?;
+    Ok((repos_in(&k, applied.as_ref())?, applied.is_none()))
 }
 
 /// Each repository's counts and newest time. Its records are counted from the Fts consumer's
 /// index `raw_docs_repo`, not by reading each record's text (4.5 s cold on this PC's store,
 /// 2026-11-01).
+/// `{imported}` is the imported documents' leg (`imported_repos_leg`), none without the proof.
 const REPOS: &str = "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(last) FROM (
        SELECT repo, COUNT(DISTINCT uid) AS claims, 0 AS imported, 0 AS records,
               MAX(valid_from) AS last
        FROM derivations WHERE repo IS NOT NULL GROUP BY repo
-       UNION ALL
-       SELECT repo, 0, COUNT(DISTINCT uid), 0, MAX(ts) FROM imported GROUP BY repo
+       {imported}
        UNION ALL
        SELECT repo, 0, 0, COUNT(*), MAX(ts) FROM raw_docs WHERE repo IS NOT NULL GROUP BY repo)
      GROUP BY repo ORDER BY MAX(last) DESC, repo";
+
+/// `REPOS`'s leg of the imported documents.
+pub(crate) const REPOS_IMPORTED: &str = "UNION ALL
+       SELECT repo, 0, COUNT(DISTINCT uid), 0, MAX(ts) FROM imported GROUP BY repo";
+
+/// Decision 109: `REPOS_IMPORTED`, with the proof that no forget of imported history waits.
+fn imported_repos_leg(_: &crate::forget::history::Applied) -> &'static str {
+    REPOS_IMPORTED
+}
 
 #[cfg(test)]
 thread_local! {
@@ -3511,19 +3560,28 @@ thread_local! {
     pub(crate) static REPOS_COUNTED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Existing repository enumeration on a caller-owned connection, without opening stores.
-pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
+/// Existing repository enumeration on a caller-owned connection, without opening stores. With no
+/// proof (decision 109) the imported documents are not read: a row then has no `imported` count,
+/// which would read as none.
+pub(crate) fn repos_in(
+    k: &rusqlite::Connection,
+    applied: Option<&crate::forget::history::Applied>,
+) -> Result<Vec<Value>> {
     #[cfg(test)]
     REPOS_COUNTED.set(REPOS_COUNTED.get() + 1);
-    let mut st = k.prepare(REPOS)?;
+    let sql = REPOS.replace("{imported}", applied.map_or("", imported_repos_leg));
+    let mut st = k.prepare(&sql)?;
     let rows = st.query_map([], |r| {
-        Ok(json!({
+        let mut row = json!({
             "repo": r.get::<_, String>(0)?,
             "claims": r.get::<_, i64>(1)?,
-            "imported": r.get::<_, i64>(2)?,
             "records": r.get::<_, i64>(3)?,
             "last": r.get::<_, i64>(4)?,
-        }))
+        });
+        if applied.is_some() {
+            row["imported"] = json!(r.get::<_, i64>(2)?);
+        }
+        Ok(row)
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -3531,13 +3589,27 @@ pub(crate) fn repos_in(k: &rusqlite::Connection) -> Result<Vec<Value>> {
 /// The names alone of the repositories `REPOS` lists: its three tables under its filters, with no
 /// count, so each is read from an index of its own (#899 W2: 0.14 s where the counts took 3.1 s
 /// cold on this PC's store, 2026-11-10). In no order.
+/// `{imported}` is the imported documents' leg (`imported_names_leg`), none without the proof.
 const REPO_NAMES: &str = "SELECT repo FROM derivations WHERE repo IS NOT NULL
-     UNION SELECT repo FROM imported
+     {imported}
      UNION SELECT repo FROM raw_docs WHERE repo IS NOT NULL";
 
-/// The repositories `repos_in` lists, by name only, on a caller-owned connection.
-pub(crate) fn repo_names_in(k: &rusqlite::Connection) -> Result<Vec<String>> {
-    let mut st = k.prepare(REPO_NAMES)?;
+/// `REPO_NAMES`'s leg of the imported documents.
+pub(crate) const REPO_NAMES_IMPORTED: &str = "UNION SELECT repo FROM imported";
+
+/// Decision 109: `REPO_NAMES_IMPORTED`, with the proof that no forget of imported history waits.
+fn imported_names_leg(_: &crate::forget::history::Applied) -> &'static str {
+    REPO_NAMES_IMPORTED
+}
+
+/// The repositories `repos_in` lists, by name only, on a caller-owned connection; the imported
+/// documents' names only with the proof (decision 109).
+pub(crate) fn repo_names_in(
+    k: &rusqlite::Connection,
+    applied: Option<&crate::forget::history::Applied>,
+) -> Result<Vec<String>> {
+    let sql = REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg));
+    let mut st = k.prepare(&sql)?;
     let rows = st.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -3547,7 +3619,14 @@ pub(crate) fn repo_names_in(k: &rusqlite::Connection) -> Result<Vec<String>> {
 /// curation waits for a provider or the owner (decision 67, row X27: claude-mem's queue beside its
 /// logo). A count that does not read leaves them out: it never stops the page's poll.
 fn polled(home: &Path) -> Result<Value> {
-    let mut answer = json!({ "v": version(home)? });
+    let (v, history) = version(home)?;
+    let mut answer = json!({ "v": v });
+    // Decision 109: the history forgets registered and applied, apart, for what only they change
+    // (Settings' privacy state, not read again at each record captured). None for a store with
+    // none, whose answer is as before.
+    if history != (0, 0) {
+        answer["history"] = json!(format!("{}.{}", history.0, history.1));
+    }
     if let Ok(Some((waiting, held))) = waiting(home) {
         answer["waiting"] = waiting.into();
         answer["held"] = held.into();
@@ -3599,9 +3678,9 @@ fn waiting(home: &Path) -> Result<Option<(i64, bool)>> {
 /// tombstone, which reads hide before the worker applies it). Live prompts move it at capture
 /// too, since the feed reads them directly (P5). Other records (tool calls, replies) do not
 /// move it, so a working agent does not redraw the page between prompts.
-fn version(home: &Path) -> Result<String> {
+fn version(home: &Path) -> Result<(String, (usize, usize))> {
     let Some((raw, k)) = search::b::stores(home)? else {
-        return Ok("0".into());
+        return Ok(("0".into(), (0, 0)));
     };
     let applied: (i64, i64) = k.query_row(
         "SELECT (SELECT COALESCE(SUM(seq), 0) FROM op_checkpoints),
@@ -3609,14 +3688,22 @@ fn version(home: &Path) -> Result<String> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(format!(
-        "{}:{}:{}:{}:{}",
+    // Decision 109: a forget of imported history registered, and applied, redraws the page.
+    let history = (
+        raw.history_forgets()?.len(),
+        crate::forget::history::applied(&k)?.len(),
+    );
+    let v = format!(
+        "{}:{}:{}:{}:{}:{}.{}",
         raw.max_op_seq()?,
         applied.0,
         applied.1,
         raw.tombstones()?,
-        raw.prompt_version()?
-    ))
+        raw.prompt_version()?,
+        history.0,
+        history.1
+    );
+    Ok((v, history))
 }
 
 /// Records per device, claims by kind and status, skipped claim ops by reason, the last seven

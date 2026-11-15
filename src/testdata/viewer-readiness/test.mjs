@@ -10,6 +10,7 @@ class Node {
     this.classList={toggle(){},add(){},remove(){},contains(){return false;}};
   }
   append(...nodes){for(const node of nodes){this.children.push(node);if(node&&typeof node==='object')node.parentElement=this;}}
+  prepend(...nodes){this.children.unshift(...nodes);for(const node of nodes)if(node&&typeof node==='object')node.parentElement=this;}
   // A browser moves the focus to the body when the focused element leaves the page (#810), and
   // Chrome blurs it as it goes, the element still in the page then (69b-3c).
   replaceChildren(...nodes){
@@ -7726,4 +7727,137 @@ for(const b of buttons)
 delete ctx.__rows;
 run(`view=${JSON.stringify(shown)}`);
 console.log('PASS: A6-01: each button in a My Work card but its link is above the link that covers the card');
+}
+
+// Decision 109 (Codex on #1020): notes the feed shows leave it when a live read says imported
+// history is withheld, and the notice says why; the cards stay.
+{
+const run=code=>vm.runInContext(code,ctx);
+const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).join(' ')).replace(/\s+/g,' ');
+const response=value=>({ok:true,status:200,json:async()=>value});
+const card={kind:'card',id:'5.0',ts:30,type:'feature',agent:'claude',repo_name:'fern',repo:'example.test/team/fern',title:'Parser built',subtitle:'',narrative:'Built.',facts:[],concepts:[],files_read:[],files_modified:[]};
+const note={kind:'note',id:'oboete-note:0123456789abcdef',ts:20,agent:null,repo_name:'fern',repo:'example.test/team/fern',title:'Release tagging',subtitle:'',narrative:'Releases are tagged from main.',facts:[],concepts:[],files_read:[],files_modified:[]};
+let page={items:[card,note],next:null},queued=[];
+// A queued null answers 503, a page to read again.
+ctx.fetch=url=>{
+  if(url.startsWith('/api/feed?')){
+    const next=queued.length?queued.shift():page;
+    return Promise.resolve(next===null?{ok:false,status:503,json:async()=>({})}:response(next));
+  }
+  if(url.startsWith('/api/repos'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+run('reposLoaded=true;setView("timeline")');
+await run('show()');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+const list=document.getElementById('list');
+assert(text(list).includes('Release tagging')&&text(list).includes('Parser built'),text(list));
+page={items:[card],next:null,withheld:true,history_forgets:1};
+await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert(!text(list).includes('Release tagging'),`a withheld note leaves the page: ${text(list)}`);
+assert(text(list).includes('Parser built'),text(list));
+const notice=run('feed.notice.textContent');
+assert(notice.includes('is not shown until a forget of it has finished'),notice);
+// Once the forget is applied, the feed is read again from the top: a live read alone stops at the
+// card shown, and the note below it never came back (CodeRabbit on #1020).
+page={items:[card,note],next:null,history_forgets:1};
+await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+const relisted=document.getElementById('list');
+assert(text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note is back in its place: ${text(relisted)}`);
+const after=run('feed.notice.textContent');
+assert(!after.includes('is not shown until'),after);
+// A forget registered and applied between two reads, which took the note: no read saw it withheld,
+// and the note leaves all the same (Codex on #1020).
+page={items:[card],next:null,history_forgets:2};
+await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert(!text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note a forget took leaves: ${text(relisted)}`);
+// The read from the top answers for the live one: when it fails, the poll keeps its marker and reads
+// again (CodeRabbit on #1020).
+queued=[{items:[card],next:null,history_forgets:3},null];
+const answered=await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(answered,false,'a read from the top that fails answers so');
+console.log('PASS: a note the feed showed leaves it once imported history is withheld or a forget takes it unseen, the page says why, and it comes back once the forget is applied');
+}
+
+// Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again when the poll sees a
+// forget of imported history registered or applied (the version's `history`), which changes the
+// repositories it names, and not at each record captured (the ponytail review of #1020); not over
+// a write on its way, whose read of its receipt a later read would take: the next poll reads it.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const response=value=>({ok:true,status:200,json:async()=>value});
+let v='p1',history='',reads=0;
+const version=()=>Promise.resolve(response(history?{v,history}:{v}));
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return version();
+  if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}));}
+  return Promise.resolve(response({}));
+};
+const settings=new Node('div');settings.className='settings';
+document.getElementById('panel').replaceChildren(settings);
+run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled,privacyHistory};
+view='settings';form={privacy:{available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}};
+version='p0';reposLoaded=true;restsPolled=new Promise(()=>{});privacyHistory=null`);
+document.visibilityState='visible';
+const polled=async()=>{run('polling=false');await run('poll()');await settle();};
+await polled();
+v='p2';
+await polled();
+assert.equal(reads,0,'a record captured moves the version, not its history forgets: no read');
+history='1.0';
+await polled();
+assert.equal(reads,1,'a forget registered reads the privacy state again');
+await polled();
+assert.equal(reads,1,'no change, no read');
+settings.inert=true;history='1.1';
+await polled();
+assert.equal(reads,1,'not over a write on its way');
+settings.inert=false;
+await polled();
+assert.equal(reads,2,'the next poll reads it');
+// A form drawn from another while the read is on its way (a provider's write keeps the privacy state
+// it had) does not take it: a later poll reads it again (CodeRabbit on #1020).
+let release=null;
+const answer=response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}});
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return version();
+  if(url.startsWith('/api/privacy?')){reads+=1;return new Promise(resolve=>{release=()=>resolve(answer);});}
+  return Promise.resolve(response({}));
+};
+history='2.1';
+await polled();
+assert.equal(reads,3,'a forget reads it');
+run('form={...form}');
+release();
+await settle();
+await polled();
+assert.equal(reads,4,'a read the form drawn meanwhile did not take is read again');
+release();
+await settle();
+// A read that fails (the reading fence busy past its wait) is read again at the next poll, until
+// one answers (Codex on #1020).
+let available=false;
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return version();
+  if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(available?answer:{ok:false,status:503,json:async()=>({})});}
+  return Promise.resolve(response({}));
+};
+history='2.2';
+await polled();
+assert.equal(reads,5,'a forget reads it');
+await polled();
+assert.equal(reads,6,'a read that failed is read again');
+available=true;
+await polled();
+assert.equal(reads,7);
+await polled();
+assert.equal(reads,7,'one that answers is not read again');
+delete document.visibilityState;
+run(`({view,form,version,reposLoaded,restsPolled,privacyHistory}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
+console.log('PASS: Settings reads the privacy state again when a history forget moves, not at each record, and not over a write on its way');
 }

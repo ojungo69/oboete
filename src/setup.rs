@@ -2802,6 +2802,16 @@ pub fn doctor(home: &Path) -> Result<()> {
                 {
                     println!("  {line}");
                 }
+                // Decision 109 (5c): a forget of imported history knowledge.db has not applied;
+                // until it has, every reader leaves imported history out.
+                if let Some(raw) = &raw
+                    && let Some(line) = crate::forget::history::doctor_line(
+                        &raw.history_forgets()?,
+                        &crate::forget::history::applied(&k)?,
+                    )
+                {
+                    println!("  {line}");
+                }
                 // Milestone 4 D8: the embedding phase.
                 for line in crate::embed_phase::doctor_lines(home, &k)? {
                     println!("  {line}");

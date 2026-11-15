@@ -2959,3 +2959,42 @@ fn a_search_begun_under_a_history_forget_lists_no_imported_document() {
     let again = body(mem(&server, json!({"query": "gateway retries"})));
     assert!(again.contains(&format!("- [{doc}] ")), "{again}");
 }
+
+/// Decision 109 (CodeRabbit on #1020): a restore puts another raw.db in place, whose forgets of
+/// imported history may be fewer than those a continuation was made under: the continuation has
+/// expired once raw.db is another file, whatever forgets it holds.
+#[test]
+fn a_continuation_expires_once_raw_db_is_another_file() {
+    let (mut s, server, _) = seeded("Retries are capped at three.");
+    let doc = s.imported(
+        "o1",
+        "r",
+        1_700_000_001_000,
+        "Gateway retries",
+        "Payments retry on a gateway timeout.",
+    );
+    s.run();
+    let token = continuation(&body(mem(&server, json!({"query": "gateway retries"}))));
+    // Closed first: Windows renames no file a connection holds (CodeRabbit on #1020). The server
+    // opens raw.db per call.
+    let Store { home, raw: open } = s;
+    drop(open);
+    let raw = home.path().join("raw.db");
+    rusqlite::Connection::open(&raw)
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let copy = home.path().join("raw.db.copy");
+    std::fs::copy(&raw, &copy).unwrap();
+    std::fs::rename(&copy, &raw).unwrap();
+    let answer = mem(
+        &server,
+        json!({"continuation": token, "selectedIds": [doc]}),
+    );
+    assert_eq!(answer.is_error, Some(true));
+    let text = body(answer);
+    assert!(
+        text.contains("Mem-search continuation expired.") && !text.contains("Gateway retries"),
+        "{text}"
+    );
+}

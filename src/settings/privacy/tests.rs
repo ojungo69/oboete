@@ -153,7 +153,8 @@ fn the_names_only_knowledge_holds_are_listed_and_masked_as_shown() {
     );
     store.run();
     let (_raw, k) = crate::search::b::stores(&home).unwrap().unwrap();
-    let mut stored = crate::view::repo_names_in(&k).unwrap();
+    let mut stored =
+        crate::view::repo_names_in(&k, Some(&crate::forget::history::fixture::proof())).unwrap();
     stored.sort();
     assert_eq!(stored.len(), 2, "{stored:?}");
     let settings = crate::capture::Settings::load(&home).unwrap();
@@ -225,7 +226,7 @@ fn repositories_the_index_never_names_are_listed_from_the_records() {
     store.run();
     let (_raw, k) = crate::search::b::stores(&home).unwrap().unwrap();
     assert_eq!(
-        crate::view::repo_names_in(&k).unwrap(),
+        crate::view::repo_names_in(&k, Some(&crate::forget::history::fixture::proof())).unwrap(),
         ["github.com/o/indexed"]
     );
     let listed = || {
@@ -1158,4 +1159,88 @@ fn nonregular_or_missing_raw_coordination_is_unavailable_and_is_not_created() {
     assert_eq!(show(home.path())["rescan"]["state"], "unavailable");
     assert!(home.path().join("raw.lock").is_dir());
     assert!(!home.path().join("knowledge.db").exists());
+}
+
+/// Decision 109: while a forget of imported history is not applied, the page lists no repository
+/// only imported documents name, and says so; its proof is read from raw.db's own connection, as
+/// the attached copy's tables would read as no forget at all. Excluding one by the selector the
+/// page showed before is one to retry (503), not "not found". Once applied, it is listed and
+/// excluded.
+#[test]
+fn a_repository_only_imported_history_names_waits_for_its_forget() {
+    use crate::forget::history::fixture::{mark_applied, register};
+    let mut store = Store::new();
+    let home = store.home.path().to_owned();
+    std::fs::write(home.join("config.toml"), "[summary]\ncurate = false\n").unwrap();
+    store.imported("plain", "notes-app", 1_000, "A note", "Imported work.");
+    store.run();
+    let wanted = selector(&crate::import::repo("notes-app"));
+    let listed = |shown: &Value| {
+        (shown["repositories"].as_array().unwrap().iter()).any(|r| r["selector"] == wanted.as_str())
+    };
+    assert!(listed(&show(&home)));
+    register(&home, "j1", "t1");
+    let shown = show(&home);
+    assert_eq!(shown["available"], true);
+    assert_eq!(shown["history_withheld"], true);
+    assert!(!listed(&shown), "{shown}");
+    let body = serde_json::to_vec(&json!({"selector": wanted, "undo": false})).unwrap();
+    let refusal = exclude(&home, &Mutex::new(()), &body).unwrap_err();
+    assert_eq!((refusal.status, refusal.code), (503, "privacy_unavailable"));
+    mark_applied(&home, "j1", "t1");
+    let shown = show(&home);
+    assert!(shown.get("history_withheld").is_none(), "{shown}");
+    assert!(listed(&shown));
+    assert_eq!(
+        exclude(&home, &Mutex::new(()), &body).unwrap()["excluded"],
+        true
+    );
+}
+
+/// Decision 109: whether a row stands for an entry that only reads as it depends on every name
+/// that reads as it, those only imported history holds among them. While a forget of imported
+/// history is not applied, an undo that would be judged without them is one to retry (503),
+/// nothing written; once applied it is judged with them, here refused as another's.
+#[test]
+fn an_undo_judged_on_names_imported_history_holds_waits_for_its_forget() {
+    const A: &str = "github.com/o/secret-a1";
+    let mut store = Store::new();
+    let home = store.home.path().to_owned();
+    std::fs::write(
+            home.join("config.toml"),
+            "[summary]\ncurate = false\n[redaction]\nextra_rules = [{ id = 'secret', regex = 'secret-[a-z][0-9]' }]\n",
+        )
+        .unwrap();
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let masked = crate::capture::exclusion_label("repo", A, &settings);
+    store.said("sa", &masked, 1_000, "Masked label journey.");
+    // A repository only imported history names, which reads as A's label too.
+    store
+        .raw
+        .append_imports(vec![crate::raw::ImportDoc {
+            uid: "oboete-v1:o1".into(),
+            source: "oboete-v1".into(),
+            source_id: "o1".into(),
+            kind: "decision".into(),
+            repo: "github.com/o/secret-b2".into(),
+            session: "v1".into(),
+            ts: 2_000,
+            title: "A note".into(),
+            body: "Imported work.".into(),
+        }])
+        .unwrap();
+    store.run();
+    store.raw.exclude_capture(("repo", A), false).unwrap();
+    let saving = Mutex::new(());
+    let post =
+        |body: serde_json::Value| capture(&home, &saving, &serde_json::to_vec(&body).unwrap());
+    let undo = json!({"selector": selector(&masked), "undo": true});
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    let before = store.raw.max_op_seq().unwrap();
+    let refusal = post(undo.clone()).unwrap_err();
+    assert_eq!((refusal.status, refusal.code), (503, "privacy_unavailable"));
+    assert_eq!(store.raw.max_op_seq().unwrap(), before);
+    crate::forget::history::fixture::mark_applied(&home, "j1", "t1");
+    assert_eq!(post(undo).unwrap_err().code, "never_other");
+    assert_eq!(store.raw.max_op_seq().unwrap(), before);
 }

@@ -11,11 +11,16 @@ fn the_repositories_records_are_counted_from_an_index() {
     s.said("s2", "github.com/o/b", 3_000, "Other words.");
     s.run();
     let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
-    let plan: Vec<String> = (k.prepare(&format!("EXPLAIN QUERY PLAN {REPOS}")).unwrap())
-        .query_map([], |r| r.get(3))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
+    let plan: Vec<String> = (k
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            REPOS.replace("{imported}", REPOS_IMPORTED)
+        ))
+        .unwrap())
+    .query_map([], |r| r.get(3))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap();
     assert!(
         !plan.iter().any(|p| p.starts_with("SCAN raw_docs")),
         "{plan:?}"
@@ -24,7 +29,10 @@ fn the_repositories_records_are_counted_from_an_index() {
         plan.iter().any(|p| p.contains("INDEX raw_docs_repo")),
         "{plan:?}"
     );
-    let records: Vec<(String, i64)> = (repos_in(&k).unwrap().iter())
+    let records: Vec<(String, i64)> =
+        (repos_in(&k, Some(&crate::forget::history::fixture::proof()))
+            .unwrap()
+            .iter())
         .map(|r| {
             (
                 r["repo"].as_str().unwrap().to_owned(),
@@ -84,10 +92,13 @@ fn the_repositories_names_are_the_lists_names_read_from_indexes() {
         .unwrap();
     assert_eq!(gone, 1);
     let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
-    let listed: std::collections::BTreeSet<String> = (repos_in(&k).unwrap().iter())
+    let listed: std::collections::BTreeSet<String> =
+        (repos_in(&k, Some(&crate::forget::history::fixture::proof()))
+            .unwrap()
+            .iter())
         .map(|r| r["repo"].as_str().unwrap().to_owned())
         .collect();
-    let names = repo_names_in(&k).unwrap();
+    let names = repo_names_in(&k, Some(&crate::forget::history::fixture::proof())).unwrap();
     let set: std::collections::BTreeSet<String> = names.iter().cloned().collect();
     assert_eq!(set, listed);
     assert_eq!(names.len(), set.len(), "a name twice: {names:?}");
@@ -100,7 +111,10 @@ fn the_repositories_names_are_the_lists_names_read_from_indexes() {
         assert!(set.contains(&name), "{name} of {set:?}");
     }
     let plan: Vec<String> = (k
-        .prepare(&format!("EXPLAIN QUERY PLAN {REPO_NAMES}"))
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            REPO_NAMES.replace("{imported}", REPO_NAMES_IMPORTED)
+        ))
         .unwrap())
     .query_map([], |r| r.get(3))
     .unwrap()
@@ -7551,4 +7565,74 @@ fn a_range_is_read_as_rfc_9110_has_it() {
     assert_eq!(byte_range(None, 10), None);
     assert!(parse_tag(&"A".repeat(32)).is_none());
     assert!(parse_tag(&"a".repeat(31)).is_none());
+}
+
+/// Decision 109: while a forget of imported history is not applied, the feed leaves the saved
+/// notes out and says so, the cards as before; the repository list gives no imported count (no
+/// row says none) and no repository only imported documents name; the page's version moves at
+/// the registration and again at the apply. Once applied, all are back.
+#[test]
+fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
+    use crate::forget::history::fixture::{mark_applied, register};
+    let (mut s, v) = feed_fixture();
+    let fern = "example.test/team/fern";
+    let (_, card) = feed_cards(&mut s, fern, 4_000, &["A card"]);
+    let note = s.note("a", fern, 3_000, "First note", "Saved words.");
+    s.imported("x", "imported-only", 3_200, "Imported", "Imported.");
+    s.run();
+    let home = s.home.path().to_owned();
+    let card = ("card".to_owned(), format!("{card}.0"));
+    let only = crate::import::repo("imported-only");
+    let version = || get(&v, "/api/version")["v"].clone();
+    // Apart from the version, what only a history forget moves (Settings' privacy state): none
+    // before one, then the registered and the applied counts.
+    let history = || get(&v, "/api/version").get("history").cloned();
+    assert_eq!(history(), None);
+    let before = version();
+    let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
+    assert!(page.get("history_forgets").is_none(), "{page}");
+    register(&home, "j1", "t1");
+    let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
+    assert_eq!(feed_ids(&page), std::slice::from_ref(&card));
+    assert_eq!(page["withheld"], json!(true));
+    assert_eq!(page["history_forgets"], json!(1));
+    let repos = get(&v, "/api/repos");
+    assert_eq!(repos["withheld"], json!(true));
+    let rows = repos["repos"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["repo"] == fern), "{repos}");
+    assert!(rows.iter().all(|r| r.get("imported").is_none()), "{repos}");
+    assert!(!rows.iter().any(|r| r["repo"] == only), "{repos}");
+    let registered = version();
+    assert_ne!(registered, before);
+    assert_eq!(history(), Some(json!("1.0")));
+    mark_applied(&home, "j1", "t1");
+    assert_ne!(version(), registered);
+    assert_eq!(history(), Some(json!("1.1")));
+    let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
+    assert_eq!(feed_ids(&page), [card, ("note".to_owned(), note)]);
+    assert!(page.get("withheld").is_none(), "{page}");
+    // A page read before the forget sees it though it never saw the withholding (Codex on #1020).
+    assert_eq!(page["history_forgets"], json!(1));
+    let repos = get(&v, "/api/repos");
+    assert!(repos.get("withheld").is_none(), "{repos}");
+    let rows = repos["repos"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["repo"] == only && r["imported"] == json!(1)),
+        "{repos}"
+    );
+}
+
+/// A forget that holds the reading fence past its wait makes a page to read again (503), not a
+/// failure (500). Waits the fence's 10 s once.
+#[test]
+fn a_page_read_while_a_forget_holds_the_fence_is_one_to_retry() {
+    let (mut s, v) = feed_fixture();
+    feed_cards(&mut s, "example.test/team/fern", 4_000, &["A card"]);
+    s.run();
+    let held = crate::dispatch::exclusive(s.home.path()).unwrap();
+    let r = v.route("GET", "/api/feed", &[HOST, TOKEN]);
+    drop(held);
+    assert_eq!(r.status, 503, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(v.route("GET", "/api/feed", &[HOST, TOKEN]).status, 200);
 }

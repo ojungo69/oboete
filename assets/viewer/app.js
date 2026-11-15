@@ -634,9 +634,11 @@ function activeFeed(state) {
 
 function updateFeedState(state) {
   if (!activeFeed(state)) return;
-  const message = state.loading ? t('feed_loading')
+  let message = state.loading ? t('feed_loading')
     : state.error ? t('feed_error', { reason: failureMessage(state.error) })
       : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
+  // Decision 109: the notes a forget of imported history withholds are not "no items".
+  if (state.withheld && !state.loading && !state.error) message = [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ');
   state.notice.textContent = message;
   state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
   state.notice.classList.toggle('loading', state.loading);
@@ -669,6 +671,17 @@ async function readFeed(state, mode) {
       if (mode === 'more') params.before = state.next;
       const page = await api('feed', params);
       if (!activeFeed(state)) return false;
+      const was = [state.withheld, state.forgets];
+      state.withheld = Boolean(page.withheld);
+      state.forgets = page.history_forgets ?? 0;
+      // Decision 109: a forget of imported history registered, or its withholding begun or ended,
+      // reads the feed again from the top. The notes shown may be withheld or gone, a registration
+      // and its apply between two reads showing no withholding at all, and the notes withheld go
+      // back in their place: a live read stops at the newest item shown, and More goes on below
+      // the oldest (Codex and CodeRabbit on #1020).
+      // The read from the top answers for this one: one that fails leaves the poll's marker, so the
+      // next poll reads again (CodeRabbit on #1020).
+      if (mode !== 'initial' && (was[0] !== state.withheld || was[1] !== state.forgets)) return show();
       const entries = [];
       const unseen = new Set();
       let joined = false;
@@ -686,6 +699,7 @@ async function readFeed(state, mode) {
         if (unseen.has(key)) continue;
         const entry = feedEntry(item);
         entry.dataset.category = feedCategory(item);
+        entry.dataset.key = key;
         entries.push(entry);
         unseen.add(key);
       }
@@ -1223,6 +1237,7 @@ const TEXT = {
   repository: ['Repository', 'リポジトリ'],
   all_repositories: ['All repositories', 'すべてのリポジトリ'],
   repo_counts: ['{repo} ({claims} claims, {imported} imported, {records} records)', '{repo} (主張 {claims} 件、インポート {imported} 件、記録 {records} 件)'],
+  repo_counts_plain: ['{repo} ({claims} claims, {records} records)', '{repo} (主張 {claims} 件、記録 {records} 件)'],
   current_checkout: ['Current checkout', '現在のチェックアウト'],
   last_activity: ['Last activity: {time}', '最終更新: {time}'],
   refresh: ['Refresh', '更新'],
@@ -1407,6 +1422,7 @@ const TEXT = {
   feed_loading: ['Loading…', '読み込み中…'],
   feed_empty: ['No items to display', '表示する項目はありません'],
   feed_exhausted: ['No more items', 'すべての項目を表示しました'],
+  feed_withheld: ['Imported history, saved notes included, is not shown until a forget of it has finished. Please try again shortly.', 'インポートした履歴（保存したメモを含む）は、忘れる処理が終わるまで表示しません。しばらくしてから、もう一度お試しください。'],
   feed_error: ['Could not load items: {reason}', '項目を読み込めませんでした: {reason}'],
   feed_card: ['card', 'カード'],
   feed_summary: ['Session summary', 'セッションの要約'],
@@ -1682,6 +1698,7 @@ const TEXT = {
   privacy_readback_failed: ['{receipt} The updated privacy state could not be read. Refresh privacy state to confirm it; do not repeat the write.', '{receipt} 更新後のプライバシー状態を読み込めませんでした。書き込みは繰り返さず、「プライバシーの状態を更新」で確認してください。'],
   privacy_reading: ['Reading the repositories recorded…', '記録しているリポジトリを読み込んでいます…'],
   privacy_unavailable: ['Privacy state could not be read or changed. Nothing is reported as complete.', 'プライバシーの状態を読み込み・変更できませんでした。完了したとは判定していません。'],
+  privacy_history_withheld: ['Repositories that only imported history names are not listed until a forget of it has finished.', 'インポートした履歴にだけ名前があるリポジトリは、忘れる処理が終わるまで一覧に表示されません。'],
   privacy_selector: ['This repository selection is invalid. Reload its state.', 'リポジトリの選択が無効です。状態を再読み込みしてください。'],
   repo_not_found: ['This repository is no longer in the stored list. Reload its state.', 'このリポジトリは保存済み一覧にありません。状態を再読み込みしてください。'],
   repo_changed: ['The repository selection changed. Reload its state.', 'リポジトリの選択対象が変わりました。状態を再読み込みしてください。'],
@@ -2938,7 +2955,8 @@ function applyLanguage() {
 function labelRepo(option) {
   if (!option.value) option.textContent = t('all_repositories');
   else {
-    option.textContent = t('repo_counts', option.dataset);
+    // Decision 109: no imported count while a forget of imported history withholds it, never 0.
+    option.textContent = t(option.dataset.imported === undefined ? 'repo_counts_plain' : 'repo_counts', option.dataset);
     option.title = `${option.value}${option.value === currentRepo ? ` (${t('current_checkout')})` : ''}${option.dataset.last === undefined ? '' : `; ${t('last_activity', { time: new Date(Number(option.dataset.last)).toLocaleString(lang) })}`}`;
   }
 }
@@ -5073,6 +5091,10 @@ function hiddenSection(f) {
 // The page's reads of the privacy state, numbered as they start: only the last one started is
 // drawn, whichever form it reaches (Codex and CodeRabbit on #806).
 let privacyReads = 0;
+// A change the poll saw that the privacy state has not been read again for (`poll`), and the
+// version's history forgets it was last read under.
+let privacyStale = false;
+let privacyHistory = null;
 
 async function refreshPrivacy(f) {
   if (!f) return false;
@@ -5170,6 +5192,7 @@ function privacySection(f) {
   let listing = el('p', 'desc', t(state.pending ? 'privacy_reading' : 'privacy_unavailable'));
   if (state.available) listing = rows.length ? el('ul', null, ...rows) : el('p', 'desc', t('privacy_none'));
   return el('section', 'privacy-state', el('h3', null, t('privacy_h')), el('p', 'desc', t('privacy_desc')),
+    state.history_withheld ? el('p', 'desc', t('privacy_history_withheld')) : null,
     listing,
     ...(state.pending ? [] : [el('h4', null, t('rescan_h')), el('p', 'desc', t(Object.hasOwn(TEXT, scanKey) ? scanKey : 'rescan_unavailable')),
       scan.processed !== null && scan.total !== null ? el('p', 'desc', t('rescan_progress', scan)) : null]), refresh);
@@ -10875,7 +10898,7 @@ async function loadRepos() {
   const keep = reposLoaded ? $('repo').value : view === 'timeline' ? '' : current;
   currentRepo = current;
   const listed = current === '' || repos.some((r) => r.repo === current) ? repos
-    : [...repos, { repo: current, claims: 0, imported: 0, records: 0 }];
+    : [...repos, answer.withheld ? { repo: current, claims: 0, records: 0 } : { repo: current, claims: 0, imported: 0, records: 0 }];
   const options = listed.map((r) => {
     const o = new Option('', r.repo);
     for (const key of ['repo', 'claims', 'imported', 'records', 'last']) {
@@ -10976,7 +10999,7 @@ async function poll() {
   try {
     if ((view === 'my_work' && mw.rows) || view === 'my_rules') myWorkTimes();
     await pollMaintenance();
-    const { v, waiting, held } = await api('version');
+    const { v, waiting, held, history = '' } = await api('version');
     queue = { waiting, held };
     drawQueue();
     $('live').classList.remove('off');
@@ -10991,6 +11014,19 @@ async function poll() {
       || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
     // Settings reads no list at a change: the next view that uses it does (`show`).
     if (view === 'settings' && changed) reposStale = true;
+    // The privacy state is read again in place when a forget of imported history is registered or
+    // applied, which changes the repositories it names (decision 109; CodeRabbit on #1020): not at
+    // each record captured, which would redraw it under the owner's click (the ponytail review of
+    // #1020). Not over a write on its way, whose read of its receipt a later read would take: a
+    // later poll reads it.
+    if (view === 'settings' && privacyHistory !== null && history !== privacyHistory) privacyStale = true;
+    privacyHistory = history;
+    if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
+      privacyStale = false;
+      // A read that failed, or that a form drawn from another meanwhile did not take (a provider's
+      // write keeps the state it had), is read again at a later poll (Codex and CodeRabbit on #1020).
+      void refreshPrivacy(form).then((drawn) => { if (!drawn) privacyStale = true; });
+    }
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
     version = v;

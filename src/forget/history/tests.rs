@@ -79,11 +79,8 @@ fn a_history_forget_moves_the_fence_and_the_denied_count() {
 enum Reach {
     /// It takes `&Applied`: no caller reaches it without the proof.
     Proof,
-    /// It reads them for no reader: why.
+    /// It reads them for no reader, or as the owner's own act: why.
     Without(&'static str),
-    /// A reader not yet made to take the proof: which surface. Registration (5b) waits for none
-    /// to be left.
-    Later(&'static str),
     /// A constant of SQL that only functions taking the proof read.
     Through,
 }
@@ -126,7 +123,10 @@ const READERS: &[(&str, &str, Reach)] = &[
     (
         "src/forget.rs",
         "uid_preview",
-        Reach::Later("forget --uid's preview"),
+        Reach::Without(
+            "the owner's own forget of a uid named: the viewer gets counts, the CLI the title \
+             through the gate, which the op log it falls back on holds too",
+        ),
     ),
     (
         "src/mcp.rs",
@@ -145,21 +145,9 @@ const READERS: &[(&str, &str, Reach)] = &[
     ("src/search/b.rs", "imported_side", Reach::Proof),
     ("src/search/b.rs", "imported_known", Reach::Proof),
     ("src/search/b.rs", "imported_time", Reach::Proof),
-    (
-        "src/view.rs",
-        "notes_page",
-        Reach::Later("the viewer's feed"),
-    ),
-    (
-        "src/view.rs",
-        "REPOS",
-        Reach::Later("the viewer's repositories"),
-    ),
-    (
-        "src/view.rs",
-        "REPO_NAMES",
-        Reach::Later("the viewer's privacy page"),
-    ),
+    ("src/view.rs", "notes_page", Reach::Proof),
+    ("src/view.rs", "REPOS_IMPORTED", Reach::Through),
+    ("src/view.rs", "REPO_NAMES_IMPORTED", Reach::Through),
 ];
 
 /// Whether a signature takes the proof: a parameter of type `&Applied`, not an optional one
@@ -289,8 +277,9 @@ fn readers_of(
 }
 
 /// 5c: every reader of knowledge.db's imported documents is in the reach table, and each one it
-/// says takes the proof does, so no new reader comes in unguarded and none loses its guard. A
-/// reader listed for later that takes the proof is moved to `Proof`.
+/// says takes the proof does, so no new reader comes in unguarded and none loses its guard. Every
+/// reader is guarded or says why not since 1a-4; registration (5b) still waits for what this
+/// table cannot see (docs/milestone-5-plan.md, 5c).
 #[test]
 fn every_reader_of_the_imported_documents_is_in_the_reach_table() {
     let (found, texts) = sql_readers();
@@ -312,7 +301,7 @@ fn every_reader_of_the_imported_documents_is_in_the_reach_table() {
         let proof = found[key];
         match reach {
             Reach::Proof => assert!(proof, "{key:?} is listed as taking the proof and does not"),
-            Reach::Without(why) | Reach::Later(why) => {
+            Reach::Without(why) => {
                 assert!(
                     !proof,
                     "{key:?} takes the proof: list it as Proof, not as {why:?}"
@@ -376,4 +365,28 @@ fn the_reach_test_counts_only_a_proof_its_reader_cannot_run_without() {
             ("b.rs:other".to_owned(), false)
         ]
     );
+}
+
+/// Doctor's line names the history forgets knowledge.db has not applied, a job applied again
+/// under another token among them, and is none once it has applied them all.
+#[test]
+fn doctor_names_the_history_forgets_not_yet_applied() {
+    let set = |pairs: &[(&str, &str)]| -> std::collections::BTreeSet<super::Pair> {
+        pairs
+            .iter()
+            .map(|(j, t)| ((*j).to_owned(), (*t).to_owned()))
+            .collect()
+    };
+    let registered = set(&[("j1", "t1"), ("j2", "t2")]);
+    assert_eq!(
+        super::doctor_line(&registered, &set(&[("j1", "t1")])).as_deref(),
+        Some(
+            "imported history is withheld: 1 forget(s) of a repository's history not yet \
+             applied in knowledge.db"
+        )
+    );
+    assert!(super::doctor_line(&registered, &set(&[])).is_some_and(|l| l.contains(": 2 forget")));
+    assert_eq!(super::doctor_line(&registered, &registered), None);
+    assert!(super::doctor_line(&set(&[("j1", "t2")]), &set(&[("j1", "t1")])).is_some());
+    assert_eq!(super::doctor_line(&set(&[]), &set(&[])), None);
 }
