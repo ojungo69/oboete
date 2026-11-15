@@ -7748,22 +7748,29 @@ await run('show()');
 for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
 const list=document.getElementById('list');
 assert(text(list).includes('Release tagging')&&text(list).includes('Parser built'),text(list));
-page={items:[card],next:null,withheld:true};
+page={items:[card],next:null,withheld:true,history_forgets:1};
 await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
 assert(!text(list).includes('Release tagging'),`a withheld note leaves the page: ${text(list)}`);
 assert(text(list).includes('Parser built'),text(list));
 const notice=run('feed.notice.textContent');
 assert(notice.includes('is not shown until a forget of it has finished'),notice);
 // Once the forget is applied, the feed is read again from the top: a live read alone stops at the
 // card shown, and the note below it never came back (CodeRabbit on #1020).
-page={items:[card,note],next:null};
+page={items:[card,note],next:null,history_forgets:1};
 await run('readFeed(feed,"live")');
 for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
 const relisted=document.getElementById('list');
 assert(text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note is back in its place: ${text(relisted)}`);
 const after=run('feed.notice.textContent');
 assert(!after.includes('is not shown until'),after);
-console.log('PASS: a note the feed showed leaves it once imported history is withheld, the page says why, and it comes back once the forget is applied');
+// A forget registered and applied between two reads, which took the note: no read saw it withheld,
+// and the note leaves all the same (Codex on #1020).
+page={items:[card],next:null,history_forgets:2};
+await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert(!text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note a forget took leaves: ${text(relisted)}`);
+console.log('PASS: a note the feed showed leaves it once imported history is withheld or a forget takes it unseen, the page says why, and it comes back once the forget is applied');
 }
 
 // Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again at a change the poll

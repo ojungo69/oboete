@@ -3383,8 +3383,17 @@ fn feed(
         crate::turns::page(&k, &raw, scope, cursor.summaries.as_ref(), limit, &rules)?;
     let (prompts, prompts_more) = raw.prompts(scope, cursor.prompts.as_ref(), limit, &rules)?;
     // A note is its repository's document, of no session's work: a session's page shows none.
-    // Withheld, the notes' place in the cursor stays, so the page goes on from it once applied.
+    // Withheld, the notes' place in the cursor stays; the page reads again from the top once the
+    // forget is applied (`history_forgets` below).
     let withheld = named.is_none() && applied.is_none();
+    // How many forgets of imported history raw.db holds: a page read before one reads again from
+    // the top, though a registration and its apply between two of its reads show it no
+    // withholding, as the notes it shows may be gone (Codex on #1020). None, no key: a store with
+    // no history forget answers as before.
+    let forgets = match named {
+        None => raw.history_forgets()?.len(),
+        Some(_) => 0,
+    };
     let (notes, notes_more) = match (&named, &applied) {
         (None, Some(applied)) => notes_page(
             &k,
@@ -3462,6 +3471,9 @@ fn feed(
     let mut page = json!({"items": items, "next": next});
     if withheld {
         page["withheld"] = json!(true);
+    }
+    if forgets > 0 {
+        page["history_forgets"] = json!(forgets);
     }
     Ok(page)
 }

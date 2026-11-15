@@ -1554,9 +1554,10 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   raw.db 自身の接続から取る（ATTACH した写しの表は `forget::history` が見る main の schema に無く、forget が無い
   と読めてしまう）。除外・送信の POST は fence をその関数の中だけで持ち（書き込みが取る dispatch の lock と
   ぶつかるため）、反映待ちの間に見つからない selector と、取り込み文書の名前も見て決める取り消しは 503。
-  ページの version は履歴の forget の登録と反映で動く。doctor は反映待ちの数を出す。ページは保留が解けると
-  一覧を先頭から読み直し、設定画面は version が動くとプライバシーの状態を読み直す（書き込みの途中なら次の
-  poll で）。mem_search の続きは、raw.db が別のファイルになったとき（復元）も失効する。forget --uid の preview は
+  ページの version は履歴の forget の登録と反映で動く。doctor は反映待ちの数を出す。一覧の答えは raw.db の
+  履歴の forget の数を持ち（0 なら持たない）、ページはその数か保留が変わると一覧を先頭から読み直す（登録と
+  反映が 2 回の読みの間に済むと保留は見えない）。設定画面は version が動くとプライバシーの状態を読み直す
+  （書き込みの途中なら次の poll で）。mem_search の続きは、raw.db が別のファイルになったとき（復元）も失効する。forget --uid の preview は
   所有者自身の操作で、op log にも同じ題名があるので証拠を取らない。到達表の `Later` はこれで 0 になったが、
   5b が登録を開く前に、表に見えないもの（反映とその再開、raw.db の取り込み work state の読み手、登録が
   dispatch の排他を取ること、OpenCode の plugin が持つ写し）が要る。

@@ -7585,10 +7585,13 @@ fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
     let only = crate::import::repo("imported-only");
     let version = || get(&v, "/api/version")["v"].clone();
     let before = version();
+    let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
+    assert!(page.get("history_forgets").is_none(), "{page}");
     register(&home, "j1", "t1");
     let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
     assert_eq!(feed_ids(&page), std::slice::from_ref(&card));
     assert_eq!(page["withheld"], json!(true));
+    assert_eq!(page["history_forgets"], json!(1));
     let repos = get(&v, "/api/repos");
     assert_eq!(repos["withheld"], json!(true));
     let rows = repos["repos"].as_array().unwrap();
@@ -7602,6 +7605,8 @@ fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
     let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
     assert_eq!(feed_ids(&page), [card, ("note".to_owned(), note)]);
     assert!(page.get("withheld").is_none(), "{page}");
+    // A page read before the forget sees it though it never saw the withholding (Codex on #1020).
+    assert_eq!(page["history_forgets"], json!(1));
     let repos = get(&v, "/api/repos");
     assert!(repos.get("withheld").is_none(), "{repos}");
     let rows = repos["repos"].as_array().unwrap();

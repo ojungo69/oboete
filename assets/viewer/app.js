@@ -671,23 +671,17 @@ async function readFeed(state, mode) {
       if (mode === 'more') params.before = state.next;
       const page = await api('feed', params);
       if (!activeFeed(state)) return false;
-      const was = state.withheld;
+      const was = [state.withheld, state.forgets];
       state.withheld = Boolean(page.withheld);
-      // Decision 109: once the forget is applied, the notes it withheld go in their place: a live
-      // read stops at the newest item shown and More goes on below the oldest, so the feed is read
-      // again from the top (CodeRabbit on #1020).
-      if (was && !state.withheld && mode !== 'initial') {
+      state.forgets = page.history_forgets ?? 0;
+      // Decision 109: a forget of imported history registered, or its withholding begun or ended,
+      // reads the feed again from the top. The notes shown may be withheld or gone, a registration
+      // and its apply between two reads showing no withholding at all, and the notes withheld go
+      // back in their place: a live read stops at the newest item shown, and More goes on below
+      // the oldest (Codex and CodeRabbit on #1020).
+      if (mode !== 'initial' && (was[0] !== state.withheld || was[1] !== state.forgets)) {
         void show();
         return true;
-      }
-      // Decision 109: notes shown before a forget of imported history came to wait leave the page
-      // (Codex on #1020); a Refresh shows them in their place once it is applied.
-      if (state.withheld) {
-        for (const shown of [...state.list.children]) {
-          if (!shown.dataset?.key?.startsWith('note:')) continue;
-          state.keys.delete(shown.dataset.key);
-          shown.remove();
-        }
       }
       const entries = [];
       const unseen = new Set();
