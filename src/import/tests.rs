@@ -846,7 +846,7 @@ fn a_rule_that_finds_nothing_keeps_what_is_kept_under_none() {
 /// the review of #998).
 #[test]
 fn a_prompt_the_looks_again_mask_is_one_mask_under_a_rule_of_the_homes() {
-    let line = "curl -u admin:パスワードN3kL7pW2 https://h.test -u bob:pass && echo ok";
+    let line = "curl -u admin:パスワード暗号鍵七三九 https://h.test -u bob:pass && echo ok";
     let text = format!("{}\n{line}\n{}", "x".repeat(100), "y ".repeat(5_000));
     let rule = "[[redaction.extra_rules]]\nid = \"echo\"\nregex = 'echo ok'\n";
     let none = "[[redaction.extra_rules]]\nid = \"none\"\nregex = 'zz-never-[0-9]{9}'\n";
@@ -871,7 +871,8 @@ fn a_prompt_the_looks_again_mask_is_one_mask_under_a_rule_of_the_homes() {
         "{plain:.300}"
     );
     assert_eq!(stored(none), plain);
-    assert_eq!(stored(rule), "[REDACTED]\n…[clipped, 10166 chars in full]");
+    // 10,164: the prompt as stored, without the space it ends on.
+    assert_eq!(stored(rule), "[REDACTED]\n…[clipped, 10164 chars in full]");
 }
 
 /// What the home's gate finds in what is kept is masked too, where only the bundled rules' masks

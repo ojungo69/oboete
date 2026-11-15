@@ -153,8 +153,11 @@ regexes = [
     # another tool's -u: a URL, a format of date
     '''^["']?(?:https?|rediss?)://''',
     '''^["']?\+[^:]*%''',
-    # the placeholder as sessions in Japanese write it (`-u ユーザー名:パスワード`)
-    '''^["']?[^:]*["']?:["']?パスワード''',
+    # the placeholder as sessions in Japanese write it (`-u ユーザー名:パスワード`), Japanese words
+    # after it too (`パスワードを入力`, `パスワード。`): only kana, kanji and Japanese punctuation
+    # after it; anything else there is a password that starts with the word (`パスワード!2024`,
+    # `パスワード！２０２４`, `パスワード★七三九`)
+    '''^["']?[^:]*["']?:["']?パスワード[\p{Hiragana}\p{Katakana}\p{Han}ー・、。]*["']?[.,]?$''',
 ]
 
 [[rules]]
