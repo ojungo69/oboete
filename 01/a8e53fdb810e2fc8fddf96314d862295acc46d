@@ -1,0 +1,23 @@
+src/forget/history.rs
+  s_d169cd080e079e::t_85a7f53ea35ca8 54-65
+src/forget/history/tests.rs
+  s_d169cd080e079e::t_94d69011cd1af2 129-132,383-406
+src/setup.rs
+  s_d169cd080e079e::t_66e455859dc109 2805-2814
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "01a8e53fdb810e2fc8fddf96314d862295acc46d",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
