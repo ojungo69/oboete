@@ -2975,12 +2975,16 @@ fn a_continuation_expires_once_raw_db_is_another_file() {
     );
     s.run();
     let token = continuation(&body(mem(&server, json!({"query": "gateway retries"}))));
-    let raw = s.home.path().join("raw.db");
+    // Closed first: Windows renames no file a connection holds (CodeRabbit on #1020). The server
+    // opens raw.db per call.
+    let Store { home, raw: open } = s;
+    drop(open);
+    let raw = home.path().join("raw.db");
     rusqlite::Connection::open(&raw)
         .unwrap()
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
-    let copy = s.home.path().join("raw.db.copy");
+    let copy = home.path().join("raw.db.copy");
     std::fs::copy(&raw, &copy).unwrap();
     std::fs::rename(&copy, &raw).unwrap();
     let answer = mem(

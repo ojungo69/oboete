@@ -7737,9 +7737,13 @@ const text=node=>(typeof node==='string'?node:(node?.children||[]).map(text).joi
 const response=value=>({ok:true,status:200,json:async()=>value});
 const card={kind:'card',id:'5.0',ts:30,type:'feature',agent:'claude',repo_name:'fern',repo:'example.test/team/fern',title:'Parser built',subtitle:'',narrative:'Built.',facts:[],concepts:[],files_read:[],files_modified:[]};
 const note={kind:'note',id:'oboete-note:0123456789abcdef',ts:20,agent:null,repo_name:'fern',repo:'example.test/team/fern',title:'Release tagging',subtitle:'',narrative:'Releases are tagged from main.',facts:[],concepts:[],files_read:[],files_modified:[]};
-let page={items:[card,note],next:null};
+let page={items:[card,note],next:null},queued=[];
+// A queued null answers 503, a page to read again.
 ctx.fetch=url=>{
-  if(url.startsWith('/api/feed?'))return Promise.resolve(response(page));
+  if(url.startsWith('/api/feed?')){
+    const next=queued.length?queued.shift():page;
+    return Promise.resolve(next===null?{ok:false,status:503,json:async()=>({})}:response(next));
+  }
   if(url.startsWith('/api/repos'))return Promise.resolve(response({current:'',repos:[]}));
   return Promise.resolve(response({}));
 };
@@ -7770,6 +7774,12 @@ page={items:[card],next:null,history_forgets:2};
 await run('readFeed(feed,"live")');
 for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
 assert(!text(relisted).includes('Release tagging')&&text(relisted).includes('Parser built'),`the note a forget took leaves: ${text(relisted)}`);
+// The read from the top answers for the live one: when it fails, the poll keeps its marker and reads
+// again (CodeRabbit on #1020).
+queued=[{items:[card],next:null,history_forgets:3},null];
+const answered=await run('readFeed(feed,"live")');
+for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+assert.equal(answered,false,'a read from the top that fails answers so');
 console.log('PASS: a note the feed showed leaves it once imported history is withheld or a forget takes it unseen, the page says why, and it comes back once the forget is applied');
 }
 
@@ -7803,6 +7813,25 @@ assert.equal(reads,1,'not over a write on its way');
 settings.inert=false;
 await polled();
 assert.equal(reads,2,'the next poll reads it');
+// A form drawn from another while the read is on its way (a provider's write keeps the privacy state
+// it had) does not take it: a later poll reads it again (CodeRabbit on #1020).
+let release=null;
+const answer=response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}});
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/privacy?')){reads+=1;return new Promise(resolve=>{release=()=>resolve(answer);});}
+  return Promise.resolve(response({}));
+};
+v='p3';
+await polled();
+assert.equal(reads,3,'a change reads it');
+run('form={...form}');
+release();
+await settle();
+await polled();
+assert.equal(reads,4,'a read the form drawn meanwhile did not take is read again');
+release();
+await settle();
 delete document.visibilityState;
 run(`({view,form,version,reposLoaded,restsPolled}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
 console.log('PASS: Settings reads the privacy state again at a change, and not over a write on its way');

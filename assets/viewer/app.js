@@ -679,10 +679,9 @@ async function readFeed(state, mode) {
       // and its apply between two reads showing no withholding at all, and the notes withheld go
       // back in their place: a live read stops at the newest item shown, and More goes on below
       // the oldest (Codex and CodeRabbit on #1020).
-      if (mode !== 'initial' && (was[0] !== state.withheld || was[1] !== state.forgets)) {
-        void show();
-        return true;
-      }
+      // The read from the top answers for this one: one that fails leaves the poll's marker, so the
+      // next poll reads again (CodeRabbit on #1020).
+      if (mode !== 'initial' && (was[0] !== state.withheld || was[1] !== state.forgets)) return show();
       const entries = [];
       const unseen = new Set();
       let joined = false;
@@ -11019,7 +11018,10 @@ async function poll() {
     if (view === 'settings' && changed) privacyStale = true;
     if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
       privacyStale = false;
-      void refreshPrivacy(form);
+      // A form drawn from another meanwhile (a provider's write keeps the state it had) did not take
+      // the read: a later poll reads it again (CodeRabbit on #1020).
+      const f = form;
+      void refreshPrivacy(f).then(() => { if (form !== f) privacyStale = true; });
     }
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
