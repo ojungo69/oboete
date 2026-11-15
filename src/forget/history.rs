@@ -77,6 +77,50 @@ pub(crate) fn covered(raw: &Connection, uid: &str) -> Result<bool> {
         .query_row([uid], |r| r.get(0))?)
 }
 
+/// Whether a history forget covers the imported work state `source`'s `source_id`
+/// (`denied_imports`, kind 'ws'). Asked of a writer's raw.db.
+pub(crate) fn covered_ws(raw: &Connection, source: &str, source_id: &str) -> Result<bool> {
+    Ok(raw
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM denied_imports WHERE kind = 'ws' AND key = ?1)",
+        )?
+        .query_row([format!("{source}:{source_id}")], |r| r.get(0))?)
+}
+
+/// The source ids of `source`'s documents (kind 'uid', an import's uid being `source:source_id`)
+/// or imported work state (kind 'ws') a history forget covers, which an import takes as already
+/// imported (5c), their bodies rewritten by a purge (5e) or not.
+pub(crate) fn covered_ids(raw: &Connection, kind: &str, source: &str) -> Result<HashSet<String>> {
+    let mut st = raw.prepare_cached(
+        "SELECT substr(key, length(?2) + 2) FROM denied_imports
+         WHERE kind = ?1 AND substr(key, 1, length(?2) + 1) = ?2 || ':'",
+    )?;
+    let rows = st.query_map([kind, source], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether a history forget covers what op `body` of `kind` appends (5d): an imported document,
+/// its files or a note by its uid, imported work state by its source and source id.
+pub(crate) fn covered_op(
+    raw: &Connection,
+    kind: crate::raw::OpKind,
+    body: &serde_json::Value,
+) -> Result<bool> {
+    match kind {
+        crate::raw::OpKind::Import => match body["uid"].as_str() {
+            Some(uid) => covered(raw, uid),
+            None => Ok(false),
+        },
+        crate::raw::OpKind::WorkState => {
+            match (body["source"].as_str(), body["source_id"].as_str()) {
+                (Some(source), Some(id)) => covered_ws(raw, source, id),
+                _ => Ok(false),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Every uid a history forget covers, for what keeps no row of them though it reads none by uid
 /// (the carry of vectors into a new knowledge.db).
 pub(crate) fn covered_uids(raw: &Connection) -> Result<HashSet<String>> {

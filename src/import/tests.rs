@@ -423,6 +423,85 @@ fn files_only_files_a_moved_documents_files_where_it_is_filed() {
     assert_eq!(repos(&raw), [repo("free-mem"), repo("other")]);
 }
 
+/// Decision 109 (5d): a document a forget of its repository's imported history covers is not put
+/// again, nor its files, though claude-mem moved it to another project since: the line counts it
+/// as seen.
+#[test]
+fn a_document_a_history_forget_covers_is_not_put_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("claude-mem.db");
+    claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let first = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+    let o10 = docs(&raw)
+        .into_iter()
+        .find(|d| d.source_id == "o10")
+        .unwrap()
+        .uid;
+    crate::forget::history::fixture::register_covering(home.path(), "j1", "t1", &[&o10]);
+    with_files(&src, &[(10, json!(["src/a.rs"]), json!([]))]);
+    Connection::open(&src)
+        .unwrap()
+        .execute(
+            "UPDATE observations SET project = 'other' WHERE id = 10",
+            [],
+        )
+        .unwrap();
+    let stats = claude_mem(&mut raw, &src, &Default::default()).unwrap();
+    assert_eq!(
+        (stats.observations, stats.files, stats.seen),
+        (0, 0, first.observations + first.summaries + first.prompts)
+    );
+    let filed: Vec<String> = docs(&raw)
+        .into_iter()
+        .filter(|d| d.source_id == "o10")
+        .map(|d| d.repo)
+        .collect();
+    assert_eq!(filed, [repo("free-mem")]);
+    assert!(files_ops(&raw).is_empty());
+}
+
+/// Decision 109 (5d): a forget of its repository's imported history committed after the import
+/// read what it had imported leaves out the list it covers, counted as refused, and lets the rest
+/// of the batch in.
+#[test]
+fn a_list_a_forget_came_to_cover_is_refused_and_the_rest_goes_in() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let list = |id: &str| {
+        (
+            crate::raw::OpKind::WorkState,
+            json!({"repo": repo("free-mem"), "list": "plan", "fields": {"task": id},
+                "clock": 3_000, "at": 3_000, "source": "claude-mem:test", "source_id": id}),
+        )
+    };
+    Connection::open(home.path().join("raw.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO forget_history(job, token) VALUES ('j1', 't1');
+             INSERT INTO denied_imports(kind, key, job) VALUES ('ws', 'claude-mem:test:w1', 'j1');",
+        )
+        .unwrap();
+    let mut stats = Stats {
+        work_state: 2,
+        ..Default::default()
+    };
+    super::append_work_state(
+        &mut raw,
+        &[list("w1"), list("w2")],
+        &Default::default(),
+        &mut stats,
+    )
+    .unwrap();
+    assert_eq!((stats.work_state, stats.refused), (1, 1));
+    let ids: Vec<serde_json::Value> = work_ops(&raw)
+        .into_iter()
+        .map(|op| op["source_id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("w2")]);
+}
+
 fn counts(s: &Stats) -> (u64, u64, u64, u64, u64) {
     (s.observations, s.summaries, s.prompts, s.seen, s.empty)
 }

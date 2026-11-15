@@ -806,6 +806,11 @@ impl Oboete {
                     doc.uid
                 ));
             }
+            Ok(crate::raw::Noted::HistoryForgotten) => {
+                return failed(format!(
+                    "this note was forgotten with {repo}'s history: it is not saved again"
+                ));
+            }
             // Not `saved`: a repeated fingerprint's title need not be the one kept.
             Ok(crate::raw::Noted::Kept) => {
                 return text(format!(

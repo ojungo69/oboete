@@ -1513,7 +1513,9 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   uid = `source:source_id` は約束で制約ではない）、取り込みの work state は `source:source_id`（kind `ws`）。平文で持つ:
   record は外の id を持たないよう origin を hash にするが、1 つの文書の forget は Forget op に uid を平文で残し、
   拒否表もその uid を持つ（本文は持たない）。登録・ログからの入れ直し・復元の仕上げは、`forget_history` の行と同じ
-  transaction でこの表を書く（適用は、対象の無い repo の空の表と表の欠落を区別できない）。
+  transaction でこの表を書く（適用は、対象の無い repo の空の表と表の欠落を区別できない）。登録が選ぶのは
+  repo に入った op 自身の uid で、`source:source_id` から作らない（ある利用者の store では、取り込み文書の
+  9,794 件が v1 の移行で入った uid `<hash>:<id>` を持つ）。
 - **削除の世代**: 同じ transaction で raw.db の削除の世代を進める（5c）。
 - **store の形式**: 版 6 を知らない binary は版 6 の行を飛ばし（規則 9）、忘れた文書を見せる。だから
   `docs/store-format.md` の「home が得る形式」の型どおり、最初の版 6 の登録が、それを書く transaction で home を
@@ -1595,7 +1597,8 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
     `docs/store-format.md`）。work state op（1,140 件）は既存の `ops_work_state` で 0.01 秒。
 - **raw.db の読み手**（`work_state_in`、`native_work_writes`、`imported_list_fields`、`work_state_keys`）は
   拒否表を見る。`work_state_keys` は本文の source_id だけでなく拒否の identity も重複として扱う（purge で
-  本文が消えると source_id が消え、次の取り込みで戻るため）。
+  本文が消えると source_id が消え、次の取り込みで戻るため）。as built（1b-2、2026-11-16）: `work_state_keys`。
+  残りの 3 つは次の PR。
 
 #### 5d: 後から届くものと、派生物
 
@@ -1603,6 +1606,15 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   `append_imported_ops`、`append_note`、`append_ops_from` の transaction の中でも確かめ直す。確かめた後に
   forget が入った batch は対象を除いてやり直し、関係のない文書を詰まらせない。
 - 同じ fingerprint の note の保存し直し、project が移った同じ source_id、`--files` による再投入も止める。
+  as built（1b-2、2026-11-16）: 拒否表の分。claude-mem の取り込みは始めに拒否表の source id を読み、対象の行は
+  文書もファイルも入れずに「取り込み済み」と数える（claude-mem が project を移した行も、`--files` も同じ）。取り込みの
+  work state は `work_state_keys` が拒否の identity も取り込み済みとする。`append_ops_from` の transaction は op
+  ごとに拒否表を見直し、対象があれば batch を型つきの誤り（`HistoryCovered`）で戻す。文書の取り込みは対象を除いて
+  batch をやり直し、work state は 1 件ずつ入れ直して対象を `refused` に数え、note の保存は「忘れた」と答える
+  （`Noted::HistoryForgotten`。op log がまだ最初の保存を持つので、transaction の中で「保存済み」の判定より先に
+  見る。Codex on #1027）。note の uid は repo と題名と本文（か `sourceFingerprint`）から決まるので、保存し直しも
+  同じ uid で止まる。後から届く行の scope（登録より前に claude-mem が作り、登録の後に届く行）は、5b の要求が
+  Λ(R) と S を決めてから入れる。
 - My Work が忘れた work state op を参照していれば、provenance の op 参照から派生物も隠して purge する。
 - DENIED_COUNT/FENCE_COUNT、`Reading`、viewer の版とキャッシュの失効に、新しい拒否を反映する。
 

@@ -708,3 +708,245 @@ fn every_drain_applies_a_history_forget_waiting_first() {
         );
     }
 }
+
+/// 5d: an import leaves out a document, its files and a note a history forget covers; what the
+/// forget does not cover goes in.
+#[test]
+fn an_import_leaves_out_what_a_history_forget_covers() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let read = &["src/pay.rs"][..];
+    register_covering(&home, "j1", "t1", &["claude-mem:test:o1", "oboete-note:n1"]);
+    s.imported_with_files(
+        "o1",
+        ("alpha", "cm"),
+        "decision",
+        1_000,
+        "Zebrafinch retries",
+        read,
+        &[],
+    );
+    let kept = s.imported_with_files(
+        "o2",
+        ("alpha", "cm"),
+        "decision",
+        1_200,
+        "Heron backoff",
+        read,
+        &[],
+    );
+    s.note(
+        "n1",
+        "github.com/o/alpha",
+        1_300,
+        "Zebrafinch note",
+        "Saved words.",
+    );
+    s.run();
+    let k = crate::knowledge::open(&home).unwrap();
+    assert_eq!(held(&k, "claude-mem:test:o1", &[])[..2], [0, 0]);
+    assert_eq!(held(&k, "oboete-note:n1", &[])[0], 0);
+    assert_eq!(held(&k, &kept, &[])[..2], [1, 1]);
+    let ops: i64 = Connection::open(home.join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE type = 'import' AND json_extract(body, '$.uid') IN
+               ('claude-mem:test:o1', 'oboete-note:n1')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops, 0, "nothing covered is appended to raw.db");
+}
+
+/// 5d: a history forget committed after an import checked its batch, before the batch's own
+/// transaction: the batch leaves out what it covers and appends the rest, not held up by it.
+#[test]
+fn a_forget_committed_during_an_import_leaves_out_what_it_covers_and_lets_the_rest_in() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let docs: Vec<_> = ["o1", "o2"]
+        .iter()
+        .map(|id| {
+            crate::raw::Import::Doc(crate::raw::ImportDoc {
+                uid: format!("claude-mem:test:{id}"),
+                source: "claude-mem:test".into(),
+                source_id: (*id).into(),
+                kind: "decision".into(),
+                repo: crate::import::repo("alpha"),
+                session: "cm".into(),
+                ts: 1_000,
+                title: format!("Title {id}"),
+                body: "Body.".into(),
+            })
+        })
+        .collect();
+    let at = home.clone();
+    crate::raw::BEFORE_IMPORT_APPEND.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            register_covering(&at, "j1", "t1", &["claude-mem:test:o1"]);
+        }))
+    });
+    let appended = s.raw.append_import_items(docs, |_| {}).unwrap();
+    assert_eq!(appended, 1);
+    let uids: Vec<String> = Connection::open(home.join("raw.db"))
+        .unwrap()
+        .prepare("SELECT json_extract(body, '$.uid') FROM ops WHERE type = 'import'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(uids, ["claude-mem:test:o2"]);
+}
+
+/// 5d: inside an append's own transaction, an op a history forget covers refuses the batch with
+/// `HistoryCovered`, nothing written; imported work state is covered by its source and source id,
+/// and an import takes a covered list as already imported.
+#[test]
+fn an_append_refuses_a_covered_op_and_the_work_state_import_knows_a_covered_list() {
+    let s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    {
+        let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        raw.execute_batch(
+            "INSERT INTO forget_history(job, token) VALUES ('j1', 't1');
+             INSERT INTO denied_imports(kind, key, job) VALUES
+               ('uid', 'claude-mem:test:o1', 'j1'), ('ws', 'claude-mem:test:w7', 'j1');",
+        )
+        .unwrap();
+    }
+    let mut raw = crate::raw::open(&home).unwrap();
+    let doc = serde_json::json!({"uid": "claude-mem:test:o1", "source": "claude-mem:test",
+        "source_id": "o1", "kind": "decision", "repo": "claude-mem:alpha", "session": "cm",
+        "ts": 1_000, "title": "T", "body": "B"});
+    let err = raw
+        .append_ops(&[(crate::raw::OpKind::Import, doc)])
+        .unwrap_err();
+    assert!(err.is::<crate::raw::HistoryCovered>(), "{err:#}");
+    let list = serde_json::json!({"repo": "claude-mem:alpha", "list": "l", "fields": {},
+        "clock": 1, "at": 1, "source": "claude-mem:test", "source_id": "w7"});
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let err = raw
+        .append_imported_ops(&[(crate::raw::OpKind::WorkState, list)], &settings)
+        .unwrap_err();
+    assert!(err.is::<crate::raw::HistoryCovered>(), "{err:#}");
+    assert!(
+        raw.work_state_keys("claude-mem:test")
+            .unwrap()
+            .contains("w7")
+    );
+    assert!(
+        !raw.work_state_keys("claude-mem:other")
+            .unwrap()
+            .contains("w7")
+    );
+}
+
+/// 5d: a note a history forget covers is not saved again, though the op log still holds the
+/// note's first save (which answers a repeated note as kept): whether the forget was there before
+/// the save or came to cover it while the save was on its way (Codex on #1027).
+#[test]
+fn a_note_a_history_forget_covers_is_not_saved_again() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let repo = "github.com/o/alpha";
+    let note = |id: &str| crate::raw::ImportDoc {
+        uid: format!("{}:{id}", crate::raw::NOTE_SOURCE),
+        source: crate::raw::NOTE_SOURCE.into(),
+        source_id: id.into(),
+        kind: "note".into(),
+        repo: repo.into(),
+        session: crate::raw::NOTE_SESSION.into(),
+        ts: 1_000,
+        title: format!("Zebrafinch note {id}"),
+        body: "Saved words.".into(),
+    };
+    s.raw.append_imports(vec![note("n1"), note("n2")]).unwrap();
+    register_covering(&home, "j1", "t1", &["oboete-note:n1"]);
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let mut save = |doc: &crate::raw::ImportDoc| {
+        s.raw
+            .append_note(
+                doc,
+                (&[], &Default::default()),
+                repo,
+                &settings,
+                ("note", None),
+            )
+            .unwrap()
+    };
+    assert_eq!(save(&note("n1")), crate::raw::Noted::HistoryForgotten);
+    let at = home.clone();
+    crate::raw::BEFORE_IMPORT_APPEND.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            register_covering(&at, "j2", "t2", &["oboete-note:n2"]);
+        }))
+    });
+    assert_eq!(save(&note("n2")), crate::raw::Noted::HistoryForgotten);
+    let saves: i64 = Connection::open(home.join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE type = 'import'
+               AND json_extract(body, '$.uid') IN ('oboete-note:n1', 'oboete-note:n2')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(saves, 2, "the first saves alone");
+}
+
+/// #1025: a vector a set-aside copy of knowledge.db holds for a covered document stays behind
+/// when the copy's vectors are carried into the live one.
+#[test]
+fn a_set_aside_copy_carries_no_vector_of_what_a_history_forget_covers() {
+    use super::fixture::register_covering;
+    let mut s = crate::search::b::fixture::Store::new();
+    let home = s.home.path().to_owned();
+    let covered = s.imported(
+        "o1",
+        "alpha",
+        1_000,
+        "Zebrafinch retries",
+        "Zebrafinch retries.",
+    );
+    let kept = s.imported("o2", "alpha", 1_200, "Heron backoff", "Heron backoff.");
+    s.run();
+    crate::embed_phase::fixture::vectors(&s);
+    let sha = |k: &Connection, uid: &str| -> String {
+        k.query_row(
+            "SELECT src_sha FROM vector_keys WHERE kind IN ('k', 'p') AND key = ?1",
+            [uid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let (covered_sha, kept_sha) = {
+        let k = crate::knowledge::open(&home).unwrap();
+        (sha(&k, &covered), sha(&k, &kept))
+    };
+    // The live knowledge.db set aside, as a quarantine leaves it, and a new one in its place.
+    std::fs::rename(
+        home.join("knowledge.db"),
+        home.join("knowledge.db.quarantined-1"),
+    )
+    .unwrap();
+    for end in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(home.join(format!("knowledge.db{end}")));
+    }
+    register_covering(&home, "j1", "t1", &[&covered]);
+    let k = crate::knowledge::open(&home).unwrap();
+    crate::embed_phase::carry_set_aside(&home, &k, &s.raw).unwrap();
+    let cached = |sha: &str| -> i64 {
+        k.query_row(
+            "SELECT COUNT(*) FROM vectors WHERE src_sha = ?1",
+            [sha],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!((cached(&covered_sha), cached(&kept_sha)), (0, 1));
+}
