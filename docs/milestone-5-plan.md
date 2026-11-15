@@ -1611,8 +1611,8 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   work state は `work_state_keys` が拒否の identity も取り込み済みとする。`append_ops_from` の transaction は op
   ごとに拒否表を見直し、対象があれば batch を型つきの誤り（`HistoryCovered`）で戻す。文書の取り込みは対象を除いて
   batch をやり直し、work state は 1 件ずつ入れ直して対象を `refused` に数え、note の保存は「忘れた」と答える
-  （`Noted::HistoryForgotten`。op log がまだその uid を持つ間は transaction の「保存済み」の判定が先に答えるので、
-  transaction の前にも見る）。note の uid は repo と題名と本文（か `sourceFingerprint`）から決まるので、保存し直しも
+  （`Noted::HistoryForgotten`。op log がまだ最初の保存を持つので、transaction の中で「保存済み」の判定より先に
+  見る。Codex on #1027）。note の uid は repo と題名と本文（か `sourceFingerprint`）から決まるので、保存し直しも
   同じ uid で止まる。後から届く行の scope（登録より前に claude-mem が作り、登録の後に届く行）は、5b の要求が
   Λ(R) と S を決めてから入れる。
 - My Work が忘れた work state op を参照していれば、provenance の op 参照から派生物も隠して purge する。

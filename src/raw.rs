@@ -6339,6 +6339,13 @@ impl Raw {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
+        // Decision 109 (5d): what a history forget committed since the caller checked, asked before
+        // what the batch would repeat: a note saved before the forget is forgotten, not kept.
+        for (kind, body) in ops {
+            if crate::forget::history::covered_op(&tx, *kind, body)? {
+                return Err(HistoryCovered.into());
+            }
+        }
         // What the batch would repeat, asked in its own transaction (`append_note`): nothing is
         // written, and no seq returned.
         if let Some(kept) = kept
@@ -6361,10 +6368,6 @@ impl Raw {
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
-            // Decision 109 (5d): what a history forget committed since the caller checked.
-            if crate::forget::history::covered_op(&tx, *kind, body)? {
-                return Err(HistoryCovered.into());
-            }
             // A list imported from claude-mem is matched by its project's name too; a note, by its
             // repository's key alone.
             let (repo, imported) = (
@@ -6630,7 +6633,9 @@ impl Raw {
     /// (`indexed`, the imported consumer's checkpoints), so a save repeated before the worker
     /// indexed the first appends nothing either (Codex on #629). The op log, not the index, says
     /// it is kept, so a restore that lost the op and has not rewound the index yet keeps no note
-    /// away (Codex on #525).
+    /// away (Codex on #525). A note a forget of its repository's history covers is answered as
+    /// forgotten (`HistoryForgotten`, decision 109), asked in the transaction before whether it
+    /// is kept.
     pub fn append_note(
         &mut self,
         doc: &ImportDoc,
@@ -6643,9 +6648,6 @@ impl Raw {
         let origin = crate::forget::origin(&doc.source, &doc.source_id);
         if forgotten_uid(&self.conn, &doc.uid)? || denied(&self.conn, Some(&origin), &text)? {
             return Ok(Noted::Forgotten);
-        }
-        if crate::forget::history::covered(&self.conn, &doc.uid)? {
-            return Ok(Noted::HistoryForgotten);
         }
         let mut devices = self.op_devices()?;
         if !devices.contains(&self.device) {
@@ -6865,7 +6867,8 @@ impl Raw {
     }
 
     /// The claude-mem work state rows already imported from `source`, by their ids
-    /// (docs/claude-mem-import.md I4).
+    /// (docs/claude-mem-import.md I4), and those a forget of their repository's imported history
+    /// covers (decision 109), which an import takes as imported.
     pub fn work_state_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
         let mut keys = self.source_ids("work_state", source)?;
         // Decision 109 (5c): what a history forget covers is known, its body rewritten or not.

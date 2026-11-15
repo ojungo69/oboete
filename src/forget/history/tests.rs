@@ -845,17 +845,15 @@ fn an_append_refuses_a_covered_op_and_the_work_state_import_knows_a_covered_list
     );
 }
 
-/// 5d: a note a history forget covers is not saved again: one saved before the forget, which the
-/// op log still holds (the append alone would answer it as kept), and one the forget came to
-/// cover while its save was on its way.
+/// 5d: a note a history forget covers is not saved again, though the op log still holds the
+/// note's first save (which answers a repeated note as kept): whether the forget was there before
+/// the save or came to cover it while the save was on its way (Codex on #1027).
 #[test]
 fn a_note_a_history_forget_covers_is_not_saved_again() {
     use super::fixture::register_covering;
     let mut s = crate::search::b::fixture::Store::new();
     let home = s.home.path().to_owned();
     let repo = "github.com/o/alpha";
-    s.note("n1", repo, 1_000, "Zebrafinch note", "Saved words.");
-    register_covering(&home, "j1", "t1", &["oboete-note:n1"]);
     let note = |id: &str| crate::raw::ImportDoc {
         uid: format!("{}:{id}", crate::raw::NOTE_SOURCE),
         source: crate::raw::NOTE_SOURCE.into(),
@@ -867,6 +865,8 @@ fn a_note_a_history_forget_covers_is_not_saved_again() {
         title: format!("Zebrafinch note {id}"),
         body: "Saved words.".into(),
     };
+    s.raw.append_imports(vec![note("n1"), note("n2")]).unwrap();
+    register_covering(&home, "j1", "t1", &["oboete-note:n1"]);
     let settings = crate::capture::Settings::load(&home).unwrap();
     let mut save = |doc: &crate::raw::ImportDoc| {
         s.raw
@@ -887,16 +887,16 @@ fn a_note_a_history_forget_covers_is_not_saved_again() {
         }))
     });
     assert_eq!(save(&note("n2")), crate::raw::Noted::HistoryForgotten);
-    let n2: i64 = Connection::open(home.join("raw.db"))
+    let saves: i64 = Connection::open(home.join("raw.db"))
         .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM ops WHERE type = 'import'
-               AND json_extract(body, '$.uid') = 'oboete-note:n2'",
+               AND json_extract(body, '$.uid') IN ('oboete-note:n1', 'oboete-note:n2')",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(n2, 0);
+    assert_eq!(saves, 2, "the first saves alone");
 }
 
 /// #1025: a vector a set-aside copy of knowledge.db holds for a covered document stays behind
