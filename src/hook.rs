@@ -1784,6 +1784,12 @@ pub fn start_text_read(
     let memory_use = work && inject.memory_instructions;
     // docs/work-state.md L7: the work state section first, out of the same size, which the
     // manifest is fitted to what it leaves of.
+    // Milestone 5 D5 (#439): no forget commits from the work state's read until the manifest is
+    // built, for every reader of it (a hook and `oboete inject` hold their own fence around this
+    // and what they record; the viewer's Context page holds this one alone: CodeRabbit on #1028).
+    let _read = store
+        .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
+        .transpose()?;
     let now = crate::db::now_ms();
     let entries = match work.then(|| store.map(|s| s.work_state_entries(repo)).transpose()) {
         Some(Ok(entries)) => Some(entries.unwrap_or_default()),
@@ -1809,11 +1815,6 @@ pub fn start_text_read(
     let work_units = work.as_ref().map_or(0, |w| w.units());
     let use_units = crate::mem_search::MEMORY_USE.encode_utf16().count() + 1;
     let memory_use = memory_use && work_units + use_units <= inject.session_start_chars;
-    // Milestone 5 D5 (#439): no forget commits until the manifest is built, for every reader of
-    // it (a hook and `oboete inject` hold their own fence around this and what they record).
-    let _read = store
-        .map(|_| crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT))
-        .transpose()?;
     let manifest = match store {
         Some(store) => crate::consumer::manifest::text(
             home,

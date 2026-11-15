@@ -1600,7 +1600,9 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   本文が消えると source_id が消え、次の取り込みで戻るため）。as built（1b-2、2026-11-16）: `work_state_keys`。
   as built（1b-3、2026-11-16）: `work_state_in`（`work_state_read`・書き込みの返事・SessionStart の節）と
   `imported_list_fields`（My Work の subagent の停止）は、同じ読みの中で拒否表の ws identity を除く（どちらも答える
-  ときに読むだけで、結果を残さない）。拒否表の無い raw.db（この版の書き手がまだ開いていないもの）は何も除かない。
+  ときに読むだけで、結果を残さない）。`work_state_read`・書き込みの返事・SessionStart の節（viewer の Context
+  ページも）は、作業メモを読む前から答えを作り終えるまで読みの fence を持つ（CodeRabbit on #1028）。拒否表の無い
+  raw.db（この版の書き手がまだ開いていないもの）は何も除かない。
   `native_work_writes` は自前の work state（`source` の無い op）だけを読むので、5b の scope（repo と S）で入る。
   OpenCode の plugin が持つ写しは次の PR。
 

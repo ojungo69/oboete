@@ -2998,3 +2998,43 @@ fn a_continuation_expires_once_raw_db_is_another_file() {
         "{text}"
     );
 }
+
+/// Decision 109 (CodeRabbit on #1028): a read of work state and a write's answer hold the reading
+/// fence from their read until the answer is built, so what a forget registers under its
+/// exclusive hold is in no answer read around it: each waits for the hold, and leaves it out.
+#[test]
+fn a_work_state_answer_waits_for_a_forgets_hold_and_leaves_out_what_it_covers() {
+    let s = Store::new();
+    let home = s.home.path().to_owned();
+    let server = Oboete::new(&home, &checkout(&s, "r"));
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let imported = json!({"repo": "claude-mem:r", "list": "plan", "fields": {"task": "Zebrafinch"},
+        "clock": 1_000, "at": 1_000, "source": "claude-mem:test", "source_id": "w1"});
+    crate::raw::open(&home)
+        .unwrap()
+        .append_imported_ops(&[(crate::raw::OpKind::WorkState, imported)], &settings)
+        .unwrap();
+    let read = || read_state(&server, json!({"list": "plan"}));
+    assert!(read().contains("Zebrafinch"), "{}", read());
+    let held = crate::dispatch::exclusive(&home).unwrap();
+    let (shown, written) = std::thread::scope(|scope| {
+        let shown = scope.spawn(read);
+        let written = scope.spawn(|| body(write_state(&server, "plan", json!({"task": "Heron"}))));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // As a registration writes, under its hold.
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO forget_history(job, token) VALUES ('j1', 't1');
+                 INSERT INTO denied_imports(kind, key, job) VALUES ('ws', 'claude-mem:test:w1', 'j1');",
+            )
+            .unwrap();
+        drop(held);
+        (shown.join().unwrap(), written.join().unwrap())
+    });
+    assert!(!shown.contains("Zebrafinch"), "{shown}");
+    assert!(
+        written.contains("Heron") && !written.contains("Zebrafinch"),
+        "{written}"
+    );
+}
