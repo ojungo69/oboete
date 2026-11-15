@@ -164,11 +164,14 @@ const READERS: &[(&str, &str, Reach)] = &[
 ];
 
 /// Whether a signature takes the proof: a parameter of type `&Applied`, not an optional one
-/// (`Option<&Applied>` lets its body run without it).
+/// (`Option<&Applied>` lets its body run without it), nor one that only names the type
+/// (`impl Fn(&Applied)`, a where clause).
 fn takes_proof(signature: &str) -> bool {
-    regex::Regex::new(r"(?:^|[^<])&(?:crate::forget::history::)?Applied\b")
-        .unwrap()
-        .is_match(signature)
+    regex::Regex::new(
+        r"[(,]\s*(?:mut\s+)?\w+\s*:\s*&(?:'\w+\s+)?(?:crate::forget::history::)?Applied\b",
+    )
+    .unwrap()
+    .is_match(signature)
 }
 
 /// The item line regex: a `fn`, or a constant or static of SQL.
@@ -185,10 +188,13 @@ fn signature_at(lines: &[&str], at: usize) -> String {
     joined.split('{').next().unwrap_or_default().to_owned()
 }
 
+type Readers = std::collections::BTreeMap<(String, String), bool>;
+
 /// Each item of `src/` (test files left out) whose SQL reads an imported table, with whether it
 /// takes the proof (`takes_proof`; two items of one name in a file take it only if both do): the
 /// nearest `fn` or constant above each statement. And each file's text, by its path.
-type Readers = std::collections::BTreeMap<(String, String), bool>;
+// shortcut: a line scan, not a parse: SQL in an outer function below a nested `fn`, or a
+// statement built from pieces, is the review's to catch; parse with `syn` if one slips by.
 fn sql_readers() -> (Readers, std::collections::BTreeMap<String, String>) {
     let statement = regex::Regex::new(
         r"\b(?:FROM|JOIN|INTO|UPDATE|EXISTS\s*\(\s*SELECT\s+1\s+FROM)\s+imported(?:_fts|_files)?\b",
@@ -337,6 +343,13 @@ fn the_reach_test_counts_only_a_proof_its_reader_cannot_run_without() {
     ));
     assert!(!takes_proof(
         "fn a(k: &Connection, applied: Option<&crate::forget::history::Applied>)"
+    ));
+    assert!(takes_proof("fn a<'a>(k: &Connection, proof: &'a Applied)"));
+    assert!(!takes_proof(
+        "fn a(k: &Connection, f: impl Fn(&Applied) -> bool)"
+    ));
+    assert!(!takes_proof(
+        "fn a<F>(k: &Connection, f: F) where F: Fn(&Applied)"
     ));
     let texts = [
         (
