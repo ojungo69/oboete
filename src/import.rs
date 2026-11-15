@@ -31,7 +31,8 @@ pub struct Stats {
     pub empty: u64,
     /// Work state rows imported as work state ops (docs/claude-mem-import.md I4).
     pub work_state: u64,
-    /// Work state rows the checks a write passes refused.
+    /// Work state rows the checks a write passes refused, and those a forget of their
+    /// repository's imported history came to cover during the run (decision 109).
     pub refused: u64,
     /// Work state rows of a project whose repository is never recorded (slice 4a, I6).
     pub never_recorded: u64,
@@ -158,6 +159,7 @@ pub fn claude_mem_with(
     let mut sink = Sink {
         known: raw.import_repos(&source)?,
         known_files: raw.import_files_repos(&source)?,
+        covered: raw.import_covered_ids(&source)?,
         raw,
         settings,
         source: &source,
@@ -513,8 +515,10 @@ fn append_work_state(
     stats: &mut Stats,
 ) -> Result<()> {
     let never = |e: &anyhow::Error| e.is::<crate::raw::NeverRecorded>();
+    // Decision 109 (5d): a list a forget of its repository's imported history came to cover.
+    let covered = |e: &anyhow::Error| e.is::<crate::raw::HistoryCovered>();
     match raw.append_imported_ops(batch, settings) {
-        Err(e) if never(&e) => {}
+        Err(e) if never(&e) || covered(&e) => {}
         other => return other.map(drop),
     }
     for op in batch {
@@ -522,6 +526,10 @@ fn append_work_state(
             Err(e) if never(&e) => {
                 stats.work_state -= 1;
                 stats.never_recorded += 1;
+            }
+            Err(e) if covered(&e) => {
+                stats.work_state -= 1;
+                stats.refused += 1;
             }
             other => other.map(drop)?,
         }
@@ -623,6 +631,8 @@ struct Sink<'a> {
     known: HashMap<String, HashSet<String>>,
     /// The same for the documents' files ops (F11).
     known_files: HashMap<String, HashSet<String>>,
+    /// The source ids a forget of their repository's imported history covers (decision 109, 5d).
+    covered: HashSet<String>,
     /// `--files`: the files ops of the documents imported before, and no document (F11).
     files_only: bool,
     items: Vec<crate::raw::Import>,
@@ -656,6 +666,16 @@ impl Sink<'_> {
             _ => None,
         };
         let before = had.is_some();
+        // Decision 109 (5d): an earlier run imported it, and a forget of its repository's
+        // imported history covers it, wherever claude-mem files it now: neither it nor its files.
+        if self.covered.contains(&r.key) {
+            return Ok(Put {
+                new: false,
+                before: true,
+                cut: 0,
+                masked: false,
+            });
+        }
         let session = match r.session {
             Some(s) => s.id.clone(),
             // No session id at all: a session of its own, so unrelated rows do not merge.

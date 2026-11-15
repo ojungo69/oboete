@@ -53,10 +53,17 @@ summaries and prompts, as import ops, gated on the way in, each once (by source 
   under that project, where claude-mem reads it; one merged after it came in comes in again, with
   the same uid, and readers take a document's newest row (Codex on #431).
 
+A document a forget of its repository's imported history covers (decision 109, milestone-5-plan.md
+5d) does not come in again, under its project or another: the import counts it as imported before,
+and an append refuses it in its own transaction, the rest of its batch going in.
+
 I4. **Work state.** Each `work_state_entries` row (v61) comes in as a work state op, oldest first:
 the list, the fields, `repo` the project as an import names it (`claude-mem:<project>`), its own
 time as both `clock` and `at`, and its source and id (`w<id>`), so a second run adds nothing. It
 passes the checks and the gate a write passes (L3, L5); a row they refuse is counted and left out.
+A row a forget of its repository's imported history covers is taken as imported (decision 109), and
+one a forget came to cover after the run read what it had imported is refused in the append and
+counted as refused.
 
 I5. **Reading work state.** A repository's work state is its own entries and those of the
 claude-mem project its key ends in, the project's worktree keys (`claude-mem:<name>/…`) included,

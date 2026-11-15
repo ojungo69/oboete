@@ -222,6 +222,18 @@ thread_local! {
     /// How many times this thread read the events' repositories through their index: a test's
     /// look at `event_repos`.
     pub(crate) static EVENT_REPOS_SOUGHT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// What happens between an import's checks and its append (a batch's, a note's): a test
+    /// registers a history forget there (decision 109, 5d).
+    pub(crate) static BEFORE_IMPORT_APPEND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs what a test set to happen between an import's checks and its append.
+#[cfg(test)]
+fn before_import_append() {
+    if let Some(before) = BEFORE_IMPORT_APPEND.with(|hook| hook.borrow_mut().take()) {
+        before();
+    }
 }
 
 /// The repositories the events name, each once, in no order: every device's and every kind's (a
@@ -580,6 +592,8 @@ pub enum Noted {
     Kept,
     /// Forget names it: nothing appended.
     Forgotten,
+    /// A forget of its repository's imported history covers it (decision 109): nothing appended.
+    HistoryForgotten,
 }
 
 /// Documents per `append_imports` append (D5), and the most records an `append_imported` takes.
@@ -613,13 +627,15 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
     Ok(denied || cfg!(test) && text.contains(DENIED_IN_TESTS))
 }
 
-/// Every forgotten uid (D5): the readers and senders pass them over.
+/// The uids whose vectors a carry into a new knowledge.db leaves behind: the forgotten ones (D5)
+/// and those a history forget covers (decision 109).
 fn carry_forgotten(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let mut uids = forgotten_set(conn)?;
     uids.extend(crate::forget::history::covered_uids(conn)?);
     Ok(uids)
 }
 
+/// Every forgotten uid (D5): the readers and senders pass them over.
 fn forgotten_set(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let mut st = conn.prepare_cached(
         "SELECT json_extract(body, '$.uid') FROM ops
@@ -1572,6 +1588,22 @@ impl std::fmt::Display for NeverRecorded {
 }
 
 impl std::error::Error for NeverRecorded {}
+
+/// Decision 109 (5d): a batch refused inside its transaction, a history forget committed since
+/// its caller checked it covering part of it: the caller leaves that out and appends the rest.
+#[derive(Debug)]
+pub struct HistoryCovered;
+
+impl std::fmt::Display for HistoryCovered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "a forget of a repository's imported history covers part of this batch: it was not \
+             recorded",
+        )
+    }
+}
+
+impl std::error::Error for HistoryCovered {}
 
 /// Every device's exclusion ops in time order, each entry set by the last op that names it: the
 /// repositories `oboete exclude` keeps from being sent, and what is never recorded (level
@@ -6329,6 +6361,10 @@ impl Raw {
                 !forgotten_op(&tx, *kind, body)?,
                 "a forget request invalidated this derived batch; it was not recorded"
             );
+            // Decision 109 (5d): what a history forget committed since the caller checked.
+            if crate::forget::history::covered_op(&tx, *kind, body)? {
+                return Err(HistoryCovered.into());
+            }
             // A list imported from claude-mem is matched by its project's name too; a note, by its
             // repository's key alone.
             let (repo, imported) = (
@@ -6608,6 +6644,9 @@ impl Raw {
         if forgotten_uid(&self.conn, &doc.uid)? || denied(&self.conn, Some(&origin), &text)? {
             return Ok(Noted::Forgotten);
         }
+        if crate::forget::history::covered(&self.conn, &doc.uid)? {
+            return Ok(Noted::HistoryForgotten);
+        }
         let mut devices = self.op_devices()?;
         if !devices.contains(&self.device) {
             devices.push(self.device.clone());
@@ -6635,8 +6674,13 @@ impl Raw {
             Ok(false)
         };
         let ops = [(OpKind::Import, serde_json::to_value(doc)?)];
+        #[cfg(test)]
+        before_import_append();
         let seqs =
-            self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read), Some(&kept))?;
+            match self.append_ops_from(&ops, Some(cwd), Some(settings), Some(read), Some(&kept)) {
+                Err(e) if e.is::<HistoryCovered>() => return Ok(Noted::HistoryForgotten),
+                other => other?,
+            };
         Ok(seqs
             .first()
             .map_or(Noted::Kept, |&seq| Noted::Appended(seq)))
@@ -6823,7 +6867,12 @@ impl Raw {
     /// The claude-mem work state rows already imported from `source`, by their ids
     /// (docs/claude-mem-import.md I4).
     pub fn work_state_keys(&self, source: &str) -> Result<std::collections::HashSet<String>> {
-        self.source_ids("work_state", source)
+        let mut keys = self.source_ids("work_state", source)?;
+        // Decision 109 (5c): what a history forget covers is known, its body rewritten or not.
+        keys.extend(crate::forget::history::covered_ids(
+            &self.conn, "ws", source,
+        )?);
+        Ok(keys)
     }
 
     /// The documents imported from `source`, each id with every repository an import op files it
@@ -6848,6 +6897,12 @@ impl Raw {
             source,
             "json_type(body, '$.title') IS NULL AND json_type(body, '$.files_read') = 'array'",
         )
+    }
+
+    /// The source ids of `source`'s documents a forget of their repository's imported history
+    /// covers (decision 109, 5d): an import puts none of them again, nor their files.
+    pub fn import_covered_ids(&self, source: &str) -> Result<std::collections::HashSet<String>> {
+        crate::forget::history::covered_ids(&self.conn, "uid", source)
     }
 
     fn import_ops_repos(
@@ -6973,7 +7028,7 @@ impl Raw {
             };
             let size = body.to_string().len();
             if batch.len() == IMPORT_BATCH || bytes + size > MAX_BATCH_BYTES {
-                let count = self.append_ops(&std::mem::take(&mut batch))?.len();
+                let count = self.append_import_batch(std::mem::take(&mut batch))?;
                 appended += count;
                 committed(count as u64);
                 bytes = 0;
@@ -6982,11 +7037,41 @@ impl Raw {
             batch.push((OpKind::Import, body));
         }
         if !batch.is_empty() {
-            let count = self.append_ops(&batch)?.len();
+            let count = self.append_import_batch(batch)?;
             appended += count;
             committed(count as u64);
         }
         Ok(appended)
+    }
+
+    /// One batch of an import: what a forget of a repository's imported history committed since
+    /// the batch was checked covers is left out, and the rest goes in, not held up by it
+    /// (decision 109, 5d). How many it appended.
+    fn append_import_batch(
+        &mut self,
+        mut batch: Vec<(OpKind, serde_json::Value)>,
+    ) -> Result<usize> {
+        #[cfg(test)]
+        before_import_append();
+        // Each refusal leaves out at least the op its transaction found covered.
+        for _ in 0..=batch.len() {
+            match self.append_ops(&batch) {
+                Err(e) if e.is::<HistoryCovered>() => {
+                    let mut kept = Vec::with_capacity(batch.len());
+                    for (kind, body) in batch {
+                        if !crate::forget::history::covered_op(&self.conn, kind, &body)? {
+                            kept.push((kind, body));
+                        }
+                    }
+                    batch = kept;
+                    if batch.is_empty() {
+                        return Ok(0);
+                    }
+                }
+                other => return Ok(other?.len()),
+            }
+        }
+        Err(HistoryCovered.into())
     }
 
     /// The devices that have ops (this one's, and from milestone 6 other devices' through sync),

@@ -156,7 +156,8 @@ one for the repository it is filed under now, for the exclusion and sync rules t
 labels. `oboete import claude-mem <db> --files` does only the second: no new document, so what
 claude-mem recorded after the last import stays out (claude-mem-parity.md, the first open check),
 and a document claude-mem moved since stays where it is filed, which is where its files op goes
-(the plain import moves it and files its files again).
+(the plain import moves it and files its files again). Neither brings the files of a document a
+forget of its repository's imported history covers (decision 109).
 Which uids hold a files op, under which repository, is read from the ops, as `import_repos` reads
 the documents'. No files op is put for a forgotten or denied uid (the append asks again, so the
 import's count is of what it stored); a forget registered while
