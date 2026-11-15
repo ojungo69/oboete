@@ -2934,3 +2934,28 @@ fn a_continuation_expires_once_a_history_forget_registers() {
         );
     }
 }
+
+/// Decision 109: a search begun while a forget of imported history is not applied lists no
+/// imported document, so no continuation of it holds one; once it is applied the document is
+/// listed again.
+#[test]
+fn a_search_begun_under_a_history_forget_lists_no_imported_document() {
+    let (mut s, server, _) = seeded("Retries are capped at three.");
+    let doc = s.imported(
+        "o1",
+        "r",
+        1_700_000_001_000,
+        "Gateway retries",
+        "Payments retry on a gateway timeout.",
+    );
+    s.run();
+    crate::forget::history::fixture::register(s.home.path(), "j1", "t1");
+    let first = body(mem(&server, json!({"query": "gateway retries"})));
+    assert!(
+        !first.contains(&doc) && !first.contains("Gateway retries"),
+        "{first}"
+    );
+    crate::forget::history::fixture::mark_applied(s.home.path(), "j1", "t1");
+    let again = body(mem(&server, json!({"query": "gateway retries"})));
+    assert!(again.contains(&format!("- [{doc}] ")), "{again}");
+}
