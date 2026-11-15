@@ -147,6 +147,7 @@ impl IndexReport<'_> {
         proof: &crate::executable::CommandHome,
     ) -> Result<()> {
         self.receipt.state = IndexState::Failed;
+        apply_history(raw, k);
         loop {
             proof.check(home)?;
             if !pass_report(raw, k, consumers, &mut Some(&mut *self))? {
@@ -289,8 +290,20 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
 /// again under new rules). The worker's own loop runs `pass` itself: it checks the backup
 /// deadline between passes.
 pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()> {
+    apply_history(raw, k);
     while pass(raw, k, consumers)? {}
     Ok(())
+}
+
+/// Decision 109 (5c): the history forgets raw.db holds that knowledge.db `k` has not applied,
+/// applied before every drain (the worker's rounds, `drain`, a report's drain): a knowledge.db
+/// made new (a rebuild, a restore) records them before it projects anything, and the consumers
+/// then leave out what they cover. One that fails keeps the readers withheld, which doctor
+/// names, and the drain goes on.
+fn apply_history(raw: &Raw, k: &mut Connection) {
+    if let Err(e) = raw.apply_history(k) {
+        eprintln!("oboete: a forget of imported history was not applied in knowledge.db: {e:#}");
+    }
 }
 
 /// One batch for each consumer: whether any checkpoint moved.
@@ -1195,6 +1208,7 @@ fn serve(
         let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
         // Decision 70: a refresh request the page leaves after this round began wakes the wait.
         let began = crate::db::now_ms();
+        apply_history(&raw, &mut k);
         while pass_report(&raw, &mut k, consumers, report)? {
             // Between two batches too: a consumer opens the home's files by path (the rescan).
             if gone(home, holding) {
@@ -2125,11 +2139,12 @@ fn carry_rebuild_vectors(
     if kept.exists() {
         let carried = crate::knowledge::open(home).and_then(|k| {
             // Milestone 5 D5: no forgotten claim's or document's vector comes back, nor one whose
-            // forget only the logs hold yet: the pass after this reconciles them.
+            // forget only the logs hold yet: the pass after this reconciles them. Nor one a
+            // history forget covers (decision 109).
             let (forgotten, home_id) = match crate::raw::read_only(home)? {
                 Some(raw) => (
                     crate::forget::Forgotten {
-                        uids: raw.forgotten_set()?,
+                        uids: raw.carry_forgotten()?,
                         records: raw.forgotten_record_keys()?,
                     },
                     raw.home_id()?,

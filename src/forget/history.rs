@@ -7,7 +7,8 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 
 /// Proof that knowledge.db had applied every history forget raw.db held when it was taken: what a
 /// function that reads knowledge.db's imported documents asks of its caller. Good while the caller
@@ -58,9 +59,149 @@ pub(crate) fn doctor_line(registered: &BTreeSet<Pair>, applied: &BTreeSet<Pair>)
     (waiting > 0).then(|| {
         format!(
             "imported history is withheld: {waiting} forget(s) of a repository's history not \
-             yet applied in knowledge.db"
+             yet applied in knowledge.db (`oboete forget --continue` applies them; the worker \
+             does too)"
         )
     })
+}
+
+/// Whether a history forget covers the imported document, its files or the note `uid` names
+/// (`denied_imports`, kind 'uid'): what knowledge.db is not given (5c), and no import appends
+/// (5d). Asked of a writer's raw.db, whose open made the table: once per Import op a consumer
+/// projects.
+pub(crate) fn covered(raw: &Connection, uid: &str) -> Result<bool> {
+    Ok(raw
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM denied_imports WHERE kind = 'uid' AND key = ?1)",
+        )?
+        .query_row([uid], |r| r.get(0))?)
+}
+
+/// Every uid a history forget covers, for what keeps no row of them though it reads none by uid
+/// (the carry of vectors into a new knowledge.db).
+pub(crate) fn covered_uids(raw: &Connection) -> Result<HashSet<String>> {
+    if !crate::consumer::manifest::exists(raw, "table", "denied_imports")? {
+        return Ok(HashSet::new());
+    }
+    let mut st =
+        raw.prepare_cached("SELECT DISTINCT key FROM denied_imports WHERE kind = 'uid'")?;
+    let rows = st.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Decision 109 (5c, "先に消す"): applies in knowledge.db `k` each history forget raw.db holds that
+/// it has not: every row made from what the forget covers goes (`remove`), and the job is recorded
+/// with the token read here, in one knowledge.db transaction for each. A job raw.db holds with
+/// another token (lost with raw.db, applied again from its log) is applied again. A pass that
+/// stops leaves its job unapplied and the readers closed; the next pass does it again. How many it
+/// applied.
+pub(crate) fn apply(raw: &Connection, k: &mut Connection) -> Result<usize> {
+    let registered = registered(raw)?;
+    if registered.is_empty() {
+        return Ok(0);
+    }
+    let done = applied(k)?;
+    let mut count = 0;
+    for (job, token) in registered.difference(&done) {
+        let uids = job_uids(raw, job)?;
+        let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        remove(&tx, &uids)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO history_applied(job, token) VALUES (?1, ?2)",
+            [job, token],
+        )?;
+        tx.commit()?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// `oboete forget --continue` (5c): applies the history forgets knowledge.db has not, asking a
+/// resident worker aside only when one waits. How many it applied.
+pub(crate) fn apply_due(home: &Path) -> Result<usize> {
+    {
+        let Some(raw) = crate::raw::read_only(home)? else {
+            return Ok(0);
+        };
+        if registered(&raw.conn)?.is_empty()
+            || imported_open(&raw.conn, &crate::knowledge::open(home)?)?.is_some()
+        {
+            return Ok(0);
+        }
+    }
+    let _worker = crate::worker::lock_asking(home)?;
+    let raw = crate::raw::open(home)?;
+    raw.apply_history(&mut crate::knowledge::open(home)?)
+}
+
+/// The uids history forget `job` covers.
+fn job_uids(raw: &Connection, job: &str) -> Result<Vec<String>> {
+    let mut st = raw.prepare_cached(
+        "SELECT key FROM denied_imports WHERE kind = 'uid' AND job = ?1 ORDER BY key",
+    )?;
+    let rows = st.query_map([job], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every row knowledge.db made from the imported documents, files and notes `uids` name, whichever
+/// repository or op each is filed under: their full-text rows by rowid first, then the rows, the
+/// files, the vectors' index and keys, and last the embedding queue, which deleting a key fills
+/// again (`vector_todo_unkeyed`). A table not made yet holds none.
+fn remove(k: &Connection, uids: &[String]) -> Result<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    k.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS history_covered(uid TEXT PRIMARY KEY);
+         DELETE FROM temp.history_covered;",
+    )?;
+    {
+        let mut add = k.prepare("INSERT OR IGNORE INTO temp.history_covered(uid) VALUES (?1)")?;
+        for uid in uids {
+            add.execute([uid])?;
+        }
+    }
+    let has = |table: &str| crate::consumer::manifest::exists(k, "table", table);
+    if has("imported")? {
+        k.execute(
+            "DELETE FROM imported_fts WHERE rowid IN
+               (SELECT rowid FROM imported WHERE uid IN (SELECT uid FROM temp.history_covered))",
+            [],
+        )?;
+        k.execute(
+            "DELETE FROM imported WHERE uid IN (SELECT uid FROM temp.history_covered)",
+            [],
+        )?;
+    }
+    if has("imported_files")? {
+        k.execute(
+            "DELETE FROM imported_files WHERE uid IN (SELECT uid FROM temp.history_covered)",
+            [],
+        )?;
+    }
+    let ids: Vec<i64> = k
+        .prepare(
+            "SELECT id FROM vector_keys
+             WHERE kind IN ('k', 'p') AND key IN (SELECT uid FROM temp.history_covered)",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    // One row at a time, as `embed_phase::touched` removes them from the vec0 index.
+    for id in ids {
+        k.prepare_cached("DELETE FROM vec_index WHERE rowid = ?1")?
+            .execute([id])?;
+        k.prepare_cached("DELETE FROM vector_keys WHERE id = ?1")?
+            .execute([id])?;
+    }
+    if has("vector_todo")? {
+        k.execute(
+            "DELETE FROM vector_todo
+             WHERE family = 'i' AND key IN (SELECT uid FROM temp.history_covered)",
+            [],
+        )?;
+    }
+    k.execute("DELETE FROM temp.history_covered", [])?;
+    Ok(())
 }
 
 /// What a reader says where it left knowledge.db's imported documents out (`imported_open` gave no

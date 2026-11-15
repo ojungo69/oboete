@@ -120,6 +120,14 @@ CREATE TABLE IF NOT EXISTS forget_jobs(
 -- raw.db and applied again from a log gets another token, so a knowledge.db that applied the job
 -- before applies it again (forget::history).
 CREATE TABLE IF NOT EXISTS forget_history(job TEXT PRIMARY KEY, token TEXT NOT NULL);
+-- Decision 109 (5c, 5d): what each history forget covers, written in the transaction that writes
+-- its `forget_history` row (5b): an imported document, its files and a note by their uid (kind
+-- 'uid'), imported work state by `source:source_id` (kind 'ws'). Plaintext, as a forget of one
+-- document keeps its uid in its Forget op: ids of the source, no text.
+CREATE TABLE IF NOT EXISTS denied_imports(
+  kind TEXT NOT NULL, key TEXT NOT NULL, job TEXT NOT NULL, PRIMARY KEY (kind, key, job)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS denied_imports_job ON denied_imports(job);
 -- docs/unwritten.md U3 (#454): each kept file written back, by its content's hash, in the
 -- transaction that wrote its events: a file a call left behind after that commit is removed, never
 -- written again. Not a name: they start again from 0 once the directory is empty.
@@ -606,6 +614,12 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
 }
 
 /// Every forgotten uid (D5): the readers and senders pass them over.
+fn carry_forgotten(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut uids = forgotten_set(conn)?;
+    uids.extend(crate::forget::history::covered_uids(conn)?);
+    Ok(uids)
+}
+
 fn forgotten_set(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let mut st = conn.prepare_cached(
         "SELECT json_extract(body, '$.uid') FROM ops
@@ -963,9 +977,9 @@ impl ReadOnly {
         forgotten_uid(&self.conn, uid)
     }
 
-    /// Every forgotten uid (D5).
-    pub(crate) fn forgotten_set(&self) -> Result<std::collections::HashSet<String>> {
-        forgotten_set(&self.conn)
+    /// As `Raw::carry_forgotten`: the uids a carry of vectors leaves behind.
+    pub(crate) fn carry_forgotten(&self) -> Result<std::collections::HashSet<String>> {
+        carry_forgotten(&self.conn)
     }
 
     /// Each forgotten record's vector key (slice 3c).
@@ -3134,6 +3148,24 @@ impl Raw {
         k: &Connection,
     ) -> Result<Option<crate::forget::history::Applied>> {
         crate::forget::history::imported_open(&self.conn, k)
+    }
+
+    /// Decision 109 (5c): applies in knowledge.db `k` the history forgets this raw.db holds that
+    /// it has not (`forget::history::apply`). How many it applied.
+    pub(crate) fn apply_history(&self, k: &mut Connection) -> Result<usize> {
+        crate::forget::history::apply(&self.conn, k)
+    }
+
+    /// Decision 109 (5c): whether a history forget covers the imported document, its files or the
+    /// note `uid` names, which knowledge.db is then not given.
+    pub(crate) fn import_covered(&self, uid: &str) -> Result<bool> {
+        crate::forget::history::covered(&self.conn, uid)
+    }
+
+    /// The uids whose vectors a carry into a new knowledge.db leaves behind: the forgotten ones
+    /// (D5) and those a history forget covers (decision 109).
+    pub(crate) fn carry_forgotten(&self) -> Result<std::collections::HashSet<String>> {
+        carry_forgotten(&self.conn)
     }
 
     /// Slice 3e-1: while raw.db holds more ranges a rescan masked than the last purge that did

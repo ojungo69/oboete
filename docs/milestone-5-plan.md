@@ -1508,6 +1508,12 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   「purge 済み」と読めないと写しごと消してしまう。purge・backup の書き換え・segments だけの復元の後も拒否が残り、
   検索ごとの集合を作らない方を選ぶ。ImportFiles は文書の時刻を持たず、claude-mem で project が移ると同じ行が別のラベルで
   届くので、取り込み済みのものはラベルと時刻ではなく identity で止める。
+  as built（1b-1、2026-11-16）: 安い形ではなく拒否表にした。raw.db の `denied_imports(kind, key, job)` で、文書・その
+  ファイル・note は op 自身の uid（kind `uid`。`imported_files`・ベクトルの key・埋め込み待ちが持つのは uid だけで、
+  uid = `source:source_id` は約束で制約ではない）、取り込みの work state は `source:source_id`（kind `ws`）。平文で持つ:
+  record は外の id を持たないよう origin を hash にするが、1 つの文書の forget は Forget op に uid を平文で残し、
+  拒否表もその uid を持つ（本文は持たない）。登録・ログからの入れ直し・復元の仕上げは、`forget_history` の行と同じ
+  transaction でこの表を書く（適用は、対象の無い repo の空の表と表の欠落を区別できない）。
 - **削除の世代**: 同じ transaction で raw.db の削除の世代を進める（5c）。
 - **store の形式**: 版 6 を知らない binary は版 6 の行を飛ばし（規則 9）、忘れた文書を見せる。だから
   `docs/store-format.md` の「home が得る形式」の型どおり、最初の版 6 の登録が、それを書く transaction で home を
@@ -1565,6 +1571,14 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ
   atomic commit は仮定しない。rebuild と復元は適用済みの世代を確かめ直す。
+  as built（1b-1、2026-11-16）: `forget::history::apply`。job ごとに 1 つの knowledge.db の transaction で、拒否表の
+  uid の行（どの repo・op に入った行も）、その全文検索の行（rowid で先に）、ファイルの行、ベクトルの索引と key、
+  埋め込み待ち（key を消すと trigger が入れ直すので最後）を消し、job をこの回に読んだ token ごと記録する。worker は
+  各 round で consumer より先に適用し（rebuild や復元で新しくなった knowledge.db は、投影の前に記録する）、
+  `oboete forget --continue` も先に適用する（待つ forget があるときだけ worker に退いてもらう）。consumer
+  （`Imported`・`ImportedFiles`）は拒否表にあるものを投影せず、rebuild と退避した写しからのベクトルの持ち越しも
+  それを除く。doctor の行は `oboete forget --continue` を案内する。全文検索の segments とベクトルの cache からの
+  物理的な消去は 5e の rebuild。登録（5b）の後にコマンド自身が適用する呼び出しは 5b で入る。
 - **到達表**: 検索・get・session start・viewer・timeline・cards・埋め込み・curator への送信・My Work の各入口から
   SQL までの表を作り、ガードを通ることを確かめる。通常時は世代の照合 1 回だけで、10 万件を
   `depth + forgotten.len()` に足さない。同じ表に、Import op から作られて文面を持つもの（`cards.rs` の 2 か所、

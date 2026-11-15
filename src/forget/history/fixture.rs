@@ -29,3 +29,33 @@ pub(crate) fn mark_applied(home: &Path, job: &str, token: &str) {
 pub(crate) fn proof() -> super::Applied {
     super::Applied(())
 }
+
+/// A history forget covering the imported documents (their files, notes) `uids` name, as a
+/// registration leaves it in `home`'s raw.db: its job with `token`, and what it covers, in one
+/// transaction (5b). A job registered again takes the new token.
+pub(crate) fn register_covering(home: &Path, job: &str, token: &str, uids: &[&str]) {
+    let mut raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let tx = raw.transaction().unwrap();
+    tx.execute(
+        "INSERT OR REPLACE INTO forget_history(job, token) VALUES (?1, ?2)",
+        [job, token],
+    )
+    .unwrap();
+    for uid in uids {
+        tx.execute(
+            "INSERT OR IGNORE INTO denied_imports(kind, key, job) VALUES ('uid', ?1, ?2)",
+            [uid, &job],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+/// `home`'s raw.db as one restored to before `job` leaves it: neither the job nor what it covers.
+pub(crate) fn lose(home: &Path, job: &str) {
+    let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    raw.execute("DELETE FROM forget_history WHERE job = ?1", [job])
+        .unwrap();
+    raw.execute("DELETE FROM denied_imports WHERE job = ?1", [job])
+        .unwrap();
+}

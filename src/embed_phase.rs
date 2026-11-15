@@ -1181,8 +1181,9 @@ pub(crate) fn carry_set_aside(home: &Path, k: &Connection, raw: &Raw) -> Result<
     let forgotten = if aside.is_empty() {
         crate::forget::Forgotten::default()
     } else {
+        // Nor a vector of what a history forget covers (decision 109).
         let forgotten = crate::forget::Forgotten {
-            uids: raw.forgotten_set()?,
+            uids: raw.carry_forgotten()?,
             records: raw.forgotten_record_keys()?,
         };
         crate::forget::with_logged(home, forgotten, Some(raw.home_id()))?
