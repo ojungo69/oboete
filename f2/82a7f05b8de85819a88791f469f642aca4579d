@@ -1,0 +1,25 @@
+docs/milestone-5-plan.md
+  s_d169cd080e079e::t_8158ce8a0ef10c 1601-1605
+src/forget/history.rs
+  s_d169cd080e079e::t_cca4081ad9c3db 73,76-78,81,83-106,113-116,126-131
+src/forget/history/tests.rs
+  s_d169cd080e079e::t_244cc33ada9637 953-1021
+src/raw.rs
+  s_d169cd080e079e::t_eb88bb3fc41d1a 634,1429-1431,1450-1453,4978-4979,4998,5001-5003
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f282a7f05b8de85819a88791f469f642aca4579d",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
