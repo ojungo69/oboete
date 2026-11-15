@@ -15,6 +15,8 @@ use std::collections::HashSet;
 use std::io::{BufRead, IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod history;
+
 /// One request's records; a larger selection is several requests (rule 9).
 pub const MAX_RECORDS: usize = 500;
 

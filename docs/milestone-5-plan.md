@@ -1525,7 +1525,16 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   中でその部分を省く。古い行を読まず、「0 件」とも扱わない。hook の read-only 接続と長く開いている接続も
   対象にする。
 - **世代は数ではない**: segments だけの復元で数は戻り、古い knowledge.db の値と偶然合う。だから世代は版 6 の
-  job の集合のダイジェストにする。
+  job の集合にする。raw.db の `forget_history` が job ごとに、raw.db へ入れたときの token（毎回新しい乱数）を
+  持ち、knowledge.db の `history_applied` が消し終えた (job, token) を持つ。raw.db の組がすべて knowledge.db に
+  あれば読める（ダイジェストの一致ではなく包含: ログごと失われた job で読みが閉じたままにならない）。raw.db を
+  古い写しに戻して job を失い、ログから入れ直した job は token が変わるので、その間に取り込まれて投影された文書が
+  あっても読みは閉じ、もう一度消すまで開かない（最初の赤いテスト）。as built（1 本目、2026-11-15）:
+  `forget::history`（`imported_open` が証拠 `Applied` を返し、取り込み文書を読む関数は `&Applied` を取る）。
+  到達表はコードの中にある（`forget::history::tests` の `READERS`。表に無い読み手と、証拠を取ると書いて取らない
+  読み手でテストが落ちる）。検索・get・timeline・known・評価の run がこの PR で証拠を取り、残りは表の `Later`。
+  SQL を持たないので表に載らない残り: mem_search の `Cursors`（MCP の続きの呼び出しに、前の呼び出しの行を
+  読み直さずに渡す）は、作ったときの raw.db の組を覚え、組が変わっていたら期限切れにする（次の PR）。
 - **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ

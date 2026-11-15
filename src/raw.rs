@@ -115,6 +115,11 @@ CREATE INDEX IF NOT EXISTS import_origins_origin ON import_origins(origin);
 CREATE TABLE IF NOT EXISTS forget_jobs(
   id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL, step INTEGER NOT NULL
 );
+-- Decision 109 (Slice 5c): each history forget, a repository's forget that reaches the history
+-- imported for it, by its job and the token its insertion into this raw.db wrote. A job lost with
+-- raw.db and applied again from a log gets another token, so a knowledge.db that applied the job
+-- before applies it again (forget::history).
+CREATE TABLE IF NOT EXISTS forget_history(job TEXT PRIMARY KEY, token TEXT NOT NULL);
 -- docs/unwritten.md U3 (#454): each kept file written back, by its content's hash, in the
 -- transaction that wrote its events: a file a call left behind after that commit is removed, never
 -- written again. Not a name: they start again from 0 once the directory is empty.
@@ -675,13 +680,15 @@ fn forgotten_uid(conn: &Connection, uid: &str) -> Result<bool> {
 /// What forget denies: records by origin, and uids by their forget ops. A preview's token count,
 /// and with the masks the derived writers' fence (`FENCE_COUNT`).
 const DENIED_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
-  + (SELECT COUNT(*) FROM ops WHERE type = 'forget')";
+  + (SELECT COUNT(*) FROM ops WHERE type = 'forget')
+  + (SELECT COUNT(*) FROM forget_history)";
 
 /// The derived writers' fence (rule 12): what forget denies, so a uid's forget also cuts a window in
 /// flight again (D5: rare, and safe), and the ranges a rescan masked (slice 3e-1): what a curator
 /// or a turn's call read before one is cut again, never written.
 const FENCE_COUNT: &str = "SELECT (SELECT COUNT(*) FROM denied_records)
   + (SELECT COUNT(*) FROM ops WHERE type = 'forget')
+  + (SELECT COUNT(*) FROM forget_history)
   + (SELECT COUNT(*) FROM records WHERE type = 'tombstone' AND target_offset IS NOT NULL)";
 
 /// Slice 3e-1: how many ranges a rescan masked, and how many of them the last purge that did every
@@ -3111,6 +3118,15 @@ impl Raw {
     /// What a derived writer is fenced by (`FENCE_COUNT`).
     pub fn fence_count(&self) -> Result<i64> {
         Ok(self.conn.query_row(FENCE_COUNT, [], |r| r.get(0))?)
+    }
+
+    /// Decision 109 (5c): whether knowledge.db `k` has applied every history forget this raw.db
+    /// holds, and the proof when it has (`forget::history::imported_open`).
+    pub(crate) fn imported_open(
+        &self,
+        k: &Connection,
+    ) -> Result<Option<crate::forget::history::Applied>> {
+        crate::forget::history::imported_open(&self.conn, k)
     }
 
     /// Slice 3e-1: while raw.db holds more ranges a rescan masked than the last purge that did

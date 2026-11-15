@@ -83,7 +83,10 @@ pub(crate) fn open_report(
          );
          CREATE TABLE IF NOT EXISTS vec_generation(
            embedder TEXT PRIMARY KEY, state TEXT NOT NULL, exclusions TEXT
-         );"
+         );
+         -- Decision 109 (Slice 5c): each history forget whose imported rows this knowledge.db has
+         -- removed, by its job and the token raw.db holds for it (forget::history).
+         CREATE TABLE IF NOT EXISTS history_applied(job TEXT PRIMARY KEY, token TEXT NOT NULL);"
         ),
         crate::embed::DIM
     );

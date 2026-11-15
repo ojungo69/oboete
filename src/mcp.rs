@@ -426,10 +426,15 @@ impl Oboete {
             .collect();
         // In the text, not in structured content: Claude Code and Codex hand a model a result's
         // structured content in place of its text when it has any.
-        let status = match answer.vector {
+        let mut status = match answer.vector {
             search::Vector::Used => String::new(),
             search::Vector::Skipped(s) => format!("full text only: {}\n", s.why()),
         };
+        // Decision 109: hits without the imported documents say so, "no hits" or not.
+        if answer.withheld {
+            status.push_str(crate::forget::history::WITHHELD);
+            status.push('\n');
+        }
         text(format!(
             "{status}{}",
             if out.is_empty() { "no hits" } else { &out }
