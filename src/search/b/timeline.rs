@@ -80,17 +80,18 @@ where
     let Some(w) = window(home, repo, (around, true), (before, after))? else {
         return Ok(String::new());
     };
-    // Decision 109: where imported documents were left out, the text says so, empty or not.
+    // Decision 109: where imported documents were left out, the text says so first, empty or
+    // not: a reply past its size is cut from the end (CodeRabbit on #1016).
     let withheld = match w.withheld {
-        true => format!("\n{}", crate::forget::history::WITHHELD),
+        true => format!("{}\n", crate::forget::history::WITHHELD),
         false => String::new(),
     };
     if w.shown.is_empty() {
         return Ok(match w.anchor {
             Some(_) => format!(
-                "No context found around anchor ({before} records before, {after} records after){withheld}"
+                "{withheld}No context found around anchor ({before} records before, {after} records after)"
             ),
-            None => withheld.trim_start().to_owned(),
+            None => withheld.trim_end().to_owned(),
         });
     }
     let marked_entry = w.shown.iter().find(|e| Some(&e.id) == w.marked.as_ref());
@@ -109,7 +110,7 @@ where
         (&w.local, repo.is_none()),
         tz,
     );
-    Ok(out.join("\n") + &withheld)
+    Ok(withheld + &out.join("\n"))
 }
 
 /// One entry around an anchor as mem_search's context takes it (docs/mem-search.md): what `get`
@@ -202,7 +203,12 @@ fn window(
                 limit: QUERY_HITS,
                 ..q
             };
-            let Some(hit) = super::query(home, &q)?.hits.into_iter().next() else {
+            let answer = super::query(home, &q)?;
+            let Some(hit) = answer.hits.into_iter().next() else {
+                // Decision 109: the imported documents it left out may hold the match.
+                if answer.withheld {
+                    anyhow::bail!("{}", crate::forget::history::WITHHELD);
+                }
                 anyhow::bail!("nothing matches {:?} to anchor on", q.text);
             };
             (Some(hit.key), Some(q.text), 0)

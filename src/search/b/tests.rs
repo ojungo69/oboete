@@ -4484,12 +4484,28 @@ fn a_history_forget_not_yet_applied_withholds_the_imported_documents() {
         &chrono::Utc,
     );
     assert!(around.is_err_and(|e| e.to_string().contains(WITHHELD)));
+    // The note comes first: a reply past its size is cut from the end (CodeRabbit on #1016).
     let newest =
         timeline_text(&home, None, &home, Around::Newest(10), (3, 3), &chrono::Utc).unwrap();
     assert!(
-        newest.contains(WITHHELD) && !newest.contains("canary title"),
+        newest.starts_with(WITHHELD) && !newest.contains("canary title"),
         "{newest}"
     );
+    // A query only the withheld document matches says so, not "nothing matches" (CodeRabbit on
+    // #1016).
+    let body_only = Query {
+        all: true,
+        ..q("body")
+    };
+    let by_query = timeline_text(
+        &home,
+        None,
+        &home,
+        Around::Query(body_only),
+        (3, 3),
+        &chrono::Utc,
+    );
+    assert!(by_query.is_err_and(|e| e.to_string().contains(WITHHELD)));
     assert!(!known(&home, "github.com/o/beta").unwrap());
     assert!(known(&home, R).unwrap());
 
