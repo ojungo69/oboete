@@ -7783,31 +7783,38 @@ assert.equal(answered,false,'a read from the top that fails answers so');
 console.log('PASS: a note the feed showed leaves it once imported history is withheld or a forget takes it unseen, the page says why, and it comes back once the forget is applied');
 }
 
-// Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again at a change the poll
-// sees, as a forget of imported history changes which repositories it names; not over a write on
-// its way, whose read of its receipt a later read would take, and the next poll reads it then.
+// Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again when the poll sees a
+// forget of imported history registered or applied (the version's `history`), which changes the
+// repositories it names, and not at each record captured (the ponytail review of #1020); not over
+// a write on its way, whose read of its receipt a later read would take: the next poll reads it.
 {
 const run=code=>vm.runInContext(code,ctx);
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 const response=value=>({ok:true,status:200,json:async()=>value});
-let v='p1',reads=0;
+let v='p1',history='',reads=0;
+const version=()=>Promise.resolve(response(history?{v,history}:{v}));
 ctx.fetch=url=>{
-  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/version'))return version();
   if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}));}
   return Promise.resolve(response({}));
 };
 const settings=new Node('div');settings.className='settings';
 document.getElementById('panel').replaceChildren(settings);
-run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled};
+run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled,privacyHistory};
 view='settings';form={privacy:{available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}};
-version='p0';reposLoaded=true;restsPolled=new Promise(()=>{})`);
+version='p0';reposLoaded=true;restsPolled=new Promise(()=>{});privacyHistory=null`);
 document.visibilityState='visible';
 const polled=async()=>{run('polling=false');await run('poll()');await settle();};
 await polled();
-assert.equal(reads,1,'a change the poll sees reads the privacy state again');
+v='p2';
+await polled();
+assert.equal(reads,0,'a record captured moves the version, not its history forgets: no read');
+history='1.0';
+await polled();
+assert.equal(reads,1,'a forget registered reads the privacy state again');
 await polled();
 assert.equal(reads,1,'no change, no read');
-settings.inert=true;v='p2';
+settings.inert=true;history='1.1';
 await polled();
 assert.equal(reads,1,'not over a write on its way');
 settings.inert=false;
@@ -7818,13 +7825,13 @@ assert.equal(reads,2,'the next poll reads it');
 let release=null;
 const answer=response({available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}});
 ctx.fetch=url=>{
-  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/version'))return version();
   if(url.startsWith('/api/privacy?')){reads+=1;return new Promise(resolve=>{release=()=>resolve(answer);});}
   return Promise.resolve(response({}));
 };
-v='p3';
+history='2.1';
 await polled();
-assert.equal(reads,3,'a change reads it');
+assert.equal(reads,3,'a forget reads it');
 run('form={...form}');
 release();
 await settle();
@@ -7836,13 +7843,13 @@ await settle();
 // one answers (Codex on #1020).
 let available=false;
 ctx.fetch=url=>{
-  if(url.startsWith('/api/version'))return Promise.resolve(response({v}));
+  if(url.startsWith('/api/version'))return version();
   if(url.startsWith('/api/privacy?')){reads+=1;return Promise.resolve(available?answer:{ok:false,status:503,json:async()=>({})});}
   return Promise.resolve(response({}));
 };
-v='p4';
+history='2.2';
 await polled();
-assert.equal(reads,5,'a change reads it');
+assert.equal(reads,5,'a forget reads it');
 await polled();
 assert.equal(reads,6,'a read that failed is read again');
 available=true;
@@ -7851,6 +7858,6 @@ assert.equal(reads,7);
 await polled();
 assert.equal(reads,7,'one that answers is not read again');
 delete document.visibilityState;
-run(`({view,form,version,reposLoaded,restsPolled}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
-console.log('PASS: Settings reads the privacy state again at a change, and not over a write on its way');
+run(`({view,form,version,reposLoaded,restsPolled,privacyHistory}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
+console.log('PASS: Settings reads the privacy state again when a history forget moves, not at each record, and not over a write on its way');
 }

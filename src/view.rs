@@ -3619,7 +3619,14 @@ pub(crate) fn repo_names_in(
 /// curation waits for a provider or the owner (decision 67, row X27: claude-mem's queue beside its
 /// logo). A count that does not read leaves them out: it never stops the page's poll.
 fn polled(home: &Path) -> Result<Value> {
-    let mut answer = json!({ "v": version(home)? });
+    let (v, history) = version(home)?;
+    let mut answer = json!({ "v": v });
+    // Decision 109: the history forgets registered and applied, apart, for what only they change
+    // (Settings' privacy state, not read again at each record captured). None for a store with
+    // none, whose answer is as before.
+    if history != (0, 0) {
+        answer["history"] = json!(format!("{}.{}", history.0, history.1));
+    }
     if let Ok(Some((waiting, held))) = waiting(home) {
         answer["waiting"] = waiting.into();
         answer["held"] = held.into();
@@ -3671,9 +3678,9 @@ fn waiting(home: &Path) -> Result<Option<(i64, bool)>> {
 /// tombstone, which reads hide before the worker applies it). Live prompts move it at capture
 /// too, since the feed reads them directly (P5). Other records (tool calls, replies) do not
 /// move it, so a working agent does not redraw the page between prompts.
-fn version(home: &Path) -> Result<String> {
+fn version(home: &Path) -> Result<(String, (usize, usize))> {
     let Some((raw, k)) = search::b::stores(home)? else {
-        return Ok("0".into());
+        return Ok(("0".into(), (0, 0)));
     };
     let applied: (i64, i64) = k.query_row(
         "SELECT (SELECT COALESCE(SUM(seq), 0) FROM op_checkpoints),
@@ -3686,7 +3693,7 @@ fn version(home: &Path) -> Result<String> {
         raw.history_forgets()?.len(),
         crate::forget::history::applied(&k)?.len(),
     );
-    Ok(format!(
+    let v = format!(
         "{}:{}:{}:{}:{}:{}.{}",
         raw.max_op_seq()?,
         applied.0,
@@ -3695,7 +3702,8 @@ fn version(home: &Path) -> Result<String> {
         raw.prompt_version()?,
         history.0,
         history.1
-    ))
+    );
+    Ok((v, history))
 }
 
 /// Records per device, claims by kind and status, skipped claim ops by reason, the last seven

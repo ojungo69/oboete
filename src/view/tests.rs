@@ -7584,6 +7584,10 @@ fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
     let card = ("card".to_owned(), format!("{card}.0"));
     let only = crate::import::repo("imported-only");
     let version = || get(&v, "/api/version")["v"].clone();
+    // Apart from the version, what only a history forget moves (Settings' privacy state): none
+    // before one, then the registered and the applied counts.
+    let history = || get(&v, "/api/version").get("history").cloned();
+    assert_eq!(history(), None);
     let before = version();
     let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
     assert!(page.get("history_forgets").is_none(), "{page}");
@@ -7600,8 +7604,10 @@ fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
     assert!(!rows.iter().any(|r| r["repo"] == only), "{repos}");
     let registered = version();
     assert_ne!(registered, before);
+    assert_eq!(history(), Some(json!("1.0")));
     mark_applied(&home, "j1", "t1");
     assert_ne!(version(), registered);
+    assert_eq!(history(), Some(json!("1.1")));
     let page = get(&v, "/api/feed?repo=example.test%2Fteam%2Ffern");
     assert_eq!(feed_ids(&page), [card, ("note".to_owned(), note)]);
     assert!(page.get("withheld").is_none(), "{page}");

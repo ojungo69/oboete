@@ -5091,8 +5091,10 @@ function hiddenSection(f) {
 // The page's reads of the privacy state, numbered as they start: only the last one started is
 // drawn, whichever form it reaches (Codex and CodeRabbit on #806).
 let privacyReads = 0;
-// A change the poll saw that the privacy state has not been read again for (`poll`).
+// A change the poll saw that the privacy state has not been read again for (`poll`), and the
+// version's history forgets it was last read under.
 let privacyStale = false;
+let privacyHistory = null;
 
 async function refreshPrivacy(f) {
   if (!f) return false;
@@ -10997,7 +10999,7 @@ async function poll() {
   try {
     if ((view === 'my_work' && mw.rows) || view === 'my_rules') myWorkTimes();
     await pollMaintenance();
-    const { v, waiting, held } = await api('version');
+    const { v, waiting, held, history = '' } = await api('version');
     queue = { waiting, held };
     drawQueue();
     $('live').classList.remove('off');
@@ -11012,10 +11014,13 @@ async function poll() {
       || (view === 'my_work' && Date.now() - mw.fetched >= 60000)));
     // Settings reads no list at a change: the next view that uses it does (`show`).
     if (view === 'settings' && changed) reposStale = true;
-    // The privacy state is read again in place: a forget of imported history registered or applied
-    // changes which repositories it names (decision 109; CodeRabbit on #1020). Not over a write on
-    // its way, whose read of its receipt a later read would take: a later poll reads it.
-    if (view === 'settings' && changed) privacyStale = true;
+    // The privacy state is read again in place when a forget of imported history is registered or
+    // applied, which changes the repositories it names (decision 109; CodeRabbit on #1020): not at
+    // each record captured, which would redraw it under the owner's click (the ponytail review of
+    // #1020). Not over a write on its way, whose read of its receipt a later read would take: a
+    // later poll reads it.
+    if (view === 'settings' && privacyHistory !== null && history !== privacyHistory) privacyStale = true;
+    privacyHistory = history;
     if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
       privacyStale = false;
       // A read that failed, or that a form drawn from another meanwhile did not take (a provider's
