@@ -2813,7 +2813,8 @@ fn imported_history_reaches_a_prompt_by_the_checkouts_names_too() {
     }
     {
         let k = crate::knowledge::open(&home).unwrap();
-        let sessions = imported_sessions(&k, a, &names).unwrap();
+        let sessions =
+            imported_sessions(&k, &crate::forget::history::fixture::proof(), a, &names).unwrap();
         assert!(sessions.contains(&"cm-1".to_owned()), "{sessions:?}");
         assert!(!sessions.contains(&"cm-moved".to_owned()), "{sessions:?}");
     }
@@ -2835,7 +2836,12 @@ fn imported_history_reaches_a_prompt_by_the_checkouts_names_too() {
     s.run();
     embedded_by(&s, &stub);
     let k = crate::knowledge::open(&home).unwrap();
-    assert!(imported_sessions(&k, a, &names).unwrap().len() > SESSION_FILTER);
+    assert!(
+        imported_sessions(&k, &crate::forget::history::fixture::proof(), a, &names)
+            .unwrap()
+            .len()
+            > SESSION_FILTER
+    );
     assert_eq!(near(&names), [uid("late"), uid("main"), uid("wt")]);
     let plan: Vec<String> = k
         .prepare(&format!("EXPLAIN QUERY PLAN {IMPORTED_SESSIONS}"))
@@ -4537,4 +4543,57 @@ fn an_evaluation_run_refuses_while_a_history_forget_is_not_applied() {
         "{err}"
     );
     assert!(!out.exists());
+}
+
+/// Decision 109 (5c): while a forget of imported history is not applied, the prompt's meaning
+/// side leaves the imported documents out (their sessions, projects and vectors alike), and once
+/// it is applied they are back.
+#[test]
+fn the_prompts_meaning_side_leaves_imported_history_out_until_its_forget_is_applied() {
+    let stub = crate::embed::stub::Stub::start();
+    let mut s = Store::new();
+    let a = "example.com/a/payments";
+    let text = "Payments retry on a gateway timeout.";
+    s.raw
+        .append_imports(vec![crate::raw::ImportDoc {
+            uid: "claude-mem:test:o1".into(),
+            source: "claude-mem:test".into(),
+            source_id: "o1".into(),
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session: "cm-a".into(),
+            ts: 1_000,
+            title: "Gateway retries".into(),
+            body: text.into(),
+        }])
+        .unwrap();
+    s.said("cm-a", a, 500, "Work on the payment gateway.");
+    s.run();
+    embedded_by(&s, &stub);
+    let home = s.home.path().to_owned();
+    let keys = || -> Vec<String> {
+        let near = prompt_near(&home, (a, &[]), text, &Default::default()).unwrap();
+        near.hits.into_iter().map(|h| h.key).collect()
+    };
+    assert_eq!(keys(), ["claude-mem:test:o1"]);
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    assert_eq!(keys(), Vec::<String>::new());
+    crate::forget::history::fixture::mark_applied(&home, "j1", "t1");
+    assert_eq!(keys(), ["claude-mem:test:o1"]);
+}
+
+/// `known` with the reading fence held by a forget past the wait answers without the imported
+/// history instead of failing: a note's save asks it, and did not wait on a forget before
+/// (decision 109). Waits the fence's 10 s once.
+#[test]
+fn known_answers_without_imported_history_while_a_forget_holds_the_fence() {
+    let mut s = Store::new();
+    s.imported("o1", "r", 1_000, "Note", "An imported note.");
+    s.run();
+    let home = s.home.path();
+    assert!(known(home, R).unwrap());
+    let held = crate::dispatch::exclusive(home).unwrap();
+    assert!(!known(home, R).unwrap());
+    drop(held);
+    assert!(known(home, R).unwrap());
 }

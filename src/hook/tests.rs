@@ -958,6 +958,38 @@ fn imported_history_that_names_the_file_joins_the_note() {
     assert!(r.read("s9", "src/a.rs").contains(&format!("{newer} ")));
 }
 
+/// Decision 109: while a forget of imported history is not applied, a file's note gives its
+/// cards alone; once it is applied, the imported observations that name the file join them.
+#[test]
+fn a_files_note_leaves_imported_history_out_until_its_forget_is_applied() {
+    let mut r = Reads::new();
+    let repo = r.repo.clone();
+    let day = |d: i64, h: i64| d * 86_400_000 + h * 3_600_000;
+    r.s.event("prompt", "h1", (&repo, "main"), day(1, 23), json!({}));
+    let card = r.cards(
+        3,
+        json!([Reads::card("The parser was fixed", &["src/a.rs"])]),
+    );
+    let observation = r.s.imported_with_files(
+        "o1",
+        ("x", "h1"),
+        "bugfix",
+        day(2, 9),
+        "Fixed the reader",
+        &["src/a.rs"],
+        &[],
+    );
+    r.s.run();
+    let home = r.s.home.path().to_owned();
+    crate::forget::history::fixture::register(&home, "j1", "t1");
+    let note = r.read("s1", "src/a.rs");
+    assert!(note.contains(&format!("{} ", card[0])), "{note}");
+    assert!(!note.contains(&observation), "{note}");
+    crate::forget::history::fixture::mark_applied(&home, "j1", "t1");
+    let note = r.read("s2", "src/a.rs");
+    assert!(note.contains(&format!("{observation} ")), "{note}");
+}
+
 /// F14 (test 20): cards and imported observations share the 40 the note considers, the newest
 /// of both: a newer observation takes the place of an older card.
 #[test]
@@ -988,10 +1020,12 @@ fn cards_and_imported_history_share_one_pool() {
     let card = r.cards(2, json!([Reads::card("Between", &["src/a.rs"])]));
     let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
     let k = crate::knowledge::open(r.s.home.path()).unwrap();
+    let applied = crate::forget::history::fixture::proof();
     let on = |limit| {
         crate::cards::on_file(
             &k,
             &r.s.raw,
+            Some(&applied),
             (&repo, &[]),
             &["src/a.rs"],
             limit,
@@ -1026,11 +1060,20 @@ fn an_imported_observation_is_found_by_its_newest_files_op() {
     let settings = crate::capture::Settings::load(r.s.home.path()).unwrap();
     let found = |r: &Reads, file: &str| {
         let k = crate::knowledge::open(r.s.home.path()).unwrap();
-        crate::cards::imported_by_file(&k, &r.s.raw, (&repo, &[]), &[file], 40, &settings.rules)
-            .unwrap()
-            .into_iter()
-            .map(|f| (f.id(r.s.raw.device()), f.modified, f.named))
-            .collect::<Vec<_>>()
+        let applied = crate::forget::history::fixture::proof();
+        crate::cards::imported_by_file(
+            &k,
+            &applied,
+            &r.s.raw,
+            (&repo, &[]),
+            &[file],
+            40,
+            &settings.rules,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|f| (f.id(r.s.raw.device()), f.modified, f.named))
+        .collect::<Vec<_>>()
     };
     assert_eq!(found(&r, "src/a.rs"), [(uid.clone(), true, 3)]);
     let newer = r.s.files_of("o1", ("x", "h1"), &["src/b.rs"], &[]);
@@ -1156,6 +1199,7 @@ fn imported_history_filed_under_the_checkouts_name_joins_the_note() {
     let worktree = ["main".to_owned(), "main/wt".to_owned()];
     let found: Vec<String> = crate::cards::imported_by_file(
         &k,
+        &crate::forget::history::fixture::proof(),
         &r.s.raw,
         (&repo, &worktree),
         &["src/a.rs"],
@@ -2413,6 +2457,55 @@ fn imported_history_the_viewer_finds_joins_the_block() {
                           "hookEventName": "PreToolUse", "toolName": "Read"});
     let tool = injected("grok", &hook(&home, "grok", "PreToolUse", &tool));
     assert!(tool.contains(line), "{tool}");
+}
+
+/// Decision 109: while a forget of imported history is not applied, the block leaves out the
+/// imported documents the viewer finds, and the session is not told it was shown them; once it
+/// is applied they join it. Grok's turn, kept while they were open, leaves them out of its tool
+/// call when a forget registers in between, and takes them again once that one is applied.
+#[cfg(target_os = "linux")]
+#[test]
+fn imported_history_joins_the_block_only_once_its_forget_is_applied() {
+    use crate::forget::history::fixture::{mark_applied, register};
+    let mut p = Prompts::new(true);
+    let uid = "claude-mem:test:o1";
+    p.s.raw
+        .append_imports(vec![crate::raw::ImportDoc {
+            uid: uid.into(),
+            source: "claude-mem:test".into(),
+            source_id: "o1".into(),
+            kind: "decision".into(),
+            repo: crate::import::repo("payments"),
+            session: "cm".into(),
+            ts: 86_400_000,
+            title: "Gateway retries".into(),
+            body: "Payments retry on a gateway timeout.".into(),
+        }])
+        .unwrap();
+    p.s.run();
+    let near = json!([{"key": uid, "kind": "imported", "cosine": 0.9}]);
+    let _r = Resident::start(p.s.home.path(), 2_000, near, Duration::ZERO);
+    let home = p.s.home.path().to_owned();
+    register(&home, "j1", "t1");
+    let text = p.prompt("s1", "what happens when the payment gateway is slow");
+    assert!(!text.contains(uid), "{text}");
+    assert!(!shown_kinds(&p, "s1").iter().any(|(key, _)| key == uid));
+    mark_applied(&home, "j1", "t1");
+    let text = p.prompt("s1", "and what if the gateway never answers at all");
+    assert!(text.contains(uid), "{text}");
+    let prompt = json!({"sessionId": "g", "workspaceRoot": p.c,
+                        "hookEventName": "UserPromptSubmit",
+                        "prompt": "what happens when the payment gateway is slow"});
+    let tool = json!({"sessionId": "g", "workspaceRoot": p.c,
+                      "hookEventName": "PreToolUse", "toolName": "Read"});
+    assert_eq!(hook(&home, "grok", "UserPromptSubmit", &prompt), "");
+    register(&home, "j2", "t2");
+    let out = hook(&home, "grok", "PreToolUse", &tool);
+    assert!(!out.contains(uid), "{out}");
+    mark_applied(&home, "j2", "t2");
+    assert_eq!(hook(&home, "grok", "UserPromptSubmit", &prompt), "");
+    let out = injected("grok", &hook(&home, "grok", "PreToolUse", &tool));
+    assert!(out.contains(uid), "{out}");
 }
 
 /// An agent's MCP server takes a query's vector from the resident viewer, which holds the

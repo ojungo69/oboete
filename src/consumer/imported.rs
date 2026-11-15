@@ -209,8 +209,15 @@ impl Consumer for ImportedFiles {
 /// (`session_start`, oboete's first record of it), or an agent's note saved in `repo`, which has no
 /// session of an agent's; and since decision 52, one filed under one of the checkout's claude-mem
 /// names (`import::names_of`), without case. Never by the repository a document is filed under
-/// otherwise (v1's documents are, and map through their sessions).
-pub(crate) fn maps(k: &Connection, uid: &str, repo: &str, names: &[String]) -> Result<bool> {
+/// otherwise (v1's documents are, and map through their sessions). Read with the proof that
+/// knowledge.db has applied every forget of imported history (decision 109).
+pub(crate) fn maps(
+    k: &Connection,
+    _: &crate::forget::history::Applied,
+    uid: &str,
+    repo: &str,
+    names: &[String],
+) -> Result<bool> {
     Ok(k.prepare_cached(
         "SELECT 1 FROM imported i
          WHERE i.rowid = (SELECT MAX(j.rowid) FROM imported j WHERE j.uid = ?1)
@@ -236,9 +243,11 @@ pub(crate) fn maps(k: &Connection, uid: &str, repo: &str, names: &[String]) -> R
 /// claude-mem's block shows an observation's narrative (parity row 31); a summary's is its first
 /// sentence, its request, as a session summary of oboete's is named. None for a prompt
 /// (a prompt's text is never injected, 4.6), a forgotten document (milestone 5 D5), or one with no
-/// words.
+/// words. Read with the proof that knowledge.db has applied every forget of imported history
+/// (decision 109).
 pub(crate) fn prompt_line(
     k: &Connection,
+    _: &crate::forget::history::Applied,
     raw: &Raw,
     uid: &str,
 ) -> Result<Option<(i64, String, String)>> {

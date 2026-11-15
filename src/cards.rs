@@ -805,24 +805,30 @@ impl Filed {
 
 /// X5 F3, F13, F14: what the note on a file considers, the newest `limit` of `repo`'s cards and
 /// imported observations that name it by one of `paths`, newest first; `names` are the checkout's
-/// claude-mem names (decision 52).
+/// claude-mem names (decision 52). The imported observations only with `applied`, the proof that
+/// knowledge.db has applied every forget of their history (decision 109): without it the cards
+/// alone, the note leaving the rest out within the hook's time.
 pub fn on_file(
     k: &Connection,
     raw: &Raw,
+    applied: Option<&crate::forget::history::Applied>,
     (repo, names): (&str, &[String]),
     paths: &[&str],
     limit: usize,
     rules: &Rules,
 ) -> Result<Vec<Filed>> {
     let mut rows = by_file(k, raw, repo, paths, limit, rules)?;
-    rows.extend(imported_by_file(
-        k,
-        raw,
-        (repo, names),
-        paths,
-        limit,
-        rules,
-    )?);
+    if let Some(applied) = applied {
+        rows.extend(imported_by_file(
+            k,
+            applied,
+            raw,
+            (repo, names),
+            paths,
+            limit,
+            rules,
+        )?);
+    }
     // Stable: a card before an observation of the same time, each in its reader's order.
     rows.sort_by_key(|f| std::cmp::Reverse(f.card.ts));
     rows.truncate(limit);
@@ -836,6 +842,7 @@ pub fn on_file(
 /// 52), not forgotten. None until the consumers have made the tables it reads.
 pub fn imported_by_file(
     k: &Connection,
+    _: &crate::forget::history::Applied,
     raw: &Raw,
     (repo, names): (&str, &[String]),
     paths: &[&str],

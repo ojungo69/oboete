@@ -998,6 +998,9 @@ fn file_notes(
         &knowledge,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
+    // Decision 109: imported observations only once knowledge.db has applied every forget of
+    // their history; until then the note holds the cards alone.
+    let applied = store.imported_open(&k)?;
     let top = crate::repo::top(cwd);
     // Decision 52: the checkout's claude-mem names, which imported history maps by too, read once
     // a file needs them.
@@ -1026,8 +1029,15 @@ fn file_notes(
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let projects = projects.get_or_insert_with(|| crate::import::names_of(cwd));
-        let cards =
-            crate::cards::on_file(&k, &store, (&repo, projects), &names, 40, &settings.rules)?;
+        let cards = crate::cards::on_file(
+            &k,
+            &store,
+            applied.as_ref(),
+            (&repo, projects),
+            &names,
+            40,
+            &settings.rules,
+        )?;
         let now = db::now_ms();
         let Some(note) =
             crate::cards::file_note(&cards, mtime, store.device(), now, &chrono::Local)
@@ -2211,6 +2221,9 @@ fn prompt_point(
     }
     let k =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Decision 109: imported documents only once knowledge.db has applied every forget of their
+    // history; until then the block leaves them out within the hook's time.
+    let applied = raw.imported_open(&k)?;
     let rules = &settings.rules;
     let mut out = Prompted {
         blocks: Vec::new(),
@@ -2285,7 +2298,7 @@ fn prompt_point(
     };
     let picks = match (inject.per_prompt, prompt) {
         (false, _) => Vec::new(),
-        (true, None) => turn_picks(raw, &k, &turn, rules, &not_shown)?,
+        (true, None) => turn_picks(raw, &k, applied.as_ref(), &turn, rules, &not_shown)?,
         (true, Some(prompt)) => {
             let asking = Asking {
                 home,
@@ -2300,6 +2313,7 @@ fn prompt_point(
                         + Duration::from_millis(inject.per_prompt_wait_ms.try_into().unwrap_or(0)),
                 ),
                 clock,
+                applied: applied.as_ref(),
             };
             prompt_picks(&asking, prompt, sendable, &not_shown, &was_shown)?
         }
@@ -2428,6 +2442,9 @@ struct Asking<'a> {
     deadline: std::time::Instant,
     /// The hook's clock: its time for what it injects ends the words side's reads of documents.
     clock: &'a Clock,
+    /// Decision 109: the proof that knowledge.db has applied every forget of imported history,
+    /// without which no imported document is read.
+    applied: Option<&'a crate::forget::history::Applied>,
 }
 
 /// Spec 4.2, 4.6 and G23 (docs/prompt-context.md): a prompt's places. The resident viewer is asked
@@ -2521,7 +2538,7 @@ fn prompt_picks(
                 nearby.insert(hit.key);
             }
             Some(kind @ (Kind::Card | Kind::Summary | Kind::Imported)) => {
-                if let Some(d) = read_doc(a.raw, a.k, kind, &hit.key, rules)?
+                if let Some(d) = read_doc(a.raw, a.k, a.applied, kind, &hit.key, rules)?
                     && not_shown(&d.key)
                 {
                     near_docs.push(d);
@@ -2568,7 +2585,8 @@ fn docs_by_words(
             Class::Summary => Kind::Summary,
             _ => return Ok(false),
         };
-        Ok(match read_doc(raw, k, kind, key, rules)? {
+        // Cards and summaries alone: no imported document is asked for.
+        Ok(match read_doc(raw, k, None, kind, key, rules)? {
             Some(d) if not_shown(&d.key) => {
                 let share = words.share(&d.words);
                 let takes = share >= crate::shortlist::THRESHOLD;
@@ -2589,10 +2607,11 @@ fn docs_by_words(
 /// whole narrative (claude-mem's block, parity row 31), matched on its title and the narrative's
 /// first sentence; a summary by its request; an imported document as
 /// `consumer::imported::prompt_line` does. `None` for one the reader hides, or a summary without a
-/// request.
+/// request, and for an imported document without `applied` (decision 109).
 fn read_doc(
     raw: &crate::raw::Raw,
     k: &rusqlite::Connection,
+    applied: Option<&crate::forget::history::Applied>,
     kind: Kind,
     key: &str,
     rules: &redact::Rules,
@@ -2640,14 +2659,17 @@ fn read_doc(
                     words: s.row,
                 }
             }),
-        Kind::Imported => {
-            crate::consumer::imported::prompt_line(k, raw, key)?.map(|(ts, what, words)| Doc {
-                line: doc_line(ts, &what, key, &words, rules),
-                key: key.to_owned(),
-                kind,
-                words,
-            })
-        }
+        Kind::Imported => match applied {
+            Some(applied) => crate::consumer::imported::prompt_line(k, applied, raw, key)?.map(
+                |(ts, what, words)| Doc {
+                    line: doc_line(ts, &what, key, &words, rules),
+                    key: key.to_owned(),
+                    kind,
+                    words,
+                },
+            ),
+            None => None,
+        },
         Kind::Claim => None,
     })
 }
@@ -2972,6 +2994,7 @@ pub(crate) fn prompt_blocks_line(home: &Path, now: i64) -> Option<String> {
 fn turn_picks(
     raw: &crate::raw::Raw,
     k: &rusqlite::Connection,
+    applied: Option<&crate::forget::history::Applied>,
     kept: &[(String, Kind)],
     rules: &redact::Rules,
     not_shown: &dyn Fn(&String) -> bool,
@@ -2989,7 +3012,7 @@ fn turn_picks(
         if picks.len() >= PROMPT_PLACES {
             break;
         }
-        if let Some(d) = read_doc(raw, k, *kind, key, rules)?
+        if let Some(d) = read_doc(raw, k, applied, *kind, key, rules)?
             && not_shown(&d.key)
         {
             picks.push(Pick::Doc(d));
