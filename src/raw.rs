@@ -3212,6 +3212,15 @@ impl Raw {
         crate::forget::history::imported_open(&self.conn, k)
     }
 
+    /// `imported_open`, and how many history forgets this raw.db holds, from one read of them
+    /// (`forget::history::imported_open_counted`).
+    pub(crate) fn imported_open_counted(
+        &self,
+        k: &Connection,
+    ) -> Result<(Option<crate::forget::history::Applied>, usize)> {
+        crate::forget::history::imported_open_counted(&self.conn, k)
+    }
+
     /// Decision 109 (5c): applies in knowledge.db `k` the history forgets this raw.db holds that
     /// it has not (`forget::history::apply`). How many it applied.
     pub(crate) fn apply_history(&self, k: &mut Connection) -> Result<usize> {

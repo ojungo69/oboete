@@ -45,11 +45,21 @@ fn pairs(conn: &Connection, table: &str) -> Result<BTreeSet<Pair>> {
 /// applies it again); the proof when it has. raw.db alone when it holds none, as before any
 /// registration.
 pub(crate) fn imported_open(raw: &Connection, k: &Connection) -> Result<Option<Applied>> {
+    Ok(imported_open_counted(raw, k)?.0)
+}
+
+/// `imported_open`, and how many history forgets raw.db holds, from the one read of them that
+/// decided it: the viewer's feed marks its page with that count (#1022).
+pub(crate) fn imported_open_counted(
+    raw: &Connection,
+    k: &Connection,
+) -> Result<(Option<Applied>, usize)> {
     let registered = registered(raw)?;
     if registered.is_empty() {
-        return Ok(Some(Applied(())));
+        return Ok((Some(Applied(())), 0));
     }
-    Ok(registered.is_subset(&applied(k)?).then_some(Applied(())))
+    let open = registered.is_subset(&applied(k)?).then_some(Applied(()));
+    Ok((open, registered.len()))
 }
 
 /// Doctor's line (decision 109): how many of the history forgets raw.db holds knowledge.db has
