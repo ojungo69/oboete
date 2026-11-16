@@ -181,6 +181,10 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         "ALTER TABLE cards ADD COLUMN subagent INTEGER;
          CREATE INDEX IF NOT EXISTS cards_unmarked ON cards(ts) WHERE subagent IS NULL;",
     )?;
+    // Also where a migration stopped between the two (`consumer::cards::mark` reads through it).
+    k.execute_batch(
+        "CREATE INDEX IF NOT EXISTS cards_unmarked ON cards(ts) WHERE subagent IS NULL",
+    )?;
     crate::hide::schema(k)
 }
 

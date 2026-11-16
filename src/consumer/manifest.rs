@@ -17,14 +17,28 @@ use std::time::{Duration, Instant};
 
 pub struct Manifest {
     home: PathBuf,
+    /// Each owner-directive prompt's directive lines as gated, by the SHA-256 of the rules'
+    /// version and the prompt (#1045): the gate is a function of the two alone, and gating a
+    /// repository's directive prompts took 5 s of each build on one PC. This process's only.
+    gated: std::collections::HashMap<[u8; 32], Vec<String>>,
 }
 
 impl Manifest {
     pub fn new(home: &Path) -> Self {
         Self {
             home: home.to_owned(),
+            gated: std::collections::HashMap::new(),
         }
     }
+}
+
+/// The most prompts `Manifest::gated` keeps: past it, it starts again.
+const GATED: usize = 4_096;
+
+#[cfg(test)]
+thread_local! {
+    /// How many directive prompts this thread gated: a test's look at `Manifest::gated`.
+    static GATED_PROMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Records per step, as the FTS consumer.
@@ -85,6 +99,13 @@ const FORMAT: &str = "m5";
 /// D9's `git status` in the worker, given up after this.
 const GIT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// A repository's newest owner directives, through their own index: with no statistics SQLite
+/// took `manifest_facts_record` for the order and walked every fact of the device (277 ms warm on
+/// 364,830 facts) for each checkout it built.
+const OWNER_LINES_SQL: &str =
+    "SELECT seq, session, ts FROM manifest_facts INDEXED BY manifest_facts_owner
+     WHERE device = ?1 AND repo = ?2 AND fact = 'owner' ORDER BY seq DESC LIMIT ?3";
+
 fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "CREATE TABLE IF NOT EXISTS manifest_facts(
@@ -108,6 +129,10 @@ fn schema(k: &Connection) -> Result<()> {
          -- tombstones each scanned the device's facts (slice 3c, measured).
          CREATE INDEX IF NOT EXISTS manifest_facts_record
            ON manifest_facts(device, seq, repo, branch);
+         -- A repository's owner directives, newest first (`OWNER_LINES_SQL`): without it the
+         -- read walked every fact of the device for its few directives.
+         CREATE INDEX IF NOT EXISTS manifest_facts_owner
+           ON manifest_facts(device, repo, seq) WHERE fact = 'owner';
          CREATE TABLE IF NOT EXISTS manifests(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
            built_at INTEGER NOT NULL, text TEXT NOT NULL,
@@ -831,7 +856,7 @@ impl Consumer for Manifest {
                  SELECT repo, branch, device FROM manifests WHERE device = ?1 AND ruleset != ?2",
                 params![device, stamp(rules.version())],
             )?;
-            rebuild(raw, k, device, &rules)?;
+            rebuild(raw, k, device, &rules, &mut self.gated)?;
         }
         Ok(recs.last().map_or(from, |r| r.seq))
     }
@@ -873,22 +898,55 @@ fn label_facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> 
             params![device, seq, repo, branch, e.session, e.ts, fact],
         )?;
     }
-    dirty(k, device, repo, branch)
+    let reach = if e.kind == "reply" {
+        Reach::Reply(&e.session)
+    } else {
+        Reach::Own
+    };
+    dirty(k, device, repo, branch, reach)
 }
 
-/// Every checkout of `repo` marked for a rebuild, `branch`'s among them.
-fn dirty(k: &Connection, device: &str, repo: &str, branch: &str) -> Result<()> {
-    // Owner directives and other sessions are the repo's, not the branch's: every checkout of
-    // the repo is built again, so its text depends on the records, not on the order they came.
+/// Which checkouts of its repository a record's new facts reach besides its own (`dirty`).
+#[derive(Clone, Copy)]
+enum Reach<'a> {
+    Own,
+    /// An owner directive: directives are the repository's.
+    Repo,
+    /// A turn's reply, by its session: it shows on its prompt's checkout, on whichever branch the
+    /// session had moved to (#854).
+    Reply(&'a str),
+}
+
+/// The checkouts of a repository where a session prompted, through the index that seeks them:
+/// with no statistics SQLite took `manifest_facts_label` and walked the repository's facts (27 ms
+/// for a session of 76,141 facts on one PC, 0.03 ms through this one).
+const PROMPTED_SQL: &str = "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+     SELECT DISTINCT repo, branch, device FROM manifest_facts INDEXED BY manifest_facts_turn
+     WHERE device = ?1 AND repo = ?2 AND session = ?3 AND fact = 'prompt'";
+
+/// `branch`'s checkout of `repo` marked for a rebuild, and the other checkouts the record's new
+/// facts reach (`reach`), so a text depends on the records, not on the order they came. Only an
+/// owner directive and a reply show beyond their own branch (`build`); marking every checkout of
+/// the repo for each record built 99 of them on one PC, minutes for each batch the owner's work
+/// brought.
+fn dirty(k: &Connection, device: &str, repo: &str, branch: &str, reach: Reach) -> Result<()> {
     k.execute(
         "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device) VALUES(?1, ?2, ?3)",
         params![repo, branch, device],
     )?;
-    k.execute(
-        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
-         SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
-        params![repo, device],
-    )?;
+    match reach {
+        Reach::Own => {}
+        Reach::Repo => {
+            k.execute(
+                "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+                 SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
+                params![repo, device],
+            )?;
+        }
+        Reach::Reply(session) => {
+            k.execute(PROMPTED_SQL, params![device, repo, session])?;
+        }
+    }
     Ok(())
 }
 
@@ -917,6 +975,7 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
     };
     add("event", "")?;
     let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::Null);
+    let mut reach = Reach::Own;
     match e.kind.as_str() {
         "prompt" => {
             add("prompt", "")?;
@@ -924,9 +983,13 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
             // (#273).
             if body["agent_sent"] != true && manifest::is_owner_line(str_at(&body, "prompt")) {
                 add("owner", "")?;
+                reach = Reach::Repo;
             }
         }
-        "reply" => add("reply", "")?,
+        "reply" => {
+            add("reply", "")?;
+            reach = Reach::Reply(&e.session);
+        }
         "end" => add("end", "")?,
         // An interrupted call returned nothing: neither a failure nor the fix of one. Nor is a
         // read of stored memory, or a note saved to it, any of the work's facts.
@@ -949,7 +1012,7 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         }
         _ => {}
     }
-    dirty(k, device, repo, branch)
+    dirty(k, device, repo, branch, reach)
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -1137,13 +1200,31 @@ pub(crate) fn one_line(s: &str, n: usize) -> String {
 }
 
 /// Every dirty checkout of this device built again (or its row removed when no record is left).
-fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules) -> Result<()> {
+fn rebuild(
+    raw: &Raw,
+    k: &Connection,
+    device: &str,
+    rules: &crate::redact::Rules,
+    gated: &mut std::collections::HashMap<[u8; 32], Vec<String>>,
+) -> Result<()> {
     let dirty: Vec<(String, String)> = k
         .prepare("SELECT repo, branch FROM manifest_dirty WHERE device = ?1 ORDER BY repo, branch")?
         .query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    // A repository's owner directives are read and gated once for all its checkouts: a directive
+    // marks every one of them (99 on one PC), and each build took 5 s to gate them.
+    let mut owner: Option<(String, Vec<Line>)> = None;
     for (repo, branch) in dirty {
-        match build(raw, k, device, &repo, &branch, rules)? {
+        if owner.as_ref().is_none_or(|(of, _)| *of != repo) {
+            owner = Some((
+                repo.clone(),
+                owner_lines(raw, k, device, &repo, rules, gated)?,
+            ));
+        }
+        let directives = owner
+            .as_ref()
+            .map_or(&[][..], |(_, lines)| lines.as_slice());
+        match build(raw, k, device, &repo, &branch, rules, directives)? {
             Some(text) => k.execute(
                 "INSERT INTO manifests(repo, branch, device, built_at, text, ruleset)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6)
@@ -1166,6 +1247,73 @@ fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules
     }
     k.execute("DELETE FROM manifest_dirty WHERE device = ?1", [device])?;
     Ok(())
+}
+
+/// The owner directives a repository's checkouts show (D13), each field gated with `rules` before
+/// it is split, newest last: the same for every checkout of the repository.
+fn owner_lines(
+    raw: &Raw,
+    k: &Connection,
+    device: &str,
+    repo: &str,
+    rules: &crate::redact::Rules,
+    gated: &mut std::collections::HashMap<[u8; 32], Vec<String>>,
+) -> Result<Vec<Line>> {
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
+    let mut owner: Vec<(i64, String, i64)> = k
+        .prepare(OWNER_LINES_SQL)?
+        .query_map(params![device, repo, OWNER_LINES], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    owner.reverse();
+    // D13 matches directive lines one by one: taking one back leaves the others of its prompt.
+    // ponytail: lines and `。`; English sentences on one line stay one line.
+    let mut lines = Vec::new();
+    for (seq, session, ts) in owner {
+        if let Some(e) = event(raw, device, seq)? {
+            // A template recorded before capture marked it holds no directive of the owner's.
+            if crate::typed::codex_review_preset(str_at(&body(&e), "prompt")) {
+                continue;
+            }
+            let b = body(&e);
+            let prompt = str_at(&b, "prompt");
+            let key: [u8; 32] = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(rules.version().as_bytes());
+                h.update([0]);
+                h.update(prompt.as_bytes());
+                h.finalize().into()
+            };
+            if gated.len() >= GATED && !gated.contains_key(&key) {
+                gated.clear();
+            }
+            let texts = gated.entry(key).or_insert_with(|| {
+                #[cfg(test)]
+                GATED_PROMPTS.set(GATED_PROMPTS.get() + 1);
+                (gate(prompt).split(['\n', '。']).map(str::trim))
+                    .filter(|text| manifest::is_owner_line(text))
+                    .map(str::to_owned)
+                    .collect()
+            });
+            for text in texts.iter() {
+                lines.push(Line {
+                    date: crate::db::utc(ts)[..10].to_owned(),
+                    session: session.clone(),
+                    text: text.clone(),
+                });
+            }
+        }
+    }
+    // A line said again is shown once, at its latest date.
+    let mut kept: Vec<Line> = Vec::new();
+    for l in manifest::directives(&lines) {
+        let text = one_line(&l.text, CLIP);
+        kept.retain(|k| k.text != text);
+        kept.push(Line { text, ..l });
+    }
+    Ok(kept.split_off(kept.len().saturating_sub(DIRECTIVES)))
 }
 
 /// One record's event, read back through raw (`None` once a tombstone removed it).
@@ -1193,6 +1341,7 @@ fn build(
     repo: &str,
     branch: &str,
     rules: &crate::redact::Rules,
+    directives: &[Line],
 ) -> Result<Option<String>> {
     // Every stored field it shows is gated before it is flattened or clipped.
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
@@ -1250,45 +1399,7 @@ fn build(
             one_line(&gate(str_at(&b, "output")), CLIP)
         ));
     }
-    let mut owner: Vec<(i64, String, i64)> = k
-        .prepare(
-            "SELECT seq, session, ts FROM manifest_facts
-             WHERE device = ?1 AND repo = ?2 AND fact = 'owner' ORDER BY seq DESC LIMIT ?3",
-        )?
-        .query_map(params![device, repo, OWNER_LINES], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    owner.reverse();
-    // D13 matches directive lines one by one: taking one back leaves the others of its prompt.
-    // ponytail: lines and `。`; English sentences on one line stay one line.
-    let mut lines = Vec::new();
-    for (seq, session, ts) in owner {
-        if let Some(e) = event(raw, device, seq)? {
-            // A template recorded before capture marked it holds no directive of the owner's.
-            if crate::typed::codex_review_preset(str_at(&body(&e), "prompt")) {
-                continue;
-            }
-            let prompt = gate(str_at(&body(&e), "prompt"));
-            for text in prompt.split(['\n', '。']).map(str::trim) {
-                if manifest::is_owner_line(text) {
-                    lines.push(Line {
-                        date: crate::db::utc(ts)[..10].to_owned(),
-                        session: session.clone(),
-                        text: text.to_owned(),
-                    });
-                }
-            }
-        }
-    }
-    // A line said again is shown once, at its latest date.
-    let mut kept: Vec<Line> = Vec::new();
-    for l in manifest::directives(&lines) {
-        let text = one_line(&l.text, CLIP);
-        kept.retain(|k| k.text != text);
-        kept.push(Line { text, ..l });
-    }
-    p.directives = kept.split_off(kept.len().saturating_sub(DIRECTIVES));
+    p.directives = directives.to_vec();
     if let Some(e) = last("todo")?
         .map(|s| event(raw, device, s))
         .transpose()?

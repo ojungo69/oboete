@@ -756,6 +756,104 @@ fn a_backlog_that_ends_with_a_full_batch_is_built() {
     assert!(manifest(home.path()).0.contains("step 499"));
 }
 
+/// #1045: a directive prompt is gated once for as long as its text and the rules stay. A build
+/// after an unrelated record gates none again; a directive a later tombstone masks, or a rule
+/// added later masks, is gated again and shown masked.
+#[test]
+fn a_directive_prompt_is_gated_again_only_when_its_text_or_the_rules_change() {
+    use crate::worker::Consumer;
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut store = raw::open(p).unwrap();
+    let device = store.device().to_owned();
+    let mut m = Manifest::new(p);
+    let mut step = |store: &Raw| {
+        let k = knowledge::open(p).unwrap();
+        loop {
+            let tx = k.unchecked_transaction().unwrap();
+            let at = crate::knowledge::checkpoint::get_in(&tx, m.checkpoints(), m.name(), &device)
+                .unwrap();
+            let next = m.step(store, &tx, &device, at).unwrap();
+            crate::knowledge::checkpoint::set_in(&tx, m.checkpoints(), m.name(), &device, next)
+                .unwrap();
+            tx.commit().unwrap();
+            if next == at {
+                break;
+            }
+        }
+    };
+    let said = |ts: i64, text: &str| {
+        ev(
+            "prompt",
+            "s1",
+            ts,
+            cwd.path(),
+            serde_json::json!({"prompt": text}),
+        )
+    };
+    store
+        .append(&said(60_000, "always run zqxlint first"))
+        .unwrap();
+    let second = said(120_000, "never deploy with acme-123456 on friday");
+    let at = second.body.find("acme-123456").unwrap();
+    let masked = store.append(&second).unwrap();
+    GATED_PROMPTS.set(0);
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 2);
+    let text = manifest(p).0;
+    assert!(
+        text.contains("zqxlint") && text.contains("acme-123456"),
+        "{text}"
+    );
+    // An unrelated record: its checkout is built again, no directive gated again.
+    store
+        .append(&tool(
+            cwd.path(),
+            180_000,
+            "Bash",
+            serde_json::json!({"command": "ls"}),
+            "ok",
+            false,
+        ))
+        .unwrap();
+    step(&store);
+    assert_eq!(
+        GATED_PROMPTS.get(),
+        2,
+        "a directive gated again with nothing changed"
+    );
+    // A tombstone masks part of the second prompt: its text changed, so it is gated again.
+    store
+        .append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: masked,
+            offset: at as i64,
+            length: 11,
+        })
+        .unwrap();
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 3);
+    let text = manifest(p).0;
+    assert!(
+        text.contains("never deploy") && !text.contains("acme-123456"),
+        "{text}"
+    );
+    // A rule added later: both are gated again, under the new rules.
+    std::fs::write(
+        p.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"zqx\", regex = 'zqxlint' }]\n",
+    )
+    .unwrap();
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 5);
+    let text = manifest(p).0;
+    assert!(
+        !text.contains("zqxlint") && text.contains("always run"),
+        "{text}"
+    );
+}
+
 #[test]
 fn the_manifest_is_the_same_bytes_for_the_same_records() {
     let home = tempfile::tempdir().unwrap();
@@ -1442,6 +1540,217 @@ fn a_failure_a_new_rule_masks_is_paired_with_the_success_stored_masked() {
     worker::run_once(home.path()).unwrap(); // the rescan masks the failure: same call now
     let shown = shown(home.path(), &store).unwrap();
     assert!(!shown.contains("failed with"), "{shown}");
+}
+
+/// A repository's owner directives are read through their own index, never by walking the
+/// device's facts.
+#[test]
+fn the_owner_directives_are_read_through_their_index() {
+    let k = rusqlite::Connection::open_in_memory().unwrap();
+    schema(&k).unwrap();
+    // An index a later change might add, made after it: with no statistics SQLite would take that
+    // one for the order (#908), so the statement names its own.
+    k.execute_batch("CREATE INDEX later ON manifest_facts(device, repo, fact, seq)")
+        .unwrap();
+    let plan: String = k
+        .prepare(&format!("EXPLAIN QUERY PLAN {OWNER_LINES_SQL}"))
+        .unwrap()
+        .query_map(rusqlite::params!["d", "r", 20], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join(" | ");
+    assert!(plan.contains("INDEX manifest_facts_owner"), "{plan}");
+}
+
+/// The checkouts where a reply's session prompted are read through their index, never by walking
+/// the repository's facts.
+#[test]
+fn a_replys_checkouts_are_read_through_their_index() {
+    let k = rusqlite::Connection::open_in_memory().unwrap();
+    schema(&k).unwrap();
+    // An index a later change might add, made after it: with no statistics SQLite would take that
+    // one (#908), so the statement names its own.
+    k.execute_batch("CREATE INDEX later ON manifest_facts(device, repo, session, fact)")
+        .unwrap();
+    let plan: String = k
+        .prepare(&format!("EXPLAIN QUERY PLAN {PROMPTED_SQL}"))
+        .unwrap()
+        .query_map(rusqlite::params!["d", "r", "s"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join(" | ");
+    assert!(plan.contains("INDEX manifest_facts_turn"), "{plan}");
+}
+
+/// A record builds its own checkout again and the checkouts its new facts reach, not every
+/// checkout of its repository (99 on one PC, minutes a batch while the owner worked): an owner
+/// directive is the repository's, and a turn's reply on another branch is shown on its prompt's
+/// branch (#854); a session's other records stay on their own branch. One rebuild of two
+/// repositories shows each its own directives. The texts are those a build from scratch gives.
+#[test]
+fn a_record_builds_again_only_the_checkouts_its_facts_reach() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let min = 60_000;
+    let on = |branch: &str, e: Event| Event {
+        branch: Some(branch.into()),
+        ..e
+    };
+    let prompt = |s: &str, ts: i64, text: &str| {
+        ev(
+            "prompt",
+            s,
+            ts,
+            cwd.path(),
+            serde_json::json!({"prompt": text}),
+        )
+    };
+    let reply = |s: &str, ts: i64, text: &str| {
+        ev(
+            "reply",
+            s,
+            ts,
+            cwd.path(),
+            serde_json::json!({"assistant": text}),
+        )
+    };
+    let mut store = raw::open(home.path()).unwrap();
+    let mut all: Vec<Event> = Vec::new();
+    let mut add = |store: &mut Raw, e: Event| {
+        store.append(&e).unwrap();
+        all.push(e);
+    };
+    let k = knowledge::open(home.path()).unwrap();
+    let built = |branch: &str| -> i64 {
+        k.query_row(
+            "SELECT built_at FROM manifests WHERE repo = 'r' AND branch = ?1",
+            [branch],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let text = |home: &Path, branch: &str| -> String {
+        knowledge::open(home)
+            .unwrap()
+            .query_row(
+                "SELECT text FROM manifests WHERE repo = 'r' AND branch = ?1",
+                [branch],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let reset = || k.execute("UPDATE manifests SET built_at = 0", []).unwrap();
+    add(&mut store, prompt("s1", min, "Look at main."));
+    add(
+        &mut store,
+        on("feature", prompt("s2", 2 * min, "Look at the feature.")),
+    );
+    worker::run_once(home.path()).unwrap();
+    // A tool call on the feature branch, in its own session: its checkout alone is built again.
+    reset();
+    let call = Event {
+        session: "s2".into(),
+        ..tool(
+            cwd.path(),
+            3 * min,
+            "Bash",
+            serde_json::json!({"command": "cargo test"}),
+            "ok",
+            false,
+        )
+    };
+    add(&mut store, on("feature", call));
+    worker::run_once(home.path()).unwrap();
+    assert_eq!(
+        built("main"),
+        0,
+        "main was built again for the feature's call"
+    );
+    assert!(built("feature") > 0);
+    // An owner directive on the feature branch: every checkout of the repository.
+    reset();
+    add(
+        &mut store,
+        on("feature", prompt("s2", 4 * min, "always run zqxlint first")),
+    );
+    worker::run_once(home.path()).unwrap();
+    assert!(built("main") > 0 && built("feature") > 0);
+    assert!(text(home.path(), "main").contains("zqxlint"));
+    // A turn whose session moved: its prompt on main, its reply on the feature branch.
+    add(&mut store, prompt("s3", 5 * min, "Split the module."));
+    worker::run_once(home.path()).unwrap();
+    reset();
+    add(
+        &mut store,
+        on("feature", reply("s3", 6 * min, "Split on a branch.")),
+    );
+    worker::run_once(home.path()).unwrap();
+    assert!(built("main") > 0, "the reply's prompt is on main");
+    assert!(text(home.path(), "main").contains("Split on a branch."));
+    // The same session's later call on the feature branch: its own checkout only.
+    reset();
+    let call = Event {
+        session: "s3".into(),
+        ..tool(
+            cwd.path(),
+            7 * min,
+            "Bash",
+            serde_json::json!({"command": "cargo build"}),
+            "ok",
+            false,
+        )
+    };
+    add(&mut store, on("feature", call));
+    worker::run_once(home.path()).unwrap();
+    assert_eq!(
+        built("main"),
+        0,
+        "a call of a session that prompted on main built main again"
+    );
+    // Two repositories' directives in one batch: each checkout shows its own repository's.
+    let elsewhere = |e: Event| Event {
+        repo: Some("q".into()),
+        ..e
+    };
+    add(
+        &mut store,
+        elsewhere(prompt("s4", 8 * min, "always run qrunner first")),
+    );
+    add(&mut store, prompt("s5", 9 * min, "always run zqxfmt first"));
+    worker::run_once(home.path()).unwrap();
+    let q_main: String = knowledge::open(home.path())
+        .unwrap()
+        .query_row(
+            "SELECT text FROM manifests WHERE repo = 'q' AND branch = 'main'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        q_main.contains("qrunner") && !q_main.contains("zqx"),
+        "{q_main}"
+    );
+    let r_main = text(home.path(), "main");
+    assert!(
+        r_main.contains("zqxfmt") && !r_main.contains("qrunner"),
+        "{r_main}"
+    );
+    // The same records built from scratch give the same texts.
+    let fresh = tempfile::tempdir().unwrap();
+    let mut again = raw::open(fresh.path()).unwrap();
+    for e in &all {
+        again.append(e).unwrap();
+    }
+    worker::run_once(fresh.path()).unwrap();
+    for branch in ["main", "feature"] {
+        assert_eq!(
+            text(home.path(), branch),
+            text(fresh.path(), branch),
+            "{branch}"
+        );
+    }
 }
 
 #[test]
