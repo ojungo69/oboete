@@ -290,8 +290,9 @@ After it, on this PC: `provider_calls` against the estimate above.
 6. On this PC first (decision 111, 2026-11-16): the conversation and `shrink = "subagents"` on
    from 07:10Z for about three days, set in its config, the measurement not run yet. They are
    compared with the days before per thousand records the Messages entry's curated windows
-   covered (`to_seq - from_seq + 1`, which neither setting changes; a window's own count is not
-   compared, as shrink makes windows fewer and larger): USD, cards and claims, and the shares of
+   covered (the window's own session's records between `from_seq` and `to_seq`, as seq numbers
+   every session's records; a window's own count is not compared, as shrink makes windows fewer
+   and larger): USD, cards and claims, and the shares of
    calls refused, cut off at the answer's limit and failed, with every other entry's refused
    share, as the three-part prompt reaches them all. Rules fixed before the start turn both off,
    and the windows curated meanwhile are curated again (`oboete recurate <device>:<from>-<to>`).
