@@ -777,9 +777,12 @@ pub fn backlog(home: &Path) -> Result<i64> {
     Ok(most)
 }
 
+/// Each consumer's devices with where its records or ops end on each (`marks`).
+type Ends = Vec<Vec<(String, i64)>>;
+
 /// Where each consumer's records or ops end, on each device it reads, as a round begins: what the
 /// round's batches read before its other phases run (#1041).
-fn marks(raw: &Raw, consumers: &[Box<dyn Consumer>]) -> Result<Vec<Vec<(String, i64)>>> {
+fn marks(raw: &Raw, consumers: &[Box<dyn Consumer>]) -> Result<Ends> {
     consumers
         .iter()
         .map(|c| {
@@ -794,11 +797,7 @@ fn marks(raw: &Raw, consumers: &[Box<dyn Consumer>]) -> Result<Vec<Vec<(String, 
 }
 
 /// Whether every consumer's checkpoint has reached its `marks`.
-fn reached(
-    k: &Connection,
-    consumers: &[Box<dyn Consumer>],
-    marks: &[Vec<(String, i64)>],
-) -> Result<bool> {
+fn reached(k: &Connection, consumers: &[Box<dyn Consumer>], marks: &Ends) -> Result<bool> {
     for (c, marks) in consumers.iter().zip(marks) {
         for (device, top) in marks {
             if checkpoint::get_in(k, c.checkpoints(), c.name(), device)? < *top {
@@ -1194,10 +1193,11 @@ fn serve(
     // R3: told to leave while a call is out, it settles that call and leaves, and starts no other
     // in between (Codex on #359).
     let mut departing = false;
-    // The ends a round fixed and whose batches ran out of time before they read up to them: the
-    // next round reads up to the same ends before it fixes new ones, so records that arrive
-    // faster than they are read still leave the phases a turn (CodeRabbit on #1043).
-    let mut unread: Option<Vec<Vec<(String, i64)>>> = None;
+    // The ends a round fixed and whose batches ran out of time before they read up to them, with
+    // what that round had seen: the next round reads up to the same ends before it fixes new ones,
+    // so records that arrive faster than they are read still leave the phases a turn (CodeRabbit
+    // on #1043).
+    let mut unread: Option<(Ends, (i64, i64))> = None;
     loop {
         #[cfg(test)]
         if let Some(before) = BEFORE_ROUND.take() {
@@ -1250,19 +1250,23 @@ fn serve(
         }
         // What the pass below reads up to, new records or new ops of this device (an owner's
         // correction appends only an op): one that lands after it, even before the wait, wakes it.
-        let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
-        // Decision 70: a refresh request the page leaves after this round began wakes the wait.
-        let began = crate::db::now_ms();
-        apply_history(&raw, &mut k);
         // D3's drain, to what the round began with (#1041): records that kept arriving while the
         // owner worked kept the consumers' batches going for as long as they arrived, and the
         // phases below, a replaced binary (R9) and a command's step-aside (R12) waited all that
-        // time. Those that arrive during the batches wait for the next round, which starts at once.
-        let passing = Instant::now();
-        let marks = match unread.take() {
-            Some(marks) => marks,
-            None => marks(&raw, consumers)?,
+        // time. Those that arrive during the batches wait for the next round. A round that goes on
+        // toward the ends a timed-out round fixed keeps what that round had seen, so one that
+        // landed since still wakes the wait (CodeRabbit on #1043).
+        let (marks, seen) = match unread.take() {
+            Some(kept) => kept,
+            None => {
+                let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
+                (marks(&raw, consumers)?, seen)
+            }
         };
+        // Decision 70: a refresh request the page leaves after this round began wakes the wait.
+        let began = crate::db::now_ms();
+        apply_history(&raw, &mut k);
+        let passing = Instant::now();
         // Whether the consumers read what the round began with before its time ran out.
         let read = loop {
             if !pass_report(&raw, &mut k, consumers, report)? {
@@ -1298,7 +1302,7 @@ fn serve(
                 e.poll(&raw, &k)?;
                 e.hold(hold);
             }
-            unread = Some(marks);
+            unread = Some((marks, seen));
             continue;
         }
         // D3 and milestone 4's D8 and D9: once the consumers have read what the round began with,

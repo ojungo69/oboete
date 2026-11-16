@@ -3082,6 +3082,65 @@ fn curation_gets_its_turn_while_records_arrive_faster_than_they_are_read() {
     assert_eq!(left.get(), 0, "the arrivals were all read");
 }
 
+/// CodeRabbit on #1043: a round that goes on toward the ends a timed-out round fixed keeps what
+/// that round had seen, so a record that landed since still wakes the wait. Here the eleventh
+/// record lands during the first round, and a resident worker reads it at once, not after its idle
+/// time.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_record_past_the_kept_ends_wakes_the_wait() {
+    struct OneMore {
+        home: std::path::PathBuf,
+        added: bool,
+    }
+    impl Consumer for OneMore {
+        fn name(&self) -> &'static str {
+            "one-more"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+            if !std::mem::replace(&mut self.added, true) {
+                raw::open(&self.home)?.append(&raw::test_event("the eleventh"))?;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(raw.after(device, after, 1)?.last().map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..10 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            let one = OneMore {
+                home: p.clone(),
+                added: false,
+            };
+            run_holding(&p, 600_000, vec![Box::new(one)], || {}, lock(&p)?, phases)
+        })
+    };
+    let read = || checkpoint::get(&knowledge::open(&p).unwrap(), "one-more", &device).unwrap();
+    until("the eleventh is read before the idle time", || read() == 11);
+    let held = lock_asking(&p).unwrap();
+    worker.join().unwrap().unwrap();
+    drop(held);
+}
+
 /// CodeRabbit on #1043: a round whose time runs out settles an embedding call that came back,
 /// with no other sent, so a command that asks aside during a backlog longer than a round is let
 /// in once the call is settled, not only once the backlog is read.
