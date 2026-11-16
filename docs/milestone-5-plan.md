@@ -1484,7 +1484,7 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
 - **preview**（spec 6.2 の「Preview first」）: 種類ごとに数える。raw records、自前の work state（list 数と件数）、
   note、取り込み文書（一意な uid の数と op の数、ラベルごと）、ImportFiles、未保存の event（5e）。
   末尾の名前が同じ別の repo も同じ claude-mem のラベルを読むときは、そのラベルと「その repo からも消える」
-  ことを出す（forget は戻せない）。
+  ことを出す（forget は戻せない）。そのラベルの取り込み履歴は残さず消す（決定 112、2026-11-16）。
 - **token**: 今は target・records・copies・denied だけ。対象の identity 集合のダイジェスト、Λ(R)、端末ごとの
   境界、未保存の event の一覧を足し、登録の transaction の中でもう一度計算して比べる（件数だけの一致では
   通さない）。
