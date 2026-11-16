@@ -2964,6 +2964,361 @@ fn a_worker_that_leaves_notes_why_and_when_in_its_own_home() {
     assert!(last_failure(p).is_some_and(|why| why == NO_PROGRESS));
 }
 
+/// D3 under a backlog that keeps growing (#1041): a round's batches read what was there when it
+/// began, then the other phases have their turn, so records that keep arriving while the owner
+/// works no longer hold curation off for as long as they arrive. A hook appends a record while
+/// each batch is read, 100 times, beside the worker's own consumers.
+#[test]
+fn curation_gets_its_turn_while_records_keep_arriving() {
+    struct Arriving {
+        home: std::path::PathBuf,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Consumer for Arriving {
+        fn name(&self) -> &'static str {
+            "arriving"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+            if self.left.get() > 0 {
+                self.left.set(self.left.get() - 1);
+                raw::open(&self.home)?.append(&raw::test_event("arrived"))?;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let left = std::rc::Rc::new(std::cell::Cell::new(100));
+    let first_turn = std::cell::Cell::new(None);
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if first_turn.get().is_none() {
+            first_turn.set(Some(left.get()));
+        }
+        Ok(Phase::Idle)
+    };
+    let mut all = consumers(p);
+    all.push(Box::new(Arriving {
+        home: p.into(),
+        left: left.clone(),
+    }));
+    run_holding(p, 0, all, || {}, None, curating(&mut phase)).unwrap();
+    let left_then = first_turn.get().unwrap();
+    assert!(
+        left_then > 0,
+        "curation's first turn came only once the records stopped arriving"
+    );
+    assert_eq!(left.get(), 0, "the arrivals were all read");
+}
+
+/// CodeRabbit on #1043: records that arrive faster than the consumers read them still leave the
+/// phases a turn. A round whose time runs out keeps the ends it fixed, and the next reads up to
+/// them before it fixes new ones. Here each batch reads one record in 30 ms while two arrive.
+#[test]
+fn curation_gets_its_turn_while_records_arrive_faster_than_they_are_read() {
+    struct Flood {
+        home: std::path::PathBuf,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Consumer for Flood {
+        fn name(&self) -> &'static str {
+            "flood"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+            if self.left.get() > 0 {
+                self.left.set(self.left.get() - 1);
+                let mut to = raw::open(&self.home)?;
+                to.append(&raw::test_event("arrived"))?;
+                to.append(&raw::test_event("arrived"))?;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(raw.after(device, after, 1)?.last().map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    for i in 0..10 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    drop(raw);
+    let left = std::rc::Rc::new(std::cell::Cell::new(30));
+    let first_turn = std::cell::Cell::new(None);
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if first_turn.get().is_none() {
+            first_turn.set(Some(left.get()));
+        }
+        Ok(Phase::Idle)
+    };
+    let flood = Flood {
+        home: p.into(),
+        left: left.clone(),
+    };
+    run_holding(
+        p,
+        0,
+        vec![Box::new(flood)],
+        || {},
+        None,
+        curating(&mut phase),
+    )
+    .unwrap();
+    let left_then = first_turn.get().unwrap();
+    assert!(
+        left_then > 0,
+        "curation's first turn came only once the records stopped arriving"
+    );
+    assert_eq!(left.get(), 0, "the arrivals were all read");
+}
+
+/// CodeRabbit on #1043: a round that goes on toward the ends a timed-out round fixed keeps what
+/// that round had seen, so a record that landed since still wakes the wait. Here the eleventh
+/// record lands during the first round, and a resident worker reads it at once, not after its idle
+/// time.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_record_past_the_kept_ends_wakes_the_wait() {
+    struct OneMore {
+        home: std::path::PathBuf,
+        added: bool,
+    }
+    impl Consumer for OneMore {
+        fn name(&self) -> &'static str {
+            "one-more"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+            if !std::mem::replace(&mut self.added, true) {
+                raw::open(&self.home)?.append(&raw::test_event("the eleventh"))?;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(raw.after(device, after, 1)?.last().map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..10 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            let one = OneMore {
+                home: p.clone(),
+                added: false,
+            };
+            run_holding(&p, 600_000, vec![Box::new(one)], || {}, lock(&p)?, phases)
+        })
+    };
+    let read = || checkpoint::get(&knowledge::open(&p).unwrap(), "one-more", &device).unwrap();
+    until("the eleventh is read before the idle time", || read() == 11);
+    let held = lock_asking(&p).unwrap();
+    worker.join().unwrap().unwrap();
+    drop(held);
+}
+
+/// CodeRabbit on #1043: a round whose time runs out settles an embedding call that came back,
+/// with no other sent, so a command that asks aside during a backlog longer than a round is let
+/// in once the call is settled, not only once the backlog is read.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_returned_embedding_call_is_settled_while_a_backlog_is_read() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..50 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let read = || checkpoint::get(&knowledge::open(&p).unwrap(), "slow", &device).unwrap();
+    let mut embed = crate::embed_phase::Phase::new(&p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Slow)], || {}, lock(&p)?, phases)
+        })
+    };
+    until("it reads", || read() > 0);
+    let asking = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let _contending = contending();
+            lock_asking(&p).map(drop)
+        })
+    };
+    until("the command asks", || asked_aside(&p));
+    release.send(()).unwrap();
+    asking.join().unwrap().unwrap();
+    worker.join().unwrap().unwrap();
+    let then = read();
+    assert!(
+        then < 50,
+        "it stepped aside once the backlog was read ({then} of 50)"
+    );
+}
+
+/// Codex on #1043: a round whose time runs out before its consumers have read the op log runs no
+/// phase. Here knowledge.db is built again from raw, the first batches outlast the round's time,
+/// and each summarized turn's op comes after more ops than the summaries' consumer reads in a
+/// batch (500): no turn is asked for again.
+#[test]
+fn a_summarized_turn_is_not_asked_for_again_before_its_op_is_read() {
+    struct SlowOnce(bool);
+    impl Consumer for SlowOnce {
+        fn name(&self) -> &'static str {
+            "slow-once"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, _: i64) -> Result<i64> {
+            if !std::mem::replace(&mut self.0, true) {
+                std::thread::sleep(PASS_BUDGET + Duration::from_millis(100));
+            }
+            raw.max_seq_of(device)
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let filler: Vec<_> = (0..600)
+        .map(|i| {
+            let fields = serde_json::json!({"n": i});
+            let op = serde_json::json!({"repo": "r", "list": "l", "fields": fields, "clock": i});
+            (raw::OpKind::WorkState, op)
+        })
+        .collect();
+    raw::open(p).unwrap().append_ops(&filler).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/fixtures/overturn-cross.jsonl");
+    crate::replay::run(p, &fixture, None, 0, &[1], "claude", 0, 0).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let run = |consumers: Vec<Box<dyn Consumer>>| {
+        let rules = crate::capture::Settings::load(p).unwrap().rules;
+        let summary = crate::config::Summary {
+            curate: true,
+            window_tokens: 1_500,
+            ..Default::default()
+        };
+        let db = crate::providers_db::open(p).unwrap();
+        let mut summarizer =
+            |a: &str, b: &str, c: &crate::provider::AnswerCheck, d: &crate::provider::Gate| {
+                calls.set(calls.get() + 1);
+                fake_summarizer(a, b, c, d)
+            };
+        let mut phase = |raw: &mut Raw, k: &Connection| {
+            crate::turns::round(
+                raw,
+                k,
+                &db,
+                &rules,
+                &summary,
+                "",
+                &mut summarizer,
+                &mut fake_curator,
+                &mut |_, _, _, _| Ok(Phase::Idle),
+            )
+        };
+        let held = lock(p).unwrap().expect("no other worker");
+        run_holding(p, 0, consumers, || {}, Some(held), curating(&mut phase)).unwrap();
+    };
+    run(consumers(p));
+    assert!(calls.get() > 0, "the fixture gave no turn to summarize");
+    let turn_ops = || -> i64 {
+        Connection::open(p.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM ops WHERE type = 'turn'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let ops = turn_ops();
+    for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
+        std::fs::remove_file(p.join(f)).ok();
+    }
+    calls.set(0);
+    let mut again = consumers(p);
+    again.push(Box::new(SlowOnce(false)));
+    run(again);
+    assert_eq!(calls.get(), 0, "a summarized turn was asked for again");
+    assert_eq!(turn_ops(), ops);
+}
+
+/// R12 during a backlog longer than a round's time (#1041): a command that asks is let in at the
+/// next round's start, the backlog not yet read, not once the worker has read all of it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_command_waits_for_one_rounds_batches_not_the_whole_backlog() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..60 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let read = || checkpoint::get(&knowledge::open(&p).unwrap(), "slow", &device).unwrap();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let held = lock(&p)?;
+            let phases = Phases {
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Slow)], || {}, held, phases)
+        })
+    };
+    until("it reads", || read() > 0);
+    let held = lock_asking(&p).unwrap();
+    worker.join().unwrap().unwrap();
+    let then = read();
+    assert!(
+        then < 60,
+        "it let the command in once the backlog was read ({then} of 60)"
+    );
+    drop(held);
+}
+
 /// One record a batch, 30 ms each: a backlog that takes many batches.
 struct Slow;
 impl Consumer for Slow {
