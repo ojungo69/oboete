@@ -3642,7 +3642,9 @@ fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
         Some("curation is paused while knowledge.db is being rebuilt, since 2023-11-14 22:13 UTC")
     );
     drop(rebuild);
-    assert_eq!(curation_pause(p), None, "a stamped lock not held");
+    // A child that another test's thread forked holds the open file, and the lock with it, until
+    // it execs (#1042): each drop is waited out before the next look.
+    until("a stamped lock not held", || curation_pause(p).is_none());
     // A purge's rebuild: both held, the rebuild named, since the purge's earlier time.
     let both = held("rebuild.lock", 1_700_000_120_000);
     let purging = held("purge.lock", 1_700_000_060_000);
@@ -3651,6 +3653,7 @@ fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
         Some(("rebuild", Some(1_700_000_060_000)))
     );
     drop((both, purging));
+    until("both let go", || curation_pause(p).is_none());
     let rewrite = held("purge.lock", 1_700_000_060_000);
     assert_eq!(
         curation_pause(p),
@@ -3662,14 +3665,23 @@ fn curation_is_paused_while_a_rebuild_or_a_rewrite_holds_its_lock() {
             .ends_with("(a forget, the retention period or new masks), since 2023-11-14 22:14 UTC")
     );
     drop(rewrite);
-    // The purge's lock stamps its file when it takes it.
+    until("the rewrite let go", || curation_pause(p).is_none());
+    // The purge's lock stamps its file when it takes it. The shared lock a look takes for an
+    // instant can be held by a forked child too, as a dropped one can: this thread contends, so
+    // `try_lock` does not wait for it.
     let before = crate::db::now_ms();
-    let purge = crate::forget::purge_lock(p).unwrap().unwrap();
+    let mut taken = None;
+    until("the purge's lock", || {
+        taken = crate::forget::purge_lock(p).unwrap();
+        taken.is_some()
+    });
+    let purge = taken.unwrap();
     let (kind, since) = curation_pause(p).unwrap();
     assert!(
         kind == "rewrite" && since.is_some_and(|t| (before..=crate::db::now_ms()).contains(&t))
     );
     drop(purge);
+    until("the purge let go", || curation_pause(p).is_none());
     // And a rebuild while it fills the new store, an old one set aside.
     drop(raw::open(p).unwrap());
     drop(knowledge::open(p).unwrap());
