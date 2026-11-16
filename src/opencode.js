@@ -93,7 +93,9 @@ export default {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return null;
         if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
-        state = { dir: location.directory, started: false, message: null, parts: [], turn: null, epoch: 0, inbox: new Map() };
+        // The stamp as the session starts, before it holds anything read (Codex and CodeRabbit on
+        // #1029): a prompt captured before the first model call is compared against it too.
+        state = { dir: location.directory, started: false, message: null, parts: [], turn: null, epoch: 0, inbox: new Map(), mark: marked() };
       }
       sessions.set(id, state);
       if (!state.started) {
@@ -121,11 +123,11 @@ export default {
       const state = session(e.sessionID, ctx.location);
       if (!state) return;
       const mark = marked();
-      if (state.mark !== undefined && state.mark !== mark) {
+      if (state.mark !== mark) {
         state.context = undefined;
         state.turn = null;
+        state.mark = mark;
       }
-      state.mark = mark;
       const turn = state.turn;
       const epoch = state.epoch;
       // Cache the promise too: overlapping calls still start only one injection process. The

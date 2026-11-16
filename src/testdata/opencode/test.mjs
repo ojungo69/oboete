@@ -565,6 +565,17 @@ const after = { sessionID: "forgets", system: [] };
 await forgets.hooks.context(after);
 assert.deepEqual(after.system, [{ type: "text", text: "read again" }]);
 assert.equal(injections.length, 4);
+// A prompt captured before a session's first model call, with the forget registered in between:
+// its packets are not sent with the manifest read then (Codex and CodeRabbit on #1029).
+promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "picked before" } });
+await forgets.emit("session.inbox.enqueued", user("forgets-first", "a prompt"), where);
+await drain();
+promptOutput = "";
+stampText = "registered four times";
+injectResult = "first read";
+const firstCall = { sessionID: "forgets-first", system: [] };
+await forgets.hooks.context(firstCall);
+assert.deepEqual(firstCall.system, [{ type: "text", text: "first read" }]);
 // Every read asked the home the binary runs with.
 assert(stampReads.length > 0 && stampReads.every((path) => path === expectedStamp), stampReads.join(", "));
 await drain();
