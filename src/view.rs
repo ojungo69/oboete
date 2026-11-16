@@ -3374,7 +3374,7 @@ fn feed(
     // Milestone 5 D5 (#439): no forget commits until the page is built. Decision 109: the saved
     // notes only once knowledge.db has applied every forget of imported history.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
-    let applied = raw.imported_open(&k)?;
+    let (applied, registered) = raw.imported_open_counted(&k)?;
     // A session's page (S4): the agent and session its key names; a key of no session hooks
     // recorded has no items.
     let named = match session {
@@ -3400,9 +3400,10 @@ fn feed(
     // How many forgets of imported history raw.db holds: a page read before one reads again from
     // the top, though a registration and its apply between two of its reads show it no
     // withholding, as the notes it shows may be gone (Codex on #1020). None, no key: a store with
-    // no history forget answers as before.
+    // no history forget answers as before. The count is the one the withholding was decided by,
+    // from the same read (#1022).
     let forgets = match named {
-        None => raw.history_forgets()?.len(),
+        None => registered,
         Some(_) => 0,
     };
     let (notes, notes_more) = match (&named, &applied) {
@@ -3699,7 +3700,12 @@ fn version(home: &Path) -> Result<(String, (usize, usize))> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    // Decision 109: a forget of imported history registered, and applied, redraws the page.
+    // Decision 109: a forget of imported history registered, and applied, redraws the page. The
+    // marks are counts, not the pairs: a job raw.db lost and registered again with another token
+    // within one poll's gap would leave both as they were. That cannot happen while no job leaves
+    // `forget_history` (its pairs only grow while its file stays the one it was, which mem_search's
+    // continuations rest on too); a change that removes a pair must mark the pairs themselves
+    // (#1022).
     let history = (
         raw.history_forgets()?.len(),
         crate::forget::history::applied(&k)?.len(),

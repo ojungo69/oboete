@@ -7834,9 +7834,9 @@ ctx.fetch=url=>{
 };
 const settings=new Node('div');settings.className='settings';
 document.getElementById('panel').replaceChildren(settings);
-run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled,privacyHistory};
+run(`globalThis.__privacyPoll={view,form,version,reposLoaded,restsPolled,privacyHistory,privacyPolled};
 view='settings';form={privacy:{available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}};
-version='p0';reposLoaded=true;restsPolled=new Promise(()=>{});privacyHistory=null`);
+version='p0';reposLoaded=true;restsPolled=new Promise(()=>{});privacyHistory=null;privacyPolled=null`);
 document.visibilityState='visible';
 const polled=async()=>{run('polling=false');await run('poll()');await settle();};
 await polled();
@@ -7892,6 +7892,56 @@ assert.equal(reads,7);
 await polled();
 assert.equal(reads,7,'one that answers is not read again');
 delete document.visibilityState;
-run(`({view,form,version,reposLoaded,restsPolled,privacyHistory}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
+run(`({view,form,version,reposLoaded,restsPolled,privacyHistory,privacyPolled}=globalThis.__privacyPoll);delete globalThis.__privacyPoll`);
 console.log('PASS: Settings reads the privacy state again when a history forget moves, not at each record, and not over a write on its way');
+}
+
+// #1022: the poll reads the privacy state one read at a time. With its read on its way, a poll that
+// sees another change starts no second read, which would supersede it; the changes it saw are read
+// at the first poll after that read ends, and a poll with no further change reads nothing more.
+{
+const run=code=>vm.runInContext(code,ctx);
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const response=value=>({ok:true,status:200,json:async()=>value});
+const state=name=>({available:true,repositories:[{repo:name}],rescan:{state:'idle',processed:null,total:null}});
+let v='q1',history='',reads=0;
+const pending=[];
+ctx.fetch=url=>{
+  if(url.startsWith('/api/version'))return Promise.resolve(response(history?{v,history}:{v}));
+  if(url.startsWith('/api/privacy?')){reads+=1;return new Promise(resolve=>pending.push(resolve));}
+  return Promise.resolve(response({}));
+};
+const settings=new Node('div');settings.className='settings';
+document.getElementById('panel').replaceChildren(settings);
+run(`globalThis.__privacyOne={view,form,version,reposLoaded,restsPolled,privacyHistory,privacyStale,privacyPolled};
+view='settings';form={privacy:{available:true,repositories:[],rescan:{state:'idle',processed:null,total:null}}};
+version='q0';reposLoaded=true;restsPolled=new Promise(()=>{});privacyHistory=null;privacyStale=false;privacyPolled=null`);
+document.visibilityState='visible';
+const polled=async()=>{run('polling=false');await run('poll()');await settle();};
+const shown=()=>run('form.privacy.repositories[0]?.repo');
+await polled();
+history='3.0';
+await polled();
+assert.equal(reads,1,'a forget registered reads the privacy state');
+history='3.1';
+await polled();
+history='3.2';
+await polled();
+assert.equal(reads,1,'no second read over one on its way');
+pending.shift()(response(state('first')));
+await settle();
+assert.equal(shown(),'first','the read on its way draws');
+await polled();
+assert.equal(reads,2,'the changes seen meanwhile are read at the first poll after it');
+await polled();
+assert.equal(reads,2,'not over the read on its way');
+pending.shift()(response(state('second')));
+await settle();
+assert.equal(shown(),'second','the page shows the read made after the changes');
+await polled();
+assert.equal(reads,2,'a poll with no further change reads nothing more');
+assert.equal(run('privacyPolled'),null);
+delete document.visibilityState;
+run(`({view,form,version,reposLoaded,restsPolled,privacyHistory,privacyStale,privacyPolled}=globalThis.__privacyOne);delete globalThis.__privacyOne`);
+console.log('PASS: #1022: the poll reads the privacy state one read at a time, and the changes it saw after the read on its way');
 }

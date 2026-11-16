@@ -37,6 +37,24 @@ fn a_registered_history_forget_closes_the_imported_documents_until_applied() {
     assert!(raw.imported_open(&k).unwrap().is_none());
 }
 
+/// The proof and the count of history forgets come from the one read of them (#1022): none
+/// registered is open with no count, one waiting is closed with its count, and the mark opens it.
+#[test]
+fn the_proof_comes_with_the_count_it_was_read_with() {
+    let (home, raw, k, _conn) = stores();
+    let counted = |raw: &crate::raw::Raw| {
+        let (open, n) = raw.imported_open_counted(&k).unwrap();
+        (open.is_some(), n)
+    };
+    assert_eq!(counted(&raw), (true, 0));
+    register(home.path(), "j1", "t1");
+    assert_eq!(counted(&raw), (false, 1));
+    mark_applied(home.path(), "j1", "t1");
+    assert_eq!(counted(&raw), (true, 1));
+    register(home.path(), "j2", "t2");
+    assert_eq!(counted(&raw), (false, 2));
+}
+
 /// A job raw.db lost (a restore of an older copy) and a log applied again gets another token: the
 /// mark of the first application does not open the documents, so a document of the repository
 /// imported between the restore and the second application is not shown.

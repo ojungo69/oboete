@@ -469,7 +469,8 @@ function scope(repo) {
 // Decision 109: an answer that left imported history out while a forget of it waits says so
 // first, as the feed does (#1021).
 function withheldNote(message, withheld) {
-  return withheld ? [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ') : message;
+  if (!withheld) return message;
+  return [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ');
 }
 
 async function showRecords(repo) {
@@ -1001,8 +1002,9 @@ async function showSearch(repo, q) {
       $('vector').replaceChildren(word('span', null, answer.why ? 'vector_notice_reason' : 'vector_notice', { state, reason }));
       $('vector').hidden = false;
     }
-    const found = answer.hits.length === LIMIT ? t('best_matches', { n: LIMIT })
-      : answer.hits.length ? t('found', { n: answer.hits.length }) : t('nothing_found');
+    let found = t('nothing_found');
+    if (answer.hits.length === LIMIT) found = t('best_matches', { n: LIMIT });
+    else if (answer.hits.length) found = t('found', { n: answer.hits.length });
     setStatus(withheldNote(found, answer.withheld));
   };
 }
@@ -5099,6 +5101,9 @@ function hiddenSection(f) {
 // The page's reads of the privacy state, numbered as they start: only the last one started is
 // drawn, whichever form it reaches (Codex and CodeRabbit on #806).
 let privacyReads = 0;
+// The poll's read of the privacy state on its way: one at a time, as `restsPolled` keeps the rests'
+// read, so a read slower than the poll is not superseded by the poll's next (#1022).
+let privacyPolled = null;
 // A change the poll saw that the privacy state has not been read again for (`poll`), and the
 // version's history forgets it was last read under.
 let privacyStale = false;
@@ -11025,15 +11030,18 @@ async function poll() {
     // The privacy state is read again in place when a forget of imported history is registered or
     // applied, which changes the repositories it names (decision 109; CodeRabbit on #1020): not at
     // each record captured, which would redraw it under the owner's click (the ponytail review of
-    // #1020). Not over a write on its way, whose read of its receipt a later read would take: a
-    // later poll reads it.
+    // #1020). Not over a write on its way, whose read of its receipt a later read would take, nor
+    // over the poll's own read on its way, which a second would supersede (#1022): a later poll
+    // reads it.
     if (view === 'settings' && privacyHistory !== null && history !== privacyHistory) privacyStale = true;
     privacyHistory = history;
-    if (privacyStale && view === 'settings' && form && !$('panel').querySelector('.settings')?.inert) {
+    if (privacyStale && view === 'settings' && form && !privacyPolled && !$('panel').querySelector('.settings')?.inert) {
       privacyStale = false;
       // A read that failed, or that a form drawn from another meanwhile did not take (a provider's
       // write keeps the state it had), is read again at a later poll (Codex and CodeRabbit on #1020).
-      void refreshPrivacy(form).then((drawn) => { if (!drawn) privacyStale = true; });
+      const read = refreshPrivacy(form).then((drawn) => { if (!drawn) privacyStale = true; })
+        .catch((error) => console.error(error)).finally(() => { if (privacyPolled === read) privacyPolled = null; });
+      privacyPolled = read;
     }
     if (wanted && !(await refresh(true))) return;
     // A failed redraw leaves the marker unchanged, so the next poll retries it.
