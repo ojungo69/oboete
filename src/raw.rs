@@ -215,6 +215,26 @@ const PROMPT_SEQS_SINCE: &str = "SELECT seq FROM records INDEXED BY records_prom
 const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
     ON records(device, agent, session, seq)";
 
+/// The expired events alone (#1037), so a store whose retention expired nothing holds none: what
+/// `Raw::expired_among` seeks, and what the other reads of expired events (`expired_count`,
+/// `holds_expired`, `expired_identities`) may take. `expired` is a row's last column, past its body,
+/// so without this index each record read for it walks its whole body: My Work asked 73,448
+/// subagent records one primary-key read each, 7 to 11 s cold, to find none expired. The first
+/// build reads every record once, so only the worker makes it, in a pause of the owner's work
+/// (`worker::maintain`), as `SESSION_INDEX`.
+const EXPIRED_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_expired
+    ON records(device, seq) WHERE type = 'event' AND expired IS NOT NULL";
+
+/// `Raw::expired_among` before `EXPIRED_INDEX` is built.
+const EXPIRED_AMONG: &str = "SELECT seq FROM records WHERE device = ?1 AND type = 'event'
+       AND expired IS NOT NULL AND seq IN (SELECT value FROM json_each(?2))";
+
+/// `EXPIRED_AMONG` through `EXPIRED_INDEX`, named: with no statistics SQLite breaks a tie between
+/// indexes toward the one made last (#1036).
+const EXPIRED_AMONG_INDEXED: &str = "SELECT seq FROM records INDEXED BY records_expired
+     WHERE device = ?1 AND type = 'event' AND expired IS NOT NULL
+       AND seq IN (SELECT value FROM json_each(?2))";
+
 /// The repositories the events of `schema`'s records name, each once (`event_repos`). Through
 /// `records_repo` each name is one seek of the index: the least name, then the least one above
 /// it, and so on. Without it every record is read.
@@ -4997,12 +5017,36 @@ impl Raw {
     pub(crate) fn expired_among(&self, device: &str, seqs: &[i64]) -> Result<Vec<i64>> {
         Ok(self
             .conn
-            .prepare_cached(
-                "SELECT seq FROM records WHERE device = ?1 AND type = 'event'
-                   AND expired IS NOT NULL AND seq IN (SELECT value FROM json_each(?2))",
-            )?
+            .prepare_cached(self.expired_among_sql()?)?
             .query_map(params![device, serde_json::to_string(seqs)?], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `expired_among`'s statement: through `EXPIRED_INDEX` once the worker built it, else a read
+    /// of each asked record's row (#1037).
+    pub(crate) fn expired_among_sql(&self) -> Result<&'static str> {
+        Ok(if self.has_expired_index()? {
+            EXPIRED_AMONG_INDEXED
+        } else {
+            EXPIRED_AMONG
+        })
+    }
+
+    /// Whether `records_expired` (`EXPIRED_INDEX`) is built.
+    pub(crate) fn has_expired_index(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+               WHERE type = 'index' AND name = 'records_expired')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `EXPIRED_INDEX`, which only the worker builds, in a pause of the owner's work
+    /// (`worker::maintain`).
+    pub(crate) fn expired_index(&self) -> Result<()> {
+        self.conn.execute_batch(EXPIRED_INDEX)?;
+        Ok(())
     }
 
     /// Slice 2: the fields of each imported work state write (an op of an import's source) to
