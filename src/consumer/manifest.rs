@@ -17,14 +17,28 @@ use std::time::{Duration, Instant};
 
 pub struct Manifest {
     home: PathBuf,
+    /// Each owner-directive prompt's directive lines as gated, by the SHA-256 of the rules'
+    /// version and the prompt (#1045): the gate is a function of the two alone, and gating a
+    /// repository's directive prompts took 5 s of each build on one PC. This process's only.
+    gated: std::collections::HashMap<[u8; 32], Vec<String>>,
 }
 
 impl Manifest {
     pub fn new(home: &Path) -> Self {
         Self {
             home: home.to_owned(),
+            gated: std::collections::HashMap::new(),
         }
     }
+}
+
+/// The most prompts `Manifest::gated` keeps: past it, it starts again.
+const GATED: usize = 4_096;
+
+#[cfg(test)]
+thread_local! {
+    /// How many directive prompts this thread gated: a test's look at `Manifest::gated`.
+    static GATED_PROMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Records per step, as the FTS consumer.
@@ -842,7 +856,7 @@ impl Consumer for Manifest {
                  SELECT repo, branch, device FROM manifests WHERE device = ?1 AND ruleset != ?2",
                 params![device, stamp(rules.version())],
             )?;
-            rebuild(raw, k, device, &rules)?;
+            rebuild(raw, k, device, &rules, &mut self.gated)?;
         }
         Ok(recs.last().map_or(from, |r| r.seq))
     }
@@ -1186,7 +1200,13 @@ pub(crate) fn one_line(s: &str, n: usize) -> String {
 }
 
 /// Every dirty checkout of this device built again (or its row removed when no record is left).
-fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules) -> Result<()> {
+fn rebuild(
+    raw: &Raw,
+    k: &Connection,
+    device: &str,
+    rules: &crate::redact::Rules,
+    gated: &mut std::collections::HashMap<[u8; 32], Vec<String>>,
+) -> Result<()> {
     let dirty: Vec<(String, String)> = k
         .prepare("SELECT repo, branch FROM manifest_dirty WHERE device = ?1 ORDER BY repo, branch")?
         .query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1196,7 +1216,10 @@ fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules
     let mut owner: Option<(String, Vec<Line>)> = None;
     for (repo, branch) in dirty {
         if owner.as_ref().is_none_or(|(of, _)| *of != repo) {
-            owner = Some((repo.clone(), owner_lines(raw, k, device, &repo, rules)?));
+            owner = Some((
+                repo.clone(),
+                owner_lines(raw, k, device, &repo, rules, gated)?,
+            ));
         }
         let directives = owner
             .as_ref()
@@ -1234,6 +1257,7 @@ fn owner_lines(
     device: &str,
     repo: &str,
     rules: &crate::redact::Rules,
+    gated: &mut std::collections::HashMap<[u8; 32], Vec<String>>,
 ) -> Result<Vec<Line>> {
     let gate = |s: &str| crate::redact::outbound_with(s, rules);
     let mut owner: Vec<(i64, String, i64)> = k
@@ -1252,15 +1276,33 @@ fn owner_lines(
             if crate::typed::codex_review_preset(str_at(&body(&e), "prompt")) {
                 continue;
             }
-            let prompt = gate(str_at(&body(&e), "prompt"));
-            for text in prompt.split(['\n', '。']).map(str::trim) {
-                if manifest::is_owner_line(text) {
-                    lines.push(Line {
-                        date: crate::db::utc(ts)[..10].to_owned(),
-                        session: session.clone(),
-                        text: text.to_owned(),
-                    });
-                }
+            let b = body(&e);
+            let prompt = str_at(&b, "prompt");
+            let key: [u8; 32] = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(rules.version().as_bytes());
+                h.update([0]);
+                h.update(prompt.as_bytes());
+                h.finalize().into()
+            };
+            if gated.len() >= GATED && !gated.contains_key(&key) {
+                gated.clear();
+            }
+            let texts = gated.entry(key).or_insert_with(|| {
+                #[cfg(test)]
+                GATED_PROMPTS.set(GATED_PROMPTS.get() + 1);
+                (gate(prompt).split(['\n', '。']).map(str::trim))
+                    .filter(|text| manifest::is_owner_line(text))
+                    .map(str::to_owned)
+                    .collect()
+            });
+            for text in texts.iter() {
+                lines.push(Line {
+                    date: crate::db::utc(ts)[..10].to_owned(),
+                    session: session.clone(),
+                    text: text.clone(),
+                });
             }
         }
     }

@@ -756,6 +756,104 @@ fn a_backlog_that_ends_with_a_full_batch_is_built() {
     assert!(manifest(home.path()).0.contains("step 499"));
 }
 
+/// #1045: a directive prompt is gated once for as long as its text and the rules stay. A build
+/// after an unrelated record gates none again; a directive a later tombstone masks, or a rule
+/// added later masks, is gated again and shown masked.
+#[test]
+fn a_directive_prompt_is_gated_again_only_when_its_text_or_the_rules_change() {
+    use crate::worker::Consumer;
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut store = raw::open(p).unwrap();
+    let device = store.device().to_owned();
+    let mut m = Manifest::new(p);
+    let mut step = |store: &Raw| {
+        let k = knowledge::open(p).unwrap();
+        loop {
+            let tx = k.unchecked_transaction().unwrap();
+            let at = crate::knowledge::checkpoint::get_in(&tx, m.checkpoints(), m.name(), &device)
+                .unwrap();
+            let next = m.step(store, &tx, &device, at).unwrap();
+            crate::knowledge::checkpoint::set_in(&tx, m.checkpoints(), m.name(), &device, next)
+                .unwrap();
+            tx.commit().unwrap();
+            if next == at {
+                break;
+            }
+        }
+    };
+    let said = |ts: i64, text: &str| {
+        ev(
+            "prompt",
+            "s1",
+            ts,
+            cwd.path(),
+            serde_json::json!({"prompt": text}),
+        )
+    };
+    store
+        .append(&said(60_000, "always run zqxlint first"))
+        .unwrap();
+    let second = said(120_000, "never deploy with acme-123456 on friday");
+    let at = second.body.find("acme-123456").unwrap();
+    let masked = store.append(&second).unwrap();
+    GATED_PROMPTS.set(0);
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 2);
+    let text = manifest(p).0;
+    assert!(
+        text.contains("zqxlint") && text.contains("acme-123456"),
+        "{text}"
+    );
+    // An unrelated record: its checkout is built again, no directive gated again.
+    store
+        .append(&tool(
+            cwd.path(),
+            180_000,
+            "Bash",
+            serde_json::json!({"command": "ls"}),
+            "ok",
+            false,
+        ))
+        .unwrap();
+    step(&store);
+    assert_eq!(
+        GATED_PROMPTS.get(),
+        2,
+        "a directive gated again with nothing changed"
+    );
+    // A tombstone masks part of the second prompt: its text changed, so it is gated again.
+    store
+        .append_tombstone(Target::Range {
+            device: device.clone(),
+            seq: masked,
+            offset: at as i64,
+            length: 11,
+        })
+        .unwrap();
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 3);
+    let text = manifest(p).0;
+    assert!(
+        text.contains("never deploy") && !text.contains("acme-123456"),
+        "{text}"
+    );
+    // A rule added later: both are gated again, under the new rules.
+    std::fs::write(
+        p.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"zqx\", regex = 'zqxlint' }]\n",
+    )
+    .unwrap();
+    step(&store);
+    assert_eq!(GATED_PROMPTS.get(), 5);
+    let text = manifest(p).0;
+    assert!(
+        !text.contains("zqxlint") && text.contains("always run"),
+        "{text}"
+    );
+}
+
 #[test]
 fn the_manifest_is_the_same_bytes_for_the_same_records() {
     let home = tempfile::tempdir().unwrap();
