@@ -1663,15 +1663,18 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
 /// its events for the next hook to write back (docs/unwritten.md).
 const INDEX_PAUSE_MS: i64 = 30 * 60_000;
 
-/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`)
-/// and the index of the events' repositories (`Raw::repo_index`, which the settings page's list of
-/// repositories reads: #899 W2), each built once in a pause of the owner's work, since its first
+/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`),
+/// the index of the events' repositories (`Raw::repo_index`, which the settings page's list of
+/// repositories reads: #899 W2) and the index of the expired events (`Raw::expired_index`, which My
+/// Work reads: #1037), each built once in a pause of the owner's work, since its first
 /// build takes seconds a hook's write would wait out. Not while a command waits for the worker to
 /// step aside (R12) or it is leaving, nor with a call out (R10). A build that fails is tried again
 /// at a later idle time; the readers work without the indexes, only slower.
 fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
     // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
-    let built = raw.has_session_index().unwrap_or(true) && raw.has_repo_index().unwrap_or(true);
+    let built = raw.has_session_index().unwrap_or(true)
+        && raw.has_repo_index().unwrap_or(true)
+        && raw.has_expired_index().unwrap_or(true);
     if leaving || calling || asked_aside(home) || built {
         return;
     }
@@ -1681,6 +1684,7 @@ fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
     if paused {
         let _ = raw.ensure_session_index();
         let _ = raw.repo_index();
+        let _ = raw.expired_index();
     }
 }
 

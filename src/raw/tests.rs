@@ -3392,6 +3392,55 @@ fn an_import_leaves_a_denied_v1_event_and_document_out() {
 /// prompts since a time read the prompts through their own index. With no statistics, SQLite took
 /// the events' repository index for the first and the primary key for the second, and read every
 /// event of the store: about 1.9 GB a call on a store of 810,000 records, 6,858 of them prompts.
+/// #1037: which of the asked events expired is read through the index of expired events once the
+/// worker built it, as a live store makes its indexes (that one last), and answers the same as
+/// without it: My Work asked a device's 73,448 subagent records one primary-key read each (7-11 s
+/// cold) to find none expired.
+#[test]
+fn which_events_expired_is_read_through_their_index() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let seqs: Vec<i64> = (0..6)
+        .map(|i| raw.append(&test_event(&format!("event {i}"))).unwrap())
+        .collect();
+    raw.expire_for_test(&[seqs[1], seqs[4]]);
+    let asked = [seqs[0], seqs[1], seqs[2], seqs[4]];
+    let device = raw.device.clone();
+    let without = raw.expired_among(&device, &asked).unwrap();
+    assert_eq!(without, [seqs[1], seqs[4]]);
+    raw.conn.execute_batch(PROMPT_INDEX).unwrap();
+    raw.ensure_session_index().unwrap();
+    raw.repo_index().unwrap();
+    assert!(!raw.has_expired_index().unwrap());
+    raw.expired_index().unwrap();
+    assert!(raw.has_expired_index().unwrap());
+    // An index a later change might add, made after it: with no statistics SQLite would take that
+    // one (#908), so the statement names its own.
+    raw.conn
+        .execute_batch("CREATE INDEX later ON records(device, type, seq)")
+        .unwrap();
+    let plan: String = raw
+        .conn
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            raw.expired_among_sql().unwrap()
+        ))
+        .unwrap()
+        .query_map(params![device, "[]"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join(" | ");
+    assert!(plan.contains("INDEX records_expired"), "{plan}");
+    assert_eq!(raw.expired_among(&device, &asked).unwrap(), without);
+    // Expired after the index was made: the index holds it too.
+    raw.expire_for_test(&[seqs[2]]);
+    assert_eq!(
+        raw.expired_among(&device, &asked).unwrap(),
+        [seqs[1], seqs[2], seqs[4]]
+    );
+}
+
 #[test]
 fn the_sessions_and_the_prompts_since_read_the_prompts_index() {
     let home = tempfile::tempdir().unwrap();

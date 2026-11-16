@@ -70,6 +70,32 @@ fn the_repository_index_is_built_in_a_pause_beside_the_session_index() {
     assert!(raw.has_session_index().unwrap() && raw.has_repo_index().unwrap());
 }
 
+/// #1037: the index of the expired events is the idle worker's to build too, in the same pause,
+/// on a store whose session and repository indexes an earlier worker built, as this PC's are.
+#[test]
+fn the_expired_events_index_is_built_in_a_pause_beside_the_others() {
+    for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let e = crate::raw::Event {
+            ts: crate::db::now_ms() - ago,
+            ..crate::raw::test_event("a step")
+        };
+        raw.append(&e).unwrap();
+        raw.ensure_session_index().unwrap();
+        raw.repo_index().unwrap();
+        maintain(p, &raw, true, false);
+        maintain(p, &raw, false, true);
+        assert!(
+            !raw.has_expired_index().unwrap(),
+            "leaving, or with a call out"
+        );
+        maintain(p, &raw, false, false);
+        assert_eq!(raw.has_expired_index().unwrap(), built, "{ago} ms ago");
+    }
+}
+
 /// A resident worker that went idle before the pause came builds the index once it has: its
 /// idle times go on with nothing new.
 #[cfg(target_os = "linux")]
