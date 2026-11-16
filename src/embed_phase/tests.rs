@@ -1111,6 +1111,131 @@ fn the_queue_holds_only_what_waits_for_a_vector() {
     );
 }
 
+/// #1037: claims wait in the queue as imported documents and records do, so a poll reads a page of
+/// it and not every claim: a new claim is queued until it has a key, a claim whose text changed
+/// (its key deleted) waits again, and a home whose queue was made before claims joined it queues
+/// its claims with no key once.
+#[test]
+fn claims_wait_in_the_queue_until_they_have_a_key() {
+    let mut s = Store::new();
+    let text = "Parser errors go to stderr.";
+    let seq = s.said("s", R, 1_000, text);
+    let first = derive(&mut s, seq, text, text);
+    s.run();
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let queued = || -> Vec<String> {
+        k.prepare("SELECT key FROM vector_todo WHERE family = 'c' ORDER BY key")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let keyed = |s: &Store, uid: &str| {
+        keys(s)
+            .iter()
+            .any(|(kind, key, why)| kind == "c" && key == uid && why.is_none())
+    };
+    vectors(&s);
+    assert!(keyed(&s, &first));
+    assert!(queued().is_empty(), "{:?}", queued());
+    let other = "Logs rotate daily.";
+    let second = claim(&mut s, other, other);
+    s.run();
+    assert_eq!(queued(), [second.as_str()], "a new claim waits for its key");
+    vectors(&s);
+    assert!(keyed(&s, &second));
+    assert!(queued().is_empty(), "{:?}", queued());
+    // Derived again with another body: its key goes, and it waits again.
+    derive(&mut s, seq, text, "Parser errors go to the log.");
+    s.run();
+    assert_eq!(
+        queued(),
+        [first.as_str()],
+        "a claim whose text changed waits again"
+    );
+    vectors(&s);
+    assert!(keyed(&s, &first));
+    assert!(queued().is_empty(), "{:?}", queued());
+    // A home whose queue was made before claims joined it: its claims with no key are queued once.
+    k.execute_batch("DROP TRIGGER vector_todo_claim; DROP TRIGGER vector_todo_unkeyed_claim;")
+        .unwrap();
+    let late = "Builds run on every push.";
+    let third = claim(&mut s, late, late);
+    s.run();
+    assert!(queued().is_empty(), "no trigger, no queue yet");
+    vectors(&s);
+    assert!(
+        keyed(&s, &third),
+        "the queue made then took the claim with no key"
+    );
+    assert!(queued().is_empty(), "{:?}", queued());
+}
+
+/// #1039: a claim whose key row goes, through another connection, after a page read it as keyed
+/// stays queued. The trigger queues nothing while the claim's row stands, so the row may go only
+/// when the claim is read as keyed again with the write lock held.
+#[test]
+fn a_claim_unkeyed_while_its_page_reads_it_stays_queued() {
+    let mut s = Store::new();
+    let text = "Parser errors go to stderr.";
+    let uid = claim(&mut s, text, text);
+    s.run();
+    vectors(&s);
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let other = crate::knowledge::open(s.home.path()).unwrap();
+    // A row from before the claim was keyed.
+    k.execute(
+        "INSERT INTO vector_todo(family, key, ord) VALUES ('c', ?1, 0)",
+        [&uid],
+    )
+    .unwrap();
+    let mut first = true;
+    let page = queued(&k, "c", |key| {
+        let found = k
+            .prepare_cached(CLAIM_PAGE)?
+            .query_row(params![crate::embed::EMBEDDER, key], claim_read)
+            .optional()?;
+        if std::mem::take(&mut first) {
+            // Another connection takes the key row off right after the read.
+            other
+                .execute(
+                    "DELETE FROM vector_keys WHERE kind = 'c' AND key = ?1",
+                    [key],
+                )
+                .unwrap();
+        }
+        Ok(found)
+    })
+    .unwrap();
+    assert_eq!(
+        page.iter().map(|r| r.doc.key.as_str()).collect::<Vec<_>>(),
+        [uid.as_str()],
+        "the claim left the queue with no key row"
+    );
+}
+
+/// #1037: a claim is read from the queue by its uid, through the claims' index, never by a scan.
+#[test]
+fn a_queued_claim_is_read_by_its_uid() {
+    let mut s = Store::new();
+    let text = "Parser errors go to stderr.";
+    claim(&mut s, text, text);
+    s.run();
+    vectors(&s);
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let plan: String = k
+        .prepare(&format!("EXPLAIN QUERY PLAN {CLAIM_PAGE}"))
+        .unwrap()
+        .query_map(params!["e", "u"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join(" | ");
+    assert!(plan.contains("(uid=?)"), "{plan}");
+    assert!(!plan.contains("SCAN c"), "{plan}");
+}
+
 /// Settle the current call (starting one if needed), then return the next poll's step.
 fn call(s: &Store, k: &Connection, phase: &mut Phase) -> Step {
     if phase.flight.is_none() {

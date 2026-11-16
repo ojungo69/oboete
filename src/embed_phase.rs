@@ -1537,6 +1537,30 @@ const QUEUE: &str = concat!(
                         WHERE v.kind = 'r' AND v.key = d.device || ':' || d.seq);"
 );
 
+/// #1037: claims wait in the queue as imported documents do, the newest by their time first: a claim
+/// inserted with no key row, and one whose key row goes (its text changed or a mark lifted:
+/// `touched`, `unmask`, `unhold`). Then, once, the claims a home has with no key row: a queue made
+/// before claims joined it holds none of them.
+const CLAIMS_QUEUE: &str = "
+    CREATE TRIGGER IF NOT EXISTS vector_todo_claim AFTER INSERT ON claims
+      WHEN NOT EXISTS (SELECT 1 FROM vector_keys WHERE kind = 'c' AND key = NEW.uid)
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        VALUES ('c', NEW.uid, COALESCE((SELECT valid_from FROM derivations
+          WHERE op_device = NEW.op_device AND op_seq = NEW.op_seq), 0));
+    END;
+    CREATE TRIGGER IF NOT EXISTS vector_todo_unkeyed_claim AFTER DELETE ON vector_keys
+      WHEN OLD.kind = 'c'
+    BEGIN
+      INSERT OR IGNORE INTO vector_todo(family, key, ord)
+        SELECT 'c', OLD.key, COALESCE((SELECT d.valid_from FROM claims c JOIN derivations d
+          ON d.op_device = c.op_device AND d.op_seq = c.op_seq WHERE c.uid = OLD.key), 0);
+    END;
+    INSERT OR IGNORE INTO vector_todo(family, key, ord)
+      SELECT 'c', c.uid, d.valid_from FROM claims c
+      JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+      WHERE NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.kind = 'c' AND v.key = c.uid);";
+
 /// A home whose phase ran before tool output stayed out (#317): its trigger queued tool records and
 /// its index may hold their vectors. The key rows go before the queue's: a deleted key row queues
 /// its key again (`vector_todo_unkeyed`).
@@ -1563,6 +1587,7 @@ fn queue(k: &Connection) -> Result<()> {
     if !made {
         let tx = k.unchecked_transaction()?;
         tx.execute_batch(QUEUE)?;
+        tx.execute_batch(CLAIMS_QUEUE)?;
         tx.commit()?;
         return Ok(());
     }
@@ -1578,11 +1603,17 @@ fn queue(k: &Connection) -> Result<()> {
         tx.execute_batch(UNTOOL)?;
         tx.commit()?;
     }
+    if !crate::consumer::manifest::exists(k, "trigger", "vector_todo_claim")? {
+        let tx = k.unchecked_transaction()?;
+        tx.execute_batch(CLAIMS_QUEUE)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
 /// A page of `family`'s queued documents, the newest first, each as `read` finds it: a key whose
-/// document is gone or has its key row leaves the queue, and the next page is read.
+/// document is gone or has its key row leaves the queue once `read` finds it so again with the
+/// store's write lock held, and the next page is read.
 fn queued(
     k: &Connection,
     family: &str,
@@ -1605,14 +1636,25 @@ fn queued(
                 None => gone.push(key),
             }
         }
-        let tx = k.unchecked_transaction()?;
-        for key in &gone {
-            tx.execute(
-                "DELETE FROM vector_todo WHERE family = ?1 AND key = ?2",
-                params![family, key],
-            )?;
+        if !gone.is_empty() {
+            // Read again with the write lock held: a key row deleted, or a document written, by
+            // another connection since the first read queues nothing while this row stands, so the
+            // row goes only if it still has nothing to send (#1039).
+            let tx =
+                rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate)?;
+            for key in &gone {
+                match read(key)? {
+                    Some(r) => out.push(r),
+                    None => {
+                        tx.execute(
+                            "DELETE FROM vector_todo WHERE family = ?1 AND key = ?2",
+                            params![family, key],
+                        )?;
+                    }
+                }
+            }
+            tx.commit()?;
         }
-        tx.commit()?;
         if !out.is_empty() {
             return Ok(out);
         }
@@ -1620,8 +1662,8 @@ fn queued(
 }
 
 /// A page of `kind`'s documents (`i` reads both imported kinds) with no key row for `embedder`,
-/// the newest first: claims from `active`, current cards (`o`) from `cards`, summaries not skipped
-/// (`s`) from `turns`, the rest from the queue. With the proof that no forget of imported history
+/// the newest first: current cards (`o`) from `cards`, summaries not skipped (`s`) from `turns`, the
+/// rest from the queue, claims among them (#1037). With the proof that no forget of imported history
 /// waits (decision 109), for the `i` page.
 fn read_page(
     raw: &Raw,
@@ -1632,31 +1674,13 @@ fn read_page(
 ) -> Result<Vec<Read>> {
     let limit = PAGE as i64;
     Ok(match kind {
-        "c" => k
-            .prepare_cached(
-                "SELECT a.uid, a.body, COALESCE(a.repo, ''), a.valid_from FROM active a
-                 WHERE NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
-                                     AND v.kind = 'c' AND v.key = a.uid)
-                 ORDER BY a.valid_from DESC LIMIT ?2",
-            )?
-            .query_map(params![embedder, limit], |r| {
-                let text: String = r.get(1)?;
-                Ok(Read {
-                    doc: Doc {
-                        kind: "c",
-                        key: r.get(0)?,
-                        sha: sha(&text),
-                        repo: r.get(2)?,
-                        ts: r.get(3)?,
-                        session: String::new(),
-                    },
-                    text,
-                    title: None,
-                    labels: None,
-                    parts: Vec::new(),
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?,
+        // #1037: from the queue, as the imported documents and records are: probing every claim
+        // for a key row read 185 MB a poll on a store of 61,852 claims.
+        "c" => queued(k, "c", |uid| {
+            Ok(k.prepare_cached(CLAIM_PAGE)?
+                .query_row(params![embedder, uid], claim_read)
+                .optional()?)
+        })?,
         "o" => k
             .prepare_cached(&format!(
                 "SELECT {}, {CARD_DOC} FROM cards c WHERE replaced_by IS NULL AND hidden = 0
@@ -1764,6 +1788,30 @@ fn read_page(
 /// repository, time and session.
 const CARD_DOC: &str =
     "device || '.' || op_seq || '.' || n, COALESCE(repo, ''), ts, COALESCE(session, '')";
+
+/// #1037: a queued claim as a page reads it: from `active` by its uid (`?2`), while it has no key
+/// row for the embedder (`?1`).
+const CLAIM_PAGE: &str = "SELECT a.uid, a.body, COALESCE(a.repo, ''), a.valid_from FROM active a
+     WHERE a.uid = ?2 AND NOT EXISTS (SELECT 1 FROM vector_keys v WHERE v.embedder = ?1
+                                        AND v.kind = 'c' AND v.key = a.uid)";
+
+fn claim_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
+    let text: String = r.get(1)?;
+    Ok(Read {
+        doc: Doc {
+            kind: "c",
+            key: r.get(0)?,
+            sha: sha(&text),
+            repo: r.get(2)?,
+            ts: r.get(3)?,
+            session: String::new(),
+        },
+        text,
+        title: None,
+        labels: None,
+        parts: Vec::new(),
+    })
+}
 
 fn card_read(r: &rusqlite::Row) -> rusqlite::Result<Read> {
     let crate::consumer::fts::Joined { text, parts } = crate::consumer::fts::card_text(r, 0)?;
