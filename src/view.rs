@@ -2579,11 +2579,16 @@ impl Viewer {
                     search::b::Vector::Used => (json!("used"), None),
                     search::b::Vector::Skipped(s) => (json!(s), Some(s.why())),
                 };
-                json!({
+                let mut found = json!({
                     "hits": answer.hits,
                     "vector": vector,
                     "why": why,
-                })
+                });
+                // Decision 109 (#1021): hits without the imported documents say so, as the feed's.
+                if answer.withheld {
+                    found["withheld"] = json!(true);
+                }
+                found
             }
             // Parity row 3: the cards and summaries removed from the page, to bring back.
             "hidden" => {
@@ -2705,18 +2710,24 @@ impl Viewer {
                     (false, Some(r)) => Some(r.to_owned()),
                     (false, None) => self.checkout()?.map(|(repo, _)| repo),
                 };
-                let items = search::b::timeline(&self.home, repo.as_deref(), None, before, limit)?;
+                let (items, withheld) =
+                    search::b::timeline(&self.home, repo.as_deref(), None, before, limit)?;
                 // The next page starts after the last entry's time and key (never an anchor,
                 // which reads around an item and would return a time's other entries again).
                 let next = match items.last() {
                     Some(i) if items.len() == limit => Some(format!("{}:{}", i.when, i.key)),
                     _ => None,
                 };
-                json!({
+                let mut page = json!({
                     "repo": repo,
                     "items": items,
                     "next": next,
-                })
+                });
+                // Decision 109 (#1021): a page without the imported documents says so.
+                if withheld {
+                    page["withheld"] = json!(true);
+                }
+                page
             }
             // Its text is SessionStart's, which `hook::start_text_read` gated itself.
             "context" => return Ok(Response::json(&self.context(arg("repo"))?)),

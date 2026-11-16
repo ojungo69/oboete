@@ -3505,16 +3505,17 @@ pub struct Item {
 /// newest first, by time and then key: the `limit` newest, those after `before` (the time and key
 /// of a page's last entry, the viewer's next page), or with `anchor` (an id `get` takes) those
 /// around its time, half at or before it. A claim the worker has yet to apply an owner's change to
-/// is left out.
+/// is left out. With them, whether imported documents were left out while a forget of their
+/// history waits (decision 109), read under the same fence: the viewer says so (#1021).
 pub fn timeline(
     home: &Path,
     repo: Option<&str>,
     anchor: Option<&str>,
     before: Option<(i64, String)>,
     limit: usize,
-) -> Result<Vec<Item>> {
+) -> Result<(Vec<Item>, bool)> {
     let Some((raw, k)) = stores(home)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
     // Milestone 5 D5 (#439): no forget commits until the answer is built.
     let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
@@ -3533,9 +3534,10 @@ pub fn timeline(
     if let Some(between) = BETWEEN.take() {
         between();
     }
+    let withheld = applied.is_none();
     let Some(at) = at else {
         before.truncate(limit);
-        return Ok(before);
+        return Ok((before, withheld));
     };
     let mut after = others(&raw, &k, applied, repo, (false, true), at, "", limit)?;
     // Half on each side, and what one side cannot fill to the other (Codex on #306).
@@ -3544,7 +3546,7 @@ pub fn timeline(
     after.truncate(later);
     after.reverse();
     after.append(&mut before);
-    Ok(after)
+    Ok((after, withheld))
 }
 
 /// `others`' imported documents (each by its newest row), of the repository's two names

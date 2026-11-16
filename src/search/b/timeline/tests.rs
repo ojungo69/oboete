@@ -520,7 +520,9 @@ fn without_an_anchor_the_newest_entries() {
     assert!(got.contains(&d.later[0].1[..12]) && got.contains(&d.later[1].0));
     assert!(!got.contains("Window") && !got.contains("Quartz"), "{got}");
     assert_eq!(text(&Store::new(), Around::Newest(3), (3, 3)).unwrap(), "");
-    let listed = super::super::timeline(d.s.home.path(), Some(R), None, None, 20).unwrap();
+    let listed = super::super::timeline(d.s.home.path(), Some(R), None, None, 20)
+        .unwrap()
+        .0;
     let classes: Vec<&str> = listed.iter().map(|i| i.class.as_str()).collect();
     assert_eq!(classes, ["claim"; 3]);
 }

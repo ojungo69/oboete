@@ -7623,6 +7623,58 @@ fn the_viewer_withholds_imported_history_while_its_forget_is_not_applied() {
     );
 }
 
+/// Decision 109 (#1021): while a forget of imported history is not applied, a search and a
+/// timeline leave the imported documents out and say so; before any forget, and once it is
+/// applied, their answers carry no such key.
+#[test]
+fn a_search_and_a_timeline_say_when_imported_history_is_withheld() {
+    use crate::forget::history::fixture::{mark_applied, register};
+    let (mut s, v) = feed_fixture();
+    let doc = s.imported(
+        "x",
+        "fern",
+        3_200,
+        "Parser imported",
+        "Imported parser notes.",
+    );
+    s.run();
+    let home = s.home.path().to_owned();
+    let has = |answer: &Value, list: &str| {
+        (answer[list].as_array().unwrap().iter()).any(|entry| entry["key"] == doc)
+    };
+    let read = || {
+        (
+            get(&v, "/api/search?q=parser&all=1"),
+            get(&v, "/api/timeline?all=1"),
+        )
+    };
+    let (found, page) = read();
+    assert!(
+        has(&found, "hits") && found.get("withheld").is_none(),
+        "{found}"
+    );
+    assert!(
+        has(&page, "items") && page.get("withheld").is_none(),
+        "{page}"
+    );
+    register(&home, "j1", "t1");
+    let (found, page) = read();
+    assert!(!has(&found, "hits"), "{found}");
+    assert_eq!(found["withheld"], json!(true));
+    assert!(!has(&page, "items"), "{page}");
+    assert_eq!(page["withheld"], json!(true));
+    mark_applied(&home, "j1", "t1");
+    let (found, page) = read();
+    assert!(
+        has(&found, "hits") && found.get("withheld").is_none(),
+        "{found}"
+    );
+    assert!(
+        has(&page, "items") && page.get("withheld").is_none(),
+        "{page}"
+    );
+}
+
 /// A forget that holds the reading fence past its wait makes a page to read again (503), not a
 /// failure (500). Waits the fence's 10 s once.
 #[test]

@@ -4847,7 +4847,9 @@ fn a_forgotten_uid_is_hidden_from_every_reader_at_once() {
     assert!(crate::search::b::claim(&home, &uid).unwrap().is_none());
     let cited = crate::search::b::cite(&home, std::slice::from_ref(&uid)).unwrap();
     assert_eq!(cited[0]["error"], "not a claim");
-    let line = crate::search::b::timeline(&home, None, None, None, 10).unwrap();
+    let line = crate::search::b::timeline(&home, None, None, None, 10)
+        .unwrap()
+        .0;
     assert!(
         line.iter().all(|i| i.key != uid && i.key != doc),
         "{line:?}"
