@@ -3522,7 +3522,23 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
 /// nothing when there are none), and has `tool_search` leave that list out of its own description
 /// (`append_tool_search_executor`, core/src/tools/spec_plan.rs). The tools registered are the same
 /// with it on or off, and `tool_search` is offered when it was before.
-pub(crate) const CODEX_ON: [&str; 62] = [
+/// Those of 0.169.0 (codex-rs/features/src/lib.rs at rust-v0.169.0), none of them a tool:
+/// `code_mode_host_grpc` has Core talk to the process-owned code-mode host over gRPC on stdio
+/// instead of the older protocol, a transport only (core/src/thread_manager.rs), and
+/// `code_mode_host_output_truncation` has that host, not Core, cut a cell's output to its limit
+/// (`LocalServerOutputProvider`, core/src/code_mode_host.rs): both act only in a code-mode
+/// session, which stays off; `guardian_include_additional_context` keeps a client's
+/// additional-context outputs in the history the Guardian reviewer reads, a filter on items
+/// already there (core/src/context_manager/history.rs); `incremental_tools_legacy_gcp` declares
+/// the GCP provider's tools once a context window, as `incremental_tools` does, read only for the
+/// provider id `gcp` (core/src/session/step_context.rs); `retain_client_tool_outputs` keeps a
+/// client's call-less named function outputs across a new context window and a remote compaction
+/// (core/src/compact_retained_tool_outputs.rs), of which `codex exec` injects none;
+/// `unified_image_budget` sizes a prompt's images under one budget and drops `detail` from
+/// `view_image`'s schema (core/src/image_preparation.rs); `untrusted_as_tool_output` shows a
+/// client's untrusted context to the model as a named tool output instead of a user message, with
+/// no tool registered (core/src/session/turn_input.rs).
+pub(crate) const CODEX_ON: [&str; 69] = [
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "auth_elicitation",
@@ -3531,6 +3547,8 @@ pub(crate) const CODEX_ON: [&str; 62] = [
     "browser_use_full_cdp_access",
     "cli_daybreak",
     "code_mode_host",
+    "code_mode_host_grpc",
+    "code_mode_host_output_truncation",
     "code_mode_interrupt",
     "collaboration_modes",
     "compaction_image_budget",
@@ -3541,6 +3559,7 @@ pub(crate) const CODEX_ON: [&str; 62] = [
     "fast_mode",
     "goals",
     "guardian_approval",
+    "guardian_include_additional_context",
     "guardian_reuse_parent_compaction",
     "guardianv2.thread_context",
     "hooks",
@@ -3550,6 +3569,7 @@ pub(crate) const CODEX_ON: [&str; 62] = [
     "in_app_updates",
     "in_app_voice",
     "incremental_tools",
+    "incremental_tools_legacy_gcp",
     "instant_interrupt",
     "item_ids",
     "mcp_oauth_refresh_coordination",
@@ -3563,6 +3583,7 @@ pub(crate) const CODEX_ON: [&str; 62] = [
     "reasoning_effort_override",
     "remote_plugin",
     "resize_all_images",
+    "retain_client_tool_outputs",
     "shell_snapshot",
     "shell_tool",
     "skill_mcp_dependency_install",
@@ -3581,6 +3602,8 @@ pub(crate) const CODEX_ON: [&str; 62] = [
     "unified_exec",
     "unified_exec_tty",
     "unified_exec_zsh_fork",
+    "unified_image_budget",
+    "untrusted_as_tool_output",
     "view_image",
     "workspace_dependencies",
     "worktrees",

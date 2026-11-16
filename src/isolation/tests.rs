@@ -325,6 +325,30 @@ fn the_deferred_tool_world_state_of_codex_0_167_does_not_fail_the_gate() {
     assert_eq!(g, Gate::Passed);
 }
 
+/// codex 0.169.0 turns seven features on by default, none of them a tool (`provider::CODEX_ON`):
+/// the gate passes with them on.
+#[test]
+fn the_features_of_codex_0_169_do_not_fail_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let on: String = [
+        "code_mode_host_grpc",
+        "code_mode_host_output_truncation",
+        "guardian_include_additional_context",
+        "incremental_tools_legacy_gcp",
+        "retain_client_tool_outputs",
+        "unified_image_budget",
+        "untrusted_as_tool_output",
+    ]
+    .iter()
+    .map(|f| format!("; echo '{f}  stable  true'"))
+    .collect();
+    let (_, g) = gate_with(
+        &fake(dir.path(), &(FEATURES.to_owned() + &on), REFUSES),
+        dir.path(),
+    );
+    assert_eq!(g, Gate::Passed);
+}
+
 #[test]
 fn a_hosted_tool_left_on_fails_the_gate() {
     let dir = tempfile::tempdir().unwrap();
