@@ -181,6 +181,29 @@ fn schema_for_file(conn: &Connection, path: &Path) -> Result<String> {
 const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
     ON records(ts DESC, device DESC, seq DESC) WHERE type = 'event' AND kind = 'prompt'";
 
+/// `Raw::live_sessions`: every agent's session with a live prompt, by the prompts index. Named: with
+/// no statistics, SQLite took the events' repository index once a store had made it after this
+/// one (#908), and read every event to find the prompts (about 1.9 GB on a store of 810,000
+/// records, 6,858 of them prompts, for each Sessions tab and Settings page).
+const LIVE_SESSIONS: &str =
+    "SELECT MIN(r.ts), r.device, r.seq, r.agent, r.session, r.repo, COUNT(*)
+     FROM records r INDEXED BY records_prompts
+     WHERE r.type = 'event' AND r.kind = 'prompt'
+       AND r.source IN (SELECT value FROM json_each(?1))
+       AND r.agent IS NOT NULL AND r.session IS NOT NULL AND r.session <> ''
+       AND r.expired IS NULL AND NOT EXISTS (
+         SELECT 1 FROM records t WHERE t.type = 'tombstone'
+           AND t.target_device = r.device AND t.target_seq = r.seq
+           AND t.target_offset IS NULL)
+     GROUP BY r.agent, r.session";
+
+/// `Raw::prompt_seqs_since`: this device's live prompts since a time, by the prompts index. Named:
+/// SQLite took the primary key for the order, and read every record of the device.
+const PROMPT_SEQS_SINCE: &str = "SELECT seq FROM records INDEXED BY records_prompts
+     WHERE device = ?1 AND type = 'event' AND kind = 'prompt' AND ts >= ?2
+       AND source IN (SELECT value FROM json_each(?3))
+     ORDER BY seq";
+
 /// What `Raw::previous_window_ops` seeks a session's latest event by. Without it the seek walks
 /// the device's records down from the window, past every other session's, which for a session with
 /// no earlier event reads them all (1.2 s warm and about 12 s cold on 717,000 records, 2026-11-04).
@@ -5258,12 +5281,7 @@ impl Raw {
     /// leaves them.
     pub(crate) fn prompt_seqs_since(&self, since: i64) -> Result<Vec<i64>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
-        let mut st = self.conn.prepare(
-            "SELECT seq FROM records
-             WHERE device = ?1 AND type = 'event' AND kind = 'prompt' AND ts >= ?2
-               AND source IN (SELECT value FROM json_each(?3))
-             ORDER BY seq",
-        )?;
+        let mut st = self.conn.prepare(PROMPT_SEQS_SINCE)?;
         let rows = st.query_map(
             params![self.device, since, serde_json::to_string(&LIVE)?],
             |r| r.get(0),
@@ -5294,18 +5312,7 @@ impl Raw {
     pub fn live_sessions(&self) -> Result<Vec<LiveSession>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         // With one MIN(), SQLite takes the other bare columns from its row: the first prompt's.
-        let mut st = self.conn.prepare(
-            "SELECT MIN(r.ts), r.device, r.seq, r.agent, r.session, r.repo, COUNT(*)
-             FROM records r
-             WHERE r.type = 'event' AND r.kind = 'prompt'
-               AND r.source IN (SELECT value FROM json_each(?1))
-               AND r.agent IS NOT NULL AND r.session IS NOT NULL AND r.session <> ''
-               AND r.expired IS NULL AND NOT EXISTS (
-                 SELECT 1 FROM records t WHERE t.type = 'tombstone'
-                   AND t.target_device = r.device AND t.target_seq = r.seq
-                   AND t.target_offset IS NULL)
-             GROUP BY r.agent, r.session",
-        )?;
+        let mut st = self.conn.prepare(LIVE_SESSIONS)?;
         let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
             Ok(LiveSession {
                 started: r.get(0)?,

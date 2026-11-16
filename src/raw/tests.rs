@@ -3387,3 +3387,58 @@ fn an_import_leaves_a_denied_v1_event_and_document_out() {
     let keys = raw.import_keys("oboete-v1:d1e5").unwrap();
     assert_eq!(keys, ["o2".to_owned()].into_iter().collect());
 }
+
+/// The sessions' list (the viewer's Sessions tab and Settings' estimate of My Work) and My Work's
+/// prompts since a time read the prompts through their own index. With no statistics, SQLite took
+/// the events' repository index for the first and the primary key for the second, and read every
+/// event of the store: about 1.9 GB a call on a store of 810,000 records, 6,858 of them prompts.
+#[test]
+fn the_sessions_and_the_prompts_since_read_the_prompts_index() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    for (kind, session, body) in [
+        ("prompt", "a", "one"),
+        ("tool", "a", "two"),
+        ("prompt", "b", "three"),
+        ("tool", "b", "four"),
+    ] {
+        let e = Event {
+            kind: kind.into(),
+            session: session.into(),
+            repo: Some("r".into()),
+            ..test_event(body)
+        };
+        raw.append(&e).unwrap();
+    }
+    // The indexes a live store has, in the order one made them: the prompts' for the Sessions tab,
+    // the worker's of the sessions, then the events' repositories' (#908, 2026-11-10). With no
+    // statistics, SQLite took the one made last.
+    raw.conn.execute_batch(PROMPT_INDEX).unwrap();
+    raw.ensure_session_index().unwrap();
+    raw.repo_index().unwrap();
+    let live = serde_json::to_string(&LIVE).unwrap();
+    let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
+        raw.conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(args, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" | ")
+    };
+    let sessions = plan(LIVE_SESSIONS, &[&live]);
+    assert!(
+        sessions.starts_with("SCAN r USING INDEX records_prompts"),
+        "{sessions}"
+    );
+    let since = plan(PROMPT_SEQS_SINCE, &[&raw.device, &0_i64, &live]);
+    assert!(since.contains("USING INDEX records_prompts"), "{since}");
+    // What they answer is what they answered.
+    let mut names: Vec<String> = (raw.live_sessions().unwrap().into_iter())
+        .map(|s| s.session)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a", "b"]);
+    assert_eq!(raw.prompt_seqs_since(0).unwrap().len(), 2);
+}
