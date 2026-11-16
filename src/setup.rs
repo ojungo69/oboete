@@ -2186,9 +2186,10 @@ fn opencode_dir() -> PathBuf {
 
 fn opencode_plugin(cmd: &HookCommand) -> Result<String> {
     Ok(format!(
-        "const exe = {};\nconst home = {};\n{}",
+        "const exe = {};\nconst home = {};\nconst stamp = {};\n{}",
         serde_json::to_string(&cmd.exe)?,
         serde_json::to_string(&cmd.home)?,
+        serde_json::to_string(crate::forget::history::STAMP)?,
         include_str!("opencode.js")
     ))
 }

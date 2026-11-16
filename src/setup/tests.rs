@@ -572,10 +572,15 @@ fn opencode_plugin_escapes_paths_and_runs_on_node() {
         home: Some("C:\\Users\\Jane Doe\\\"memory\"\\back\\slash\nline".into()),
     };
     let plugin = opencode_plugin(&cmd).unwrap();
-    let constants: Vec<&str> = plugin.lines().take(2).collect();
+    let constants: Vec<&str> = plugin.lines().take(3).collect();
     for (line, prefix, expected) in [
         (constants[0], "const exe = ", json!(cmd.exe)),
         (constants[1], "const home = ", json!(cmd.home)),
+        (
+            constants[2],
+            "const stamp = ",
+            json!(crate::forget::history::STAMP),
+        ),
     ] {
         let literal = line
             .strip_prefix(prefix)

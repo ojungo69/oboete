@@ -246,6 +246,12 @@ fn remove(k: &Connection, uids: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The file in the home whose text a history forget's registration changes (5b, under its dispatch
+/// hold, after its raw.db commit). The OpenCode plugin sends a session's cached text again at each
+/// model call: when this file's text moves, it reads that text again and sends none of what it
+/// held (decision 109).
+pub(crate) const STAMP: &str = "history-forgets.stamp";
+
 /// What a reader says where it left knowledge.db's imported documents out (`imported_open` gave no
 /// proof): they are not read until a forget's deletion is applied, which is no answer of "none".
 pub(crate) const WITHHELD: &str = "Imported history is withheld until a forget's deletion reaches knowledge.db; try again shortly.";

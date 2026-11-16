@@ -3,10 +3,27 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import fs, { readFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
 
 const [file, expectedExe, expectedHome] = process.argv.slice(2);
+// The stamp a history forget's registration changes (decision 109), which the plugin names in its
+// third constant: its reads go through this mock, and no file is touched.
+const stampName = JSON.parse(readFileSync(file, "utf8").split("\n")[2].replace(/^const stamp = /, "").replace(/;$/, ""));
+if (expectedHome === undefined) process.env.OBOETE_HOME = "/oboete-test-home";
+const expectedStamp = join(expectedHome ?? process.env.OBOETE_HOME, stampName);
+const stampReads = [];
+let stampText;
+const realReadFileSync = fs.readFileSync;
+fs.readFileSync = (path, ...rest) => {
+  if (typeof path === "string" && path.endsWith(stampName)) {
+    stampReads.push(path);
+    if (stampText === undefined) throw Object.assign(new Error("no stamp"), { code: "ENOENT" });
+    return stampText;
+  }
+  return realReadFileSync(path, ...rest);
+};
 const homeArgs = expectedHome === undefined ? [] : ["--home", expectedHome];
 const captures = [];
 const injections = [];
@@ -506,3 +523,61 @@ await next.hooks.context(resumed);
 assert.deepEqual(resumed.system, [{ type: "text", text: "fresh context" }]);
 await drain();
 nextCleanup();
+
+// Decision 109: a history forget's registration changes the home's stamp. A session whose manifest
+// and turn were read before it reads the manifest again and sends none of the turn's packets; a
+// stamp that does not move again keeps the new manifest; a call that was reading when it moved
+// sends nothing, and the next reads the manifest again.
+const forgets = context();
+const forgetsCleanup = await plugin.setup(forgets.ctx);
+const where = forgets.ctx.location;
+injectResult = "remembered context";
+injectReceipt = undefined;
+injections.length = 0;
+promptOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "picked" } });
+await forgets.emit("session.inbox.enqueued", user("forgets", "a prompt"), where);
+await drain();
+promptOutput = "";
+const held = { sessionID: "forgets", system: [] };
+await forgets.hooks.context(held);
+assert.deepEqual(held.system, [{ type: "text", text: "remembered context" }, { type: "text", text: "picked" }]);
+stampText = "registered";
+injectResult = "read again";
+const moved = { sessionID: "forgets", system: [] };
+await forgets.hooks.context(moved);
+assert.deepEqual(moved.system, [{ type: "text", text: "read again" }]);
+const kept = { sessionID: "forgets", system: [] };
+await forgets.hooks.context(kept);
+assert.deepEqual(kept.system, [{ type: "text", text: "read again" }]);
+assert.equal(injections.length, 2);
+stampText = "registered twice";
+holdManifest = true;
+const reading = { sessionID: "forgets", system: [] };
+const pendingReading = forgets.hooks.context(reading);
+await drain();
+assert.equal(typeof releaseManifest, "function");
+stampText = "registered three times";
+holdManifest = false;
+releaseManifest();
+await pendingReading;
+assert.deepEqual(reading.system, []);
+const after = { sessionID: "forgets", system: [] };
+await forgets.hooks.context(after);
+assert.deepEqual(after.system, [{ type: "text", text: "read again" }]);
+assert.equal(injections.length, 4);
+// Every read asked the home the binary runs with.
+assert(stampReads.length > 0 && stampReads.every((path) => path === expectedStamp), stampReads.join(", "));
+await drain();
+forgetsCleanup();
+// With no home written and no OBOETE_HOME, the home under the user's own.
+if (expectedHome === undefined) {
+  delete process.env.OBOETE_HOME;
+  process.env.HOME = "/home/oboete-test-user";
+  stampReads.length = 0;
+  const fallback = context();
+  const fallbackCleanup = await plugin.setup(fallback.ctx);
+  await fallback.hooks.context({ sessionID: "fallback", system: [] });
+  assert.deepEqual([...new Set(stampReads)], [join("/home/oboete-test-user", ".oboete", stampName)]);
+  await drain();
+  fallbackCleanup();
+}

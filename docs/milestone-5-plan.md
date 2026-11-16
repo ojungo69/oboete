@@ -1515,7 +1515,9 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   拒否表もその uid を持つ（本文は持たない）。登録・ログからの入れ直し・復元の仕上げは、`forget_history` の行と同じ
   transaction でこの表を書く（適用は、対象の無い repo の空の表と表の欠落を区別できない）。登録が選ぶのは
   repo に入った op 自身の uid で、`source:source_id` から作らない（ある利用者の store では、取り込み文書の
-  9,794 件が v1 の移行で入った uid `<hash>:<id>` を持つ）。
+  9,794 件が v1 の移行で入った uid `<hash>:<id>` を持つ）。登録とログからの入れ直しは、raw.db の commit の後、
+  dispatch の排他を持ったまま home の `history-forgets.stamp`（`forget::history::STAMP`）の中身を書き換える
+  （OpenCode の plugin が写しを捨てる印。1b-3 の 2 本目）。
 - **削除の世代**: 同じ transaction で raw.db の削除の世代を進める（5c）。
 - **store の形式**: 版 6 を知らない binary は版 6 の行を飛ばし（規則 9）、忘れた文書を見せる。だから
   `docs/store-format.md` の「home が得る形式」の型どおり、最初の版 6 の登録が、それを書く transaction で home を
@@ -1568,7 +1570,8 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   （書き込みの途中なら次の poll で）。mem_search の続きは、raw.db が別のファイルになったとき（復元）も失効する。forget --uid の preview は
   所有者自身の操作で、op log にも同じ題名があるので証拠を取らない。到達表の `Later` はこれで 0 になったが、
   5b が登録を開く前に、表に見えないもの（反映とその再開、raw.db の取り込み work state の読み手、登録が
-  dispatch の排他を取ること、OpenCode の plugin が持つ写し）が要る。
+  dispatch の排他を取ること、OpenCode の plugin が持つ写し）が要る。反映とその再開は 1b-1、work state の読み手は
+  1b-3、OpenCode の写しは 1b-3 の 2 本目で入り、残るのは登録が排他を取って印を書くこと（5b）。
 - **先に消す**: 登録の直後に worker が優先して knowledge.db の対象の行（`imported`、`imported_fts`、
   `imported_files`、ベクトルの key と索引、埋め込み待ち）をまとめて消し、同じ knowledge.db の transaction で
   適用済みの世代を進める。途中で止まっても世代は進まず、読みは閉じたまま再開する。2 つの DB をまたぐ
@@ -1604,7 +1607,12 @@ note・取り込み文書は選ばれない。`docs/claude-mem-import.md` の I6
   ページも）は、作業メモを読む前から答えを作り終えるまで読みの fence を持つ（CodeRabbit on #1028）。拒否表の無い
   raw.db（この版の書き手がまだ開いていないもの）は何も除かない。
   `native_work_writes` は自前の work state（`source` の無い op）だけを読むので、5b の scope（repo と S）で入る。
-  OpenCode の plugin が持つ写しは次の PR。
+  as built（1b-3 の 2 本目、2026-11-16）: OpenCode の plugin はセッションごとに `inject --json` の manifest と
+  そのターンの packet を持ち、model の呼び出しのたびに送り直す。呼び出しのたびに home の `history-forgets.stamp`
+  の中身を読み、前の呼び出しの時と違えば、その manifest と packet を捨てて manifest を読み直す（forget の反映を
+  待つ間、inject は取り込み履歴を出さない）。読んでいる間に中身が動いた呼び出しは何も送らない。home は setup が
+  書いたもの、無ければ本体と同じ決め方（`OBOETE_HOME`、無ければ `HOME` か `USERPROFILE` の下の `.oboete`）。
+  ファイルが無ければ中身は空。もう送った文は取り戻せない。
 
 #### 5d: 後から届くものと、派生物
 
