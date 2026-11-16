@@ -1612,7 +1612,8 @@ fn queue(k: &Connection) -> Result<()> {
 }
 
 /// A page of `family`'s queued documents, the newest first, each as `read` finds it: a key whose
-/// document is gone or has its key row leaves the queue, and the next page is read.
+/// document is gone or has its key row leaves the queue once `read` finds it so again with the
+/// store's write lock held, and the next page is read.
 fn queued(
     k: &Connection,
     family: &str,
@@ -1635,14 +1636,25 @@ fn queued(
                 None => gone.push(key),
             }
         }
-        let tx = k.unchecked_transaction()?;
-        for key in &gone {
-            tx.execute(
-                "DELETE FROM vector_todo WHERE family = ?1 AND key = ?2",
-                params![family, key],
-            )?;
+        if !gone.is_empty() {
+            // Read again with the write lock held: a key row deleted, or a document written, by
+            // another connection since the first read queues nothing while this row stands, so the
+            // row goes only if it still has nothing to send (#1039).
+            let tx =
+                rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate)?;
+            for key in &gone {
+                match read(key)? {
+                    Some(r) => out.push(r),
+                    None => {
+                        tx.execute(
+                            "DELETE FROM vector_todo WHERE family = ?1 AND key = ?2",
+                            params![family, key],
+                        )?;
+                    }
+                }
+            }
+            tx.commit()?;
         }
-        tx.commit()?;
         if !out.is_empty() {
             return Ok(out);
         }

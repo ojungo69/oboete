@@ -1172,6 +1172,49 @@ fn claims_wait_in_the_queue_until_they_have_a_key() {
     assert!(queued().is_empty(), "{:?}", queued());
 }
 
+/// #1039: a claim whose key row goes, through another connection, after a page read it as keyed
+/// stays queued. The trigger queues nothing while the claim's row stands, so the row may go only
+/// when the claim is read as keyed again with the write lock held.
+#[test]
+fn a_claim_unkeyed_while_its_page_reads_it_stays_queued() {
+    let mut s = Store::new();
+    let text = "Parser errors go to stderr.";
+    let uid = claim(&mut s, text, text);
+    s.run();
+    vectors(&s);
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let other = crate::knowledge::open(s.home.path()).unwrap();
+    // A row from before the claim was keyed.
+    k.execute(
+        "INSERT INTO vector_todo(family, key, ord) VALUES ('c', ?1, 0)",
+        [&uid],
+    )
+    .unwrap();
+    let mut first = true;
+    let page = queued(&k, "c", |key| {
+        let found = k
+            .prepare_cached(CLAIM_PAGE)?
+            .query_row(params![crate::embed::EMBEDDER, key], claim_read)
+            .optional()?;
+        if std::mem::take(&mut first) {
+            // Another connection takes the key row off right after the read.
+            other
+                .execute(
+                    "DELETE FROM vector_keys WHERE kind = 'c' AND key = ?1",
+                    [key],
+                )
+                .unwrap();
+        }
+        Ok(found)
+    })
+    .unwrap();
+    assert_eq!(
+        page.iter().map(|r| r.doc.key.as_str()).collect::<Vec<_>>(),
+        [uid.as_str()],
+        "the claim left the queue with no key row"
+    );
+}
+
 /// #1037: a claim is read from the queue by its uid, through the claims' index, never by a scan.
 #[test]
 fn a_queued_claim_is_read_by_its_uid() {
