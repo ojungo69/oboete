@@ -306,8 +306,10 @@ fn apply_history(raw: &Raw, k: &mut Connection) {
     }
 }
 
-/// How long a round's consumers may take before its other phases run (#1041), checked between
-/// batches: a batch is never cut, so a round whose batch takes longer runs that one batch.
+/// How long a round's batches may take before the round ends (#1041), checked between batches: a
+/// batch is never cut, so a round whose batch takes longer runs that one batch. A round whose
+/// time runs out before its consumers have read what it began with runs no other phase: R9's
+/// move and R12's step-aside, at the next round's start, come round during a long backlog.
 #[cfg(not(test))]
 const PASS_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -775,6 +777,38 @@ pub fn backlog(home: &Path) -> Result<i64> {
     Ok(most)
 }
 
+/// Where each consumer's records or ops end, on each device it reads, as a round begins: what the
+/// round's batches read before its other phases run (#1041).
+fn marks(raw: &Raw, consumers: &[Box<dyn Consumer>]) -> Result<Vec<Vec<(String, i64)>>> {
+    consumers
+        .iter()
+        .map(|c| {
+            (c.devices(raw)?.into_iter())
+                .map(|device| {
+                    let top = c.top(raw, &device)?;
+                    Ok((device, top))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether every consumer's checkpoint has reached its `marks`.
+fn reached(
+    k: &Connection,
+    consumers: &[Box<dyn Consumer>],
+    marks: &[Vec<(String, i64)>],
+) -> Result<bool> {
+    for (c, marks) in consumers.iter().zip(marks) {
+        for (device, top) in marks {
+            if checkpoint::get_in(k, c.checkpoints(), c.name(), device)? < *top {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Whether any consumer's checkpoint for this device is below raw's highest seq.
 fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<bool> {
     for c in consumers {
@@ -1216,12 +1250,14 @@ fn serve(
         // Decision 70: a refresh request the page leaves after this round began wakes the wait.
         let began = crate::db::now_ms();
         apply_history(&raw, &mut k);
-        // D3's drain, bounded (#1041): records that keep arriving while the owner works kept the
-        // consumers' batches going for as long as they arrived, and the phases below, a replaced
-        // binary (R9) and a command's step-aside (R12) waited all that time. What a round leaves
-        // undrained the next one takes at once.
+        // D3's drain, to what the round began with (#1041): records that kept arriving while the
+        // owner worked kept the consumers' batches going for as long as they arrived, and the
+        // phases below, a replaced binary (R9) and a command's step-aside (R12) waited all that
+        // time. Those that arrive during the batches wait for the next round, which starts at once.
         let passing = Instant::now();
-        let drained = loop {
+        let marks = marks(&raw, consumers)?;
+        // Whether the consumers read what the round began with before its time ran out.
+        let read = loop {
             if !pass_report(&raw, &mut k, consumers, report)? {
                 break true;
             }
@@ -1232,6 +1268,9 @@ fn serve(
             if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
                 return Ok(true);
             }
+            if reached(&k, consumers, &marks)? {
+                break true;
+            }
             if passing.elapsed() >= PASS_BUDGET {
                 break false;
             }
@@ -1239,12 +1278,19 @@ fn serve(
         if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
             return Ok(true);
         }
-        // D3 and milestone 4's D8 and D9: once the consumers have drained, or had their time, the
-        // embedding phase, the shortlists, then one window. A call in flight, or a window that
+        // A round whose time ran out first runs no phase: each reads knowledge.db, and one behind
+        // the op log would ask again for what was asked (Codex on #1043: a summarized turn, once
+        // knowledge.db is built again). The next round starts at once, after R9 and R12.
+        if !read {
+            continue;
+        }
+        // D3 and milestone 4's D8 and D9: once the consumers have read what the round began with,
+        // the embedding phase, the shortlists, then one window. A call in flight, or a window that
         // waits only on time within D10's 30 minutes, keeps the worker up until then; a phase's
-        // progress, or consumers left undrained, starts the next round. A resident worker is up
-        // for every wait (R3): no hook starts it again.
-        let (mut stay, mut again) = (None, !drained);
+        // progress starts the next round, and records that arrived during the batches wake the
+        // wait below as those that arrive during the phases do. A resident worker is up for every
+        // wait (R3): no hook starts it again.
+        let (mut stay, mut again) = (None, false);
         if let Some(embed) = phases.embed.as_mut() {
             match embed.poll(&raw, &k)? {
                 Phase::Covered => again = true,
