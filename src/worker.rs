@@ -306,6 +306,13 @@ fn apply_history(raw: &Raw, k: &mut Connection) {
     }
 }
 
+/// How long a round's consumers may take before its other phases run (#1041), checked between
+/// batches: a batch is never cut, so a round whose batch takes longer runs that one batch.
+#[cfg(not(test))]
+const PASS_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PASS_BUDGET: Duration = Duration::from_millis(200);
+
 /// One batch for each consumer: whether any checkpoint moved.
 fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<bool> {
     pass_report(raw, k, consumers, &mut None)
@@ -1209,7 +1216,15 @@ fn serve(
         // Decision 70: a refresh request the page leaves after this round began wakes the wait.
         let began = crate::db::now_ms();
         apply_history(&raw, &mut k);
-        while pass_report(&raw, &mut k, consumers, report)? {
+        // D3's drain, bounded (#1041): records that keep arriving while the owner works kept the
+        // consumers' batches going for as long as they arrived, and the phases below, a replaced
+        // binary (R9) and a command's step-aside (R12) waited all that time. What a round leaves
+        // undrained the next one takes at once.
+        let passing = Instant::now();
+        let drained = loop {
+            if !pass_report(&raw, &mut k, consumers, report)? {
+                break true;
+            }
             // Between two batches too: a consumer opens the home's files by path (the rescan).
             if gone(home, holding) {
                 return Err(Gone.into());
@@ -1217,15 +1232,19 @@ fn serve(
             if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
                 return Ok(true);
             }
-        }
+            if passing.elapsed() >= PASS_BUDGET {
+                break false;
+            }
+        };
         if due(&raw, holding, phases.viewer.as_deref_mut(), report) {
             return Ok(true);
         }
-        // D3 and milestone 4's D8 and D9: once the consumers have drained, the embedding phase, the
-        // shortlists, then one window. A call in flight, or a window that waits only on time
-        // within D10's 30 minutes, keeps the worker up until then; a phase's progress starts the
-        // next round. A resident worker is up for every wait (R3): no hook starts it again.
-        let (mut stay, mut again) = (None, false);
+        // D3 and milestone 4's D8 and D9: once the consumers have drained, or had their time, the
+        // embedding phase, the shortlists, then one window. A call in flight, or a window that
+        // waits only on time within D10's 30 minutes, keeps the worker up until then; a phase's
+        // progress, or consumers left undrained, starts the next round. A resident worker is up
+        // for every wait (R3): no hook starts it again.
+        let (mut stay, mut again) = (None, !drained);
         if let Some(embed) = phases.embed.as_mut() {
             match embed.poll(&raw, &k)? {
                 Phase::Covered => again = true,

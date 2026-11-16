@@ -213,7 +213,7 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
   stops and launch from `consumer::subagents`' facts, it takes a stop only once that consumer's
   checkpoint for this device has reached it with no rebuild owed (no checkpoint is none reached);
   else it stops just before the stop, its own checkpoint below it, and a later round takes it, the
-  consumers draining before the phase.
+  consumers' batches running before the phase.
 - **What.** The files those calls wrote or declared, found in one pass as `candidates` finds a
   turn's (one path, its last write's call; no failed call; `MAX_FILES` at most), copied as a
   turn's: the row's turn the gap's reply (`turn_seq`, `turn_ts`), its call the call that wrote or

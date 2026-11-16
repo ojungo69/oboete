@@ -2964,6 +2964,67 @@ fn a_worker_that_leaves_notes_why_and_when_in_its_own_home() {
     assert!(last_failure(p).is_some_and(|why| why == NO_PROGRESS));
 }
 
+/// D3 under a backlog that keeps growing (#1041): a round gives the consumers' batches at most
+/// `PASS_BUDGET`, then the other phases their turn, so records that keep arriving while the owner
+/// works no longer hold curation off for as long as they arrive. A hook appends a record while
+/// each batch is read, 300 times.
+#[test]
+fn curation_gets_its_turn_while_records_keep_arriving() {
+    struct Arriving {
+        home: std::path::PathBuf,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Consumer for Arriving {
+        fn name(&self) -> &'static str {
+            "arriving"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, _: i64) -> Result<i64> {
+            if self.left.get() > 0 {
+                self.left.set(self.left.get() - 1);
+                raw::open(&self.home)?.append(&raw::test_event("arrived"))?;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    raw::open(p)
+        .unwrap()
+        .append(&raw::test_event("first"))
+        .unwrap();
+    let left = std::rc::Rc::new(std::cell::Cell::new(300));
+    let first_turn = std::cell::Cell::new(None);
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if first_turn.get().is_none() {
+            first_turn.set(Some(left.get()));
+        }
+        Ok(Phase::Idle)
+    };
+    let arriving = Arriving {
+        home: p.into(),
+        left: left.clone(),
+    };
+    run_holding(
+        p,
+        0,
+        vec![Box::new(arriving)],
+        || {},
+        None,
+        curating(&mut phase),
+    )
+    .unwrap();
+    let left_then = first_turn.get().unwrap();
+    assert!(
+        left_then > 0,
+        "curation's first turn came only once the records stopped arriving"
+    );
+    assert_eq!(left.get(), 0, "the arrivals were all read");
+}
+
 /// One record a batch, 30 ms each: a backlog that takes many batches.
 struct Slow;
 impl Consumer for Slow {
