@@ -466,12 +466,19 @@ function scope(repo) {
   return repo ? { repo } : { all: '1' };
 }
 
+// Decision 109: an answer that left imported history out while a forget of it waits says so
+// first, as the feed does (#1021).
+function withheldNote(message, withheld) {
+  return withheld ? [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ') : message;
+}
+
 async function showRecords(repo) {
   const params = { ...scope(repo), limit: LIMIT };
   const page = await api('timeline', params);
   return () => {
     const mine = generation;
     let next = page.next;
+    let withheld = Boolean(page.withheld);
     const more = word('button', 'quiet more', 'more');
     more.type = 'button';
     const loadMore = async () => {
@@ -482,8 +489,9 @@ async function showRecords(repo) {
         if (mine !== generation || !more.isConnected) return;
         $('list').append(...older.items.map((item) => timelineEntry(item, !repo)));
         next = older.next;
+        withheld ||= Boolean(older.withheld);
         if (!next) more.remove();
-        setStatus(t('entries_loaded', { n: $('list').childElementCount }));
+        setStatus(withheldNote(t('entries_loaded', { n: $('list').childElementCount }), withheld));
       } catch (e) {
         if (mine === generation) showError(e, loadMore);
       } finally {
@@ -492,7 +500,7 @@ async function showRecords(repo) {
     };
     more.addEventListener('click', loadMore);
     draw(t('records'), page.items.map((item) => timelineEntry(item, !repo)), next ? [more] : []);
-    setStatus(page.items.length ? t('entries_loaded', { n: page.items.length }) : t('no_entries'));
+    setStatus(withheldNote(page.items.length ? t('entries_loaded', { n: page.items.length }) : t('no_entries'), withheld));
   };
 }
 
@@ -638,7 +646,7 @@ function updateFeedState(state) {
     : state.error ? t('feed_error', { reason: failureMessage(state.error) })
       : !state.keys.size ? t('feed_empty') : state.next === null ? t('feed_exhausted') : '';
   // Decision 109: the notes a forget of imported history withholds are not "no items".
-  if (state.withheld && !state.loading && !state.error) message = [t('feed_withheld'), message].filter(Boolean).join(lang === 'ja' ? '' : ' ');
+  message = withheldNote(message, state.withheld && !state.loading && !state.error);
   state.notice.textContent = message;
   state.notice.classList.toggle('error', Boolean(state.error) && !state.loading);
   state.notice.classList.toggle('loading', state.loading);
@@ -993,9 +1001,9 @@ async function showSearch(repo, q) {
       $('vector').replaceChildren(word('span', null, answer.why ? 'vector_notice_reason' : 'vector_notice', { state, reason }));
       $('vector').hidden = false;
     }
-    if (answer.hits.length === LIMIT) setStatus(t('best_matches', { n: LIMIT }));
-    else if (answer.hits.length) setStatus(t('found', { n: answer.hits.length }));
-    else setStatus(t('nothing_found'));
+    const found = answer.hits.length === LIMIT ? t('best_matches', { n: LIMIT })
+      : answer.hits.length ? t('found', { n: answer.hits.length }) : t('nothing_found');
+    setStatus(withheldNote(found, answer.withheld));
   };
 }
 

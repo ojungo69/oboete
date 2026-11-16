@@ -7783,6 +7783,40 @@ assert.equal(answered,false,'a read from the top that fails answers so');
 console.log('PASS: a note the feed showed leaves it once imported history is withheld or a forget takes it unseen, the page says why, and it comes back once the forget is applied');
 }
 
+// Decision 109 (#1021): a search and the records' timeline that left imported history out while a
+// forget of it waits say so first, as the feed does; without the flag they say only what they found.
+{
+const run=code=>vm.runInContext(code,ctx);
+const response=value=>({ok:true,status:200,json:async()=>value});
+let search={hits:[],vector:'used',why:null},records={repo:null,items:[],next:null};
+ctx.fetch=url=>{
+  if(url.startsWith('/api/search?'))return Promise.resolve(response(search));
+  if(url.startsWith('/api/timeline?'))return Promise.resolve(response(records));
+  if(url.startsWith('/api/repos'))return Promise.resolve(response({current:'',repos:[]}));
+  return Promise.resolve(response({}));
+};
+const note='is not shown until a forget of it has finished';
+const showing=async query=>{
+  document.getElementById('q').value=query;
+  run('reposLoaded=true;setView("records")');
+  await run('show()');
+  for(let i=0;i<10;i++)await new Promise(resolve=>setTimeout(resolve,0));
+  return document.getElementById('status').textContent;
+};
+let said=await showing('parser');
+assert(!said.includes(note),`a search with nothing withheld says only what it found: ${said}`);
+search={...search,withheld:true};
+said=await showing('parser');
+assert(said.includes(note),`a search that left imported history out says so: ${said}`);
+said=await showing('');
+assert(!said.includes(note),`a timeline with nothing withheld says only what it read: ${said}`);
+records={...records,withheld:true};
+said=await showing('');
+assert(said.includes(note),`a timeline that left imported history out says so: ${said}`);
+document.getElementById('q').value='';
+console.log('PASS: #1021: a search and the records timeline that left imported history out say so, as the feed does');
+}
+
 // Decision 109 (CodeRabbit on #1020): Settings reads the privacy state again when the poll sees a
 // forget of imported history registered or applied (the version's `history`), which changes the
 // repositories it names, and not at each record captured (the ponytail review of #1020); not over

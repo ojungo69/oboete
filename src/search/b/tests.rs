@@ -1128,7 +1128,7 @@ fn every_repositorys_timeline_reads_the_texts_of_its_page_alone() {
     }
     let keys = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
     let newest: Vec<String> = uids.iter().rev().take(5).cloned().collect();
-    assert_eq!(keys(timeline(home, None, None, None, 5).unwrap()), newest);
+    assert_eq!(keys(timeline(home, None, None, None, 5).unwrap().0), newest);
 }
 
 /// N5 (docs/memory-lookup.md): a timeline reads a repository's imported documents by the
@@ -1169,23 +1169,27 @@ fn a_timeline_reads_a_repositorys_documents_in_time_order_and_finds_the_same() {
     let keys_of = |items: Vec<Item>| items.into_iter().map(|i| i.key).collect::<Vec<_>>();
     let read = || -> Vec<Vec<String>> {
         let keys = keys_of;
-        let mut out = vec![keys(timeline(home, Some(R), None, None, 30).unwrap())];
+        let mut out = vec![keys(timeline(home, Some(R), None, None, 30).unwrap().0)];
         for anchor in [&uids[1], &uids[5], &uids[11], &uids[23]] {
             out.push(keys(
-                timeline(home, Some(R), Some(anchor), None, 6).unwrap(),
+                timeline(home, Some(R), Some(anchor), None, 6).unwrap().0,
             ));
         }
         let page = Some((3_000, uids[5].clone()));
-        out.push(keys(timeline(home, Some(R), None, page, 4).unwrap()));
+        out.push(keys(timeline(home, Some(R), None, page, 4).unwrap().0));
         out
     };
     // A claude-mem label searched as the repository is its own two names: each document once.
     let label = crate::import::repo("r");
-    let own = keys_of(timeline(home, Some(&label), None, None, 30).unwrap());
+    let own = keys_of(timeline(home, Some(&label), None, None, 30).unwrap().0);
     assert_eq!(own.len(), 18, "{own:?}");
     assert_eq!(own.iter().collect::<HashSet<_>>().len(), 18);
     // Past the first of a time's two documents, the second comes first.
-    let page = keys_of(timeline(home, Some(R), None, Some((4_000, uids[6].clone())), 3).unwrap());
+    let page = keys_of(
+        timeline(home, Some(R), None, Some((4_000, uids[6].clone())), 3)
+            .unwrap()
+            .0,
+    );
     assert_eq!(page.first(), Some(&uids[7]), "{page:?}");
     let indexed = read();
     assert_eq!(indexed[0].len(), 19, "{:?}", indexed[0]);
@@ -1541,6 +1545,7 @@ fn the_timeline_lists_claims_imports_and_session_starts_around_an_anchor() {
     let home = s.home.path();
     let all: Vec<String> = timeline(home, Some(R), None, None, 10)
         .unwrap()
+        .0
         .into_iter()
         .map(|i| i.key)
         .collect();
@@ -1550,6 +1555,7 @@ fn the_timeline_lists_claims_imports_and_session_starts_around_an_anchor() {
     );
     let around: Vec<String> = timeline(home, Some(R), Some(&doc), None, 2)
         .unwrap()
+        .0
         .into_iter()
         .map(|i| i.key)
         .collect();
@@ -1663,6 +1669,7 @@ fn a_removed_session_start_leaves_the_timeline_at_once() {
     let keys = || -> Vec<String> {
         timeline(s.home.path(), Some(R), None, None, 10)
             .unwrap()
+            .0
             .into_iter()
             .map(|i| i.key)
             .collect()
@@ -1685,7 +1692,9 @@ fn an_anchored_timeline_fills_from_the_side_that_has_entries() {
         s.decided(R, 2_000 + i, &format!("Later decision {i}."), &[]);
     }
     s.run();
-    let around = timeline(s.home.path(), Some(R), Some(&oldest), None, 4).unwrap();
+    let around = timeline(s.home.path(), Some(R), Some(&oldest), None, 4)
+        .unwrap()
+        .0;
     assert_eq!(around.len(), 4);
     assert_eq!(around[3].key, oldest);
 }
@@ -1717,6 +1726,7 @@ fn a_timeline_past_many_pending_claims_is_full() {
     }
     let keys: Vec<String> = timeline(s.home.path(), Some(R), None, None, 2)
         .unwrap()
+        .0
         .into_iter()
         .map(|i| i.key)
         .collect();
@@ -1947,7 +1957,7 @@ fn a_forget_registered_inside_get_cite_or_timeline_waits_for_it() {
     let second = s.imported("o3", "r", 3_200, "Lexer notes", "The lexer reads tabs.");
     s.run();
     let home = s.home.path().to_owned();
-    let all = || timeline(&home, None, None, None, 10).unwrap();
+    let all = || timeline(&home, None, None, None, 10).unwrap().0;
     let (sent, started) = std::sync::mpsc::channel();
     let forget_inside = |uid: &str| {
         let (h, u, sent) = (home.clone(), uid.to_owned(), sent.clone());
@@ -2406,6 +2416,7 @@ fn a_timeline_of_documents_imported_three_times_is_full() {
     assert_eq!(
         timeline(s.home.path(), Some(R), None, None, 3)
             .unwrap()
+            .0
             .len(),
         3
     );
@@ -4478,7 +4489,7 @@ fn a_history_forget_not_yet_applied_withholds_the_imported_documents() {
             .unwrap()
             .is_some_and(|t| t.contains("canary"))
     );
-    let items = timeline(&home, None, None, None, 50).unwrap();
+    let items = timeline(&home, None, None, None, 50).unwrap().0;
     assert!(items.iter().all(|i| i.key != doc), "{items:?}");
     assert!(items.iter().any(|i| i.key == claim), "{items:?}");
     let around = timeline_text(
