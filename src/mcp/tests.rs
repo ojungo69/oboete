@@ -3020,7 +3020,11 @@ fn a_work_state_answer_waits_for_a_forgets_hold_and_leaves_out_what_it_covers() 
     let (shown, written) = std::thread::scope(|scope| {
         let shown = scope.spawn(read);
         let written = scope.spawn(|| body(write_state(&server, "plan", json!({"task": "Heron"}))));
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let wait = std::time::Duration::from_secs(10);
+        assert!(
+            crate::dispatch::shared_blocked(&home, 2, wait),
+            "the read and the write's answer wait for the hold"
+        );
         // As a registration writes, under its hold.
         rusqlite::Connection::open(home.join("raw.db"))
             .unwrap()

@@ -9469,7 +9469,11 @@ fn the_start_texts_work_state_waits_for_a_forgets_hold_and_leaves_out_what_it_co
     let held = crate::dispatch::exclusive(home.path()).unwrap();
     let shown = std::thread::scope(|scope| {
         let shown = scope.spawn(section);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let wait = std::time::Duration::from_secs(10);
+        assert!(
+            crate::dispatch::shared_blocked(home.path(), 1, wait),
+            "the section waits for the hold"
+        );
         // As a registration writes, under its hold.
         rusqlite::Connection::open(home.path().join("raw.db"))
             .unwrap()
