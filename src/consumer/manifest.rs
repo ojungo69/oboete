@@ -815,11 +815,14 @@ impl Consumer for Manifest {
                 Item::Removed => {}
             }
         }
-        // A backlog is built once, at its end, not once per batch. Each field is gated with the
-        // rules as they are now before it is flattened and clipped, and a text built under other
-        // rules is built again. Settings that do not load stop capture too (doctor names them):
-        // the bundled rules then.
-        if recs.len() < BATCH {
+        // A backlog is built once, at its end, not once per batch: a batch that is not full, or
+        // one that reaches raw's last record, since a worker's round leaves its batches once
+        // every consumer has read what was there when it began (#1043; Codex on #1043: a full
+        // last batch left the build to a step no round took). Each field is gated with the rules
+        // as they are now before it is flattened and clipped, and a text built under other rules
+        // is built again. Settings that do not load stop capture too (doctor names them): the
+        // bundled rules then.
+        if recs.len() < BATCH || recs.last().map(|r| r.seq) == Some(raw.max_seq_of(device)?) {
             let rules = crate::capture::Settings::load(&self.home)
                 .map(|s| s.rules)
                 .unwrap_or_default();

@@ -3018,6 +3018,122 @@ fn curation_gets_its_turn_while_records_keep_arriving() {
     assert_eq!(left.get(), 0, "the arrivals were all read");
 }
 
+/// CodeRabbit on #1043: records that arrive faster than the consumers read them still leave the
+/// phases a turn. A round whose time runs out keeps the ends it fixed, and the next reads up to
+/// them before it fixes new ones. Here each batch reads one record in 30 ms while two arrive.
+#[test]
+fn curation_gets_its_turn_while_records_arrive_faster_than_they_are_read() {
+    struct Flood {
+        home: std::path::PathBuf,
+        left: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+    impl Consumer for Flood {
+        fn name(&self) -> &'static str {
+            "flood"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+            if self.left.get() > 0 {
+                self.left.set(self.left.get() - 1);
+                let mut to = raw::open(&self.home)?;
+                to.append(&raw::test_event("arrived"))?;
+                to.append(&raw::test_event("arrived"))?;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(raw.after(device, after, 1)?.last().map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    for i in 0..10 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    drop(raw);
+    let left = std::rc::Rc::new(std::cell::Cell::new(30));
+    let first_turn = std::cell::Cell::new(None);
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if first_turn.get().is_none() {
+            first_turn.set(Some(left.get()));
+        }
+        Ok(Phase::Idle)
+    };
+    let flood = Flood {
+        home: p.into(),
+        left: left.clone(),
+    };
+    run_holding(
+        p,
+        0,
+        vec![Box::new(flood)],
+        || {},
+        None,
+        curating(&mut phase),
+    )
+    .unwrap();
+    let left_then = first_turn.get().unwrap();
+    assert!(
+        left_then > 0,
+        "curation's first turn came only once the records stopped arriving"
+    );
+    assert_eq!(left.get(), 0, "the arrivals were all read");
+}
+
+/// CodeRabbit on #1043: a round whose time runs out settles an embedding call that came back,
+/// with no other sent, so a command that asks aside during a backlog longer than a round is let
+/// in once the call is settled, not only once the backlog is read.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_returned_embedding_call_is_settled_while_a_backlog_is_read() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path().to_path_buf();
+    std::fs::write(p.join("config.toml"), "[worker]\nresident = true\n").unwrap();
+    let mut raw = raw::open(&p).unwrap();
+    for i in 0..50 {
+        raw.append(&raw::test_event(&format!("record {i}")))
+            .unwrap();
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let read = || checkpoint::get(&knowledge::open(&p).unwrap(), "slow", &device).unwrap();
+    let mut embed = crate::embed_phase::Phase::new(&p);
+    let unsent = crate::embed_phase::Sent::Unsent(anyhow::anyhow!("a test's call"));
+    let release = crate::embed_phase::fixture::hold_query(&mut embed, "key", "text", unsent);
+    let worker = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let phases = Phases {
+                embed: Some(&mut embed),
+                yields: true,
+                resident: true,
+                ..Phases::default()
+            };
+            run_holding(&p, 600_000, vec![Box::new(Slow)], || {}, lock(&p)?, phases)
+        })
+    };
+    until("it reads", || read() > 0);
+    let asking = {
+        let p = p.clone();
+        std::thread::spawn(move || {
+            let _contending = contending();
+            lock_asking(&p).map(drop)
+        })
+    };
+    until("the command asks", || asked_aside(&p));
+    release.send(()).unwrap();
+    asking.join().unwrap().unwrap();
+    worker.join().unwrap().unwrap();
+    let then = read();
+    assert!(
+        then < 50,
+        "it stepped aside once the backlog was read ({then} of 50)"
+    );
+}
+
 /// Codex on #1043: a round whose time runs out before its consumers have read the op log runs no
 /// phase. Here knowledge.db is built again from raw, the first batches outlast the round's time,
 /// and each summarized turn's op comes after more ops than the summaries' consumer reads in a

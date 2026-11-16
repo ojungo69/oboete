@@ -1194,6 +1194,10 @@ fn serve(
     // R3: told to leave while a call is out, it settles that call and leaves, and starts no other
     // in between (Codex on #359).
     let mut departing = false;
+    // The ends a round fixed and whose batches ran out of time before they read up to them: the
+    // next round reads up to the same ends before it fixes new ones, so records that arrive
+    // faster than they are read still leave the phases a turn (CodeRabbit on #1043).
+    let mut unread: Option<Vec<Vec<(String, i64)>>> = None;
     loop {
         #[cfg(test)]
         if let Some(before) = BEFORE_ROUND.take() {
@@ -1255,7 +1259,10 @@ fn serve(
         // phases below, a replaced binary (R9) and a command's step-aside (R12) waited all that
         // time. Those that arrive during the batches wait for the next round, which starts at once.
         let passing = Instant::now();
-        let marks = marks(&raw, consumers)?;
+        let marks = match unread.take() {
+            Some(marks) => marks,
+            None => marks(&raw, consumers)?,
+        };
         // Whether the consumers read what the round began with before its time ran out.
         let read = loop {
             if !pass_report(&raw, &mut k, consumers, report)? {
@@ -1282,6 +1289,16 @@ fn serve(
         // the op log would ask again for what was asked (Codex on #1043: a summarized turn, once
         // knowledge.db is built again). The next round starts at once, after R9 and R12.
         if !read {
+            // An embedding call that came back is settled, with no other sent: until its answer is
+            // written `busy` holds R9's move and R12's step-aside off (CodeRabbit on #1043).
+            if let Some(e) = phases.embed.as_mut()
+                && e.done()
+            {
+                e.hold(true);
+                e.poll(&raw, &k)?;
+                e.hold(hold);
+            }
+            unread = Some(marks);
             continue;
         }
         // D3 and milestone 4's D8 and D9: once the consumers have read what the round began with,

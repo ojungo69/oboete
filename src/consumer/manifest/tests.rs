@@ -730,6 +730,32 @@ fn old_manifest_rows_are_rebuilt() {
     assert_eq!(manifest(home.path()), (text, built));
 }
 
+/// Codex on #1043: a backlog that ends with a full batch is built at its end too. A worker's round
+/// leaves its batches once every consumer has read what was there when it began, so a build left
+/// to the next step waited for a round that nothing started.
+#[test]
+fn a_backlog_that_ends_with_a_full_batch_is_built() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut store = raw::open(home.path()).unwrap();
+    for i in 0..super::BATCH {
+        let body = serde_json::json!({"prompt": format!("step {i}")});
+        store
+            .append(&ev("prompt", "s1", 60_000 + i as i64, cwd.path(), body))
+            .unwrap();
+    }
+    worker::run_once(home.path()).unwrap();
+    let k = knowledge::open(home.path()).unwrap();
+    let dirty: i64 = k
+        .query_row("SELECT COUNT(*) FROM manifest_dirty", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        dirty, 0,
+        "the build of a full last batch was left to a later step"
+    );
+    assert!(manifest(home.path()).0.contains("step 499"));
+}
+
 #[test]
 fn the_manifest_is_the_same_bytes_for_the_same_records() {
     let home = tempfile::tempdir().unwrap();
