@@ -1,7 +1,9 @@
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
-// setup.rs prefixes this template with JSON-escaped exe and home constants.
-/* global exe, home */
+// setup.rs prefixes this template with JSON-escaped exe, home and stamp constants.
+/* global exe, home, stamp */
 
 // oboete's own failures are dropped: the agent must never break because of them.
 const ignore = () => undefined;
@@ -16,6 +18,16 @@ export default {
     if (process.env.OBOETE_SKIP !== undefined) return ignore;
 
     const args = home === null ? [] : ["--home", home];
+    // Decision 109: a history forget's registration changes this file, in the home the binary
+    // runs with (the one setup wrote, else the one it finds itself). What a session holds that was
+    // read before the file moved is read again, and none of it is sent.
+    const stampFile = join(
+      home ?? (process.env.OBOETE_HOME || join(process.env.HOME ?? process.env.USERPROFILE ?? ".", ".oboete")),
+      stamp,
+    );
+    const marked = () => {
+      try { return readFileSync(stampFile, "utf8"); } catch { return ""; }
+    };
     const sessions = new Map();
     const abort = new AbortController();
     let pending = Promise.resolve();
@@ -81,7 +93,9 @@ export default {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return null;
         if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
-        state = { dir: location.directory, started: false, message: null, parts: [], turn: null, epoch: 0, inbox: new Map() };
+        // The stamp as the session starts, before it holds anything read (Codex and CodeRabbit on
+        // #1029): a prompt captured before the first model call is compared against it too.
+        state = { dir: location.directory, started: false, message: null, parts: [], turn: null, epoch: 0, inbox: new Map(), mark: marked() };
       }
       sessions.set(id, state);
       if (!state.started) {
@@ -108,6 +122,12 @@ export default {
     ctx.session.hook("context", async (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state) return;
+      const mark = marked();
+      if (state.mark !== mark) {
+        state.context = undefined;
+        state.turn = null;
+        state.mark = mark;
+      }
       const turn = state.turn;
       const epoch = state.epoch;
       // Cache the promise too: overlapping calls still start only one injection process. The
@@ -124,7 +144,8 @@ export default {
       const manifest = await state.context;
       // What the turn's prompt got, at each of the turn's calls: OpenCode keeps no system text.
       const packets = turn ? await bounded(turn, []) : [];
-      if (state.epoch !== epoch || state.turn !== turn) return;
+      // A forget registered while this call read them: none of it is sent.
+      if (state.epoch !== epoch || state.turn !== turn || marked() !== mark) return;
       const pushed = [];
       for (const group of [manifest, packets]) {
         if (!group.length) continue;
