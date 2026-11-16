@@ -1,0 +1,21 @@
+docs/curator-conversation.md
+  s_d169cd080e079e::t_703ba7908aaed2 290-298
+docs/spec.md
+  s_d169cd080e079e::t_aa10e4ec98aeaa 138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4e40eb76a12a6acfe4ac2263a47d86203b012dda",
+  "prompts": {},
+  "sessions": {
+    "s_d169cd080e079e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fcc3d6e-40f2-4b78-ad67-509187688fa3",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
