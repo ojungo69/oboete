@@ -91,6 +91,8 @@ fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
         "dispatch coordination is not a regular file"
     );
     let deadline = Instant::now() + wait;
+    #[cfg(test)]
+    let mut noted = false;
     loop {
         let result = if exclusive {
             file.try_lock()
@@ -103,6 +105,12 @@ fn lock(home: &Path, exclusive: bool, wait: Duration) -> Result<File> {
                 #[cfg(test)]
                 if exclusive {
                     BLOCKED.lock().unwrap().insert(path.clone());
+                } else if !std::mem::replace(&mut noted, true) {
+                    *SHARED_BLOCKED
+                        .lock()
+                        .unwrap()
+                        .entry(path.clone())
+                        .or_default() += 1;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -130,6 +138,34 @@ static BLOCKED: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>
 #[cfg(test)]
 pub(crate) fn blocked(home: &Path) -> bool {
     BLOCKED.lock().unwrap().remove(&home.join("dispatch.lock"))
+}
+
+/// Tests (CodeRabbit on #1028): how many shared holds (a reader's fence, an admission) have waited
+/// on each lock file, each once however long it waits.
+#[cfg(test)]
+static SHARED_BLOCKED: std::sync::Mutex<std::collections::BTreeMap<std::path::PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Tests: waits at most `wait` until `n` shared holds have waited on `home`'s lock since the last
+/// time this took them, and takes them: a test then knows its readers met a forget's hold before
+/// it writes what the forget registers, however slowly their threads ran.
+#[cfg(test)]
+pub(crate) fn shared_blocked(home: &Path, n: usize, wait: Duration) -> bool {
+    let path = home.join("dispatch.lock");
+    let deadline = Instant::now() + wait;
+    loop {
+        {
+            let mut waits = SHARED_BLOCKED.lock().unwrap();
+            if waits.get(&path).is_some_and(|&count| count >= n) {
+                waits.remove(&path);
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 struct TrackedBody {

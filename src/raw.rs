@@ -631,7 +631,7 @@ fn denied(conn: &Connection, origin: Option<&str>, text: &str) -> Result<bool> {
 /// and those a history forget covers (decision 109).
 fn carry_forgotten(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let mut uids = forgotten_set(conn)?;
-    uids.extend(crate::forget::history::covered_uids(conn)?);
+    uids.extend(crate::forget::history::covered_keys(conn, "uid")?);
     Ok(uids)
 }
 
@@ -1426,6 +1426,9 @@ pub(crate) fn work_state_in(
            AND (json_extract(body, '$.source') IS NOT NULL OR json_extract(body, '$.repo') = ?)
          ORDER BY device, op_seq"
     ))?;
+    // Decision 109 (5c): an imported entry a forget of its repository's imported history covers
+    // is not read, from the forget's registration on.
+    let covered = crate::forget::history::covered_keys(conn, "ws")?;
     let mut writes = Vec::new();
     let (mut device, mut clock) = (String::new(), i64::MIN);
     let values = values
@@ -1443,6 +1446,10 @@ pub(crate) fn work_state_in(
         let v: serde_json::Value = serde_json::from_str(&body)?;
         if from != device {
             (device, clock) = (from.clone(), i64::MIN);
+        }
+        // An imported entry lifts no clock (below): leaving one out changes no other's time.
+        if crate::forget::history::ws_key(&v).is_some_and(|key| covered.contains(&key)) {
+            continue;
         }
         let own = v["clock"].as_i64().unwrap_or(ts);
         // An imported entry was written elsewhere, before or after this device's own writes: it
@@ -4968,7 +4975,8 @@ impl Raw {
 
     /// Slice 2: the fields of each imported work state write (an op of an import's source) to
     /// `list` whose `content_session_id` is one of `sessions`, as `oboete import claude-mem`
-    /// brought them in: the rows of the conversations asked about alone (cubic on #850).
+    /// brought them in: the rows of the conversations asked about alone (cubic on #850). None a
+    /// forget of its repository's imported history covers (decision 109).
     pub(crate) fn imported_list_fields(
         &self,
         list: &str,
@@ -4987,8 +4995,12 @@ impl Raw {
                 r.get(0)
             })?
             .collect::<rusqlite::Result<_>>()?;
+        let covered = crate::forget::history::covered_keys(&self.conn, "ws")?;
         Ok((bodies.iter())
             .filter_map(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .filter(|v| {
+                !crate::forget::history::ws_key(v).is_some_and(|key| covered.contains(&key))
+            })
             .map(|v| v["fields"].clone())
             .filter(serde_json::Value::is_object)
             .collect())

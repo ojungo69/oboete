@@ -950,3 +950,72 @@ fn a_set_aside_copy_carries_no_vector_of_what_a_history_forget_covers() {
     };
     assert_eq!((cached(&covered_sha), cached(&kept_sha)), (0, 1));
 }
+
+/// 5c: raw.db's readers of work state leave out an imported entry a history forget covers, from
+/// its registration on: a repository's writes (its own, interleaved with the imported ones on one
+/// device, keep their order) and My Work's imported subagent stops. A raw.db without the refusal
+/// table reads every entry.
+#[test]
+fn the_work_state_readers_leave_out_an_imported_entry_a_history_forget_covers() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let repo = "github.com/o/alpha";
+    let settings = crate::capture::Settings::load(home.path()).unwrap();
+    let imported = |id: &str, at: i64| {
+        (
+            crate::raw::OpKind::WorkState,
+            serde_json::json!({"repo": "claude-mem:alpha", "list": crate::work_state::AGENT_LIFECYCLE,
+                "fields": {"task": id, "content_session_id": "s1"},
+                "clock": at, "at": at, "source": "claude-mem:test", "source_id": id}),
+        )
+    };
+    let own = |task: &str| {
+        let mut fields = serde_json::Map::new();
+        fields.insert("task".into(), task.into());
+        fields
+    };
+    raw.work_state(repo, "plan", &own("own-1"), None).unwrap();
+    raw.append_imported_ops(&[imported("w1", 1_000)], &settings)
+        .unwrap();
+    raw.work_state(repo, "plan", &own("own-2"), None).unwrap();
+    raw.append_imported_ops(&[imported("w2", 2_000)], &settings)
+        .unwrap();
+    Connection::open(home.path().join("raw.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO forget_history(job, token) VALUES ('j1', 't1');
+             INSERT INTO denied_imports(kind, key, job) VALUES ('ws', 'claude-mem:test:w1', 'j1');",
+        )
+        .unwrap();
+    let read = |raw: &crate::raw::Raw| -> (Vec<String>, Vec<String>) {
+        let task = |f: &serde_json::Value| f["task"].as_str().unwrap().to_owned();
+        let entries = raw.work_state_entries(repo).unwrap();
+        let stops = raw
+            .imported_list_fields(crate::work_state::AGENT_LIFECYCLE, &["s1"])
+            .unwrap();
+        (
+            (entries.iter())
+                .map(|e| task(&serde_json::Value::Object(e.fields.clone())))
+                .collect(),
+            stops.iter().map(task).collect(),
+        )
+    };
+    assert_eq!(
+        read(&raw),
+        (
+            vec!["w2".into(), "own-1".into(), "own-2".into()],
+            vec!["w2".into()]
+        )
+    );
+    Connection::open(home.path().join("raw.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE denied_imports")
+        .unwrap();
+    assert_eq!(
+        read(&raw),
+        (
+            vec!["w1".into(), "w2".into(), "own-1".into(), "own-2".into()],
+            vec!["w1".into(), "w2".into()]
+        )
+    );
+}

@@ -9432,3 +9432,58 @@ fn a_prompt_whose_read_ends_in_one_span_is_one_mask_where_a_rule_of_the_homes_fi
         clip(&text, &bundled)
     );
 }
+
+/// Decision 109 (CodeRabbit on #1028): the session start's work state section is read under the
+/// reading fence, so what a forget registers under its exclusive hold is in no section read
+/// around it, the viewer's Context page's included, which holds no fence of its own.
+#[test]
+fn the_start_texts_work_state_waits_for_a_forgets_hold_and_leaves_out_what_it_covers() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = crate::capture::Settings::default();
+    // Recent, as the section shows.
+    let at = crate::db::now_ms() - 60_000;
+    let imported = json!({"repo": "claude-mem:r", "list": "plan",
+        "fields": {"task": "Zebrafinch", "status": "doing"},
+        "clock": at, "at": at, "source": "claude-mem:test", "source_id": "w1"});
+    crate::raw::open(home.path())
+        .unwrap()
+        .append_imported_ops(&[(crate::raw::OpKind::WorkState, imported)], &settings)
+        .unwrap();
+    crate::worker::run_once(home.path()).unwrap();
+    let section = || {
+        let raw = crate::raw::open(home.path()).unwrap();
+        let start = crate::hook::start_text_read(
+            home.path(),
+            Some(&raw),
+            "github.com/o/r",
+            "",
+            "S",
+            &settings,
+            true,
+            false,
+        )
+        .unwrap();
+        crate::hook::joined(home.path(), Some(&raw), start.as_ref())
+    };
+    assert!(section().contains("Zebrafinch"), "{}", section());
+    let held = crate::dispatch::exclusive(home.path()).unwrap();
+    let shown = std::thread::scope(|scope| {
+        let shown = scope.spawn(section);
+        let wait = std::time::Duration::from_secs(10);
+        assert!(
+            crate::dispatch::shared_blocked(home.path(), 1, wait),
+            "the section waits for the hold"
+        );
+        // As a registration writes, under its hold.
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO forget_history(job, token) VALUES ('j1', 't1');
+                 INSERT INTO denied_imports(kind, key, job) VALUES ('ws', 'claude-mem:test:w1', 'j1');",
+            )
+            .unwrap();
+        drop(held);
+        shown.join().unwrap()
+    });
+    assert!(!shown.contains("Zebrafinch"), "{shown}");
+}

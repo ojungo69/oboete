@@ -70,33 +70,50 @@ pub(crate) fn doctor_line(registered: &BTreeSet<Pair>, applied: &BTreeSet<Pair>)
 /// (5d). Asked of a writer's raw.db, whose open made the table: once per Import op a consumer
 /// projects.
 pub(crate) fn covered(raw: &Connection, uid: &str) -> Result<bool> {
-    Ok(raw
-        .prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM denied_imports WHERE kind = 'uid' AND key = ?1)",
-        )?
-        .query_row([uid], |r| r.get(0))?)
+    covered_key(raw, "uid", uid)
 }
 
-/// Whether a history forget covers the imported work state `source`'s `source_id`
-/// (`denied_imports`, kind 'ws'). Asked of a writer's raw.db.
-pub(crate) fn covered_ws(raw: &Connection, source: &str, source_id: &str) -> Result<bool> {
+/// Whether a history forget covers the identity `key` of `kind` (`denied_imports`): an Import op's
+/// uid ('uid'), imported work state's `ws_key` ('ws'). Asked of a writer's raw.db.
+fn covered_key(raw: &Connection, kind: &str, key: &str) -> Result<bool> {
     Ok(raw
         .prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM denied_imports WHERE kind = 'ws' AND key = ?1)",
+            "SELECT EXISTS (SELECT 1 FROM denied_imports WHERE kind = ?1 AND key = ?2)",
         )?
-        .query_row([format!("{source}:{source_id}")], |r| r.get(0))?)
+        .query_row([kind, key], |r| r.get(0))?)
+}
+
+/// Imported work state's identity in the refusal table (kind 'ws'): `source:source_id`, of an op
+/// body that names both. A list written here names neither.
+pub(crate) fn ws_key(body: &serde_json::Value) -> Option<String> {
+    Some(format!(
+        "{}:{}",
+        body["source"].as_str()?,
+        body["source_id"].as_str()?
+    ))
+}
+
+/// Every key of `kind` a history forget covers: the uids ('uid'), for what keeps no row of them
+/// though it reads none by uid (the carry of vectors into a new knowledge.db), and imported work
+/// state's `ws_key`s ('ws'), for raw.db's readers of work state. A raw.db without the table (one a
+/// hook reads before this version's writer opened it) holds none.
+pub(crate) fn covered_keys(raw: &Connection, kind: &str) -> Result<HashSet<String>> {
+    if !crate::consumer::manifest::exists(raw, "table", "denied_imports")? {
+        return Ok(HashSet::new());
+    }
+    let mut st = raw.prepare_cached("SELECT DISTINCT key FROM denied_imports WHERE kind = ?1")?;
+    let rows = st.query_map([kind], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The source ids of `source`'s documents (kind 'uid', an import's uid being `source:source_id`)
 /// or imported work state (kind 'ws') a history forget covers, which an import takes as already
 /// imported (5c), their bodies rewritten by a purge (5e) or not.
 pub(crate) fn covered_ids(raw: &Connection, kind: &str, source: &str) -> Result<HashSet<String>> {
-    let mut st = raw.prepare_cached(
-        "SELECT substr(key, length(?2) + 2) FROM denied_imports
-         WHERE kind = ?1 AND substr(key, 1, length(?2) + 1) = ?2 || ':'",
-    )?;
-    let rows = st.query_map([kind, source], |r| r.get(0))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let prefix = format!("{source}:");
+    Ok((covered_keys(raw, kind)?.into_iter())
+        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
+        .collect())
 }
 
 /// Whether a history forget covers what op `body` of `kind` appends (5d): an imported document,
@@ -106,31 +123,12 @@ pub(crate) fn covered_op(
     kind: crate::raw::OpKind,
     body: &serde_json::Value,
 ) -> Result<bool> {
-    match kind {
-        crate::raw::OpKind::Import => match body["uid"].as_str() {
-            Some(uid) => covered(raw, uid),
-            None => Ok(false),
-        },
-        crate::raw::OpKind::WorkState => {
-            match (body["source"].as_str(), body["source_id"].as_str()) {
-                (Some(source), Some(id)) => covered_ws(raw, source, id),
-                _ => Ok(false),
-            }
-        }
-        _ => Ok(false),
-    }
-}
-
-/// Every uid a history forget covers, for what keeps no row of them though it reads none by uid
-/// (the carry of vectors into a new knowledge.db).
-pub(crate) fn covered_uids(raw: &Connection) -> Result<HashSet<String>> {
-    if !crate::consumer::manifest::exists(raw, "table", "denied_imports")? {
-        return Ok(HashSet::new());
-    }
-    let mut st =
-        raw.prepare_cached("SELECT DISTINCT key FROM denied_imports WHERE kind = 'uid'")?;
-    let rows = st.query_map([], |r| r.get(0))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let (kind, key) = match kind {
+        crate::raw::OpKind::Import => ("uid", body["uid"].as_str().map(str::to_owned)),
+        crate::raw::OpKind::WorkState => ("ws", ws_key(body)),
+        _ => return Ok(false),
+    };
+    key.map_or(Ok(false), |key| covered_key(raw, kind, &key))
 }
 
 /// Decision 109 (5c, "先に消す"): applies in knowledge.db `k` each history forget raw.db holds that

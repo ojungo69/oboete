@@ -565,6 +565,10 @@ impl Oboete {
             Err(e) if e.is::<crate::raw::NeverRecorded>() => return failed(e.to_string()),
             written => written.map_err(internal)?,
         };
+        // As a read's: no forget commits from the answer's read until it is built (CodeRabbit on
+        // #1028). The write itself waits for none.
+        let _read =
+            crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT).map_err(internal)?;
         let entries = raw.work_state_entries(&repo).map_err(internal)?;
         text(crate::work_state::written(
             &list,
@@ -866,7 +870,14 @@ impl Oboete {
                 crate::work_state::MAX_LIST
             ));
         }
-        let entries = match crate::raw::read_only(&self.home).map_err(internal)? {
+        let raw = crate::raw::read_only(&self.home).map_err(internal)?;
+        // Milestone 5 D5 (#439), decision 109: no forget commits from this read until the answer
+        // is built (CodeRabbit on #1028). Taken after raw.db is open, as the hold asks.
+        let _read = (raw.as_ref())
+            .map(|_| crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT))
+            .transpose()
+            .map_err(internal)?;
+        let entries = match raw {
             Some(raw) => crate::raw::work_state_in(&raw.conn, &repo).map_err(internal)?,
             None => Vec::new(),
         };
