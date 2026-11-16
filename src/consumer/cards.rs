@@ -229,11 +229,15 @@ fn replace(k: &Connection, device: &str, op_seq: i64, op: &serde_json::Value) ->
 
 /// Parity row X1: the cards kept before `cards.subagent` get it, all at the first step after the
 /// change, since a worker that has caught up steps again only when an op comes (Codex on #561).
+/// The windows of the cards kept before parity row X1 marked them, through the index that holds
+/// only those: with no statistics SQLite took the primary key for the `DISTINCT` and read the whole
+/// table at every step (1.1 s and 68 MB on 56,202 cards on one PC, none of them unmarked).
+const UNMARKED_SQL: &str = "SELECT DISTINCT device, op_seq, from_seq, to_seq
+     FROM cards INDEXED BY cards_unmarked WHERE subagent IS NULL";
+
 fn mark(raw: &Raw, k: &Connection) -> Result<()> {
     let windows: Vec<(String, i64, i64, i64)> = k
-        .prepare(
-            "SELECT DISTINCT device, op_seq, from_seq, to_seq FROM cards WHERE subagent IS NULL",
-        )?
+        .prepare(UNMARKED_SQL)?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (device, op_seq, from, to) in windows {

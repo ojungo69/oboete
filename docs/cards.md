@@ -43,7 +43,7 @@ cards(device, op_seq, n,                 -- the window op it came in, and its pl
 ```
 
 The table has more columns than this sketch: `goals` (JSON), `hidden` (a hidden card is left out by
-every reader that shows cards; the hide settings list the hidden ones, to bring one back) and `subagent` (X1). `cards_fts` (full text) and `card_files` are tables beside it.
+every reader that shows cards; the hide settings list the hidden ones, to bring one back) and `subagent` (X1). `cards_fts` (full text) and `card_files` are tables beside it. The consumer marks a card kept before X1 at each step, reading only those cards, through `cards_unmarked`: a scan of the table cost 1.1 s and 68 MB a step on one PC (56,202 cards, none unmarked).
 
 `facts`, `concepts`, `files_read` and `files_modified` are JSON arrays of strings. `type` is one
 of claude-mem's: bugfix, feature, refactor, change, discovery, decision, security_alert,

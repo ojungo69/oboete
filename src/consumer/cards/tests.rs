@@ -35,6 +35,23 @@ fn event(session: &str, repo: &str, ts: i64) -> Event {
 
 /// Parity row X1: a window of a subagent's tool calls alone gives cards marked so, another
 /// window's are marked not, and a card kept before the mark gets it at a later step.
+/// The cards kept before parity row X1 are found through the index that holds only them: the
+/// step reads it every time, and a scan of the table cost a second on one PC.
+#[test]
+fn the_unmarked_cards_are_read_through_their_index() {
+    let k = rusqlite::Connection::open_in_memory().unwrap();
+    crate::cards::schema(&k).unwrap();
+    let plan: String = k
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", super::UNMARKED_SQL))
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .join(" | ");
+    assert!(plan.contains("INDEX cards_unmarked"), "{plan}");
+}
+
 #[test]
 fn a_subagents_window_gives_marked_cards() {
     let home = tempfile::tempdir().unwrap();
