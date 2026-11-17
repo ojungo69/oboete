@@ -31,7 +31,7 @@ ryu-js = "1.0.3"
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
-sha2 = "0.10"
+sha2 = "0.11"
 sqlite-vec = "0.1.9"
 # The computer's language, the summaries' default (decision 81): each OS's own setting, read as the
 # OS gives it (LC_ALL, LC_MESSAGES, LANG on Unix; the user's languages on Windows and macOS).
