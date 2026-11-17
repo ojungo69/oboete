@@ -1,0 +1,21 @@
+docs/agents/domain.md
+  s_52c3955e48bff4::t_268ca70ecdb844 37
+docs/agents/issue-tracker.md
+  s_52c3955e48bff4::t_f223823d23294b 3-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7933ac010af6db3f5f1dd3aa9f967a2efc670193",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
