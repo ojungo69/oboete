@@ -3332,11 +3332,9 @@ fn sessions(
         if !crate::consumer::manifest::exists(&k, "table", table)? {
             return Ok(HashMap::new());
         }
-        let sql = sessions_count_sql(
-            sql,
-            &crate::hide::shown(&k, table, "")?,
-            &crate::hide::indexed_by(&k, index)?,
-        );
+        // The index before the column (`hide::indexed_by`).
+        let by = crate::hide::indexed_by(&k, index)?;
+        let sql = sessions_count_sql(sql, &crate::hide::shown(&k, table, "")?, &by);
         let mut st = k.prepare(&sql)?;
         let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -814,11 +814,10 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok((Vec::new(), false));
     }
+    // The index before the column (`hide::indexed_by`).
+    let by = crate::hide::indexed_by(k, "turns_shown")?;
     let shown = crate::hide::shown(k, "turns", "")?;
-    let mut st = k.prepare(&page_sql(
-        &shown,
-        &crate::hide::indexed_by(k, "turns_shown")?,
-    ))?;
+    let mut st = k.prepare(&page_sql(&shown, &by))?;
     let mut rows = st.query(params![
         repo,
         before.map(|p| p.0),

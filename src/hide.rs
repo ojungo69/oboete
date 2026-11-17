@@ -174,7 +174,9 @@ pub(crate) fn removed_page<T>(
 /// `INDEXED BY <index>` for a reader that names one of the indexes `cards::schema` and
 /// `turns::schema` make for the removed and the shown rows (#1037), or nothing while the store has
 /// not made it: a reader can open a store no writer of this version has opened yet. Each index
-/// holds the `hidden` column, so a store with one gives its readers `shown`'s condition too.
+/// holds the `hidden` column, so a store with one gives its readers `shown`'s condition too, when
+/// they ask for the index first: asked after `shown`, it can find the index a writer made in
+/// between, beside a condition from before the column, which the index's condition then lacks.
 pub(crate) fn indexed_by(k: &Connection, index: &str) -> Result<String> {
     Ok(if crate::consumer::manifest::exists(k, "index", index)? {
         format!("INDEXED BY {index}")
