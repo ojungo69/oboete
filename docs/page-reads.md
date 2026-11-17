@@ -555,7 +555,9 @@ waited 13 hours, and they were built by hand in the end. Until then My Work
 112 MB, against 8 MB.
 
 The change. The first time the worker finds one of them missing, it marks the time in raw.db's
-meta (`pause_index_waiting`), which outlasts the worker's exits. An hour after the mark, the worker
+meta (`pause_index_waiting`), which outlasts the worker's exits. A look that a call out holds off
+from the build marks it too; one while the worker is leaving, or while a command asks it aside,
+writes nothing. An hour after the mark, the worker
 builds them without the pause. It does so at an idle time or in a round, so a worker that never
 has an idle time builds them too. A build the hour starts first marks the time again, so a build
 that fails waits another hour. A hook during the build waits its 2 s and keeps its events for the

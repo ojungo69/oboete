@@ -123,6 +123,36 @@ fn the_pause_indexes_are_built_once_they_have_waited_their_hour() {
     }
 }
 
+/// #1063 (CodeRabbit on #1069): a look that a call out holds off from the build still starts the
+/// hour, and a later one with the call over builds once it has passed; a look that marks nothing
+/// is one while leaving or while a command asks the worker aside.
+#[test]
+fn a_look_with_a_call_out_starts_the_hour() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - 1_000,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    assert!(!pause_upkeep(p, &raw, true, false, Upkeep::Round));
+    let asked = yield_request(p);
+    std::fs::write(&asked, "").unwrap();
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert_eq!(pause_mark(p), None, "a mark while leaving or asked aside");
+    std::fs::remove_file(asked).unwrap();
+    assert!(!pause_upkeep(p, &raw, false, true, Upkeep::Round));
+    let first = pause_mark(p).expect("a look with a call out marks the wait");
+    assert!(index::made(&raw, Pause).is_empty(), "built with a call out");
+    assert!(!pause_upkeep(p, &raw, false, true, Upkeep::Idle));
+    assert_eq!(pause_mark(p), Some(first), "a held look moved the mark");
+    pause_mark_back(p, index::PAUSE_WAIT_MS);
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert_eq!(index::made(&raw, Pause), index::keeps(Pause));
+}
+
 /// #1063: a build its hour started that fails waits another hour before the next one no pause
 /// starts; the others are made, in the pause's one order, the one that failed after them.
 #[test]

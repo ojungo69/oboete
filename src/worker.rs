@@ -1791,10 +1791,15 @@ fn pause_upkeep(home: &Path, raw: &Raw, leaving: bool, calling: bool, at: Upkeep
         let _ = index::settled(raw);
         return true;
     }
-    if leaving || calling || asked_aside(home) {
+    if leaving || asked_aside(home) {
         return false;
     }
     let now = crate::db::now_ms();
+    if calling {
+        // No build with a call out (R10), but the hour runs from this look all the same.
+        let _ = index::noticed(raw, now);
+        return false;
+    }
     let waited = index::waited(raw, now).unwrap_or(false);
     let paused = at == Upkeep::Idle
         && !waited

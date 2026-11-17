@@ -365,11 +365,10 @@ pub(crate) mod index {
     /// the worker's exits, which a store whose hooks pause for a minute at a time has many of.
     pub(crate) const WAITING: &str = "pause_index_waiting";
 
-    /// Whether the pause's indexes have waited `PAUSE_WAIT_MS` at `now`. The first ask marks
-    /// `now`, and so does one past the wait, before the build it starts: a build that fails waits
-    /// another hour before the next one no pause starts. A store that has them all drops its mark
-    /// (`settled`).
-    pub(crate) fn waited(raw: &Raw, now: i64) -> Result<bool> {
+    /// When the pause's indexes started their wait: the mark, or `now`, marked, when there is none.
+    /// A look that a call out holds off from the build marks it all the same, so the hour runs from
+    /// the first look that found one missing (CodeRabbit on #1069).
+    pub(crate) fn noticed(raw: &Raw, now: i64) -> Result<i64> {
         use rusqlite::OptionalExtension;
         let since: Option<i64> = raw
             .conn
@@ -378,8 +377,22 @@ pub(crate) mod index {
             })
             .optional()?
             .and_then(|v| v.parse().ok());
-        let waited = since.is_some_and(|since| now - since >= PAUSE_WAIT_MS);
-        if since.is_none() || waited {
+        match since {
+            Some(since) => Ok(since),
+            None => {
+                mark(raw, Some(now))?;
+                Ok(now)
+            }
+        }
+    }
+
+    /// Whether the pause's indexes have waited `PAUSE_WAIT_MS` at `now`, from their mark
+    /// (`noticed`). A look past the wait marks `now` again, before the build it starts: a build
+    /// that fails waits another hour before the next one no pause starts. A store that has them
+    /// all drops its mark (`settled`).
+    pub(crate) fn waited(raw: &Raw, now: i64) -> Result<bool> {
+        let waited = now - noticed(raw, now)? >= PAUSE_WAIT_MS;
+        if waited {
             mark(raw, Some(now))?;
         }
         Ok(waited)
