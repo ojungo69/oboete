@@ -1200,6 +1200,7 @@ dependencies = [
  "ort",
  "percent-encoding",
  "regex",
+ "regex-syntax",
  "rmcp",
  "rusqlite",
  "ryu-js",
