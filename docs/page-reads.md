@@ -460,3 +460,37 @@ Tests: `providers_db::tests::the_months_spend_is_read_from_an_index_of_its_own` 
 before `usd`, the month's sums by role and outcome, and each sum's plan), and
 `providers_db::tests::my_works_daily_count_is_its_roles_requests_in_a_rolling_day` (My Work's
 count keeps its index).
+
+## #1037: the repository list, from counts the triggers keep
+
+What happened. The repository list (`GET /api/repos`, `view::repos_in`) and its names
+(`view::repo_names_in`, which Settings' privacy section reads) counted every repository's claims,
+imported documents and records on each read. On a copy of this PC's knowledge.db (4.3 GB, 965
+repositories, 2026-11-17), the list read 118.6 MB: 2.6 to 2.9 s on its first read and 0.8 s on the
+next. The page reads the list again each time the store's version moves.
+
+The change. knowledge.db keeps the counts in a table of their own, `repo_counts`
+(`consumer::repo_counts`). It has a row for each repository and leg (claims, imported documents and
+records), with the leg's count and its newest time. Triggers on `derivations`, `imported` and
+`raw_docs` change it in the transaction of each row written, whatever code writes the row, and three
+more abort an update of a column counted. The Fts consumer's step makes the table and the triggers,
+and counts the tables once, when the store does not hold exactly this build's: a new or rebuilt
+knowledge.db, an older build's store, or a newer build's. On the copy, that count read 118.6 MB in
+0.28 s with the pages in memory. Until it is made, both reads count the tables as before. The
+imported documents' leg is read only with the proof that no forget of imported history waits
+(decision 109), as before.
+
+On the copy, the list read on a new connection went from 118.6 MB and 0.8 to 2.9 s to 0.1 MB and
+1.6 ms, with the same 965 rows in the same order.
+
+Not measured yet: what the triggers add to a drain that makes a knowledge.db new (a rebuild, a
+restore, a retention pass, a forget of a claim). A bench of bare inserts on a compact copy came to
+about 20 µs a record and 40 µs an imported document: tens of seconds on a drain of this PC's store,
+as an upper bound.
+
+Tests: `consumer::repo_counts::tests::the_counts_are_made_again_unless_the_store_holds_this_builds_own`,
+`the_counts_stay_the_tables_through_inserts_and_deletes` (400 inserts and deletes of every kind),
+`every_lookup_of_the_triggers_reads_an_index`, `an_update_of_a_column_counted_aborts` and
+`no_writer_replaces_a_row_counted`; and `view::tests::the_repositories_are_read_from_the_counts_kept`,
+`the_repositories_counts_follow_every_writer` and
+`a_store_without_this_builds_counts_is_counted_from_its_tables`.

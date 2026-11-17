@@ -331,6 +331,9 @@ impl Consumer for Fts {
         // The repositories' records counted with their newest time (`view::repos_in`) from an
         // index, not by reading each record's text: 4.5 s cold on this PC's store (2026-11-01).
         k.execute_batch("CREATE INDEX IF NOT EXISTS raw_docs_repo ON raw_docs(repo, ts)")?;
+        // G (#1037): the repositories' counts, kept by triggers on the tables they count, made
+        // after the index their records' newest time is read from.
+        crate::consumer::repo_counts::keep(k)?;
         // #1037: the timeline's session starts in its order (`search::b::others`), with what an
         // entry of one shows, made after the table's other indexes. Through none in that order
         // each page read every record's labels, 78 MB of a timeline's 113 MB on this PC's store.

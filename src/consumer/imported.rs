@@ -45,7 +45,7 @@ pub fn schema(k: &Connection) -> Result<()> {
 /// store (263,208 documents, 2026-10-20) about 31 MB, made in 0.6 s with the documents cached.
 pub(crate) const COVER: &str = "imported_cover";
 
-fn cover(k: &Connection) -> Result<()> {
+pub(crate) fn cover(k: &Connection) -> Result<()> {
     k.execute_batch(
         "CREATE INDEX IF NOT EXISTS imported_cover ON imported(rowid, repo, ts, kind, session, uid);
          -- N5: a timeline's documents of a repository in time order (`search::b::imported_side`).

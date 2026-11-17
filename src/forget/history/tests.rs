@@ -131,6 +131,20 @@ const READERS: &[(&str, &str, Reach)] = &[
     ),
     ("src/embed_phase.rs", "read_page", Reach::Proof),
     (
+        "src/consumer/repo_counts.rs",
+        "BACKFILL",
+        Reach::Without(
+            "the repositories' counts, uids and times, which no reader without the proof reads",
+        ),
+    ),
+    (
+        "src/consumer/repo_counts.rs",
+        "TRIGGERS",
+        Reach::Without(
+            "the repositories' counts, uids and times, which no reader without the proof reads",
+        ),
+    ),
+    (
         "src/embed_phase.rs",
         "current",
         Reach::Without(
