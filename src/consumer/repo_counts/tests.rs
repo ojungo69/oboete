@@ -242,7 +242,7 @@ fn an_update_of_a_column_counted_aborts() {
 #[test]
 fn no_writer_replaces_a_row_counted() {
     let replace = regex::Regex::new(
-        r#"(?i)\bREPLACE\s+INTO\s+(?:(?:main|temp)\s*\.\s*)?["`\[]?(?:(?:raw_docs|derivations|imported)\b|\{)"#,
+        r#"(?i)\bREPLACE\s+INTO\s+(?:(?:main|temp)\s*\.\s*)?\\?["`\[]?(?:(?:raw_docs|derivations|imported)\b|\{)"#,
     )
     .unwrap();
     for (text, found) in [
@@ -252,6 +252,8 @@ fn no_writer_replaces_a_row_counted() {
         ),
         ("REPLACE INTO main.derivations VALUES (1)", true),
         ("INSERT OR REPLACE INTO \"imported\" VALUES (1)", true),
+        // As a Rust string holds it in the source the scan reads: the quote escaped.
+        ("INSERT OR REPLACE INTO \\\"imported\\\" VALUES (1)", true),
         ("REPLACE INTO `raw_docs` VALUES (1)", true),
         ("replace into [derivations] values (1)", true),
         ("INSERT OR REPLACE INTO {} VALUES (1)", true),
