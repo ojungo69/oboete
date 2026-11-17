@@ -334,8 +334,9 @@ cards still read every row. It takes both terms of the summaries' condition, so 
 summaries reads `turns_shown` alone. `cards_session_shown` names the sessions in its condition,
 so the feed's reads, which name none, cannot take it. Each first build reads its table once: on a copy of this
 PC's store 55 and 60 ms for the cards' two, 7 and 8 ms for the summaries' two. They are built
-where the schema is, as `cards_unmarked` is: the worker, the viewer and a search make the schema;
-a hook does not.
+where the schema is made, as `cards_unmarked` is: by the worker, the viewer, a search, retention,
+forget and doctor. No hook makes it: of the functions codegraph's call graph has above
+`cards::schema` and `turns::schema`, the 38 outside the tests include none of a hook's.
 
 On the copy, the first read of each statement on a new connection, before and after:
 
@@ -350,7 +351,9 @@ On the copy, the first read of each statement on a new connection, before and af
 | a page, a repository with one | 5.8 MB, 3.6 ms | 0.3 MB, 0.5 ms |
 | a page, the oldest session's | 5.8 MB, 4.5 ms | 0.3 MB, 0.5 ms |
 
-The same rows before and after. Every other statement on the two tables was listed twice,
+The same rows in the same order before and after, every column compared: on the copy, and on
+the copy with every 97th card and every 13th summary marked removed and every 89th card
+replaced, where the removed lists held 573 cards and 184 summaries. Every other statement on the two tables was listed twice,
 independently, the lists checked by a third reader, and each planned before and after on an
 empty copy of the store's schema made in its order. No plan of the cards' changed but the two
 above: their page and the cards around a time keep theirs, as
