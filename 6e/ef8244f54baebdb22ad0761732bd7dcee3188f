@@ -1,0 +1,29 @@
+src/search/b/tests.rs
+  s_52c3955e48bff4::t_1ef21eb977cc69 1566-1681,1683-1688,1692-1710,1713,1715,1721-1722,1726
+  s_52c3955e48bff4::t_06459642c9fbcb 1682,1689-1691
+  s_52c3955e48bff4::t_cf85ac5b982476 1711-1712,1714,1716-1720,1723-1725,1727-1731
+src/consumer/fts.rs
+  s_52c3955e48bff4::t_19956015632e24 334-340
+src/search/b.rs
+  s_52c3955e48bff4::t_350e3693d66e82 3598-3643
+  s_52c3955e48bff4::t_190a80a00dfc23 3644-3646
+  s_52c3955e48bff4::t_df0499ec23a019 3647,3668
+docs/page-reads.md
+  s_52c3955e48bff4::t_cc962b3ffea7cc 302,383-426
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6eef8244f54baebdb22ad0761732bd7dcee3188f",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
