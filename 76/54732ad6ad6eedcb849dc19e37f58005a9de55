@@ -1,0 +1,43 @@
+src/raw.rs
+  s_52c3955e48bff4::t_2e37b1deefcb73 2799,2801
+  s_52c3955e48bff4::t_9364422dab4818 5195
+  s_52c3955e48bff4::t_b4e0b88241f796 235
+  s_52c3955e48bff4::t_ba1b4ea172d31e 261-419
+src/worker/tests.rs
+  s_52c3955e48bff4::t_634b708027209f 16-17,31,34,37-39,41-66,70,74
+  s_52c3955e48bff4::t_193d5685db7d27 85-88
+  s_52c3955e48bff4::t_f7f8e45ba49c87 128-129
+  s_52c3955e48bff4::t_6dfc7968df1b7d 96-97,99
+src/settings/privacy/tests.rs
+  s_52c3955e48bff4::t_2bb322101b8465 250-251
+src/raw/tests.rs
+  s_52c3955e48bff4::t_b567845af0cfc6 3067,3069
+  s_52c3955e48bff4::t_7092903815cf9d 2951,2958-2962,2966-2969
+  s_52c3955e48bff4::t_6fdc8968157019 3517,3519
+  s_52c3955e48bff4::t_cad17d5bf428f7 3041
+  s_52c3955e48bff4::t_499da0974b4ad9 3418-3424
+  s_52c3955e48bff4::t_dce30f39a118dd 3582
+  s_52c3955e48bff4::t_d4d85641d7a0ff 3012,3020
+  s_52c3955e48bff4::t_e9538c59fe11a9 3434
+  s_52c3955e48bff4::t_db2fb5b9a6a2e7 3609-3695
+src/worker.rs
+  s_52c3955e48bff4::t_7ea99b8d1c2471 1752-1758,1760,1762-1763,1770
+docs/page-reads.md
+  s_52c3955e48bff4::t_f3ca5a5e84b3fa 149,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7654732ad6ad6eedcb849dc19e37f58005a9de55",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
