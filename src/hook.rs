@@ -339,12 +339,14 @@ fn run_clocked(
         let settings = crate::capture::Settings::load(home)?;
         // Recording keeps its own waits whatever the hook's time is (docs/hook-time.md).
         clock.begin(Phase::Open);
-        // #955: a hook its agent kills at its answer's time waits less, so it keeps in time.
-        let wait = clock.record_within(STORE_WAIT);
-        let mut store = match crate::raw::open_within(home, wait).and_then(|store| {
-            store
-                .wait_at_most(clock.record_within(wait))
-                .map(|()| store)
+        // #955: a hook its agent kills at its answer's time waits for the store, its open and
+        // the record's statements together, until `hook_time::KEEP_ROOM` before then.
+        let opened = crate::raw::open_within(home, clock.record_within(STORE_WAIT));
+        let mut store = match opened.and_then(|mut store| {
+            if let Some(at) = clock.record_until() {
+                store.wait_until(at)?;
+            }
+            Ok(store)
         }) {
             Ok(store) => store,
             Err(e) => {
@@ -1536,8 +1538,13 @@ pub(crate) fn record_if(
         None => None,
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
+    // A record whose waits end at a time (#955) writes none back: it keeps its own behind them.
     let back;
-    (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
+    (*written_back, back) = if raw.bounded() {
+        (0, Ok(()))
+    } else {
+        crate::unwritten::write_back(home, raw, settings)
+    };
     let recovers = !ending || recovery.is_some();
     let (built, prompt) = built(
         home,

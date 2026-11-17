@@ -3693,3 +3693,22 @@ fn a_failed_pause_build_keeps_its_read_plain_and_builds_the_rest() {
         EXPIRED_AMONG_INDEXED
     );
 }
+
+/// #955: a bounded record's waits end at one time. An append after part of it has gone waits only
+/// what remains, not the whole time it was set with.
+#[test]
+fn a_bounded_store_waits_only_what_remains_of_its_time() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    raw.append(&test_event("made")).unwrap();
+    raw.wait_until(std::time::Instant::now() + std::time::Duration::from_millis(800))
+        .unwrap();
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let started = std::time::Instant::now();
+    assert!(raw.append(&test_event("held")).is_err());
+    let took = started.elapsed();
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(took < std::time::Duration::from_millis(600), "{took:?}");
+}

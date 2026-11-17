@@ -33,11 +33,13 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   session's end Pi waits up to 2 s for its queue and goes on: that wait is not the child's 3 s.
   Pi kills the two hooks whose answer it waits for, a prompt's and a session start's, as its
   2 s wait ends, and tells them when (`OBOETE_ANSWER_BY_MS`, #955). Such a hook waits for the
-  store only until `hook_time::KEEP_ROOM` (1 s) before then, and keeps its events in that
-  second. One with less than that second of Pi's wait left, or none, is started to record
-  only: it waits for no store and keeps at once what it cannot write, and gets 3 s.
+  store, its open and the record's statements together, only until `hook_time::KEEP_ROOM` (1 s)
+  before then, and keeps its events in that second. One with less than that second of Pi's
+  wait left, or none, is started to record only: it waits for no store and keeps at once what
+  it cannot write, and gets 3 s. As Pi quits, a call with none of its wait left is not started.
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
-  seqs follow the events' times: a call visits at most the oldest 16 files and writes at most
+  seqs follow the events' times (a call whose record's waits end at a time, one Pi waits for,
+  writes none back and keeps its own events behind them, #955): a call visits at most the oldest 16 files and writes at most
   **256 KiB of serialized events**, including their labels and ledger rows, across all files.
   This leaves time for the hook's own keep and marker inside the shortest 3 s timeout after the
   store's 2 s wait (#443). Parts end at event boundaries. The first event is admitted even when

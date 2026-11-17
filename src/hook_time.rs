@@ -231,6 +231,15 @@ impl Clock {
         }
     }
 
+    /// When the record's waits for the store end, all of them together (`inject_within`), if
+    /// they end at a time.
+    pub(crate) fn record_until(&self) -> Option<Instant> {
+        match self.record_by.load(Ordering::Relaxed) {
+            i64::MAX => None,
+            end => Some(self.start + Duration::from_millis(u64::try_from(end).unwrap_or(0))),
+        }
+    }
+
     /// When the hook's time for what it injects is over, if it has one.
     pub(crate) fn by(&self) -> Option<Instant> {
         match self.by.load(Ordering::Relaxed) {

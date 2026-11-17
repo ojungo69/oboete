@@ -54,9 +54,10 @@ fn a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before() {
     assert_eq!(super::answer_end(i64::MIN, 1), i64::MIN);
     assert_eq!(super::record_end(1_000_000 + 10_000, 1_000_000), 9_000);
     assert_eq!(super::record_end(1_000_000 + 400, 1_000_000), -600);
-    // Its answer wanted 10 s from now: 9.5 s remain. The bounds leave a slow machine 2 s.
+    // Its answer wanted 10 s from now, counted from the clock's own start: 9.5 s remain. The
+    // bounds leave a slow machine 2 s.
     let clock = Clock::started_process(Duration::from_secs(1));
-    clock.answer_by(crate::db::now_ms() + 10_000);
+    clock.answer_by(clock.wall_ms + 11_000);
     clock.inject_within(None);
     let left = clock.left(Duration::from_secs(60));
     assert!(left <= Duration::from_millis(9_500), "{left:?}");
@@ -68,7 +69,7 @@ fn a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before() {
     );
     // Wanted 1.5 s from now: the store is waited for 0.5 s at most.
     let near = Clock::started_process(Duration::ZERO);
-    near.answer_by(crate::db::now_ms() + 1_500);
+    near.answer_by(near.wall_ms + 1_500);
     near.inject_within(None);
     let wait = near.record_within(Duration::from_secs(2));
     assert!(wait <= Duration::from_millis(500), "{wait:?}");

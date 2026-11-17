@@ -1163,6 +1163,8 @@ pub struct Raw {
     gate: Option<crate::redact::Rules>,
     /// Which open of this process it is (`opened`).
     opened: u64,
+    /// #955: when the record's waits for the store end, all of them together (`wait_until`).
+    record_by: Option<std::time::Instant>,
 }
 
 /// The opens of raw.db this process has made (`Raw::opened`).
@@ -1901,10 +1903,27 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
 }
 
 impl Raw {
-    /// #955: each later statement waits for the store's lock `wait` at most, not the 2 s `open`
-    /// sets: a hook its agent kills sooner keeps what it could not write before then.
-    pub(crate) fn wait_at_most(&self, wait: std::time::Duration) -> Result<()> {
-        self.conn.busy_timeout(wait)?;
+    /// #955: the record's waits for the store, all of them together, end at `at`: a hook its
+    /// agent kills sooner keeps what it could not write before then. Each append waits what
+    /// remains (`wait_left`, at the append's start), and no kept file is written back
+    /// (`bounded`): the call keeps its own events behind them (docs/unwritten.md U3).
+    pub(crate) fn wait_until(&mut self, at: std::time::Instant) -> Result<()> {
+        self.record_by = Some(at);
+        self.wait_left()
+    }
+
+    /// Whether the record's waits end at a time (`wait_until`).
+    pub(crate) fn bounded(&self) -> bool {
+        self.record_by.is_some()
+    }
+
+    /// The next statement waits for the store's lock what remains before the record's waits end,
+    /// when they end at a time (`wait_until`).
+    pub(crate) fn wait_left(&self) -> Result<()> {
+        if let Some(at) = self.record_by {
+            self.conn
+                .busy_timeout(at.saturating_duration_since(std::time::Instant::now()))?;
+        }
         Ok(())
     }
 }
@@ -2130,6 +2149,7 @@ fn open_within_report(
         gated_off: false,
         gate: None,
         opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        record_by: None,
     })
 }
 
@@ -4889,6 +4909,8 @@ impl Raw {
         settings: Option<&crate::capture::Settings>,
         read: Option<(&str, Option<&str>)>,
     ) -> Result<Option<i64>> {
+        // #955: a bounded record's append waits what remains of its time (`wait_until`).
+        self.wait_left()?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

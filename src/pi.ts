@@ -24,12 +24,17 @@ export default function (pi) {
   // shown. Its hook is told when the wait ends (`OBOETE_ANSWER_BY_MS`), and waits for a held store
   // no longer than leaves it `KEEP_ROOM_MS` to keep its events before then (#955). A call with
   // less than that left, or none, only records: its hook is told the wait is over, so it waits
-  // for no store and injects nothing, and it gets the capture's 3 s.
+  // for no store and injects nothing, and it gets the capture's 3 s; what it prints joins
+  // nothing. As Pi quits, a call gets what is left of its wait and no more, and one with none
+  // left is not started, as before: Pi exits once its 2 s wait for the queue ends, and the
+  // session's end must not wait behind it.
   const CAPTURE_KILL_MS = 3000;
   const KEEP_ROOM_MS = 1000;
+  let quitting = false;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
     const left = deadline === undefined ? undefined : Math.min(2000, deadline - Date.now());
-    const waited = left !== undefined && left >= KEEP_ROOM_MS;
+    if (quitting && left !== undefined && left <= 0) { resolve(""); return; }
+    const waited = left !== undefined && (left >= KEEP_ROOM_MS || quitting);
     const env = left === undefined
       ? process.env
       : { ...process.env, OBOETE_ANSWER_BY_MS: String(waited ? deadline : Date.now()) };
@@ -42,7 +47,7 @@ export default function (pi) {
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });
-    child.on("close", (code) => finish(code === 0 ? out : ""));
+    child.on("close", (code) => finish(code === 0 && (left === undefined || waited) ? out : ""));
     child.stdin.on("error", ignore);
     child.stdin.end(payload);
   });
@@ -121,6 +126,8 @@ export default function (pi) {
   });
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "reload") return;
+    // Pi exits after a quit; a session replaced by another leaves the process, and its queue, on.
+    if (event.reason === "quit") quitting = true;
     void send("SessionEnd", ctx, { reason: event.reason });
     await wait(chain);
   });
