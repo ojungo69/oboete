@@ -21,7 +21,7 @@ Impact means how often the owner would notice the difference: `daily`, `weekly`,
 | partial | 31 |
 | missing | 13 |
 | accepted_difference | 24 |
-| total | 103 |
+| total | 106 |
 
 ### Open checks before removal
 
