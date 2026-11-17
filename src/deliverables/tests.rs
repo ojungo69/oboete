@@ -1,6 +1,36 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn streamed_hash_matches_digest_and_length() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("large.bin");
+    let data = vec![0x5a; (1 << 20) + 17];
+    std::fs::write(&source, &data).unwrap();
+    let copied = copy_into(
+        home.path(),
+        "shop",
+        &source,
+        std::fs::File::open(&source).unwrap(),
+    )
+    .unwrap();
+    let expected = crate::db::hex(&Sha256::digest(&data));
+    assert_eq!(copied.sha256, expected);
+    assert_eq!(copied.bytes, data.len() as u64);
+    let dir = held_folder(home.path(), "shop").unwrap();
+    let name = Path::new(&copied.copy)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        sha256_held(&dir, name, copied.bytes).unwrap(),
+        Some(expected)
+    );
+    assert_eq!(sha256_held(&dir, name, copied.bytes - 1).unwrap(), None);
+    assert_eq!(sha256_held(&dir, name, copied.bytes + 1).unwrap(), None);
+}
+
 fn ev(session: &str, kind: &str, body: Value, cwd: &Path) -> Event {
     Event {
         agent: "claude".into(),

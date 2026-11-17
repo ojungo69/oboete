@@ -25,7 +25,7 @@ fn durable_store_files(home: &Path) -> std::collections::BTreeMap<std::ffi::OsSt
             if filename.ends_with("-shm") || (filename.ends_with("-wal") && bytes.is_empty()) {
                 return None;
             }
-            Some((name, format!("{:x}", Sha256::digest(bytes))))
+            Some((name, crate::db::hex(&Sha256::digest(bytes))))
         })
         .collect()
 }

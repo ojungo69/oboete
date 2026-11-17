@@ -41,7 +41,7 @@ fn hash(fields: &[&[u8]]) -> String {
         h.update((bytes.len() as u64).to_le_bytes());
         h.update(bytes);
     }
-    format!("{:x}", h.finalize())
+    crate::db::hex(&h.finalize())
 }
 pub(super) fn mode(m: &Metadata) -> u32 {
     #[cfg(unix)]

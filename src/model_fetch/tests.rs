@@ -416,7 +416,7 @@ fn the_runtime_comes_out_of_its_archive() {
     assert!(made.success());
     let bytes = fs::read(&tgz).unwrap();
     let sha = |b: &[u8]| -> &'static str {
-        Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
+        Box::leak(crate::db::hex(&Sha256::digest(b)).into_boxed_str())
     };
     let served = bytes.clone();
     let stub = Stub::new(move |_, _| reply(200, "", &served));
@@ -475,7 +475,7 @@ fn the_runtime_is_taken_out_under_the_lock() {
     fs::write(&slow_tar, script).unwrap();
     fs::set_permissions(&slow_tar, fs::Permissions::from_mode(0o755)).unwrap();
     let sha = |b: &[u8]| -> &'static str {
-        Box::leak(format!("{:x}", Sha256::digest(b)).into_boxed_str())
+        Box::leak(crate::db::hex(&Sha256::digest(b)).into_boxed_str())
     };
     let stub = Stub::new(|_, _| reply(200, "", b"archive"));
     let runtime = Runtime {

@@ -1802,7 +1802,7 @@ fn trust_rows_follow_user_groups_that_shift() {
 fn setup_embeddings() {
     use crate::model_fetch::{Artifact, Runtime};
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
-    let pin = |b: &[u8]| leak(format!("{:x}", Sha256::digest(b)));
+    let pin = |b: &[u8]| leak(crate::db::hex(&Sha256::digest(b)));
     // Nobody listens there: a file still to download fails.
     let closed = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

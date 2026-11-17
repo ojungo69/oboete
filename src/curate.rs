@@ -2709,7 +2709,7 @@ fn plan_inputs(
         hash.update((req.prompt.len() as u64).to_le_bytes());
         hash.update(req.prompt.as_bytes());
     }
-    Ok((tokens, format!("{:x}", hash.finalize())))
+    Ok((tokens, crate::db::hex(&hash.finalize())))
 }
 
 /// Full content only: timestamps/SHM/worker status are not recuration inputs.

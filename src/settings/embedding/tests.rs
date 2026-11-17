@@ -10,7 +10,7 @@ fn leak(s: String) -> &'static str {
 /// One model file and a runtime from `url`, pinned to `model` and `runtime`'s bytes, as
 /// `setup_embeddings` makes them.
 fn files(url: &'static str) -> (&'static [Artifact], &'static Runtime) {
-    let pin = |b: &[u8]| leak(format!("{:x}", Sha256::digest(b)));
+    let pin = |b: &[u8]| leak(crate::db::hex(&Sha256::digest(b)));
     let model = Box::leak(Box::new([Artifact {
         name: "tokenizer.json",
         url,

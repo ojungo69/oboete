@@ -67,15 +67,12 @@ fn w6a_same_id_replays_an_established_result_while_saving_is_locked() {
     let _guard = saving.lock().unwrap();
     let operation_id = "a".repeat(64);
     let key = "b".repeat(64);
-    let fingerprint = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&json!({
-                "action":"wire","agents":["codex"],"preview_key":key
-            }))
-            .unwrap()
-        )
-    );
+    let fingerprint = crate::db::hex(&Sha256::digest(
+        serde_json::to_vec(&json!({
+            "action":"wire","agents":["codex"],"preview_key":key
+        }))
+        .unwrap(),
+    ));
     assert!(
         agents
             .replay(&operation_id, &fingerprint)

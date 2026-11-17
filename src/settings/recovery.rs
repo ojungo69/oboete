@@ -192,7 +192,7 @@ fn snapshot(home: &Path) -> Result<Input, Refusal> {
     ));
     hash.update(&bytes);
     Ok(Input {
-        key: format!("{:x}", hash.finalize()),
+        key: crate::db::hex(&hash.finalize()),
         bytes,
         _file: file,
         folder,

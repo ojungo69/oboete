@@ -2273,8 +2273,8 @@ fn what_a_cut_to_the_op_cap_leaves_is_scanned_again() {
             .unwrap()
     };
     let keeps = rules(&format!(
-        "[redaction]\nallowlist = [\"{:x}\"]\n",
-        sha2::Sha256::digest(value.as_bytes())
+        "[redaction]\nallowlist = [\"{}\"]\n",
+        crate::db::hex(&sha2::Sha256::digest(value.as_bytes()))
     ));
     let off = rules("[redaction]\nenabled = false\n");
     for (told, masked) in [(None, true), (Some(&keeps), false), (Some(&off), false)] {

@@ -2169,11 +2169,11 @@ fn a_parsed_line_has_the_identity_it_was_imported_with() {
             .map(|line| {
                 let mut identity = Sha256::new();
                 hash_line(&mut identity, line).unwrap();
-                format!("{:x}", identity.finalize())
+                crate::db::hex(&identity.finalize())
             })
             .collect();
         let then: Vec<String> = (then.iter())
-            .map(|bytes| format!("{:x}", Sha256::digest(format!("{bytes}\n"))))
+            .map(|bytes| crate::db::hex(&Sha256::digest(format!("{bytes}\n"))))
             .collect();
         assert_eq!(now, then, "case {n}: {read:#?}");
     }
@@ -2296,11 +2296,11 @@ fn an_interrupted_calls_line_keeps_its_bytes_and_stands_where_its_turn_was_stopp
             .map(|line| {
                 let mut identity = Sha256::new();
                 hash_line(&mut identity, line).unwrap();
-                format!("{:x}", identity.finalize())
+                crate::db::hex(&identity.finalize())
             })
             .collect();
         let then: Vec<String> = (then.iter())
-            .map(|bytes| format!("{:x}", Sha256::digest(format!("{bytes}\n"))))
+            .map(|bytes| crate::db::hex(&Sha256::digest(format!("{bytes}\n"))))
             .collect();
         if now != then {
             wrong.push(format!("case {n}: {read:#?}"));
@@ -2328,7 +2328,7 @@ fn a_claude_lines_marks_leave_its_identity_as_it_was() {
     let hash = |l: &Line| {
         let mut h = Sha256::new();
         hash_line(&mut h, l).unwrap();
-        format!("{:x}", h.finalize())
+        crate::db::hex(&h.finalize())
     };
     let before = json!({"prompt": "Fix it.", "session_id": "s", "transcript_path": "/t",
             "cwd": "/w", "hook_event_name": "UserPromptSubmit"});

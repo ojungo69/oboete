@@ -124,7 +124,7 @@ fn fingerprint(version: &str, consent: &Consent) -> String {
     hash.update(version.as_bytes());
     hash.update([0]);
     hash.update(serde_json::to_vec(consent).expect("typed consent serializes"));
-    format!("{:x}", hash.finalize())
+    crate::db::hex(&hash.finalize())
 }
 
 fn snapshot(home: &Path, state: &State) -> Value {

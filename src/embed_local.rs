@@ -43,7 +43,7 @@ fn library() -> Result<&'static crate::model_fetch::Artifact> {
 
 /// The graph, the runtime's library and every model file at their pinned size and hash.
 pub fn verify(dir: &Path) -> Result<()> {
-    let got = format!("{:x}", Sha256::digest(GRAPH));
+    let got = crate::db::hex(&Sha256::digest(GRAPH));
     if got != GRAPH_SHA256 {
         bail!("the fused graph: SHA-256 {got}, not the pinned {GRAPH_SHA256}");
     }
