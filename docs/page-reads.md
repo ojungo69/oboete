@@ -273,7 +273,6 @@ go takes them; what does not compile is asked for once),
 `redact::tests::a_secret_is_masked_with_a_warm_as_without` (on the thread, on another thread, and
 right after the thread's map started again).
 
-
 ## #1070: a leading word boundary is tried first as a filter
 
 What happened. The Sessions tab (`GET /api/sessions`) took 300 ms on a copy of this PC's store.
