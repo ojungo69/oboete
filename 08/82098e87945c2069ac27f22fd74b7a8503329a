@@ -1,0 +1,23 @@
+docs/page-reads.md
+  s_52c3955e48bff4::t_558ec94d8c22d3 466-469
+src/consumer/repo_counts.rs
+  s_52c3955e48bff4::t_8cec91dd91bdf1 13,96-98,102-103,139-140,143-144
+src/consumer/repo_counts/tests.rs
+  s_52c3955e48bff4::t_92fef9a9a8be8b 55-60,69-70,240-241,244-262,285-287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0882098e87945c2069ac27f22fd74b7a8503329a",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
