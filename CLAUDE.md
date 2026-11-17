@@ -12,3 +12,17 @@ Lightweight single-binary memory for coding agents. Rewrite of the TypeScript `o
 - **Measure, don't assume**: `oboete replay <fixture> --home <tmp>` prints hook latency, VmHWM, provider outcomes. Fixture of record: `~/.oboete/eval/replay/events-1000.jsonl`, milestone 1's frozen copy (docs/milestone-1.md; the free-mem checkout it came from is gone). A machine without it fetches the same file (same sha256) from `ojungo69/oboete-ts`: `gh api -H 'Accept: application/vnd.github.raw' repos/ojungo69/oboete-ts/contents/test/fixtures/events-1000.jsonl > <tmp>/events-1000.jsonl`.
 - **Redaction fixes are additive**: a fix runs after `main`'s steps and stores what `main` stores outside the branch it fixes; before its push, the capture or import of a copy of a real store runs on both and their stored text is compared.
 - **Review replies report runs**: each result a reply gives is an input run through the trees it names; an input not run is quoted as the reviewer's.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repository's GitHub Issues (`ojungo69/oboete`), through the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: the decisions are the numbered ones in `docs/spec.md` 0.1, its short names are in 0.2, and there is no `docs/adr/`. See `docs/agents/domain.md`.
