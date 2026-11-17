@@ -28,11 +28,14 @@ says recording failed, and nothing brings them back. This keeps them and writes 
   The keep comes after the 2 s wait, so whatever ends a hook has to leave it that wait, a keep
   in progress (U5) and the hook's own end: 3 s. The timeouts `setup` writes do (the shortest is
   3 s). A plugin that kills its child does where it gives the child 3 s: OpenCode's every hook,
-  the prompt's included, whose answer it waits those 3 s for; and Pi's every hook. Pi waits 2 s
-  for the answer to a prompt and to a session's start, and up to 2 s for its queue at a
-  session's end, and goes on: those waits are not the child's 3 s. A hook whose answer Pi waits
-  for is told when the wait ends, and injects nothing past it (docs/hook-time.md), and one whose
-  wait ended while it queued is started all the same, to record (#955).
+  the prompt's included, whose answer it waits those 3 s for; and Pi's captures of a tool's
+  result, a turn's end, a compaction and a session's end, whose answer nothing waits for. At a
+  session's end Pi waits up to 2 s for its queue and goes on: that wait is not the child's 3 s.
+  Pi kills the two hooks whose answer it waits for, a prompt's and a session start's, as its
+  2 s wait ends, and tells them when (`OBOETE_ANSWER_BY_MS`, #955). Such a hook waits for the
+  store only until `hook_time::KEEP_ROOM` (1 s) before then, and keeps its events in that
+  second. One with less than that second of Pi's wait left, or none, is started to record
+  only: it waits for no store and keeps at once what it cannot write, and gets 3 s.
 - **U3. Written back.** By the next hook call whose store opens, before its own events, so the
   seqs follow the events' times: a call visits at most the oldest 16 files and writes at most
   **256 KiB of serialized events**, including their labels and ledger rows, across all files.

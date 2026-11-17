@@ -303,8 +303,8 @@ assert.deepEqual(plain(await expired.emit("before_agent_start", { prompt: "fresh
   message: { customType: "oboete", content: "later prompt", display: false },
 });
 
-// Starting before expiry, a prompt's hook is told when Pi's wait ends, and lives the capture's 3 s
-// from its spawn: a held store's 2 s wait and the keep after it end inside them (#955).
+// Starting with less than the room for a keep of Pi's wait left, a prompt's hook only records: it
+// is told that Pi's wait is over, and lives the capture's 3 s (#955).
 const remaining = await load({}, true);
 remaining.stallNextHook = true;
 remaining.handlers.get("tool_result")(toolEvent, ctx);
@@ -316,12 +316,30 @@ remaining.stallNextHook = true;
 remaining.fireFirstTimer();
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(remaining.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-assert.equal(remaining.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
+assert.equal(remaining.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "1500");
 assert.equal(remaining.timeouts.at(-1), 3000);
 remaining.tick(500);
 await limitedInput;
 assert.equal(await remaining.emit("before_agent_start", { prompt: "after timeout" }, ctx), undefined);
 assert.equal(remaining.kills.length, 1, "only the capture is killed as Pi's wait ends");
+
+// With that room left, a prompt's hook is told when Pi's wait ends, and dies with it (#955).
+const room = await load({}, true);
+room.stallNextHook = true;
+room.handlers.get("tool_result")(toolEvent, ctx);
+await Promise.resolve();
+const roomInput = room.emit("input", { source: "interactive", text: "room prompt" }, ctx);
+await Promise.resolve();
+room.advance(800);
+room.stallNextHook = true;
+room.fireFirstTimer();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(room.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
+assert.equal(room.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
+assert.equal(room.timeouts.at(-1), 1200);
+room.tick(1200);
+await roomInput;
+assert.deepEqual(room.kills, [800, 2000], "killed as Pi's wait ends");
 
 // What Pi waits for ends at 2 seconds. A capture's child, which nothing waits for, lives 3: its
 // hook waits 2 seconds for a held store before it keeps what it could not write.
@@ -343,8 +361,8 @@ clock.tick(1);
 assert.deepEqual(clock.kills, [3000], "a capture's child is killed at 3 seconds");
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-// Pi's wait for a hook ends at 2 seconds. The hook, told when, injects nothing past it
-// (docs/hook-time.md), and lives on to 3 to record what it could not write (#955).
+// A hook Pi waits for dies with the wait: what it prints later must not come to count as shown.
+// It is told when (#955), and keeps what it could not write before then.
 const waited = await load({}, true);
 waited.stallNextHook = true;
 const stalled = waited.emit("input", { source: "interactive", text: "stalled" }, ctx);
@@ -354,11 +372,7 @@ assert.equal(waited.hooks[0].options.env.OBOETE_ANSWER_BY_MS, "2000");
 assert.equal(waited.kills.length, 0);
 waited.tick(1);
 await stalled;
-assert.equal(waited.kills.length, 0, "Pi's wait ends at 2 seconds, and its hook goes on");
-waited.tick(999);
-assert.equal(waited.kills.length, 0, "nor before 3");
-waited.tick(1);
-assert.deepEqual(waited.kills, [3000], "a hook Pi waits for is killed at 3 seconds");
+assert.deepEqual(waited.kills, [2000], "a hook Pi waits for is killed as the wait ends");
 
 // What a prompt gets joins the stash its run starts with, after SessionStart's, once.
 const prompted = await load();

@@ -109,6 +109,46 @@ fn a_pi_prompt_past_its_answers_time_is_recorded_and_given_nothing() {
     assert_eq!(recorded, 1);
 }
 
+/// #955: a prompt Pi waits for 1.2 s more, on a store whose write lock is held: its hook waits
+/// for the store only until 1 s before Pi kills it, and keeps the prompt by then.
+#[test]
+fn a_pi_prompt_on_a_held_store_is_kept_before_pi_kills_its_hook() {
+    let home = tempfile::tempdir().unwrap();
+    let first = hook_output(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"the store is made"}"#,
+    );
+    assert!(first.status.success());
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let by = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 1_200;
+    let started = Instant::now();
+    let out = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt on a held store"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &by.to_string())],
+    );
+    let took = started.elapsed();
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(out.status.success());
+    assert!(took < Duration::from_millis(1_500), "{took:?}");
+    let kept = std::fs::read_dir(home.path().join("unwritten"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|f| {
+            std::fs::read_to_string(f.path()).is_ok_and(|t| t.contains("a prompt on a held store"))
+        });
+    assert!(kept, "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn session_start_note_says_in_japanese_that_there_is_no_memory_yet() {
     let home = tempfile::tempdir().unwrap();

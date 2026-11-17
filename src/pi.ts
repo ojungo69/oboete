@@ -16,24 +16,29 @@ export default function (pi) {
   const textParts = (parts) => (Array.isArray(parts) ? parts : [])
     .filter((p) => p?.type === "text").map((p) => p.text).join("\n");
 
-  // Every call's child gets 3 s. A hook whose store is held waits 2 s for the store, then keeps
-  // what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it died
-  // before either, and its event was lost with nothing to say so (#955). What Pi waits for, a
-  // prompt's and a session start's answer, ends sooner (`wait`): such a call tells its hook when
-  // (`OBOETE_ANSWER_BY_MS`), and the hook injects nothing past then (docs/hook-time.md), so what
-  // Pi did not wait for comes to count as shown nowhere. A call whose time ended while it queued
-  // still runs: it records, and injects nothing.
+  // A capture call's child gets 3 s. Nothing waits for its answer (a session's end waits up to
+  // 2 s for the queue and goes on), and a hook whose store is held waits 2 s for the store, then
+  // keeps what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it
+  // died before either, and its event was lost with nothing to say so. A call whose answer Pi
+  // waits for dies with Pi's 2 s wait: what its hook prints later must not come to count as
+  // shown. Its hook is told when the wait ends (`OBOETE_ANSWER_BY_MS`), and waits for a held store
+  // no longer than leaves it `KEEP_ROOM_MS` to keep its events before then (#955). A call with
+  // less than that left, or none, only records: its hook is told the wait is over, so it waits
+  // for no store and injects nothing, and it gets the capture's 3 s.
   const CAPTURE_KILL_MS = 3000;
+  const KEEP_ROOM_MS = 1000;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
-    const env = deadline === undefined
+    const left = deadline === undefined ? undefined : Math.min(2000, deadline - Date.now());
+    const waited = left !== undefined && left >= KEEP_ROOM_MS;
+    const env = left === undefined
       ? process.env
-      : { ...process.env, OBOETE_ANSWER_BY_MS: String(deadline) };
+      : { ...process.env, OBOETE_ANSWER_BY_MS: String(waited ? deadline : Date.now()) };
     const child = spawn(OBOETE_BIN, [...OBOETE_ARGS, "hook", "pi", event], {
       cwd, env, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
     const finish = (text) => { clearTimeout(timer); resolve(text); };
-    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, CAPTURE_KILL_MS);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, waited ? left : CAPTURE_KILL_MS);
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });

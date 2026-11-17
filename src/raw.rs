@@ -1899,6 +1899,15 @@ pub fn open(home: &Path) -> Result<Raw> {
 pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     open_within_report(home, wait, None, &mut |_| Ok(()))
 }
+
+impl Raw {
+    /// #955: each later statement waits for the store's lock `wait` at most, not the 2 s `open`
+    /// sets: a hook its agent kills sooner keeps what it could not write before then.
+    pub(crate) fn wait_at_most(&self, wait: std::time::Duration) -> Result<()> {
+        self.conn.busy_timeout(wait)?;
+        Ok(())
+    }
+}
 pub(crate) fn open_report(
     home: &Path,
     guard: Option<&crate::executable::CommandHome>,

@@ -47,16 +47,23 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
     its lookup's wait, its store's wait and its fence's wait take what remains.
 - An agent whose hook oboete writes no timeout for (OpenCode's and Pi's plugins, an agent with no
   adapter) has no such deadline: its waits are as they were. The plugins kill the hooks they
-  start themselves, each after 3 s. Pi's wait for its queue at a session's end, 2 s at most,
-  kills nothing (docs/unwritten.md U2).
+  start themselves: OpenCode's each after 3 s; Pi's after 3 s where nothing waits for the hook's
+  answer, and as its own 2 s wait ends where it waits for one. Pi's wait for its queue at a
+  session's end, 2 s at most, kills nothing (docs/unwritten.md U2).
 - Pi waits 2 s for the answer to a prompt and to a session's start, queue time included. Its
   plugin tells those hooks when the wait ends (`OBOETE_ANSWER_BY_MS`, ms since the epoch,
-  `hook_time::ANSWER_BY`): their time for what they inject ends half of `MARGIN` before then,
-  the time before `main` being in it already. A hook whose wait ended while it queued is started
-  all the same: it records, and injects nothing. A hook with a timeout of oboete's reads no such
-  time: a process the hook starts, and what that starts, inherit it. Before #955 the plugin killed these hooks as
-  its wait ended, and did not start one whose wait had ended: on a held store, its 2 s wait
-  outlasted the kill, and the prompt was neither written nor kept.
+  `hook_time::ANSWER_BY`) and kills them then:
+  - their time for what they inject ends half of `MARGIN` before then, the time before `main`
+    being in it already;
+  - their waits for the store (its open and each statement after it) end `KEEP_ROOM` (1 s)
+    before then, so a hook whose store is held keeps its events before the kill
+    (docs/unwritten.md U2). Recording is not cut short: what is not written is kept.
+
+  A call with less than `KEEP_ROOM` of Pi's wait left, or none, is started to record only. Its
+  hook is told that the wait is over, so it waits for no store and injects nothing, and it gets
+  3 s. Before #955 the plugin did not start such a call, and a hook whose store was held waited
+  its 2 s past the kill: the prompt was neither written nor kept. A hook with a timeout of
+  oboete's reads no such time: a process the hook starts, and what that starts, inherit it.
 - A hook run inside another process (a test) has a clock that starts when it is called and no
   deadline unless the test sets one.
 
@@ -217,9 +224,12 @@ section).
 - `hook_time::tests::a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before`,
   `hook::tests::a_pi_prompt_whose_answer_is_no_longer_wanted_is_recorded_and_given_nothing`,
   `tests/hook_output.rs`'s `a_pi_prompt_past_its_answers_time_is_recorded_and_given_nothing` (the
-  time from the environment), and the Pi harness (`src/testdata/pi/test.mjs`, under
+  time from the environment) and `a_pi_prompt_on_a_held_store_is_kept_before_pi_kills_its_hook`,
+  `setup::tests::a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write` (the
+  keep's room in both languages), and the Pi harness (`src/testdata/pi/test.mjs`, under
   `setup::tests::pi_generated_extension_matches_event_and_tool_contract`): what Pi waits for and
-  when it kills, a prompt behind a capture, and one whose wait ended while it queued (#955).
+  when it kills, a prompt behind a capture with the room for a keep left and without it, and one
+  whose wait ended while it queued (#955).
 - `hook::tests::a_hook_with_no_time_left_records_and_injects_nothing`,
   `the_read_fence_is_waited_for_within_the_hooks_time`,
   `the_prompt_points_wait_ends_with_the_hooks_time`,

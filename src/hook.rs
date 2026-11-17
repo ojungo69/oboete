@@ -339,7 +339,13 @@ fn run_clocked(
         let settings = crate::capture::Settings::load(home)?;
         // Recording keeps its own waits whatever the hook's time is (docs/hook-time.md).
         clock.begin(Phase::Open);
-        let mut store = match crate::raw::open_within(home, STORE_WAIT) {
+        // #955: a hook its agent kills at its answer's time waits less, so it keeps in time.
+        let wait = clock.record_within(STORE_WAIT);
+        let mut store = match crate::raw::open_within(home, wait).and_then(|store| {
+            store
+                .wait_at_most(clock.record_within(wait))
+                .map(|()| store)
+        }) {
             Ok(store) => store,
             Err(e) => {
                 // The store failed now: the keep after may wait and sync, and overlapping hooks
