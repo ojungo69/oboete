@@ -101,7 +101,9 @@ fn counted_as_kept(k: &rusqlite::Connection, why: &str) {
             "{why}, with the proof: {with}"
         );
         assert_eq!(
-            names(REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_leg))),
+            names(
+                REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_names_leg))
+            ),
             names(REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg))),
             "{why}, with the proof: {with}"
         );

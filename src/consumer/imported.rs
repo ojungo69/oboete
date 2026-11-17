@@ -87,24 +87,25 @@ impl Consumer for Imported {
             if raw.import_covered(&d.uid)? {
                 continue;
             }
-            k.execute(
+            // Prepared once, as `Fts`'s insert: each prepare compiles the triggers it fires.
+            k.prepare_cached(
                 "INSERT INTO imported(op_device, op_seq, uid, source, source_id, kind, repo,
                    session, ts, title, body)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    device,
-                    op.op_seq,
-                    d.uid,
-                    d.source,
-                    d.source_id,
-                    d.kind,
-                    d.repo,
-                    d.session,
-                    d.ts,
-                    d.title,
-                    d.body
-                ],
-            )?;
+            )?
+            .execute(params![
+                device,
+                op.op_seq,
+                d.uid,
+                d.source,
+                d.source_id,
+                d.kind,
+                d.repo,
+                d.session,
+                d.ts,
+                d.title,
+                d.body
+            ])?;
             k.execute(
                 "INSERT INTO imported_fts(rowid, text) VALUES(?1, ?2)",
                 params![k.last_insert_rowid(), format!("{}\n{}", d.title, d.body)],

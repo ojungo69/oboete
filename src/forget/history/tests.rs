@@ -104,7 +104,8 @@ enum Reach {
 }
 
 /// 5c's reach table: every item of `src/` whose SQL reads `imported`, `imported_fts` or
-/// `imported_files`, by file and name.
+/// `imported_files`, or `repo_counts`, which counts the imported documents among the rest (G), by
+/// file and name.
 const READERS: &[(&str, &str, Reach)] = &[
     ("src/cards.rs", "imported_by_file", Reach::Proof),
     (
@@ -185,6 +186,22 @@ const READERS: &[(&str, &str, Reach)] = &[
     ("src/view.rs", "notes_page", Reach::Proof),
     ("src/view.rs", "REPOS_IMPORTED", Reach::Through),
     ("src/view.rs", "REPO_NAMES_IMPORTED", Reach::Through),
+    (
+        "src/view.rs",
+        "REPOS_KEPT",
+        Reach::Without(
+            "the kept counts of claims and records; their imported leg is `KEPT_IMPORTED`",
+        ),
+    ),
+    ("src/view.rs", "KEPT_IMPORTED", Reach::Through),
+    (
+        "src/view.rs",
+        "REPO_NAMES_KEPT",
+        Reach::Without(
+            "the kept names of claims and records; their imported leg is `KEPT_NAMES_IMPORTED`",
+        ),
+    ),
+    ("src/view.rs", "KEPT_NAMES_IMPORTED", Reach::Through),
 ];
 
 /// Whether a signature takes the proof: a parameter of type `&Applied`, not an optional one
@@ -221,7 +238,7 @@ type Readers = std::collections::BTreeMap<(String, String), bool>;
 // statement built from pieces, is the review's to catch; parse with `syn` if one slips by.
 fn sql_readers() -> (Readers, std::collections::BTreeMap<String, String>) {
     let statement = regex::Regex::new(
-        r"\b(?:FROM|JOIN|INTO|UPDATE|EXISTS\s*\(\s*SELECT\s+1\s+FROM)\s+imported(?:_fts|_files)?\b",
+        r"\b(?:FROM|JOIN|INTO|UPDATE|EXISTS\s*\(\s*SELECT\s+1\s+FROM)\s+(?:imported(?:_fts|_files)?|repo_counts)\b",
     )
     .unwrap();
     let item = item_line();

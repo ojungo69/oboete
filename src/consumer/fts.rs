@@ -363,10 +363,12 @@ impl Consumer for Fts {
             if e.kind == "directive" || e.kind == crate::raw::SUBAGENT_STOP {
                 continue;
             }
-            k.execute(
+            // Prepared once: each prepare also compiles the triggers this insert fires
+            // (`consumer::repo_counts`), which a drain would pay for every record.
+            k.prepare_cached(
                 "INSERT INTO raw_docs(device, seq, kind, ts, repo, session) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![r.device, r.seq, e.kind, e.ts, e.repo, e.session],
-            )?;
+            )?
+            .execute(params![r.device, r.seq, e.kind, e.ts, e.repo, e.session])?;
             // The text's row is the record's, read before `session_start` makes a row of its own.
             let rowid = k.last_insert_rowid();
             // #506: the session's first row with a repository; an import of older records can

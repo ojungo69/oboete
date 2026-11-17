@@ -3577,16 +3577,18 @@ fn imported_repos_leg(_: &crate::forget::history::Applied) -> &'static str {
 }
 
 /// G (#1037): `REPOS`'s answer from the counts the Fts consumer keeps, a row for each repository
-/// and leg (`consumer::repo_counts`), where `REPOS` read 115.7 MB on this PC's store (2026-11-17).
+/// and leg (`consumer::repo_counts`), where `REPOS` read 118.6 MB on a copy of this PC's
+/// knowledge.db (2026-11-17).
 /// `{imported}` is the imported documents' leg (`imported_kept_leg`), none without the proof.
 const REPOS_KEPT: &str = "SELECT repo, SUM(CASE leg WHEN 'c' THEN n ELSE 0 END),
        SUM(CASE leg WHEN 'i' THEN n ELSE 0 END), SUM(CASE leg WHEN 'r' THEN n ELSE 0 END),
        MAX(last)
-     FROM repo_counts WHERE leg IN ('c', 'r'{imported})
+     FROM (SELECT repo, leg, n, last FROM repo_counts WHERE leg IN ('c', 'r')
+           {imported})
      GROUP BY repo ORDER BY MAX(last) DESC, repo";
 
-/// `REPOS_KEPT`'s and `REPO_NAMES_KEPT`'s leg of the imported documents.
-const KEPT_IMPORTED: &str = ", 'i'";
+/// `REPOS_KEPT`'s leg of the imported documents' counts.
+const KEPT_IMPORTED: &str = "UNION ALL SELECT repo, leg, n, last FROM repo_counts WHERE leg = 'i'";
 
 /// Decision 109: `KEPT_IMPORTED`, with the proof that no forget of imported history waits.
 fn imported_kept_leg(_: &crate::forget::history::Applied) -> &'static str {
@@ -3646,9 +3648,17 @@ fn imported_names_leg(_: &crate::forget::history::Applied) -> &'static str {
 }
 
 /// G: `REPO_NAMES`'s answer from the counts kept (`REPOS_KEPT`), with its imported leg
-/// (`imported_kept_leg`) only with the proof.
+/// (`imported_kept_names_leg`) only with the proof.
 const REPO_NAMES_KEPT: &str =
-    "SELECT DISTINCT repo FROM repo_counts WHERE leg IN ('c', 'r'{imported})";
+    "SELECT DISTINCT repo FROM repo_counts WHERE leg IN ('c', 'r') {imported}";
+
+/// `REPO_NAMES_KEPT`'s leg of the imported documents' names.
+const KEPT_NAMES_IMPORTED: &str = "UNION SELECT repo FROM repo_counts WHERE leg = 'i'";
+
+/// Decision 109: `KEPT_NAMES_IMPORTED`, with the proof that no forget of imported history waits.
+fn imported_kept_names_leg(_: &crate::forget::history::Applied) -> &'static str {
+    KEPT_NAMES_IMPORTED
+}
 
 /// The repositories `repos_in` lists, by name only, on a caller-owned connection; the imported
 /// documents' names only with the proof (decision 109).
@@ -3657,7 +3667,7 @@ pub(crate) fn repo_names_in(
     applied: Option<&crate::forget::history::Applied>,
 ) -> Result<Vec<String>> {
     let sql = if crate::consumer::repo_counts::kept(k)? {
-        REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_leg))
+        REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_names_leg))
     } else {
         REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg))
     };

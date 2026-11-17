@@ -1,7 +1,7 @@
 //! G (#1037): every repository's counts and newest times, kept in knowledge.db by triggers, so the
 //! repository list (`view::repos_in`) and its names (`view::repo_names_in`) read a row for each
-//! repository and leg, not the tables they count. Counting those read 115.7 MB, 2.8 s warm and
-//! 4.3 s cold, on this PC's store (2026-11-17).
+//! repository and leg, not the tables they count. Counting those read 118.6 MB in 0.8 to 2.9 s
+//! on a copy of this PC's knowledge.db (2026-11-17); the kept counts read 0.1 MB in 1.6 ms.
 //!
 //! `repo_counts` holds three legs for each repository, each counted as `view::REPOS` counts it:
 //! 'c' its claims (its derivations, each uid once, the newest `valid_from`), 'i' its imported
@@ -10,9 +10,10 @@
 //! right whatever writes: `raw_docs` by `Fts::step` (inserts), `reindex` (Fts and FtsText) and
 //! `Fts::rewind` (deletes); `derivations` by `Claims::step` (inserts), `Claims::rewind` and
 //! `Anchors` (deletes); `imported` by `Imported::step` (inserts), `Imported::rewind` and
-//! `forget::history::remove` (deletes). Every one of them inserts and deletes: an update of a column
-//! counted aborts (the `_kept` triggers), and an `INSERT OR REPLACE` deletes the row it replaces with
-//! no trigger fired (recursive triggers are off), which a test keeps out.
+//! `forget::history::remove` (deletes). None of them updates a column counted (`Claims` sets a
+//! derivation's status, which is not one), and such an update aborts (the `_kept` triggers). An
+//! `INSERT OR REPLACE` would delete the row it replaces with no trigger fired (recursive triggers
+//! are off), which a test keeps out.
 //!
 //! The Fts consumer makes them (`keep`), never a reader: readers make the stores' schema too. A
 //! knowledge.db made new (a rebuild, a restore, a retention pass, a forget of a claim) holds none
