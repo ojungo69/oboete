@@ -21,8 +21,8 @@ replies, tool calls and their results. It keeps the record in SQLite files on th
 and hands the next session what the last one left: the last exchange, the last failing command,
 risky git state, the files touched, the user's directives and the open to-do lists. The record can
 be searched from the terminal, from the agent over MCP, and on a local web page. Optional AI
-summaries turn the record into what was learned (「覚えたこと」 on the Japanese page, "Learned" on
-the English one) and into summaries of sessions and of work.
+summaries turn the record into what was learned (claims, whose words on the page are
+[GLOSSARY.md](GLOSSARY.md)'s) and into summaries of sessions and of work.
 
 Success: an agent, of any supported kind, starts where the last session stopped, and the user does
 not explain the work again. A user can set up, configure and manage oboete from the local page alone.
