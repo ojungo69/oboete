@@ -1,0 +1,37 @@
+docs/hook-time.md
+  s_52c3955e48bff4::t_fe5da43439d0b4 50-52,55-66,227-229,231-232
+docs/unwritten.md
+  s_52c3955e48bff4::t_f40ff73f5794f5 31-38
+src/hook_time/tests.rs
+  s_52c3955e48bff4::t_1de60c4c4a4a72 50-51,55-56,64-76,83-87,96-99
+src/raw.rs
+  s_52c3955e48bff4::t_2af8d3f420847d 1902-1910
+src/setup/tests.rs
+  s_52c3955e48bff4::t_1ba6bcc50984c1 633-638,655-663
+src/testdata/pi/test.mjs
+  s_52c3955e48bff4::t_15691bf32c90cb 306-307,319,326-343,364-365,375
+tests/hook_output.rs
+  s_52c3955e48bff4::t_281e97f1dacf70 112-151
+src/hook.rs
+  s_52c3955e48bff4::t_0e4439fb05885f 342-348
+src/hook_time.rs
+  s_52c3955e48bff4::t_e1baa48c3c7ad1 33-34,36-39,95-101,116-118,159,190-192,194-203,205,221-233
+src/pi.ts
+  s_52c3955e48bff4::t_c0df8bcb834b2d 19-27,29,31-33,35,41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a927db61aa3b5c7e04f8b4a656ad12caa4234d2c",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
