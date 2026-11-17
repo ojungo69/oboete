@@ -60,6 +60,15 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     // docs/hook-time.md: this hook is its process, so its time is counted from the process's
     // start. The thread beside it writes down a hook that is still running at 2 s.
     let clock = Clock::of_process();
+    // #955: Pi's plugin says when it stops waiting for the answer of a call it waits for. A value
+    // that is no number is none.
+    if let Some(at) = std::env::var(crate::hook_time::ANSWER_BY)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&at| at > 0)
+    {
+        clock.answer_by(at);
+    }
     clock.watch(home, agent, event);
     let result = run_clocked(
         home,

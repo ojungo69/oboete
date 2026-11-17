@@ -39,12 +39,24 @@ fn hook_output(
     event: &str,
     input: &str,
 ) -> std::process::Output {
+    hook_output_with(home, agent, event, input, &[])
+}
+
+/// `hook_output`, with `env` set for the hook.
+fn hook_output_with(
+    home: &std::path::Path,
+    agent: &str,
+    event: &str,
+    input: &str,
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
         .arg(home)
         .args(["hook", agent, event])
         // No worker is wanted for a hook's output.
         .env("OBOETE_NO_SPAWN", "1")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,6 +68,45 @@ fn hook_output(
         .write_all(input.as_bytes())
         .unwrap();
     hook.wait_with_output().unwrap()
+}
+
+/// #955: Pi's plugin gives a hook it waits for the time its wait ends (`OBOETE_ANSWER_BY_MS`, ms
+/// since the epoch). A prompt whose answer is no longer wanted is recorded, and its hook injects
+/// nothing.
+#[test]
+fn a_pi_prompt_past_its_answers_time_is_recorded_and_given_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        - 1;
+    let out = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt Pi stopped waiting for"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &past.to_string())],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nothing injected: the hook's time is over"),
+        "{stderr}"
+    );
+    let raw = rusqlite::Connection::open_with_flags(
+        home.path().join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let recorded: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE body LIKE '%a prompt Pi stopped waiting for%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, 1);
 }
 
 #[test]

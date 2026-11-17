@@ -630,11 +630,11 @@ fn opencode_plugin_escapes_paths_and_runs_on_node() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A plugin that kills its capture hook lets it live through the store's wait, a keep in
-/// progress and its own file and marker (docs/unwritten.md U2, U5), as the shortest timeout
-/// `setup` writes does. Killed sooner, a hook whose store is held dies before it keeps what
-/// it could not write, and nothing says an event was lost. The numbers are in two
-/// languages: this holds them together.
+/// A plugin that kills its hooks lets each live through the store's wait, a keep in progress
+/// and its own file and marker (docs/unwritten.md U2, U5), as the shortest timeout `setup`
+/// writes does: Pi's every hook, the two whose answer it waits for included (#955). Killed
+/// sooner, a hook whose store is held dies before it keeps what it could not write, and nothing
+/// says an event was lost. The numbers are in two languages: this holds them together.
 #[test]
 fn a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write() {
     let least = failed_write_and_keep();

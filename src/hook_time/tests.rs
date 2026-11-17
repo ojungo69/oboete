@@ -41,6 +41,44 @@ fn what_a_hook_injects_takes_what_remains_of_its_agents_timeout() {
     assert_eq!(clock.no_later(far), far);
 }
 
+/// #955: an agent whose timeout oboete does not write may say when it stops waiting for the
+/// hook's answer (`ANSWER_BY`: Pi's plugin, for the calls it waits for). The hook's time for what
+/// it injects ends half of `MARGIN` before it, the time before `main` being in it already. A hook
+/// with a timeout of oboete's reads none.
+#[test]
+fn a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before() {
+    // Half of `MARGIN` before the answer's time, counted from the hook's start.
+    assert_eq!(super::answer_end(1_000_000 + 10_000, 1_000_000), 9_500);
+    assert_eq!(super::answer_end(1_000_000 + 400, 1_000_000), -100);
+    assert_eq!(super::answer_end(i64::MIN, 1), i64::MIN);
+    // Its answer wanted 10 s from now: 9.5 s remain. The bounds leave a slow machine 2 s.
+    let clock = Clock::started_process(Duration::from_secs(1));
+    clock.answer_by(crate::db::now_ms() + 10_000);
+    clock.inject_within(None);
+    let left = clock.left(Duration::from_secs(60));
+    assert!(left <= Duration::from_millis(9_500), "{left:?}");
+    assert!(left > Duration::from_millis(7_500), "{left:?}");
+    // Wanted 0.4 s from now, or no longer: nothing remains.
+    for at in [400, -1] {
+        let late = Clock::started_process(Duration::from_secs(1));
+        late.answer_by(crate::db::now_ms() + at);
+        late.inject_within(None);
+        assert!(late.over(), "{at}");
+        assert_eq!(late.left(Duration::from_secs(1)), Duration::ZERO, "{at}");
+    }
+    // A hook with a timeout of oboete's keeps it, and reads no answer's time: one its process
+    // inherited (the worker's children) ends nothing sooner, and later is no longer.
+    let both = Clock::started_process(Duration::ZERO);
+    both.answer_by(crate::db::now_ms() - 1);
+    both.inject_within(Some(Duration::from_secs(60)));
+    assert!(!both.over());
+    assert!(both.left(Duration::from_secs(60)) > Duration::from_secs(50));
+    let both = Clock::started_process(Duration::ZERO);
+    both.answer_by(crate::db::now_ms() + 600_000);
+    both.inject_within(Some(Duration::from_secs(5)));
+    assert!(both.left(Duration::from_secs(60)) <= Duration::from_secs(4));
+}
+
 /// Each phase is written under its own name: `NAMES` is in `Phase`'s order.
 #[test]
 fn each_phase_is_written_under_its_name() {

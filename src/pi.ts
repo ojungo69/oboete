@@ -16,22 +16,24 @@ export default function (pi) {
   const textParts = (parts) => (Array.isArray(parts) ? parts : [])
     .filter((p) => p?.type === "text").map((p) => p.text).join("\n");
 
-  // A capture call's child gets 3 s. Nothing waits for its answer (a session's end waits up to
-  // 2 s for the queue and goes on), and a hook whose store is held waits 2 s for the store, then
-  // keeps what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it
-  // died before either, and its event was lost with nothing to say so. A call whose answer Pi
-  // waits for keeps Pi's 2 s: what its hook prints after Pi went on must not come to count as
-  // shown (#955: on a held store those calls' events are lost still).
+  // Every call's child gets 3 s. A hook whose store is held waits 2 s for the store, then keeps
+  // what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it died
+  // before either, and its event was lost with nothing to say so (#955). What Pi waits for, a
+  // prompt's and a session start's answer, ends sooner (`wait`): such a call tells its hook when
+  // (`OBOETE_ANSWER_BY_MS`), and the hook injects nothing past then (docs/hook-time.md), so what
+  // Pi did not wait for comes to count as shown nowhere. A call whose time ended while it queued
+  // still runs: it records, and injects nothing.
   const CAPTURE_KILL_MS = 3000;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
-    const remaining = deadline === undefined ? CAPTURE_KILL_MS : Math.min(2000, deadline - Date.now());
-    if (remaining <= 0) { resolve(""); return; }
+    const env = deadline === undefined
+      ? process.env
+      : { ...process.env, OBOETE_ANSWER_BY_MS: String(deadline) };
     const child = spawn(OBOETE_BIN, [...OBOETE_ARGS, "hook", "pi", event], {
-      cwd, stdio: ["pipe", "pipe", "ignore"],
+      cwd, env, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
     const finish = (text) => { clearTimeout(timer); resolve(text); };
-    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, remaining);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, CAPTURE_KILL_MS);
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });
@@ -91,7 +93,7 @@ export default function (pi) {
   // Pi awaits this before the run starts: what the prompt gets joins the stash.
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return;
-    // Queue time counts too: an expired prompt must not update shown state after Pi moves on.
+    // Queue time counts too: a prompt's hook that starts after Pi moved on records and shows nothing.
     const deadline = Date.now() + 2000;
     const text = contextOf(await wait(send("UserPromptSubmit", ctx, { prompt: event.text }, deadline)));
     if (text) pending = pending ? `${pending}\n${text}` : text;

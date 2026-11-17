@@ -1905,6 +1905,18 @@ impl Prompts {
 
     /// `hook`, on `clock`: a hook whose time for what it injects is the test's to set.
     fn hook_clocked(&self, event: &str, session: &str, extra: Value, clock: &Clock) -> String {
+        self.hook_of("claude", event, session, extra, clock)
+    }
+
+    /// `hook_clocked`, of `agent`.
+    fn hook_of(
+        &self,
+        agent: &str,
+        event: &str,
+        session: &str,
+        extra: Value,
+        clock: &Clock,
+    ) -> String {
         let mut payload = json!({"session_id": session, "cwd": self.c});
         payload
             .as_object_mut()
@@ -1914,7 +1926,7 @@ impl Prompts {
         let input = payload.to_string();
         run_clocked(
             self.s.home.path(),
-            "claude",
+            agent,
             event,
             input.as_bytes(),
             &mut out,
@@ -3352,6 +3364,34 @@ fn a_hook_with_no_time_left_records_and_injects_nothing() {
     let shown = p.hook_clocked("SessionStart", "d", json!({}), &ample);
     assert!(shown.contains("The output goes to stderr"), "{shown}");
     assert!(ample.begun().contains(&"manifest"), "{:?}", ample.begun());
+}
+
+/// #955: Pi's plugin tells a hook it waits for when its wait ends (`hook_time::ANSWER_BY`). Half
+/// of `MARGIN` before then or later, the prompt is recorded and given nothing; with Pi's wait
+/// ahead, it takes its block.
+#[test]
+fn a_pi_prompt_whose_answer_is_no_longer_wanted_is_recorded_and_given_nothing() {
+    let mut p = Prompts::new(true);
+    p.decided(1, "The output goes to stderr when we quit.", &[]);
+    p.s.run();
+    let ask = json!({"prompt": "where does the output go when we quit"});
+    let records = || p.s.raw.after(p.s.raw.device(), 0, 1_000).unwrap().len();
+    let before = records();
+    let late = Clock::started_process(Duration::ZERO);
+    late.answer_by(crate::db::now_ms() + 400);
+    assert_eq!(
+        p.hook_of("pi", "UserPromptSubmit", "a", ask.clone(), &late),
+        ""
+    );
+    assert!(late.over());
+    assert!(records() > before);
+    let ample = Clock::started_process(Duration::ZERO);
+    ample.answer_by(crate::db::now_ms() + 600_000);
+    let text = p.hook_of("pi", "UserPromptSubmit", "b", ask, &ample);
+    assert!(
+        text.contains("decision: The output goes to stderr when we quit."),
+        "{text}"
+    );
 }
 
 /// docs/hook-time.md: the read fence is waited for no longer than the hook's time lasts. A
