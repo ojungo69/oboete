@@ -1,0 +1,35 @@
+# Decision 113 (2026-11-17, docs/dependencies.md): Dependabot opens the pull requests that keep the
+# dependencies current. Each goes through the usual review lanes and is merged by hand: nothing here
+# merges by itself.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Tokyo
+    # Every crate in Cargo.lock, the dependencies of the dependencies too.
+    allow:
+      - dependency-type: all
+    groups:
+      cargo-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # Pinned for local-embed: they load the ONNX Runtime library at run time and are updated by
+      # hand, together (docs/dependencies.md).
+      - dependency-name: fastembed
+      - dependency-name: ort
+      - dependency-name: ort-sys
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Tokyo
+    groups:
+      actions:
+        patterns: ["*"]
