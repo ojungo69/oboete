@@ -379,3 +379,48 @@ without them, the statements name none). What the counts and the lists answer is
 `view::tests::sessions_list_each_live_session_by_its_first_prompt`'s and
 `settings::hide::tests::settings_lists_every_removed_card_and_summary_page_by_page`'s, which read
 through the indexes.
+
+## #1037: each leg of the timeline reads its own page
+
+What happened. The timeline (`search::b::timeline`, which the Timeline tab, the MCP timeline tool
+and `near` read) read, for each page, the union of every current claim and every session start,
+sorted, with the imported documents already read to the page's end (N5). A repository's filter
+was written `?1 IS NULL OR repo = ?1`, which makes one plan that reads them all. So the claims'
+leg read every claim, and the starts' leg read every record's labels in `raw_docs` to find the
+starts (6,498 among 749,283 records on this PC's store): 113 MB a page.
+
+The change. Each leg takes its own entries past the page's place in the whole's order, at most to
+the page's end (`?5 + ?6`), as the imported documents' leg already did. The whole's page is among
+them. A repository's claims and starts are filtered in the text that has one, so its claims take
+`derivations_repo`. The starts take `raw_docs_start`, which the Fts consumer makes after the
+table's other indexes:
+
+- `raw_docs_start (ts, device, seq, repo, session) WHERE kind = 'start'`
+
+A repository's starts never take `raw_docs_repo` (the text names `+d.repo`), which walks each of
+the repository's tool calls. No other statement names `kind = 'start'`, so none can take the
+index. Its first build reads the table once: 0.06 s on a copy of this PC's store, warm.
+
+On a copy of the claims, derivations, corrections, `raw_docs` and imported documents of this PC's
+store, the first read of a page of 50 on a new connection, before and after:
+
+| page | before | after |
+|---|---|---|
+| every repository, the newest | 113.4 MB, 233 ms | 35.7 MB, 93 ms |
+| every repository, the newer side of a mid time | 113.3 MB, 122 ms | 35.7 MB, 42 ms |
+| every repository, at offset 500 | 114.8 MB, 217 ms | 37.2 MB, 170 ms |
+| every repository, imported documents withheld | 113.2 MB, 158 ms | 35.6 MB, 88 ms |
+| the repository with the most | 113.5 MB, 134 ms | 0.4 MB, 2.3 ms |
+| a mid-size repository | 113.5 MB, 93 ms | 0.7 MB, 7.3 ms |
+| a repository with no entries | 113.2 MB, 88 ms | 0.6 MB, 6.5 ms |
+
+Every repository's page still reads every claim: an index of the claims by their time is for a
+later change, with the other readers of `derivations`. On the copy, the statement before and the
+statement after returned the same rows in 6,912 cases (2,994 with entries): with the imported
+documents and without, either side of a time, with the starts and without, six kinds of
+repository, nine places and four sizes of page at four offsets.
+
+Tests: `search::b::tests::a_timelines_legs_read_their_own_page_by_index` (every shape's plan, the
+indexes as the consumers make them), `search::b::tests::a_timelines_legs_give_the_wholes_rows`
+(the rows of the union before this change, from places among entries of one time from every leg,
+pages of 1 to 3 at offsets to the third page).

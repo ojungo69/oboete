@@ -331,6 +331,13 @@ impl Consumer for Fts {
         // The repositories' records counted with their newest time (`view::repos_in`) from an
         // index, not by reading each record's text: 4.5 s cold on this PC's store (2026-11-01).
         k.execute_batch("CREATE INDEX IF NOT EXISTS raw_docs_repo ON raw_docs(repo, ts)")?;
+        // #1037: the timeline's session starts in its order (`search::b::others`), with what an
+        // entry of one shows, made after the table's other indexes. Through none in that order
+        // each page read every record's labels, 78 MB of a timeline's 113 MB on this PC's store.
+        k.execute_batch(
+            "CREATE INDEX IF NOT EXISTS raw_docs_start ON raw_docs(ts, device, seq, repo, session)
+               WHERE kind = 'start'",
+        )?;
         let recs = raw.after(raw.device(), after, BATCH)?;
         for r in &recs {
             let (e, text) = match &r.item {
