@@ -13,7 +13,8 @@ use crate::raw;
 /// What an idle worker keeps up waits for a command that asked it to step aside, for its
 /// leaving and for a call out, whatever the pause.
 #[test]
-fn the_session_index_waits_for_a_command_a_leaving_and_a_call() {
+fn the_pause_indexes_wait_for_a_command_a_leaving_and_a_call() {
+    use crate::raw::index::{self, Builder::Pause};
     let home = tempfile::tempdir().unwrap();
     let p = home.path();
     let mut raw = crate::raw::open(p).unwrap();
@@ -27,111 +28,50 @@ fn the_session_index_waits_for_a_command_a_leaving_and_a_call() {
     let asked = yield_request(p);
     std::fs::write(&asked, "").unwrap();
     maintain(p, &raw, false, false);
-    assert!(!raw.has_session_index().unwrap());
+    assert!(index::made(&raw, Pause).is_empty());
     std::fs::remove_file(asked).unwrap();
     maintain(p, &raw, false, false);
-    assert!(raw.has_session_index().unwrap());
+    assert!(!index::missing(&raw, Pause).unwrap());
 }
 
-/// #899 W2: the index of the events' repositories is the idle worker's to build too, in the
-/// same pause, on a store whose session index an earlier worker built.
+/// #899 W2 and #1037: one pause builds every index the pause keeps that the store lacks, on a store
+/// an earlier worker left with any part of them (this PC's held the first two, then three); not
+/// while leaving or with a call out, nor before the pause comes.
 #[test]
-fn the_repository_index_is_built_in_a_pause_beside_the_session_index() {
-    for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = crate::raw::open(p).unwrap();
-        let e = crate::raw::Event {
-            ts: crate::db::now_ms() - ago,
-            ..crate::raw::test_event("a step")
-        };
-        raw.append(&e).unwrap();
-        raw.ensure_session_index().unwrap();
-        assert!(!raw.has_repo_index().unwrap());
-        maintain(p, &raw, true, false);
-        maintain(p, &raw, false, true);
-        assert!(
-            !raw.has_repo_index().unwrap(),
-            "leaving, or with a call out"
-        );
-        maintain(p, &raw, false, false);
-        assert_eq!(raw.has_repo_index().unwrap(), built, "{ago} ms ago");
-    }
-    // Neither built: one pause builds both.
-    let home = tempfile::tempdir().unwrap();
-    let p = home.path();
-    let mut raw = crate::raw::open(p).unwrap();
-    let e = crate::raw::Event {
-        ts: crate::db::now_ms() - INDEX_PAUSE_MS,
-        ..crate::raw::test_event("a step")
-    };
-    raw.append(&e).unwrap();
-    maintain(p, &raw, false, false);
-    assert!(raw.has_session_index().unwrap() && raw.has_repo_index().unwrap());
-}
-
-/// #1037: the index of the expired events is the idle worker's to build too, in the same pause,
-/// on a store whose session and repository indexes an earlier worker built, as this PC's are.
-#[test]
-fn the_expired_events_index_is_built_in_a_pause_beside_the_others() {
-    for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = crate::raw::open(p).unwrap();
-        let e = crate::raw::Event {
-            ts: crate::db::now_ms() - ago,
-            ..crate::raw::test_event("a step")
-        };
-        raw.append(&e).unwrap();
-        raw.ensure_session_index().unwrap();
-        raw.repo_index().unwrap();
-        maintain(p, &raw, true, false);
-        maintain(p, &raw, false, true);
-        assert!(
-            !raw.has_expired_index().unwrap(),
-            "leaving, or with a call out"
-        );
-        maintain(p, &raw, false, false);
-        assert_eq!(raw.has_expired_index().unwrap(), built, "{ago} ms ago");
+fn the_pause_builds_what_it_keeps_on_a_store_with_any_part_of_it() {
+    use crate::raw::index::{self, Builder::Pause};
+    let all = index::keeps(Pause);
+    for k in 0..=all.len() {
+        for (ago, paused) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
+            let e = crate::raw::Event {
+                ts: crate::db::now_ms() - ago,
+                ..crate::raw::test_event("a step")
+            };
+            raw.append(&e).unwrap();
+            index::build_first(&raw, Pause, k);
+            let case = format!("{k} built, the last hook {ago} ms ago");
+            maintain(p, &raw, true, false);
+            maintain(p, &raw, false, true);
+            assert_eq!(
+                index::made(&raw, Pause),
+                all[..k].to_vec(),
+                "leaving, or with a call out; {case}"
+            );
+            maintain(p, &raw, false, false);
+            let want = if paused { &all[..] } else { &all[..k] };
+            assert_eq!(index::made(&raw, Pause), want.to_vec(), "{case}");
+        }
     }
 }
 
-/// #1037: the index of the prompts' fields is the idle worker's to build too, in the same pause, on a
-/// store whose other indexes an earlier worker built, as this PC's will be.
-#[test]
-fn the_prompt_fields_index_is_built_in_a_pause_beside_the_others() {
-    for (ago, built) in [(INDEX_PAUSE_MS, true), (1_000, false)] {
-        let home = tempfile::tempdir().unwrap();
-        let p = home.path();
-        let mut raw = crate::raw::open(p).unwrap();
-        let e = crate::raw::Event {
-            ts: crate::db::now_ms() - ago,
-            ..crate::raw::test_event("a step")
-        };
-        raw.append(&e).unwrap();
-        raw.ensure_session_index().unwrap();
-        raw.repo_index().unwrap();
-        raw.expired_index().unwrap();
-        maintain(p, &raw, true, false);
-        maintain(p, &raw, false, true);
-        assert!(
-            !raw.has_prompt_fields_index().unwrap(),
-            "leaving, or with a call out"
-        );
-        maintain(p, &raw, false, false);
-        assert_eq!(
-            raw.has_prompt_fields_index().unwrap(),
-            built,
-            "{ago} ms ago"
-        );
-    }
-}
-
-/// A resident worker that went idle before the pause came builds the index once it has: its
+/// A resident worker that went idle before the pause came builds the indexes once it has: its
 /// idle times go on with nothing new.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
+fn a_resident_worker_builds_the_pause_indexes_once_the_pause_comes() {
     let _contending = contending();
     let home = tempfile::tempdir().unwrap();
     let p = home.path();
@@ -142,7 +82,10 @@ fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
     };
     raw.append(&e).unwrap();
     drop(raw);
-    let built = || crate::raw::open(p).unwrap().has_session_index().unwrap();
+    let built = || {
+        let raw = crate::raw::open(p).unwrap();
+        !crate::raw::index::missing(&raw, crate::raw::index::Builder::Pause).unwrap()
+    };
     assert!(!built());
     let worker = resident(p, 100);
     until("the index built in the pause", built);
@@ -150,11 +93,10 @@ fn a_resident_worker_builds_the_session_index_once_the_pause_comes() {
     worker.join().unwrap().unwrap();
 }
 
-/// Decision 71's plan, slice 1: the worker builds raw's session index in a pause of the
-/// owner's work, and not while hooks record (its first build takes seconds a hook's write
-/// would wait out).
+/// Decision 71's plan, slice 1: the worker builds raw's pause indexes in a pause of the owner's
+/// work, and not while hooks record (a first build takes seconds a hook's write would wait out).
 #[test]
-fn the_session_index_is_built_in_a_pause_only() {
+fn the_pause_indexes_are_built_in_a_pause_only() {
     for (ago, worker, built) in [
         (INDEX_PAUSE_MS, true, true),
         (1_000, true, false),
@@ -183,7 +125,8 @@ fn the_session_index_is_built_in_a_pause_only() {
         }
         let raw = crate::raw::open(p).unwrap();
         let case = format!("{ago} ms ago, the worker's own: {worker}");
-        assert_eq!(raw.has_session_index().unwrap(), built, "{case}");
+        let missing = crate::raw::index::missing(&raw, crate::raw::index::Builder::Pause).unwrap();
+        assert_eq!(!missing, built, "{case}");
     }
 }
 
