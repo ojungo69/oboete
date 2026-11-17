@@ -1,0 +1,25 @@
+docs/agents/domain.md
+  s_52c3955e48bff4::t_e0bd1af65bf6c1 1-45
+CLAUDE.md
+  s_52c3955e48bff4::t_e45d013b600618 15-28
+docs/agents/issue-tracker.md
+  s_52c3955e48bff4::t_888069c6c21c19 1-60
+docs/agents/triage-labels.md
+  s_52c3955e48bff4::t_5e8c1e48b06cfe 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24ac6c23dd8cba4149f486ea2aa12ff90f1ab402",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
