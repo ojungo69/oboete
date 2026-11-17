@@ -1,0 +1,27 @@
+Cargo.toml
+  s_52c3955e48bff4::t_63fc0dd1a37674 28-30
+docs/page-reads.md
+  s_52c3955e48bff4::t_ecaf654de29c7b 275-317
+Cargo.lock
+  s_52c3955e48bff4::t_e07253afb29180 1203
+src/redact.rs
+  s_52c3955e48bff4::t_a566b0f624d07d 344-345,350-353,358,362,380,386-397,401-441,452-453,468-488,491-492,494,496,524,547-572,1353-1363
+src/redact/tests.rs
+  s_52c3955e48bff4::t_d8590f37eba335 3367,3589-3769
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "05dad458edc0e01c086bd2ed6614cda683996e9f",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
