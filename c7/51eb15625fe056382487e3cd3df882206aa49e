@@ -1,0 +1,90 @@
+src/db.rs
+  s_52c3955e48bff4::t_54de8195cd67b3 2-3,11-19
+  s_52c3955e48bff4::t_eade7d3d4e925a 20-21
+Cargo.lock
+  s_52c3955e48bff4::t_c4b833ec37dd1f 229-234,342,344,346,350-351,353,355,485,487-488,777,779,781,1209,1520,1742-1743
+tests/forget_cli.rs
+  s_52c3955e48bff4::t_fb36d4bb73d1fd 11-19,351,517-518,1148,1637
+Cargo.toml
+  s_eede5b9640d68f::t_45b633c837adb1 23-24,34
+src/backup.rs
+  s_eede5b9640d68f::t_700726cb5d89a0 9
+src/curate.rs
+  s_eede5b9640d68f::t_b92004e8617511 2712
+src/db/tests.rs
+  s_eede5b9640d68f::t_ef77550e576e47 3-15
+src/deliverables.rs
+  s_eede5b9640d68f::t_a639ebef0cb79e 17,855-868
+src/deliverables/tests.rs
+  s_eede5b9640d68f::t_a83425542d3d71 4-33
+src/embed/tests.rs
+  s_eede5b9640d68f::t_bbe5175ed53089 30
+src/embed_local.rs
+  s_eede5b9640d68f::t_fef2a781b0939d 46
+src/embed_phase.rs
+  s_eede5b9640d68f::t_b05db50bcbd48a 1888,1901
+src/model_fetch.rs
+  s_eede5b9640d68f::t_2ac7514e3ffa44 612
+src/model_fetch/tests.rs
+  s_eede5b9640d68f::t_a79fd78a48af53 419,478
+src/preview.rs
+  s_eede5b9640d68f::t_11d218c51845c6 76
+src/raw/tests.rs
+  s_eede5b9640d68f::t_54463e254ee94d 2276-2277
+src/settings/claims/tests.rs
+  s_eede5b9640d68f::t_d94afd18387f5b 28
+src/settings/embedding.rs
+  s_eede5b9640d68f::t_575f84e6bf1e88 127
+src/settings/embedding/tests.rs
+  s_eede5b9640d68f::t_33b2821e8d0c4c 13
+src/settings/maintenance.rs
+  s_eede5b9640d68f::t_412b91f89a6d22 345
+src/settings/maintenance/tests.rs
+  s_eede5b9640d68f::t_3de267605d5b9c 124
+src/settings/recovery.rs
+  s_eede5b9640d68f::t_fca46c3a4c17e1 195
+src/settings/tests.rs
+  s_eede5b9640d68f::t_952c9c290ef573 329
+src/setup.rs
+  s_eede5b9640d68f::t_0ee78566432c25 1941
+src/setup/agents.rs
+  s_eede5b9640d68f::t_79c8121735c5cc 246-251,385,426,818
+src/setup/agents/files.rs
+  s_eede5b9640d68f::t_7b0a6cb1608581 44
+src/setup/agents/tests.rs
+  s_eede5b9640d68f::t_3bce1868fc16cd 70-75
+src/setup/tests.rs
+  s_eede5b9640d68f::t_89f323e5e67b21 1805
+src/transcript.rs
+  s_eede5b9640d68f::t_408db61a0bf2b0 850,1218,1241,1266
+src/transcript/tests.rs
+  s_eede5b9640d68f::t_b1840a6c9a47b9 2172,2176,2299,2303,2331
+src/view.rs
+  s_eede5b9640d68f::t_e9025bb17a651d 1409
+src/view/tests.rs
+  s_eede5b9640d68f::t_02ddd9db94bcb6 4-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c751eb15625fe056382487e3cd3df882206aa49e",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_eede5b9640d68f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e887-0b1b-70f1-baa1-0a859e5eaea6",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
