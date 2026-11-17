@@ -1563,6 +1563,172 @@ fn the_timeline_lists_claims_imports_and_session_starts_around_an_anchor() {
     assert!(timeline(home, Some(R), Some("nope"), None, 2).is_err());
 }
 
+/// #1037: each leg of a timeline reads its own entries to the page's end in the whole's order, a
+/// repository's by the indexes that name it: through the union of every claim and every record's
+/// labels, sorted for each page, a timeline read 113 MB on this PC's store. The starts take
+/// `raw_docs_start`, which the consumer makes after the table's other indexes, and never
+/// `raw_docs_repo`, which walks each of a repository's tool calls; a repository's claims take
+/// `derivations_repo`. Every shape: with the imported documents and without, a repository's and
+/// every one's, on either side of a time.
+#[test]
+fn a_timelines_legs_read_their_own_page_by_index() {
+    let mut s = Store::new();
+    s.said("s", R, 1_000, "A record.");
+    s.decided(R, 2_000, "A decision.", &[]);
+    s.run();
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let proof = crate::forget::history::fixture::proof();
+    for applied in [false, true] {
+        for (named, older) in [(false, true), (false, false), (true, true), (true, false)] {
+            let sql = others_sql(applied.then_some(&proof), named, older);
+            let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let nulls = vec![Value::Null; st.parameter_count()];
+            let plan: Vec<String> = st
+                .query_map(params_from_iter(nulls), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let case = format!("{applied} {named} {older}: {plan:?}");
+            // By their time, the index's first column: no other order serves both sides.
+            let starts = |p: &&String| p.contains("COVERING INDEX raw_docs_start (ts");
+            assert!(plan.iter().any(|p| starts(&p)), "{case}");
+            let walks = |p: &&String| p.contains("raw_docs_repo") || p.as_str() == "SCAN d";
+            assert!(!plan.iter().any(|p| walks(&p)), "{case}");
+            if named {
+                let claims = |p: &&String| p.contains("INDEX derivations_repo (repo=?");
+                assert!(plan.iter().any(|p| claims(&p)), "{case}");
+            }
+        }
+    }
+}
+
+/// #1037: a timeline whose legs each read their own page gives the rows of the union that read
+/// every entry: entries of one time from each leg on both sides of a page's place, a repository's
+/// (and its claude-mem name's) and every one's, with the imported documents and without, with the
+/// starts and without, pages of 1 to 3 at offsets to the third page, on either side of a time.
+#[test]
+fn a_timelines_legs_give_the_wholes_rows() {
+    let mut s = Store::new();
+    let start = |s: &mut Store, session: &str, repo: &str, ts: i64| {
+        let e = crate::raw::Event {
+            kind: "start".into(),
+            session: session.into(),
+            repo: Some(repo.into()),
+            ts,
+            ..crate::raw::test_event("{}")
+        };
+        s.raw.append(&e).unwrap()
+    };
+    let other = "github.com/o/other";
+    for (n, repo) in [R, R, other, R].into_iter().enumerate() {
+        let n = n as i64;
+        start(&mut s, &format!("s{n}"), repo, 2_000);
+        start(&mut s, &format!("t{n}"), repo, 1_000 + n);
+        s.decided(repo, 2_000, &format!("Decision {n} of the same time."), &[]);
+        s.decided(
+            repo,
+            3_000 - n,
+            &format!("Decision {n} of its own time."),
+            &[],
+        );
+        let project = if repo == R { "r" } else { "other" };
+        s.imported(&format!("d{n}"), project, 2_000, "", &format!("Note {n}."));
+    }
+    s.run();
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let proof = crate::forget::history::fixture::proof();
+    // The statement before the legs read their own pages: every claim and start, then the page.
+    let whole = |applied: bool, named: bool, older: bool| {
+        let imported = match applied {
+            true => format!("UNION ALL {}", imported_side(&proof, named, older)),
+            false => String::new(),
+        };
+        let items = format!(
+            "SELECT key, ts, kind, repo, text, class FROM (
+               SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
+                      a.repo AS repo, a.body AS text, 'claim' AS class
+               FROM active a WHERE ?1 IS NULL OR a.repo = ?1
+               {imported}
+               UNION ALL
+               SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
+                      COALESCE(d.session, ''), 'start'
+               FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))"
+        );
+        match older {
+            true => format!(
+                "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
+                 ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
+            ),
+            false => format!(
+                "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
+            ),
+        }
+    };
+    let rows = |sql: &str, args: &[Value]| -> Vec<(String, i64, String)> {
+        (k.prepare(sql).unwrap())
+            .query_map(params_from_iter(args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(5)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    // The places: the ends, and among the time every leg has entries of, each key of it.
+    let mut places: Vec<(i64, String)> = vec![(i64::MAX, String::new()), (0, String::new())];
+    for (key, ts, _) in rows(
+        &whole(true, false, true),
+        &[
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Integer(i64::MAX),
+            Value::Integer(100),
+            Value::Integer(0),
+            Value::Text(String::new()),
+            Value::Integer(1),
+        ],
+    ) {
+        if ts == 2_000 {
+            places.push((ts, key));
+        }
+    }
+    places.push((2_000, String::new()));
+    assert!(places.len() > 10, "{places:?}");
+    let mut compared = 0;
+    for repo in [None, Some(R.to_owned()), Some(crate::import::repo("r"))] {
+        // As `others` binds them: a repository's two names, or two empty ones.
+        let [own, named] = repo.as_deref().map(imported_repos).unwrap_or_default();
+        for (applied, older, starts) in (0..8).map(|i| (i & 1 == 1, i & 2 == 2, i & 4 == 4)) {
+            for (at, key) in &places {
+                for limit in 1..=3_i64 {
+                    for page in 0..3 {
+                        let args = [
+                            repo.clone().map_or(Value::Null, Value::Text),
+                            Value::Text(own.clone()),
+                            Value::Text(named.clone()),
+                            Value::Integer(*at),
+                            Value::Integer(limit),
+                            Value::Integer(limit * page),
+                            Value::Text(key.clone()),
+                            Value::Integer(starts.into()),
+                        ];
+                        let named_repo = repo.is_some();
+                        let legs = others_sql(applied.then_some(&proof), named_repo, older);
+                        let expected = rows(&whole(applied, named_repo, older), &args);
+                        assert_eq!(
+                            rows(&legs, &args),
+                            expected,
+                            "{repo:?} {applied} {older} {starts} {at} {key} {limit} {page}"
+                        );
+                        compared += usize::from(!expected.is_empty());
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 500, "{compared} pages with entries");
+}
+
 /// Codex on #306: a claim the worker has yet to apply a removal to is only hidden, so the claim
 /// after it takes its place within the leg's depth.
 #[test]

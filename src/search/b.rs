@@ -3595,6 +3595,56 @@ fn imported_side(_: &Applied, named: bool, older: bool) -> String {
     }
 }
 
+/// `others`' statement, of a repository's entries when `named`. Each leg takes its own entries past
+/// the place in the whole's order, at most to the page's end (`?5` + `?6`), as `imported_side`
+/// takes its documents: the newest page of the whole is among those (#1037). The whole took every
+/// claim and every record's labels for each page, 113 MB on this PC's store. A repository's
+/// claims and starts are named in the text that has one, since an optional filter makes one plan
+/// that reads them all; its starts by `raw_docs_start`, never by `raw_docs_repo`, which walks
+/// each of the repository's tool calls.
+fn others_sql(applied: Option<&Applied>, named: bool, older: bool) -> String {
+    let window = |ts: &str, key: &str| match older {
+        true => format!(
+            "{ts} <= ?4 AND ({ts} < ?4 OR {key} > ?7) ORDER BY {ts} DESC, {key} LIMIT ?5 + ?6"
+        ),
+        false => {
+            format!("{ts} >= ?4 AND ({ts} > ?4 OR {key} < ?7) ORDER BY {ts}, {key} LIMIT ?5 + ?6")
+        }
+    };
+    let (claim_repo, start_repo) = match named {
+        true => ("a.repo = ?1 AND ", "+d.repo = ?1 AND "),
+        false => ("", ""),
+    };
+    let imported = applied
+        .map(|a| format!("UNION ALL {}", imported_side(a, named, older)))
+        .unwrap_or_default();
+    let claims = window("a.valid_from", "a.uid");
+    let starts = window("d.ts", "d.device || ':' || d.seq");
+    let items = format!(
+        "SELECT key, ts, kind, repo, text, class FROM (
+           SELECT * FROM (
+             SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
+                    a.repo AS repo, a.body AS text, 'claim' AS class
+             FROM active a WHERE {claim_repo}{claims})
+           {imported}
+           UNION ALL
+           SELECT * FROM (
+             SELECT d.device || ':' || d.seq AS key, d.ts AS ts, 'session start', d.repo,
+                    COALESCE(d.session, ''), 'start'
+             FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND {start_repo}{starts}))"
+    );
+    if older {
+        format!(
+            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
+             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
+        )
+    } else {
+        format!(
+            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
+        )
+    }
+}
+
 /// [`timeline`]'s entries strictly past (`at`, `key`) in its order: the older the newest first
 /// (`older`, then by key), else the newer the oldest first; an empty `key` keeps every entry of
 /// `at` on the older side. At most `limit`. Imported documents only with `applied`
@@ -3612,34 +3662,10 @@ fn others(
 ) -> Result<Vec<Item>> {
     let pending = claims::Pending::read(raw, k)?;
     let [own, named] = repo.map(imported_repos).unwrap_or_default();
-    let imported = applied
-        .map(|a| format!("UNION ALL {}", imported_side(a, repo.is_some(), older)))
-        .unwrap_or_default();
-    let items = format!(
-        "SELECT key, ts, kind, repo, text, class FROM (
-           SELECT a.uid AS key, a.valid_from AS ts, a.kind || ' ' || a.status AS kind,
-                  a.repo AS repo, a.body AS text, 'claim' AS class
-           FROM active a WHERE ?1 IS NULL OR a.repo = ?1
-           {imported}
-           UNION ALL
-           SELECT d.device || ':' || d.seq, d.ts, 'session start', d.repo,
-                  COALESCE(d.session, ''), 'start'
-           FROM raw_docs d WHERE ?8 AND d.kind = 'start' AND (?1 IS NULL OR d.repo = ?1))"
-    );
-    let sql = if older {
-        format!(
-            "{items} WHERE ts < ?4 OR (ts = ?4 AND key > ?7)
-             ORDER BY ts DESC, key LIMIT ?5 OFFSET ?6"
-        )
-    } else {
-        format!(
-            "{items} WHERE ts > ?4 OR (ts = ?4 AND key < ?7) ORDER BY ts, key LIMIT ?5 OFFSET ?6"
-        )
-    };
     // Each key once (a document several devices imported is its newest row, as `imported_leg`
     // reads it). A claim with an owner's change still to apply is only hidden: the entries after
     // it fill its place (Codex on #306), read on in pages of `limit`.
-    let mut st = k.prepare(&sql)?;
+    let mut st = k.prepare(&others_sql(applied, repo.is_some(), older))?;
     let mut out: Vec<Item> = Vec::new();
     for page in 0.. {
         let rows = st.query_map(
