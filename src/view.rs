@@ -3553,9 +3553,10 @@ fn repos(home: &Path) -> Result<(Vec<Value>, bool)> {
     Ok((repos_in(&k, applied.as_ref())?, applied.is_none()))
 }
 
-/// Each repository's counts and newest time. Its records are counted from the Fts consumer's
-/// index `raw_docs_repo`, not by reading each record's text (4.5 s cold on this PC's store,
-/// 2026-11-01).
+/// Each repository's counts and newest time, counted from the tables, for a store that holds no
+/// counts of this build (`REPOS_KEPT`): an older build's, or a knowledge.db made new before its
+/// first pass. Its records are counted from the Fts consumer's index `raw_docs_repo`, not by
+/// reading each record's text (4.5 s cold on this PC's store, 2026-11-01).
 /// `{imported}` is the imported documents' leg (`imported_repos_leg`), none without the proof.
 const REPOS: &str = "SELECT repo, SUM(claims), SUM(imported), SUM(records), MAX(last) FROM (
        SELECT repo, COUNT(DISTINCT uid) AS claims, 0 AS imported, 0 AS records,
@@ -3575,6 +3576,25 @@ fn imported_repos_leg(_: &crate::forget::history::Applied) -> &'static str {
     REPOS_IMPORTED
 }
 
+/// G (#1037): `REPOS`'s answer from the counts the Fts consumer keeps, a row for each repository
+/// and leg (`consumer::repo_counts`), where `REPOS` read 118.6 MB on a copy of this PC's
+/// knowledge.db (2026-11-17).
+/// `{imported}` is the imported documents' leg (`imported_kept_leg`), none without the proof.
+const REPOS_KEPT: &str = "SELECT repo, SUM(CASE leg WHEN 'c' THEN n ELSE 0 END),
+       SUM(CASE leg WHEN 'i' THEN n ELSE 0 END), SUM(CASE leg WHEN 'r' THEN n ELSE 0 END),
+       MAX(last)
+     FROM (SELECT repo, leg, n, last FROM repo_counts WHERE leg IN ('c', 'r')
+           {imported})
+     GROUP BY repo ORDER BY MAX(last) DESC, repo";
+
+/// `REPOS_KEPT`'s leg of the imported documents' counts.
+const KEPT_IMPORTED: &str = "UNION ALL SELECT repo, leg, n, last FROM repo_counts WHERE leg = 'i'";
+
+/// Decision 109: `KEPT_IMPORTED`, with the proof that no forget of imported history waits.
+fn imported_kept_leg(_: &crate::forget::history::Applied) -> &'static str {
+    KEPT_IMPORTED
+}
+
 #[cfg(test)]
 thread_local! {
     /// How many times this thread counted the repositories: a test's look at `repos_in`.
@@ -3590,7 +3610,11 @@ pub(crate) fn repos_in(
 ) -> Result<Vec<Value>> {
     #[cfg(test)]
     REPOS_COUNTED.set(REPOS_COUNTED.get() + 1);
-    let sql = REPOS.replace("{imported}", applied.map_or("", imported_repos_leg));
+    let sql = if crate::consumer::repo_counts::kept(k)? {
+        REPOS_KEPT.replace("{imported}", applied.map_or("", imported_kept_leg))
+    } else {
+        REPOS.replace("{imported}", applied.map_or("", imported_repos_leg))
+    };
     let mut st = k.prepare(&sql)?;
     let rows = st.query_map([], |r| {
         let mut row = json!({
@@ -3623,13 +3647,30 @@ fn imported_names_leg(_: &crate::forget::history::Applied) -> &'static str {
     REPO_NAMES_IMPORTED
 }
 
+/// G: `REPO_NAMES`'s answer from the counts kept (`REPOS_KEPT`), with its imported leg
+/// (`imported_kept_names_leg`) only with the proof.
+const REPO_NAMES_KEPT: &str =
+    "SELECT DISTINCT repo FROM repo_counts WHERE leg IN ('c', 'r') {imported}";
+
+/// `REPO_NAMES_KEPT`'s leg of the imported documents' names.
+const KEPT_NAMES_IMPORTED: &str = "UNION SELECT repo FROM repo_counts WHERE leg = 'i'";
+
+/// Decision 109: `KEPT_NAMES_IMPORTED`, with the proof that no forget of imported history waits.
+fn imported_kept_names_leg(_: &crate::forget::history::Applied) -> &'static str {
+    KEPT_NAMES_IMPORTED
+}
+
 /// The repositories `repos_in` lists, by name only, on a caller-owned connection; the imported
 /// documents' names only with the proof (decision 109).
 pub(crate) fn repo_names_in(
     k: &rusqlite::Connection,
     applied: Option<&crate::forget::history::Applied>,
 ) -> Result<Vec<String>> {
-    let sql = REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg));
+    let sql = if crate::consumer::repo_counts::kept(k)? {
+        REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_names_leg))
+    } else {
+        REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg))
+    };
     let mut st = k.prepare(&sql)?;
     let rows = st.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)

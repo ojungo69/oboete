@@ -330,28 +330,29 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
     let stands =
         c.support.is_empty() || supported(raw, records())? || owner_set(raw, &uid, records())?;
     let status = if stands { status } else { "proposed" };
-    k.execute(
+    // Prepared once, as `Fts`'s insert: each prepare compiles the triggers it fires.
+    k.prepare_cached(
         "INSERT INTO derivations(op_device, op_seq, uid, ts, tier, recipe, kind, status, speaker,
            scope, repo, body, valid_from, anchor_device, anchor_seq)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        params![
-            op.device,
-            op.op_seq,
-            uid,
-            op.ts,
-            c.tier,
-            c.recipe,
-            kind,
-            status,
-            c.speaker,
-            c.scope,
-            anchor.repo,
-            c.body,
-            anchor.ts,
-            first.device,
-            first.seq
-        ],
-    )?;
+    )?
+    .execute(params![
+        op.device,
+        op.op_seq,
+        uid,
+        op.ts,
+        c.tier,
+        c.recipe,
+        kind,
+        status,
+        c.speaker,
+        c.scope,
+        anchor.repo,
+        c.body,
+        anchor.ts,
+        first.device,
+        first.seq
+    ])?;
     for (i, e) in (0_i64..).zip(&c.evidence) {
         k.execute(
             "INSERT INTO evidence(op_device, op_seq, idx, device, seq, offset, length, sentence,

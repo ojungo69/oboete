@@ -66,6 +66,203 @@ fn the_repositories_records_are_counted_from_an_index() {
     );
 }
 
+/// G (#1037): what `REPOS` and `REPO_NAMES` count from the tables, and what the counts the Fts
+/// consumer keeps give, on `k`: every row, column and order, with the proof and without it, and the
+/// same names.
+fn counted_as_kept(k: &rusqlite::Connection, why: &str) {
+    assert!(
+        crate::consumer::repo_counts::kept(k).unwrap(),
+        "not kept: {why}"
+    );
+    let proof = crate::forget::history::fixture::proof();
+    for applied in [Some(&proof), None] {
+        let repos = |sql: String| -> Vec<(String, i64, i64, i64, i64)> {
+            (k.prepare(&sql).unwrap())
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let names = |sql: String| -> Vec<String> {
+            let mut names: Vec<String> = (k.prepare(&sql).unwrap())
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            names.sort();
+            names
+        };
+        let with = applied.is_some();
+        assert_eq!(
+            repos(REPOS_KEPT.replace("{imported}", applied.map_or("", imported_kept_leg))),
+            repos(REPOS.replace("{imported}", applied.map_or("", imported_repos_leg))),
+            "{why}, with the proof: {with}"
+        );
+        assert_eq!(
+            names(
+                REPO_NAMES_KEPT.replace("{imported}", applied.map_or("", imported_kept_names_leg))
+            ),
+            names(REPO_NAMES.replace("{imported}", applied.map_or("", imported_names_leg))),
+            "{why}, with the proof: {with}"
+        );
+    }
+}
+
+/// G (#1037): the repositories are read from the counts the Fts consumer keeps, a row for each
+/// repository and leg, and give what counting the tables gives: records of two repositories (a
+/// tool's among them, and one of none), a claim made twice, and a document imported twice into one
+/// project and once into another.
+#[test]
+fn the_repositories_are_read_from_the_counts_kept() {
+    let mut s = Store::new();
+    s.said("s1", "github.com/o/a", 1_000, "First words.");
+    s.event(
+        "tool",
+        "s1",
+        ("github.com/o/a", "main"),
+        1_500,
+        json!({ "tool": "Bash" }),
+    );
+    let seq = s.said("s2", "github.com/o/b", 2_000, "We ship on Fridays.");
+    for _ in 0..2 {
+        s.claim(
+            seq,
+            "We ship on Fridays.",
+            ("decision", "decided", "user"),
+            &[],
+        );
+    }
+    s.imported("i1", "p", 3_000, "A note", "A document.");
+    s.imported("i1", "p", 3_500, "A note", "A document again.");
+    s.imported("i1", "q", 4_000, "A note", "Filed elsewhere.");
+    s.raw
+        .append(&crate::raw::test_event("No repository."))
+        .unwrap();
+    s.run();
+    let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
+    counted_as_kept(&k, "the first pass");
+    let proof = crate::forget::history::fixture::proof();
+    let plan: Vec<String> = (k
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            REPOS_KEPT.replace("{imported}", imported_kept_leg(&proof))
+        ))
+        .unwrap())
+    .query_map([], |r| r.get(3))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap();
+    assert!(
+        plan.iter().any(|p| p.starts_with("SCAN repo_counts")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter().all(|p| !["raw_docs", "derivations", "imported"]
+            .iter()
+            .any(|t| p.contains(t))),
+        "{plan:?}"
+    );
+    rusqlite::Connection::open(s.home.path().join("knowledge.db"))
+        .unwrap()
+        .execute(
+            "UPDATE repo_counts SET n = 41 WHERE repo = 'github.com/o/a' AND leg = 'r'",
+            [],
+        )
+        .unwrap();
+    let a = (repos_in(&k, Some(&proof)).unwrap().into_iter())
+        .find(|r| r["repo"] == "github.com/o/a")
+        .unwrap();
+    assert_eq!(a["records"], 41, "{a}");
+}
+
+/// G: the counts kept follow every writer of the tables they count: a record forgotten (Fts takes
+/// it out of `raw_docs`) with the claim that quoted it (Anchors deletes its derivation), a forget of
+/// imported history applied, and the rewinds of Imported, Claims and Fts, after which no
+/// repository is left.
+#[test]
+fn the_repositories_counts_follow_every_writer() {
+    let mut s = Store::new();
+    s.said("s1", "github.com/o/a", 1_000, "First words.");
+    let quoted = s.said("s1", "github.com/o/a", 1_100, "We deploy from main.");
+    s.claim(
+        quoted,
+        "We deploy from main.",
+        ("decision", "decided", "user"),
+        &[],
+    );
+    s.decided("github.com/o/b", 2_000, "We ship on Fridays.", &[]);
+    let gone = s.imported("i1", "p", 3_000, "A note", "A document.");
+    s.imported("i2", "p", 3_100, "Another", "Another document.");
+    s.run();
+    let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
+    counted_as_kept(&k, "the first pass");
+    let device = s.raw.device().to_owned();
+    s.raw
+        .append_tombstone(crate::raw::Target::Record {
+            device: device.clone(),
+            seq: quoted,
+        })
+        .unwrap();
+    s.run();
+    let claims: i64 = k
+        .query_row(
+            "SELECT COUNT(*) FROM derivations WHERE repo = 'github.com/o/a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(claims, 0, "Anchors left the claim of a record forgotten");
+    counted_as_kept(&k, "a record forgotten");
+    crate::forget::history::fixture::register_covering(s.home.path(), "j1", "t1", &[gone.as_str()]);
+    s.run();
+    let documents: i64 = k
+        .query_row("SELECT COUNT(*) FROM imported", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(documents, 1, "the history forget was not applied");
+    counted_as_kept(&k, "a history forget applied");
+    let w = crate::knowledge::open(s.home.path()).unwrap();
+    use crate::worker::Consumer;
+    crate::consumer::imported::Imported
+        .rewind(&w, &device, 0)
+        .unwrap();
+    counted_as_kept(&k, "Imported's rewind");
+    crate::consumer::claims::Claims
+        .rewind(&w, &device, 0)
+        .unwrap();
+    counted_as_kept(&k, "Claims' rewind");
+    crate::consumer::fts::Fts.rewind(&w, &device, 0).unwrap();
+    counted_as_kept(&k, "Fts' rewind");
+    let left: i64 = k
+        .query_row("SELECT COUNT(*) FROM repo_counts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0, "a repository outlived its rows");
+}
+
+/// G: a store that holds no counts of this build (an older build's, or a knowledge.db made new
+/// before its first pass) is counted from its tables, whatever `repo_counts` holds; its next pass
+/// makes this build's counts.
+#[test]
+fn a_store_without_this_builds_counts_is_counted_from_its_tables() {
+    let mut s = Store::new();
+    s.said("s1", "github.com/o/a", 1_000, "First words.");
+    s.run();
+    rusqlite::Connection::open(s.home.path().join("knowledge.db"))
+        .unwrap()
+        .execute_batch("DROP TRIGGER repo_counts_r_add; UPDATE repo_counts SET n = 41")
+        .unwrap();
+    let (_raw, k) = search::b::stores(s.home.path()).unwrap().unwrap();
+    let proof = crate::forget::history::fixture::proof();
+    let records =
+        |k: &rusqlite::Connection| repos_in(k, Some(&proof)).unwrap()[0]["records"].clone();
+    assert_eq!(records(&k), 1);
+    assert_eq!(repo_names_in(&k, Some(&proof)).unwrap(), ["github.com/o/a"]);
+    s.run();
+    counted_as_kept(&k, "the next pass");
+    assert_eq!(records(&k), 1);
+}
+
 /// #899 W2: the names of the repositories the list holds, each table read from an index with
 /// no count: the same names as `repos_in` gives, one in a single table too (records alone,
 /// imported documents alone, a claim alone).

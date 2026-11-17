@@ -331,6 +331,9 @@ impl Consumer for Fts {
         // The repositories' records counted with their newest time (`view::repos_in`) from an
         // index, not by reading each record's text: 4.5 s cold on this PC's store (2026-11-01).
         k.execute_batch("CREATE INDEX IF NOT EXISTS raw_docs_repo ON raw_docs(repo, ts)")?;
+        // G (#1037): the repositories' counts, kept by triggers on the tables they count, made
+        // after the index their records' newest time is read from.
+        crate::consumer::repo_counts::keep(k)?;
         // #1037: the timeline's session starts in its order (`search::b::others`), with what an
         // entry of one shows, made after the table's other indexes. Through none in that order
         // each page read every record's labels, 78 MB of a timeline's 113 MB on this PC's store.
@@ -360,10 +363,12 @@ impl Consumer for Fts {
             if e.kind == "directive" || e.kind == crate::raw::SUBAGENT_STOP {
                 continue;
             }
-            k.execute(
+            // Prepared once: each prepare also compiles the triggers this insert fires
+            // (`consumer::repo_counts`), which a drain would pay for every record.
+            k.prepare_cached(
                 "INSERT INTO raw_docs(device, seq, kind, ts, repo, session) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![r.device, r.seq, e.kind, e.ts, e.repo, e.session],
-            )?;
+            )?
+            .execute(params![r.device, r.seq, e.kind, e.ts, e.repo, e.session])?;
             // The text's row is the record's, read before `session_start` makes a row of its own.
             let rowid = k.last_insert_rowid();
             // #506: the session's first row with a repository; an import of older records can
