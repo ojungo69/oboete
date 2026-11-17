@@ -121,7 +121,7 @@ fn w5c_cached_status_and_replay_apply_current_display_rules_only_to_labels() {
         progress: Progress::default(),
         committed: true,
         result: Some(cached.clone()),
-        fingerprint: format!("{:x}", hash.finalize()),
+        fingerprint: crate::db::hex(&hash.finalize()),
         consent: None,
     });
     let request = serde_json::to_vec(&json!({"operation":operation,

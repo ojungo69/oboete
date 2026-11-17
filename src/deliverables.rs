@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::db::hex;
 use crate::raw::{Event, Item, Raw};
 
 /// The folder under the home the copies live in.
@@ -851,12 +852,21 @@ fn sha256_held(dir: &Dir, name: &str, len: u64) -> Result<Option<String>> {
     let file = dir.open_read(name)?;
     anyhow::ensure!(file.metadata()?.is_file(), "not a regular file");
     let mut hash = Sha256::new();
-    let read = std::io::copy(&mut file.take(len + 1), &mut hash)?;
+    let mut file = file.take(len + 1);
+    let mut read = 0u64;
+    let mut buf = [0; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+        read += n as u64;
+    }
     Ok((read == len).then(|| hex(&hash.finalize())))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A copy made: its path under `deliverables/`, bytes and sha256.

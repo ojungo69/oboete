@@ -6,6 +6,7 @@
 //! ledger rows). The last backed-up seq is read from the names, so it survives a lost
 //! knowledge.db.
 
+use crate::db::hex;
 use crate::raw::{self, Raw};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -1344,10 +1345,6 @@ fn write_synced_at(
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     Ok(path)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A segment that does not match its checksum, or has none.

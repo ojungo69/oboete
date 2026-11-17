@@ -847,7 +847,7 @@ fn parsed_digest(lines: &[Line]) -> Result<String> {
         ))?);
         hash.update(b"\n");
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::db::hex(&hash.finalize()))
 }
 
 fn check_bound(file: &BoundFile) -> Result<()> {
@@ -1215,7 +1215,7 @@ fn import_files(
                 for line in lines.iter().take_while(|line| line.seq <= seen as u64) {
                     hash_line(&mut prefix, line)?;
                 }
-                let fingerprint = format!("{:x}", prefix.clone().finalize());
+                let fingerprint = crate::db::hex(&prefix.clone().finalize());
                 if previous.prefix.as_deref() != Some(fingerprint.as_str()) {
                     stats.refused += 1;
                     writeln!(
@@ -1238,7 +1238,7 @@ fn import_files(
                 .map(|line| {
                     let mut native = Sha256::new();
                     hash_line(&mut native, line)?;
-                    Ok(format!("{:x}", native.finalize()))
+                    Ok(crate::db::hex(&native.finalize()))
                 })
                 .collect::<Result<_>>()?;
             let mut counts = HashMap::<&str, usize>::new();
@@ -1263,7 +1263,7 @@ fn import_files(
                     continue;
                 }
                 hash_line(&mut prefix, &line)?;
-                let fingerprint = Some(format!("{:x}", prefix.clone().finalize()));
+                let fingerprint = Some(crate::db::hex(&prefix.clone().finalize()));
                 let ts = crate::replay::fixture_ms(&clock, &json!(line.ts))
                     .context("a transcript event has no valid timestamp")?;
                 // A call's start, as the record keeps a time (#692); none when it does not read.

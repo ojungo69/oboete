@@ -243,15 +243,12 @@ impl Agents {
         if !request.confirmed || !id(&request.preview_key) || !id(&request.operation_id) {
             return Err(bad_request());
         }
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!({
-                    "action":request.action,"agents":agents,"preview_key":request.preview_key
-                }))
-                .map_err(|_| bad_request())?
-            )
-        );
+        let fingerprint = crate::db::hex(&Sha256::digest(
+            serde_json::to_vec(&json!({
+                "action":request.action,"agents":agents,"preview_key":request.preview_key
+            }))
+            .map_err(|_| bad_request())?,
+        ));
         if let Some(receipt) = self.replay(&request.operation_id, &fingerprint)? {
             return Ok(receipt);
         }
@@ -385,7 +382,7 @@ impl BinaryPin {
         Ok(Self {
             path,
             metadata: before,
-            witness: format!("{:x}", hash.finalize()),
+            witness: crate::db::hex(&hash.finalize()),
         })
     }
     fn unchanged(&self) -> bool {
@@ -426,10 +423,7 @@ impl Resources {
             None => plan::Input {
                 path: path.to_owned(),
                 text: None,
-                witness: format!(
-                    "{:x}",
-                    Sha256::digest(absolute.as_os_str().as_encoded_bytes())
-                ),
+                witness: crate::db::hex(&Sha256::digest(absolute.as_os_str().as_encoded_bytes())),
                 available: false,
             },
         }
@@ -821,7 +815,7 @@ impl Bundle {
                 );
             }
         }
-        bundle.key = format!("{:x}", hash.finalize());
+        bundle.key = crate::db::hex(&hash.finalize());
         if !bundle.unchanged() {
             return Err(refusal(409, "setup_stale"));
         }

@@ -1,11 +1,23 @@
 //! What the stores share: opening SQLite files with the stores' busy waits and schema, a store
-//! file's identity and the device id it is given, a file's privacy, and the clock.
+//! file's identity and the device id it is given, a file's privacy, the clock, and the lowercase
+//! hex the stores' hashes are written in.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+
+/// Bytes as lowercase hex, two digits a byte: what `{:x}` gave for a digest before digest 0.11.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // Writing to a String cannot fail.
+        let _ = write!(text, "{b:02x}");
+    }
+    text
+}
 
 /// `PRAGMA quick_check`: Ok when SQLite answers "ok", else the first problem it names.
 pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {

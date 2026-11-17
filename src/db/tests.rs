@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn sha256_hex_matches_known_answers() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        hex(&Sha256::digest(b"abc")),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        hex(&Sha256::digest(b"")),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
 type OpenStore = fn(&Path) -> Result<Connection>;
 
 #[test]

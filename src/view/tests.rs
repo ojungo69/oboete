@@ -1,6 +1,22 @@
 use super::*;
 use crate::search::b::fixture::Store;
 
+#[test]
+fn files_mac_matches_rfc_4231_case_2() {
+    use hmac::{KeyInit, Mac};
+    let mut mac = FilesMac::new_from_slice(b"Jefe").unwrap();
+    mac.update(b"what do ya want for nothing?");
+    let tag = mac.clone().finalize().into_bytes();
+    assert_eq!(
+        crate::db::hex(&tag),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    mac.clone().verify_slice(&tag).unwrap();
+    let mut changed = tag;
+    changed[0] ^= 1;
+    assert!(mac.verify_slice(&changed).is_err());
+}
+
 /// The repositories' records are counted from the Fts consumer's index alone, and counted
 /// right: a scan of `raw_docs` read every record's text (4.5 s cold on this PC's store).
 #[test]

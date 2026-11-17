@@ -609,7 +609,7 @@ pub(crate) fn check(path: &Path, artifact: &Artifact) -> Result<Metadata> {
         hash.update(&buffer[..read]);
     }
     ensure!(
-        format!("{:x}", hash.finalize()) == artifact.sha256,
+        crate::db::hex(&hash.finalize()) == artifact.sha256,
         "{}: SHA-256 does not match the pin",
         artifact.name
     );

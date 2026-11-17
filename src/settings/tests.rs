@@ -326,7 +326,7 @@ fn redaction_saves_keep_all_rule_fields_and_reject_invalid_candidates_without_si
         .version()
         .to_owned();
     // secret_group hashes the extracted secret, rather than the surrounding regex match.
-    let kept = format!("{:x}", Sha256::digest(b"PRESERVE"));
+    let kept = crate::db::hex(&Sha256::digest(b"PRESERVE"));
     let body = posted(&saved, |v| {
         v["redaction"] = saved["redaction"].clone();
         v["redaction"]["allowlist"] = json!([kept]);

@@ -1406,7 +1406,7 @@ impl Viewer {
     /// A copy's link tag: HMAC-SHA256 of its provenance under this viewer's secret, cut to 16
     /// bytes (docs/deliverables.md, slice 2).
     fn file_mac(&self, row: &crate::deliverables::Row) -> Result<FilesMac> {
-        use hmac::Mac;
+        use hmac::{KeyInit, Mac};
         let mut mac =
             FilesMac::new_from_slice(self.files_key()?).map_err(|e| anyhow::anyhow!("{e}"))?;
         mac.update(&crate::deliverables::provenance(row));

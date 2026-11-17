@@ -342,7 +342,7 @@ impl Maintenance {
         hash.update(serde_json::to_vec(&request.operation).expect("typed operation serializes"));
         hash.update([0]);
         hash.update(request.preview_key.as_bytes());
-        let fingerprint = format!("{:x}", hash.finalize());
+        let fingerprint = crate::db::hex(&hash.finalize());
         let consent;
         let plan;
         {

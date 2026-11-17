@@ -1885,7 +1885,7 @@ pub(crate) fn composed_out(kind: &str, title: &str, body: &str) -> String {
 }
 
 pub(crate) fn sha(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    crate::db::hex(&Sha256::digest(text.as_bytes()))
 }
 
 /// `sha` of a text gated value by value (`joined_with`), with where each value lies: values that
@@ -1898,7 +1898,7 @@ fn joined_sha(text: &str, parts: &[std::ops::Range<usize>]) -> String {
     for p in parts {
         h.update(format!("\0{}-{}", p.start, p.end));
     }
-    format!("j{:x}", h.finalize())
+    format!("j{}", crate::db::hex(&h.finalize()))
 }
 
 /// A claim a pending correction or tombstone touches: its text may change on the next pass. A

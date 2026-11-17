@@ -8,6 +8,15 @@ use std::process::{Command, Output, Stdio};
 
 const CANARY: &str = "forget-canary-amethyst-92741";
 
+/// SHA-256 as lowercase hex, two digits a byte.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn command(home: &Path, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_oboete"));
     c.arg("--home")
@@ -339,8 +348,7 @@ fn v1_source_event(home: &Path, body: &str, sid: &str) -> std::path::PathBuf {
 /// `masked` names a session whose label a redaction rule (`session-mask`) masks, as the migration
 /// gated labels. The records written.
 fn v1_import(home: &Path, source: &Path, masked: Option<&str>) -> usize {
-    use sha2::{Digest, Sha256};
-    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let hash = sha256_hex;
     // `forget::origin`: a native identity, versioned and hashed.
     let identity = |source: &str, id: &str| {
         format!(
@@ -480,7 +488,6 @@ fn v1_import(home: &Path, source: &Path, masked: Option<&str>) -> usize {
 /// Historical v1 requests use the published bodyless Request/log schema. Read only native
 /// hashes and coordinates from the selected imported record; never guess an origin by text.
 fn historical_v1_forget(home: &Path, id: &str) {
-    use sha2::{Digest, Sha256};
     let (device, seq) = id.split_once(':').unwrap();
     let seq: i64 = seq.parse().unwrap();
     let db = rusqlite::Connection::open(home.join("raw.db")).unwrap();
@@ -507,8 +514,8 @@ fn historical_v1_forget(home: &Path, id: &str) {
     });
     let serialized = request.to_string();
     let line = format!(
-        "{{\"sum\":\"{:x}\",\"request\":{serialized}}}\n",
-        Sha256::digest(serialized.as_bytes())
+        "{{\"sum\":\"{}\",\"request\":{serialized}}}\n",
+        sha256_hex(serialized.as_bytes())
     );
     assert!(!line.contains(CANARY));
     let mut file = std::fs::OpenOptions::new()
@@ -1101,7 +1108,6 @@ fn rescan_and_backup_native_record(home: &Path, id: &str) {
 /// restore timestamp, or another record. Refuse before registration through later backups too.
 #[test]
 fn restored_removed_records_with_missing_or_unverifiable_metadata_are_refused() {
-    use sha2::{Digest, Sha256};
     for damage in [
         "source",
         "kind",
@@ -1139,7 +1145,7 @@ fn restored_removed_records_with_missing_or_unverifiable_metadata_are_refused() 
             }
             let compressed = zstd::bulk::compress(edited.as_bytes(), 3).unwrap();
             let name = path.file_name().unwrap().to_string_lossy();
-            let sum = format!("{:x}  {name}\n", Sha256::digest(&compressed));
+            let sum = format!("{}  {name}\n", sha256_hex(&compressed));
             let mut checksum = path.as_os_str().to_os_string();
             checksum.push(".sha256");
             std::fs::write(checksum, sum).unwrap();
@@ -1608,7 +1614,6 @@ fn copy_backup(from: &Path, to: &Path) {
 /// A pre-M5 record segment has no home-lineage metadata. Keep its checksum valid so the
 /// public restore exercises that format, rather than the damaged-segment fallback.
 fn legacy_record_segments(home: &Path) {
-    use sha2::{Digest, Sha256};
     for entry in std::fs::read_dir(home.join("backups")).unwrap() {
         let path = entry.unwrap().path();
         if !path.to_string_lossy().ends_with(".seg.zst") {
@@ -1629,7 +1634,7 @@ fn legacy_record_segments(home: &Path) {
         }
         let compressed = zstd::bulk::compress(old.as_bytes(), 3).unwrap();
         let name = path.file_name().unwrap().to_string_lossy();
-        let sum = format!("{:x}  {name}\n", Sha256::digest(&compressed));
+        let sum = format!("{}  {name}\n", sha256_hex(&compressed));
         let mut checksum = path.as_os_str().to_os_string();
         checksum.push(".sha256");
         std::fs::write(checksum, sum).unwrap();

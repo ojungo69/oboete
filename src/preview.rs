@@ -73,7 +73,7 @@ pub(crate) fn file_version_in(mut reader: impl std::io::Read) -> Result<String> 
         }
         hash.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::db::hex(&hash.finalize()))
 }
 
 pub(crate) type SourceStamp = (PathBuf, String, u64, std::time::SystemTime, String);

@@ -1938,7 +1938,7 @@ pub fn codex_trust_hash(event: &str, matcher: Option<&str>, handler: &Value) -> 
         group["matcher"] = json!(m);
     }
     let digest = Sha256::digest(canonical(&group).as_bytes());
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", crate::db::hex(&digest))
 }
 
 /// Compact JSON with the keys of every object sorted (Codex's hashing input).

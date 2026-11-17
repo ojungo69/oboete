@@ -27,7 +27,7 @@ fn batches_stay_under_the_request_limits() {
 fn doctor_names_the_local_model_state() {
     use crate::model_fetch::Artifact;
     let pin = |b: &[u8]| -> &'static str {
-        Box::leak(format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b)).into_boxed_str())
+        Box::leak(crate::db::hex(&<sha2::Sha256 as sha2::Digest>::digest(b)).into_boxed_str())
     };
     let files = [
         Artifact {
