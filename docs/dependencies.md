@@ -11,7 +11,8 @@ Actions its workflows use. Dependabot keeps both current (`.github/dependabot.ym
   that may break the build (a new major, or a new minor of a `0.x` crate) comes on its own, and its
   code changes are made in that pull request or in one that replaces it.
 - Security updates (Dependabot alerts and security updates, on in the repository's settings) are
-  opened when an advisory is published, with no wait.
+  opened when an advisory is published, with no wait, for every crate but the three left alone
+  below.
 
 Every one of these pull requests goes through the review lanes of any other (CLAUDE.md, Process)
 and is merged by hand. None is set to merge by itself: a dependency someone took over would
@@ -21,7 +22,10 @@ otherwise reach main, and then the next install, without anyone reading it.
 
 - `fastembed` and `ort` (`=7.1.1`, `=2.0.0-rc.13` in `Cargo.toml`): the `local-embed` feature
   loads the ONNX Runtime library at run time, and these two are pinned to what that library and
-  bge-m3 were checked with. Dependabot leaves them alone. They are updated together, with a
+  bge-m3 were checked with. Dependabot leaves them alone, and `ort-sys`, which `ort` builds on:
+  `ignore` applies to security updates too, so an advisory on one of them opens no pull request.
+  It still raises a Dependabot alert, since the alerts do not read `dependabot.yml`. The alert is
+  read when it is raised, and the update is made by hand. They are updated together, with a
   `--features local-embed` build run on a machine that embeds.
 - A release that needs a newer Rust than `rust-version` in `Cargo.toml` (1.95): cargo's resolver
   picks versions the minimum Rust builds, and the `msrv` job fails on one that does not. Raising
