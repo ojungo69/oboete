@@ -3364,7 +3364,7 @@ fn the_matching_code_is_the_one_its_number_names() {
             MATCHING,
             short_hash(&[code, &crates.join("\n")].concat()).as_str()
         ),
-        ("2", "b20580f461fefa5d")
+        ("2", "b0c4a59e919b3092")
     );
 }
 
@@ -3585,4 +3585,185 @@ fn a_wrong_redaction_table_is_an_error_that_names_the_mistake() {
     let others = "[[providers]]\nname = \"x\"\n[summary]\nmax = 1\n[embedding]\nprovider = \"none\"\n\
                       [backup]\ndir = \"elsewhere\"\n";
     assert!(user(others).is_ok());
+}
+
+/// #1070: the bundled rules with a reject-only filter (`filter_pattern`): each has `\b` right
+/// after its flags and no other `\b` or `\B`, and ASCII mode rejects it.
+#[test]
+fn the_rules_with_a_reject_filter_are_named() {
+    let mut named: Vec<&str> = (bundled().rules.iter())
+        .filter(|r| r.regex.as_deref().and_then(filter_pattern).is_some())
+        .map(|r| r.id.as_str())
+        .collect();
+    named.sort_unstable();
+    assert_eq!(
+        named,
+        [
+            "authorization-header",
+            "cookie-header",
+            "openshift-user-token",
+            "secret-assignment",
+            "sentry-org-auth-token",
+            "sentry-org-token",
+            "sidekiq-sensitive-url",
+            "uri-userinfo-password",
+        ]
+    );
+}
+
+/// #1070: a filter is its rule's pattern with the one `\b` after the flags deleted, compiled in
+/// Unicode mode, the mode the rule's regex falls back to: ASCII mode rejects both, so neither has
+/// `\s`, `\w` or `(?i)` narrower than the other's.
+#[test]
+fn a_filter_is_its_rules_pattern_without_the_boundary_in_the_rules_mode() {
+    let mut seen = 0;
+    for rule in &bundled().rules {
+        let p = rule.regex.as_deref().expect("a bundled rule has a regex");
+        let Some(f) = filter_pattern(p) else {
+            continue;
+        };
+        seen += 1;
+        let at = p.find(r"\b").expect("the boundary");
+        assert_eq!(format!("{}{}", &p[..at], &p[at + 2..]), f, "{}", rule.id);
+        for (what, pattern) in [("rule", p), ("filter", f.as_str())] {
+            let ascii = regex::RegexBuilder::new(pattern).unicode(false).build();
+            assert!(ascii.is_err(), "{}: the {what} in ASCII mode", rule.id);
+            assert!(
+                Regex::new(pattern).is_ok(),
+                "{}: the {what} in Unicode mode",
+                rule.id
+            );
+        }
+        assert!(filter_regex(p).is_some(), "{}", rule.id);
+    }
+    assert_eq!(seen, 8);
+    // A pattern ASCII mode takes keeps its `\b`, which the lazy DFA runs, and has no filter.
+    assert_eq!(filter_pattern(r"(?i)\bghp_[0-9a-z]{36}"), None);
+    // Only the boundary right after the flags, and only when it is the pattern's one boundary.
+    assert_eq!(filter_pattern(r#"(?i)[^"]+\bsecret"#), None);
+    assert_eq!(filter_pattern(r#"(?i)\bsecret[^"]+\b"#), None);
+    assert_eq!(filter_pattern(r#"(?i)\bsecret[^"]+\B"#), None);
+    assert_eq!(filter_pattern(r#"(?i:\bsecret)[^"]+"#), None);
+    assert_eq!(filter_pattern(r#"(?-u)\bsecret[^"]+"#), None);
+    assert_eq!(
+        filter_pattern(r#"\bsecret[^"]+"#).as_deref(),
+        Some(r#"secret[^"]+"#)
+    );
+    // A filter that does not compile is none: its rule runs on every text.
+    assert_eq!(filter_pattern(r#"\b+[^"]"#).as_deref(), Some(r#"+[^"]"#));
+    assert!(filter_regex(r#"\b+[^"]"#).is_none());
+}
+
+/// #1070: a rule whose filter rejects a text is not run on it, and the thread takes none of its
+/// own regex for it: secret-assignment's keyword next to Japanese, with no assignment.
+#[test]
+fn a_rule_whose_filter_rejects_a_text_is_not_run_on_it() {
+    let rule = (bundled().rules.iter())
+        .find(|r| r.id == "secret-assignment")
+        .unwrap();
+    let pattern = rule.regex.as_deref().unwrap();
+    let _warm = warm();
+    let before = FILTERED.with(std::cell::Cell::get);
+    assert!(spans("このトークンの扱いは token の章を読む", &Rules::default()).is_empty());
+    assert!(
+        FILTERED.with(std::cell::Cell::get) > before,
+        "no scan was let go by a filter"
+    );
+    assert!(WARM.with(|w| !w.borrow().regexes.contains_key(pattern)));
+    assert!(WARM.with(|w| w.borrow().filters.contains_key(pattern)));
+    // A text with an assignment passes the filter, and the rule's own regex takes it.
+    let set = "この設定は api_token=Zx9kQ2mV7pLw の値";
+    let found = spans(set, &Rules::default());
+    assert!(
+        found.iter().any(|&(a, b, _)| &set[a..b] == "Zx9kQ2mV7pLw"),
+        "{found:?}"
+    );
+    assert!(WARM.with(|w| w.borrow().regexes.contains_key(pattern)));
+}
+
+/// #1070: the filters change no span. Texts made of the rules' keywords, assignments, URIs,
+/// quotes, Japanese, full-width spaces and the letters Unicode's `(?i)` folds into `k` and `s`, are
+/// scanned with the filters and without, and give the same spans and the same stored text.
+#[test]
+fn the_filters_change_no_span() {
+    const PARTS: &[&str] = &[
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "api_key",
+        "API-KEY",
+        "credentials",
+        "_pwd",
+        "private_key",
+        "access-key",
+        "=",
+        ":",
+        " ",
+        "  ",
+        "\t",
+        "\n",
+        "\r\n",
+        "\"",
+        "'",
+        "`",
+        "トークン",
+        "秘密",
+        "は",
+        "。",
+        "\u{3000}",
+        "\u{a0}",
+        "\u{212a}",
+        "\u{17f}",
+        "é",
+        "://",
+        "https",
+        "postgres",
+        "user",
+        "@",
+        "example.com",
+        "/",
+        "?",
+        "#",
+        "%40",
+        "Zx9kQ2mV7pLw",
+        "a1B2c3D4e5F6",
+        "hunter2",
+        "$",
+        "{",
+        "}",
+        "\\",
+        "-",
+        ".",
+        "_",
+        "x",
+        "Cookie:",
+        "Authorization: Bearer ",
+        "sha256~",
+        "sntrys_",
+        "gems.contribsys.com",
+    ];
+    let rules = Rules::default();
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut filtered = 0;
+    for _ in 0..3_000 {
+        let n = 1 + (next() % 30) as usize;
+        let text: String = (0..n)
+            .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+            .collect();
+        let before = FILTERED.with(std::cell::Cell::get);
+        let with = (spans(&text, &rules), scan(&text, &rules).0);
+        filtered += FILTERED.with(std::cell::Cell::get) - before;
+        NO_FILTERS.with(|f| f.set(true));
+        let without = (spans(&text, &rules), scan(&text, &rules).0);
+        NO_FILTERS.with(|f| f.set(false));
+        assert_eq!(with, without, "{text:?}");
+    }
+    assert!(filtered > 0, "no text was let go by a filter");
 }

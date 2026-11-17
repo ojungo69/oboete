@@ -273,6 +273,48 @@ go takes them; what does not compile is asked for once),
 `redact::tests::a_secret_is_masked_with_a_warm_as_without` (on the thread, on another thread, and
 right after the thread's map started again).
 
+## #1070: a leading word boundary is tried first as a filter
+
+What happened. The Sessions tab (`GET /api/sessions`) took 300 ms on a copy of this PC's store.
+CPU samples put 94% of it in `redact::plain`, under `Raw::prompt_text`, and 90% in the regex
+crate's engines, most of that in the PikeVM. Two of oboete's own rules, `secret-assignment` and
+`uri-userinfo-password` (`config/oboete-rules.toml`), do not compile in ASCII mode, so
+`own_regex` builds them in Unicode mode. Their leading `\b` is then a Unicode word boundary. The
+lazy DFA gives that up at the first non-ASCII byte, and the meta engine runs the PikeVM over the
+whole text. Over the copy's 758,520 event texts, the two took 164.6 s and 6.4 s of regex time.
+
+The change. A rule gets a filter when its pattern is `(?flags)\bS`, holds no other `\b` or `\B`,
+and falls back to Unicode mode (`redact::filter_pattern`; eight bundled rules). The filter is
+`(?flags)S`, compiled in Unicode mode. Every match of `\bS` is a match of `S`, so a text the filter
+does not match holds none of the rule's matches. For such a text, `spans_in` goes on to the next
+rule, and the rule's own regex is neither compiled nor run. A text the filter matches is scanned by
+the rule's regex as before, so no span changes. Whether ASCII mode takes a pattern is read by
+`regex-syntax`'s parser, without compiling the pattern, so a rule that ASCII mode takes is not
+compiled twice. `MATCHING` stays as it was: no rule finds or passes over anything else, and no
+store rescans.
+
+Measured on the copy, `main` against this change, in turns, twice each:
+
+| | `main` | with the filters |
+|---|---|---|
+| `GET /api/sessions` | 292 to 303 ms | 99 to 104 ms |
+| `GET /api/my-work?range=all` | 810 to 856 ms | 801 to 851 ms |
+| `scan` and `outbound_with` over 775,373 texts | 878.6 s | 308.2 s |
+| hook replay (milestone 1's fixture), in-process p50 | 1.77 to 1.79 ms | 1.70 to 1.75 ms |
+| hook replay, VmHWM | 21.4 to 21.6 MB | 21.8 to 21.9 MB |
+
+My Work is unchanged: its redaction is mostly other rules. The 775,373 texts are the copy's event
+texts and the claude-mem store's prompts. All of them gave the same stored text and the same gated
+text on both. Over the copy's event texts, `secret-assignment`'s 164.6 s of regex time became
+3.5 s of filter plus 17.8 s on the 20,653 texts the filter passed, and `uri-userinfo-password`'s
+6.4 s became 1.3 s. No text a filter rejected gave its rule a match.
+
+Tests: `redact::tests::the_rules_with_a_reject_filter_are_named`,
+`a_filter_is_its_rules_pattern_without_the_boundary_in_the_rules_mode`,
+`a_rule_whose_filter_rejects_a_text_is_not_run_on_it` and `the_filters_change_no_span` (3,000
+texts of keywords, assignments, URIs, quotes, Japanese, full-width spaces and the letters Unicode's
+`(?i)` folds into `k` and `s`, scanned with the filters and without).
+
 ## #1037: the prompts' fields, from an index of their own
 
 What happened. My Work's list of prompts (`Raw::prompt_labels`) and the sessions of the Sessions

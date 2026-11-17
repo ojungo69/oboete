@@ -341,21 +341,25 @@ struct Compiled {
     cap: usize,
     /// The compiles made, which the tests count.
     compiles: std::sync::atomic::AtomicUsize,
+    /// What a pattern's cell holds: the pattern's own regex, or its rule's filter (`filter`).
+    make: fn(&str) -> Option<Regex>,
 }
 
 impl Compiled {
     fn new(cap: usize) -> Self {
+        Self::making(cap, own_regex)
+    }
+
+    fn making(cap: usize, make: fn(&str) -> Option<Regex>) -> Self {
         Self {
             cells: Default::default(),
             cap,
             compiles: Default::default(),
+            make,
         }
     }
 
-    /// ASCII mode first: that is what gitleaks' Go RE2 means by `\w`/`\s`/`\b`, and it compiles
-    /// ~30x faster than Unicode mode for the generic rules (measured: 90 ms vs 3 ms, debug build).
-    /// The few patterns ASCII mode rejects (negated classes that could match non-UTF-8) fall back;
-    /// a pattern neither compiles is kept as `None`, not compiled again.
+    /// The pattern's cell, made with `make` once.
     fn get(&self, pattern: &str) -> Option<Regex> {
         use std::sync::PoisonError;
         let found = (self.cells.read().unwrap_or_else(PoisonError::into_inner))
@@ -373,18 +377,67 @@ impl Compiled {
         };
         cell.get_or_init(|| {
             (self.compiles).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            regex::RegexBuilder::new(pattern)
-                .unicode(false)
-                .build()
-                .or_else(|_| Regex::new(pattern))
-                .ok()
+            (self.make)(pattern)
         })
         .clone()
     }
 }
 
+/// ASCII mode first: that is what gitleaks' Go RE2 means by `\w`/`\s`/`\b`, and it compiles
+/// ~30x faster than Unicode mode for the generic rules (measured: 90 ms vs 3 ms, debug build).
+/// The few patterns ASCII mode rejects (negated classes that could match non-UTF-8) fall back;
+/// a pattern neither compiles is kept as `None`, not compiled again.
+fn own_regex(pattern: &str) -> Option<Regex> {
+    regex::RegexBuilder::new(pattern)
+        .unicode(false)
+        .build()
+        .or_else(|_| Regex::new(pattern))
+        .ok()
+}
+
 static COMPILED: std::sync::LazyLock<Compiled> =
     std::sync::LazyLock::new(|| Compiled::new(COMPILED_CAP));
+
+/// The rules' filters, one cell for each rule's pattern; `None` for a rule that has none.
+static FILTERS: std::sync::LazyLock<Compiled> =
+    std::sync::LazyLock::new(|| Compiled::making(COMPILED_CAP, filter_regex));
+
+/// #1070: a rule's pattern as a reject-only filter, when the pattern is `(?flags)\bS`, holds no
+/// other `\b` or `\B`, and ASCII mode rejects it: `(?flags)S`. Such a rule's regex falls back to
+/// Unicode mode (`own_regex`), and the lazy DFA gives a Unicode `\b` up at the first non-ASCII
+/// byte: its scan of such a text ran the PikeVM from end to end (secret-assignment: 68% of a scan's
+/// regex time over this PC's prompts). Every match of `\bS` is a match of `S`, so a text `S` does
+/// not match holds none of the rule's, and the rule's regex is not run on it.
+fn filter_pattern(pattern: &str) -> Option<String> {
+    let (flags, body) = match pattern.strip_prefix("(?") {
+        Some(inner) => {
+            let end = inner.find(')')?;
+            let letters = &inner[..end];
+            if letters.is_empty() || !letters.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return None;
+            }
+            (&pattern[..end + 3], &inner[end + 1..])
+        }
+        None => ("", pattern),
+    };
+    let rest = body.strip_prefix(r"\b")?;
+    if rest.contains(r"\b") || rest.contains(r"\B") {
+        return None;
+    }
+    // As `own_regex` tries it, read only: a pattern ASCII mode takes keeps an ASCII `\b`, which the
+    // lazy DFA runs.
+    let ascii = regex_syntax::ParserBuilder::new()
+        .unicode(false)
+        .build()
+        .parse(pattern);
+    ascii.is_err().then(|| format!("{flags}{rest}"))
+}
+
+/// A rule's filter, in Unicode mode, the mode its regex falls back to: the same classes, `\s` and
+/// `(?i)`. A filter that does not compile is none, and its rule runs on every text, as before.
+fn filter_regex(pattern: &str) -> Option<Regex> {
+    Regex::new(&filter_pattern(pattern)?).ok()
+}
 
 /// One thread's regexes while a `Warm` lives: one clone of each regex the thread has used. A clone
 /// shares the compiled program and has a cache of its own, which a search fills as it goes. Taken
@@ -396,6 +449,8 @@ struct Warmed {
     /// The `Warm`s alive on this thread.
     held: usize,
     regexes: HashMap<String, Option<Rc<Regex>>>,
+    /// The rules' filters this thread has used, by the rule's pattern (`FILTERS`).
+    filters: HashMap<String, Option<Rc<Regex>>>,
     /// The clones taken, which the tests count.
     taken: usize,
 }
@@ -410,15 +465,35 @@ impl Warmed {
         cap: usize,
         take: impl FnOnce() -> Option<Regex>,
     ) -> Option<Rc<Regex>> {
-        if let Some(kept) = self.regexes.get(pattern) {
+        Self::kept(&mut self.regexes, &mut self.taken, pattern, cap, take)
+    }
+
+    /// `get` for a rule's filter, kept apart from the rules' regexes.
+    fn filter(
+        &mut self,
+        pattern: &str,
+        cap: usize,
+        take: impl FnOnce() -> Option<Regex>,
+    ) -> Option<Rc<Regex>> {
+        Self::kept(&mut self.filters, &mut self.taken, pattern, cap, take)
+    }
+
+    fn kept(
+        map: &mut HashMap<String, Option<Rc<Regex>>>,
+        taken: &mut usize,
+        pattern: &str,
+        cap: usize,
+        take: impl FnOnce() -> Option<Regex>,
+    ) -> Option<Rc<Regex>> {
+        if let Some(kept) = map.get(pattern) {
             return kept.clone();
         }
-        if self.regexes.len() >= cap {
-            self.regexes.clear();
+        if map.len() >= cap {
+            map.clear();
         }
-        self.taken += 1;
+        *taken += 1;
         let regex = take().map(Rc::new);
-        self.regexes.insert(pattern.to_owned(), regex.clone());
+        map.insert(pattern.to_owned(), regex.clone());
         regex
     }
 }
@@ -446,6 +521,7 @@ impl Drop for Warm {
             w.held = w.held.saturating_sub(1);
             if w.held == 0 {
                 w.regexes = HashMap::new();
+                w.filters = HashMap::new();
             }
         });
     }
@@ -466,6 +542,32 @@ fn compiled(pattern: &str) -> Option<Rc<Regex>> {
         Ok(Some(regex)) => regex,
         _ => COMPILED.get(pattern).map(Rc::new),
     }
+}
+
+/// The filter of the rule whose pattern this is (`filter_pattern`), as `compiled` hands out the
+/// rule's own regex; `None` for a rule that has none.
+fn filter(pattern: &str) -> Option<Rc<Regex>> {
+    #[cfg(test)]
+    if NO_FILTERS.with(std::cell::Cell::get) {
+        return None;
+    }
+    let kept = WARM.try_with(|w| {
+        let mut w = w.borrow_mut();
+        let held = w.held > 0;
+        held.then(|| w.filter(pattern, COMPILED_CAP, || FILTERS.get(pattern)))
+    });
+    match kept {
+        Ok(Some(regex)) => regex,
+        _ => FILTERS.get(pattern).map(Rc::new),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread's scans let a rule go by its filter: a test's look at `spans_in`.
+    pub(crate) static FILTERED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// While set, this thread's scans run every rule its keywords hit, as before the filters.
+    pub(crate) static NO_FILTERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The one gate for text that leaves this machine: summary providers now; embeddings, sync and
@@ -1248,7 +1350,17 @@ fn spans_in(
         .enumerate()
         .filter(|(i, (_, h))| **h && only.is_none_or(|o| o == *i))
     {
-        let Some(re) = rule.regex.as_deref().and_then(compiled) else {
+        let Some(pattern) = rule.regex.as_deref() else {
+            continue;
+        };
+        // The filter first, on the same text: the rule's own regex is not compiled for a text the
+        // filter rejects, so a hook still compiles one regex for such a rule.
+        if filter(pattern).is_some_and(|f| !f.is_match(text)) {
+            #[cfg(test)]
+            FILTERED.with(|n| n.set(n.get() + 1));
+            continue;
+        }
+        let Some(re) = compiled(pattern) else {
             continue;
         };
         // While this rule judges its values, the regexes of the allowlists are this thread's
