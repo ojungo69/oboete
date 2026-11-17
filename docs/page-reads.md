@@ -424,3 +424,39 @@ Tests: `search::b::tests::a_timelines_legs_read_their_own_page_by_index` (every 
 indexes as the consumers make them), `search::b::tests::a_timelines_legs_give_the_wholes_rows`
 (the rows of the union before this change, from places among entries of one time from every leg,
 pages of 1 to 3 at offsets to the third page).
+
+## The month's spend, from an index of its own
+
+What happened. The month's spend was summed from every call in the ledger. `usd_this_month`,
+`embed_usd_this_month`, `reserved_usd_this_month` and budget's newest paid reservation
+(`reservation_retry_at`) each read the whole `provider_calls` table: 14.5 MB on this PC's ledger
+(159,434 calls). The settings page reads the first two each time it loads. Budget reads the first
+before each paid call, and the embedding phase reads the second as it reserves a request, inside
+the transaction that holds the ledger's write lock.
+
+The change. `providers_db::open` makes one more index, after the table's other indexes and after
+the `usd` column, which a ledger from before that column gains in the same open:
+
+- `provider_calls_spend (ts, role, outcome, usd)`
+
+The four reads seek the month's start in it and read nothing else. No other statement on
+`provider_calls` changes its plan: all 25, planned in oboete's SQLite on a copy of the ledger with
+the index made last. My Work's daily count keeps `provider_calls_my_work`, and the reads by
+provider keep `provider_calls_day`. The settings page opens the ledger read-only and never makes
+the index: it reads the table as before until a writer (the worker, curation, the embedding phase)
+has opened the ledger once. The first build took 93 ms on a copy of this PC's ledger, and the index
+is 5.0 MB.
+
+On a copy of this PC's ledger, the first read on a new connection, before and after:
+
+| read | before | after |
+|---|---|---|
+| `usd_this_month` | 14.5 MB, 34 ms | 1.5 MB, 5.8 ms |
+| `embed_usd_this_month` | 14.5 MB, 9.8 ms | 1.5 MB, 3.0 ms |
+| `reserved_usd_this_month` | 14.5 MB, 9.5 ms | 1.5 MB, 2.8 ms |
+| budget's newest paid reservation | 14.5 MB, 10.8 ms | 1.5 MB, 3.2 ms |
+
+Tests: `providers_db::tests::the_months_spend_is_read_from_an_index_of_its_own` (a ledger from
+before `usd`, the month's sums by role and outcome, and each sum's plan), and
+`providers_db::tests::my_works_daily_count_is_its_roles_requests_in_a_rolling_day` (My Work's
+count keeps its index).

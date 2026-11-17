@@ -140,6 +140,13 @@ CREATE TABLE IF NOT EXISTS my_work_round(
 CREATE INDEX IF NOT EXISTS provider_calls_my_work ON provider_calls(ts) WHERE role = 'my_work';
 ";
 
+/// The month's spend (`usd_this_month`, `embed_usd_this_month`, `reserved_usd_this_month` and
+/// budget's newest paid reservation) is read from this index alone, from the month's start: it
+/// read the whole table before, 14.5 MB a read on this PC's ledger (docs/page-reads.md). Made after
+/// the table's other indexes, and after the `usd` column, which an older ledger gains in `open`.
+const SPEND_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS provider_calls_spend ON provider_calls(ts, role, outcome, usd);";
+
 /// The viewer's ledger reads never create a database or run a schema upgrade. An absent
 /// ledger is different from one that cannot be read: only the former means no spend yet.
 pub fn read_only(home: &Path) -> Result<Option<Connection>> {
@@ -208,6 +215,9 @@ pub(crate) fn open_report(
     // many stretches went before the window's own (0: it started one); NULL for any other call.
     if crate::db::ensure_column_until(&mut conn, "provider_calls", "earlier", "INTEGER", deadline)?
     {
+        committed("stores_changed");
+    }
+    if crate::db::ensure_schema_until(&conn, SPEND_INDEX, deadline).context("providers schema")? {
         committed("stores_changed");
     }
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
@@ -590,12 +600,14 @@ pub(crate) fn reserved_since(conn: &Connection, provider: &str, since: i64) -> R
 /// accounting window ends; elapsed request time alone never proves a safe refund.
 pub(crate) fn reserved_usd_this_month(conn: &Connection) -> Result<f64> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
-         WHERE ts>=?1 AND outcome='reserved' AND role NOT IN ('embed','query')",
+        RESERVED_USD_THIS_MONTH,
         [chrono_free_month_start(now_ms())],
         |r| r.get(0),
     )?)
 }
+
+const RESERVED_USD_THIS_MONTH: &str = "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND outcome='reserved' AND role NOT IN ('embed','query')";
 
 /// When a call made at `ts` has left the rolling day that `calls_in_a_day` and `tokens_since`
 /// count (`ts >= now - DAY_MS`): one ms after it is exactly a day old.
@@ -672,13 +684,15 @@ pub fn tokens_since(conn: &Connection, provider: &str, since: i64) -> Result<(i6
 /// time: an entry since removed from the chain or repriced still counts. Embedding calls have a
 /// cap of their own (`embed_usd_this_month`), so neither spend stops the other.
 pub fn usd_this_month(conn: &Connection) -> Result<f64> {
-    Ok(conn.query_row(
-        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
-         WHERE ts>=?1 AND role NOT IN ('embed', 'query')",
-        [chrono_free_month_start(now_ms())],
-        |r| r.get(0),
-    )?)
+    Ok(
+        conn.query_row(USD_THIS_MONTH, [chrono_free_month_start(now_ms())], |r| {
+            r.get(0)
+        })?,
+    )
 }
+
+const USD_THIS_MONTH: &str = "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND role NOT IN ('embed', 'query')";
 
 /// What `provider`'s calls cost since the first of this month (UTC), its reserved ones included.
 pub fn usd_this_month_of(conn: &Connection, provider: &str) -> Result<f64> {
@@ -693,12 +707,14 @@ pub fn usd_this_month_of(conn: &Connection, provider: &str) -> Result<f64> {
 /// of this month (UTC): `[embedding] monthly_usd`'s count (milestone 4 D8).
 pub fn embed_usd_this_month(conn: &Connection) -> Result<f64> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
-         WHERE ts>=?1 AND role IN ('embed', 'query')",
+        EMBED_USD_THIS_MONTH,
         [chrono_free_month_start(now_ms())],
         |r| r.get(0),
     )?)
 }
+
+const EMBED_USD_THIS_MONTH: &str = "SELECT COALESCE(SUM(usd), 0) FROM provider_calls
+         WHERE ts>=?1 AND role IN ('embed', 'query')";
 
 /// What became of a request `embed_phase::reserve` counted (milestone 4 D8): its outcome, time
 /// and detail, its estimated cost kept only when it may have been run (`billed`).
