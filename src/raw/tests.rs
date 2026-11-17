@@ -3441,6 +3441,116 @@ fn which_events_expired_is_read_through_their_index() {
     );
 }
 
+/// #1037: My Work's list of prompts, the sessions of the Sessions tab and Settings, and the prompts
+/// since a time take what they ask of each prompt from the index of the prompts' fields once the
+/// worker built it, as a live store makes its indexes (that one last), reading no prompt's row,
+/// and answer as they answer through the prompts index: through that one each prompt's row was
+/// read, about 30 MB a call on this PC's store, where most prompts are imported and only the row
+/// says so.
+#[test]
+fn the_prompt_reads_take_each_prompts_fields_from_their_index() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let mut seqs = Vec::new();
+    for (i, (kind, session)) in [
+        ("prompt", "a"),
+        ("tool", "a"),
+        ("prompt", "b"),
+        ("prompt", "b"),
+        ("prompt", "c"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = Event {
+            kind: kind.into(),
+            session: session.into(),
+            repo: Some("r".into()),
+            ts: 1_000 + i as i64,
+            ..test_event(&format!("step {i}"))
+        };
+        seqs.push(raw.append(&e).unwrap());
+    }
+    raw.append_imported(&[imported("an imported prompt")], "", None)
+        .unwrap();
+    // One prompt expires and a forget takes another whole: neither lends its session anything.
+    raw.expire_for_test(&[seqs[3]]);
+    let device = raw.device().to_owned();
+    raw.append_tombstone(Target::Record {
+        device: device.clone(),
+        seq: seqs[4],
+    })
+    .unwrap();
+    let read = |raw: &Raw| {
+        let mut sessions: Vec<(String, usize)> = (raw.live_sessions().unwrap().into_iter())
+            .map(|s| (s.session, s.prompts))
+            .collect();
+        sessions.sort();
+        let labels: Vec<(i64, bool)> = (raw.prompt_labels().unwrap().into_iter())
+            .map(|l| (l.1, l.3))
+            .collect();
+        (labels, sessions, raw.prompt_seqs_since(0).unwrap())
+    };
+    let before = read(&raw);
+    assert_eq!(
+        before,
+        (
+            vec![
+                (seqs[4], false),
+                (seqs[3], false),
+                (seqs[2], true),
+                (seqs[0], true)
+            ],
+            vec![("a".to_owned(), 1), ("b".to_owned(), 1)],
+            vec![seqs[0], seqs[2], seqs[3], seqs[4]]
+        )
+    );
+    raw.conn.execute_batch(PROMPT_INDEX).unwrap();
+    raw.ensure_session_index().unwrap();
+    raw.repo_index().unwrap();
+    raw.expired_index().unwrap();
+    assert!(!raw.has_prompt_fields_index().unwrap());
+    raw.prompt_fields_index().unwrap();
+    assert!(raw.has_prompt_fields_index().unwrap());
+    // An index a later change might add, made after it: with no statistics SQLite would take that
+    // one (#908), so the reads name theirs.
+    raw.conn
+        .execute_batch(
+            "CREATE INDEX later ON records(ts DESC, device DESC, seq DESC)
+               WHERE type = 'event' AND kind = 'prompt'",
+        )
+        .unwrap();
+    let live = serde_json::to_string(&LIVE).unwrap();
+    let outer = |sql: &'static str, args: &[&dyn rusqlite::ToSql]| -> String {
+        let sql = raw.by_prompts(sql).unwrap();
+        let plan: Vec<String> = (raw.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")))
+            .unwrap()
+            .query_map(args, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        plan.join(" | ")
+    };
+    for plan in [
+        outer(PROMPT_LABELS, &[&live]),
+        outer(LIVE_SESSIONS, &[&live]),
+        outer(PROMPT_SEQS_SINCE, &[&device, &0_i64, &live]),
+    ] {
+        // The read of the prompts itself, before its subqueries' lines.
+        let first = plan.split(" | ").next().unwrap();
+        assert!(
+            first.contains("USING COVERING INDEX records_prompt_fields"),
+            "{plan}"
+        );
+    }
+    assert_eq!(read(&raw), before);
+    // A prompt that expires after the index was made: the index holds that too.
+    raw.expire_for_test(&[seqs[2]]);
+    let (labels, sessions, _) = read(&raw);
+    assert_eq!(sessions, [("a".to_owned(), 1)]);
+    assert!(labels.contains(&(seqs[2], false)), "{labels:?}");
+}
+
 #[test]
 fn the_sessions_and_the_prompts_since_read_the_prompts_index() {
     let home = tempfile::tempdir().unwrap();

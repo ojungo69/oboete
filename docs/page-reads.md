@@ -272,3 +272,30 @@ go takes them; what does not compile is asked for once),
 `redact::tests::a_threads_regexes_start_again_past_their_cap`,
 `redact::tests::a_secret_is_masked_with_a_warm_as_without` (on the thread, on another thread, and
 right after the thread's map started again).
+
+## #1037: the prompts' fields, from an index of their own
+
+What happened. My Work's list of prompts (`Raw::prompt_labels`) and the sessions of the Sessions
+tab and Settings (`Raw::live_sessions`) read the prompts through `records_prompts`, which holds a
+prompt's time, device and seq alone. Each read went on to every prompt's row for its source,
+agent, session, repository and expiry, one leaf page a prompt, though most prompts are imported
+and leave the read at their source. On this PC's store (6,876 prompts, 922 of them live), each
+read took about 30 MB of a request: of My Work's 109 MB once the expired events' index is built,
+of the Sessions tab's 105 MB, and of Settings' 31 MB. Attributed with a throwaway build that wrote
+each statement's `read()` bytes on its thread, less those of the statements nested in it, never
+committed.
+
+The change. `records_prompt_fields` holds those fields beside the prompts index's order, with the
+same condition. The worker builds it in a pause of the owner's work, as the expired events' index
+(`worker::maintain`): its first build read 1.8 GB in 12 s on a copy of the store. Until it is
+built the reads take `records_prompts` as before. Both reads, and the prompts since a time
+(`Raw::prompt_seqs_since`), name the index they take (`Raw::by_prompts`), since with no statistics
+SQLite breaks a tie toward the index made last (#1036).
+
+On the copy, through the new index: the prompt list 30.5 MB and 120 ms to 0.8 MB and 2 ms, the
+sessions 30.5 MB and 14 ms to 0.8 MB and 2 ms, the same rows.
+
+Tests: `raw::tests::the_prompt_reads_take_each_prompts_fields_from_their_index` (the three reads'
+plans read the index alone, with the indexes made in a live store's order and one made after
+it; the same answers before and after, an expired prompt and one a forget took whole included;
+a prompt that expires after the build), `worker::tests::the_prompt_fields_index_is_built_in_a_pause_beside_the_others`.

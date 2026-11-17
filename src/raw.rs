@@ -181,6 +181,29 @@ fn schema_for_file(conn: &Connection, path: &Path) -> Result<String> {
 const PROMPT_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompts
     ON records(ts DESC, device DESC, seq DESC) WHERE type = 'event' AND kind = 'prompt'";
 
+/// The prompts with what the viewer's prompt reads ask of each (#1037). Through `PROMPT_INDEX` a
+/// read finds each prompt's `source`, `agent`, `session`, `repo` and `expired` in its row, one leaf
+/// page a prompt, though most prompts are imported and leave the read at their source: about 30 MB
+/// a call for 6,876 prompts, 922 of them live, on this PC's store, for My Work's list and for the
+/// sessions of the Sessions tab and Settings. Its first build reads every record once, so only the
+/// worker makes it, in a pause of the owner's work (`worker::maintain`), as `EXPIRED_INDEX`; the
+/// reads take `PROMPT_INDEX` until it is built (`Raw::by_prompts`).
+const PROMPT_FIELDS_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_prompt_fields
+    ON records(ts DESC, device DESC, seq DESC, source, agent, session, repo, expired)
+    WHERE type = 'event' AND kind = 'prompt'";
+
+/// `Raw::prompt_labels`: every prompt of a live source, newest first, by the prompts index (it
+/// took that one unnamed), named so that `Raw::by_prompts` can name the fields' one instead.
+const PROMPT_LABELS: &str = "SELECT r.device, r.seq, r.agent, r.session,
+            r.expired IS NULL AND NOT EXISTS (
+              SELECT 1 FROM records t WHERE t.type = 'tombstone'
+                AND t.target_device = r.device AND t.target_seq = r.seq
+                AND t.target_offset IS NULL)
+     FROM records r INDEXED BY records_prompts
+     WHERE r.type = 'event' AND r.kind = 'prompt'
+       AND r.source IN (SELECT value FROM json_each(?1))
+     ORDER BY r.ts DESC, r.device DESC, r.seq DESC";
+
 /// `Raw::live_sessions`: every agent's session with a live prompt, by the prompts index. Named: with
 /// no statistics, SQLite took the events' repository index once a store had made it after this
 /// one (#908), and read every event to find the prompts (about 1.9 GB on a store of 810,000
@@ -5049,6 +5072,36 @@ impl Raw {
         Ok(())
     }
 
+    /// Whether `records_prompt_fields` (`PROMPT_FIELDS_INDEX`) is built.
+    pub(crate) fn has_prompt_fields_index(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+               WHERE type = 'index' AND name = 'records_prompt_fields')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `PROMPT_FIELDS_INDEX`, which only the worker builds, in a pause of the owner's work
+    /// (`worker::maintain`).
+    pub(crate) fn prompt_fields_index(&self) -> Result<()> {
+        self.conn.execute_batch(PROMPT_FIELDS_INDEX)?;
+        Ok(())
+    }
+
+    /// A prompt read that names the prompts index, naming instead the index of the prompts' fields
+    /// once the worker built it, so it reads no prompt's row (#1037).
+    fn by_prompts(&self, sql: &'static str) -> Result<std::borrow::Cow<'static, str>> {
+        const NAMED: &str = "INDEXED BY records_prompts\n";
+        debug_assert_eq!(sql.matches(NAMED).count(), 1, "{sql}");
+        Ok(if self.has_prompt_fields_index()? {
+            sql.replacen(NAMED, "INDEXED BY records_prompt_fields\n", 1)
+                .into()
+        } else {
+            sql.into()
+        })
+    }
+
     /// Slice 2: the fields of each imported work state write (an op of an import's source) to
     /// `list` whose `content_session_id` is one of `sessions`, as `oboete import claude-mem`
     /// brought them in: the rows of the conversations asked about alone (cubic on #850). None a
@@ -5293,17 +5346,7 @@ impl Raw {
     pub(crate) fn prompt_labels(&self) -> Result<Vec<PromptLabel>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         // As `hide` reads a tombstone: one with no range takes the record whole.
-        let mut st = self.conn.prepare(
-            "SELECT r.device, r.seq, r.agent, r.session,
-                    r.expired IS NULL AND NOT EXISTS (
-                      SELECT 1 FROM records t WHERE t.type = 'tombstone'
-                        AND t.target_device = r.device AND t.target_seq = r.seq
-                        AND t.target_offset IS NULL)
-             FROM records r
-             WHERE r.type = 'event' AND r.kind = 'prompt'
-               AND r.source IN (SELECT value FROM json_each(?1))
-             ORDER BY r.ts DESC, r.device DESC, r.seq DESC",
-        )?;
+        let mut st = self.conn.prepare(&self.by_prompts(PROMPT_LABELS)?)?;
         let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
             Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?), r.get(4)?))
         })?;
@@ -5334,7 +5377,7 @@ impl Raw {
     /// leaves them.
     pub(crate) fn prompt_seqs_since(&self, since: i64) -> Result<Vec<i64>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
-        let mut st = self.conn.prepare(PROMPT_SEQS_SINCE)?;
+        let mut st = self.conn.prepare(&self.by_prompts(PROMPT_SEQS_SINCE)?)?;
         let rows = st.query_map(
             params![self.device, since, serde_json::to_string(&LIVE)?],
             |r| r.get(0),
@@ -5365,7 +5408,7 @@ impl Raw {
     pub fn live_sessions(&self) -> Result<Vec<LiveSession>> {
         self.conn.execute_batch(PROMPT_INDEX)?;
         // With one MIN(), SQLite takes the other bare columns from its row: the first prompt's.
-        let mut st = self.conn.prepare(LIVE_SESSIONS)?;
+        let mut st = self.conn.prepare(&self.by_prompts(LIVE_SESSIONS)?)?;
         let rows = st.query_map([serde_json::to_string(&LIVE)?], |r| {
             Ok(LiveSession {
                 started: r.get(0)?,
