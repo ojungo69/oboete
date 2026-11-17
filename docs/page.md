@@ -6,7 +6,8 @@ first, as claude-mem's viewer shows its observations, summaries and prompts. The
 record is claude-mem 13.28.0's viewer (`src/ui/viewer/`, `src/services/worker/PaginationHelper.ts`
 at 039c6160), described for an independent implementation in the takeover notes'
 `claude-mem-spec/viewer.md`. Nothing of its code is taken: the page stays `assets/viewer/` (plain
-JavaScript and CSS, no bundler, no new dependency) and `src/view.rs`.
+JavaScript and CSS, no bundler, no new dependency) and `src/view.rs`. claude-mem's My Work pages are
+the one exception (decision 114, "claude-mem's My Work pages" below).
 
 ## Why
 
@@ -220,3 +221,40 @@ oboete's session page has "Forget this session" (docs/page-forget.md, row 3).
    on read; one a forget names is not given and takes no place before the consumer catches up
    (`feed_shows_saved_notes_scoped_paged_and_forgotten_ones_hidden`). The page draws it as a card
    labelled `Note` (the viewer's Node harness).
+
+## claude-mem's My Work pages (decision 114)
+
+Decision 114 (2026-11-17) serves claude-mem 15.19.0's work-view (My Work, focus areas, Suggested,
+Past focus and My Rules) on oboete's engine. The findings behind it, and what a spike checks, are in
+the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside the repository. The rest of this page is oboete's own, as above.
+
+- Only the work-view is taken. claude-mem's classic viewer is not: its paths (`/api/settings`,
+  `/api/sessions`, `/api/search`, `/api/timeline`) are oboete's with other shapes, it routes on the
+  hash that carries the page's token, it deletes with `DELETE`, and its settings are its own; oboete's
+  page already has those screens (Claude; overrulable).
+- A throwaway spike in the isolated user comes first. If it fails, oboete's own page is extended by
+  hand to claude-mem's pages instead (Claude; overrulable). The spike runs beside the remaining speed
+  work of the page (Claude; overrulable).
+- The new pages open at an address of their own, with a token that reaches `/api/work-view/` alone.
+  Every action on them works there, as in claude-mem. Every package their bundle holds is checked
+  before it ships and again at each update: where it comes from, what it runs when installed (the
+  bundle is built with install scripts off), and the advisories against it. The page may reach no
+  address but oboete's own.
+- The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
+  (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
+  claude-mem shows every request, the last 7 days while #1037's reads are slow
+  (Claude; overrulable).
+- A request shows claude-mem's states. What becomes of oboete's own (stalled, not started, a recorded
+  update) is decided when oboete's old My Work pages go (Claude; overrulable).
+- The focus areas' artwork ships as claude-mem's: its author added it to the repository, under
+  Apache-2.0, and oboete's `NOTICE` names it with the rest of the bundle (Claude; overrulable). Each file the bundle holds is checked for
+  its licence in the spike, and one whose licence is not confirmed is replaced (Claude; overrulable).
+- oboete follows claude-mem's releases. When one bump takes more than a day, bumps come less often;
+  the pages are not forked (Claude; overrulable).
+- The timeline, records and settings take the new look as soon as the new My Work has its Japanese
+  (Claude; overrulable).
+- What the pages have and oboete lacks is hidden until it is built: rows X36 to X38 of
+  [claude-mem-parity.md](claude-mem-parity.md). Continuing a conversation will work from the new
+  pages directly too. Focus sharing and Team stay unbuilt (row 22).
+- The page's words are [GLOSSARY.md](../GLOSSARY.md)'s. In English a claim is a memory, and their list
+  is Memories, since Learned is a summary's section, as in claude-mem (Claude; overrulable).
