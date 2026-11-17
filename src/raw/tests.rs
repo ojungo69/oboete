@@ -2948,19 +2948,25 @@ fn a_sessions_latest_event_is_sought_by_its_index_once_built() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    assert!(!raw.has_session_index().unwrap());
+    assert!(index::made(&raw, index::Builder::Pause).is_empty());
     assert!(
         !plan(&raw).contains("records_session_seq"),
         "{}",
         plan(&raw)
     );
     assert_eq!(latest(&raw), vec![3, 1]);
-    raw.ensure_session_index().unwrap();
-    assert!(raw.has_session_index().unwrap());
+    index::build_first(&raw, index::Builder::Pause, 1);
+    assert_eq!(
+        index::made(&raw, index::Builder::Pause),
+        ["records_session_seq"]
+    );
     assert!(plan(&raw).contains("records_session_seq"), "{}", plan(&raw));
     assert_eq!(latest(&raw), vec![3, 1]);
     drop(raw);
-    assert!(open(home.path()).unwrap().has_session_index().unwrap());
+    assert_eq!(
+        index::made(&open(home.path()).unwrap(), index::Builder::Pause),
+        ["records_session_seq"]
+    );
 }
 
 /// #899 W2: the events' repositories read through `records_repo` are those read from every
@@ -3003,7 +3009,7 @@ fn the_events_repositories_are_read_from_their_index_once_it_is_built() {
             .unwrap()
             .join(" | ")
     };
-    assert!(!raw.has_repo_index().unwrap());
+    assert!(!has_repo_index(&raw.conn, "main").unwrap());
     assert_eq!(names(&raw), ["a/one", "b/two", "c/rule"]);
     assert!(
         plan(&raw, false).contains("SCAN main.records"),
@@ -3011,7 +3017,7 @@ fn the_events_repositories_are_read_from_their_index_once_it_is_built() {
         plan(&raw, false)
     );
     raw.repo_index().unwrap();
-    assert!(raw.has_repo_index().unwrap());
+    assert!(has_repo_index(&raw.conn, "main").unwrap());
     assert_eq!(names(&raw), ["a/one", "b/two", "c/rule"]);
     let seeks = plan(&raw, true);
     assert!(
@@ -3032,7 +3038,7 @@ fn the_events_repositories_are_read_from_their_index_once_it_is_built() {
         ["a/on", "a/one", "a/one-more", "b/two", "c/rule", "zz/last"]
     );
     drop(raw);
-    assert!(open(home.path()).unwrap().has_repo_index().unwrap());
+    assert!(has_repo_index(&open(home.path()).unwrap().conn, "main").unwrap());
 }
 
 /// Forget's `records_sessions` and the seek's `records_session_seq` are two indexes, each as
@@ -3058,9 +3064,9 @@ fn the_seeks_index_and_forgets_are_two_whichever_comes_first() {
         raw.append(&test_event("one")).unwrap();
         if forget_first {
             raw.session_indexes().unwrap();
-            assert!(!raw.has_session_index().unwrap());
+            assert!(index::made(&raw, index::Builder::Pause).is_empty());
         }
-        raw.ensure_session_index().unwrap();
+        index::build_first(&raw, index::Builder::Pause, 1);
         raw.session_indexes().unwrap();
         let both = indexes(&raw);
         assert_eq!(both.len(), 2, "{both:?}");
@@ -3409,11 +3415,13 @@ fn which_events_expired_is_read_through_their_index() {
     let without = raw.expired_among(&device, &asked).unwrap();
     assert_eq!(without, [seqs[1], seqs[4]]);
     raw.conn.execute_batch(PROMPT_INDEX).unwrap();
-    raw.ensure_session_index().unwrap();
-    raw.repo_index().unwrap();
-    assert!(!raw.has_expired_index().unwrap());
-    raw.expired_index().unwrap();
-    assert!(raw.has_expired_index().unwrap());
+    index::build_first(&raw, index::Builder::Pause, 2);
+    assert_eq!(index::EXPIRED_AMONG.sql(&raw.conn).unwrap(), EXPIRED_AMONG);
+    index::build_first(&raw, index::Builder::Pause, 3);
+    assert_eq!(
+        index::EXPIRED_AMONG.sql(&raw.conn).unwrap(),
+        EXPIRED_AMONG_INDEXED
+    );
     // An index a later change might add, made after it: with no statistics SQLite would take that
     // one (#908), so the statement names its own.
     raw.conn
@@ -3423,7 +3431,7 @@ fn which_events_expired_is_read_through_their_index() {
         .conn
         .prepare(&format!(
             "EXPLAIN QUERY PLAN {}",
-            raw.expired_among_sql().unwrap()
+            index::EXPIRED_AMONG.sql(&raw.conn).unwrap()
         ))
         .unwrap()
         .query_map(params![device, "[]"], |r| r.get::<_, String>(3))
@@ -3506,11 +3514,9 @@ fn the_prompt_reads_take_each_prompts_fields_from_their_index() {
         )
     );
     raw.conn.execute_batch(PROMPT_INDEX).unwrap();
-    raw.ensure_session_index().unwrap();
-    raw.repo_index().unwrap();
-    raw.expired_index().unwrap();
+    index::build_first(&raw, index::Builder::Pause, 3);
     assert!(!raw.has_prompt_fields_index().unwrap());
-    raw.prompt_fields_index().unwrap();
+    index::build(&raw, index::Builder::Pause).unwrap();
     assert!(raw.has_prompt_fields_index().unwrap());
     // An index a later change might add, made after it: with no statistics SQLite would take that
     // one (#908), so the reads name theirs.
@@ -3573,8 +3579,7 @@ fn the_sessions_and_the_prompts_since_read_the_prompts_index() {
     // the worker's of the sessions, then the events' repositories' (#908, 2026-11-10). With no
     // statistics, SQLite took the one made last.
     raw.conn.execute_batch(PROMPT_INDEX).unwrap();
-    raw.ensure_session_index().unwrap();
-    raw.repo_index().unwrap();
+    index::build_first(&raw, index::Builder::Pause, 2);
     let live = serde_json::to_string(&LIVE).unwrap();
     let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> String {
         raw.conn
@@ -3600,4 +3605,91 @@ fn the_sessions_and_the_prompts_since_read_the_prompts_index() {
     names.sort();
     assert_eq!(names, ["a", "b"]);
     assert_eq!(raw.prompt_seqs_since(0).unwrap().len(), 2);
+}
+
+/// The pause builds what it keeps and raw.db lacks, in its one order, on a fresh store and on one
+/// an earlier worker left with any part of it, after the prompts' index the page makes first; then
+/// nothing is left, and a second build makes none.
+#[test]
+fn the_pause_builds_what_it_lacks_in_its_one_order() {
+    use index::Builder::Pause;
+    let all = index::keeps(Pause);
+    assert_eq!(
+        all,
+        [
+            "records_session_seq",
+            "records_repo",
+            "records_expired",
+            "records_prompt_fields"
+        ]
+    );
+    for k in 0..=all.len() {
+        let home = tempfile::tempdir().unwrap();
+        let raw = open(home.path()).unwrap();
+        raw.conn.execute_batch(PROMPT_INDEX).unwrap();
+        index::build_first(&raw, Pause, k);
+        assert_eq!(index::made(&raw, Pause), all[..k].to_vec(), "{k} built");
+        assert_eq!(
+            index::missing(&raw, Pause).unwrap(),
+            k < all.len(),
+            "{k} built"
+        );
+        index::build(&raw, Pause).unwrap();
+        assert_eq!(index::made(&raw, Pause), all, "{k} built first");
+        assert!(!index::missing(&raw, Pause).unwrap(), "{k} built first");
+        let indexes = || -> i64 {
+            raw.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = indexes();
+        index::build(&raw, Pause).unwrap();
+        assert_eq!(indexes(), before, "a second build makes none");
+    }
+}
+
+/// A pause build that fails, here on a table of an index's name, leaves that index's read on its
+/// plain form, builds the rest and returns the failure; once the table is gone the next pause
+/// builds it, last.
+#[test]
+fn a_failed_pause_build_keeps_its_read_plain_and_builds_the_rest() {
+    use index::Builder::Pause;
+    let home = tempfile::tempdir().unwrap();
+    let raw = open(home.path()).unwrap();
+    raw.conn
+        .execute_batch("CREATE TABLE records_expired(x)")
+        .unwrap();
+    let e = index::build(&raw, Pause).unwrap_err();
+    assert!(format!("{e:#}").contains("records_expired"), "{e:#}");
+    assert_eq!(
+        index::made(&raw, Pause),
+        [
+            "records_session_seq",
+            "records_repo",
+            "records_prompt_fields"
+        ]
+    );
+    assert!(index::missing(&raw, Pause).unwrap());
+    assert_eq!(index::EXPIRED_AMONG.sql(&raw.conn).unwrap(), EXPIRED_AMONG);
+    raw.conn
+        .execute_batch("DROP TABLE records_expired")
+        .unwrap();
+    index::build(&raw, Pause).unwrap();
+    assert_eq!(
+        index::made(&raw, Pause),
+        [
+            "records_session_seq",
+            "records_repo",
+            "records_prompt_fields",
+            "records_expired"
+        ]
+    );
+    assert_eq!(
+        index::EXPIRED_AMONG.sql(&raw.conn).unwrap(),
+        EXPIRED_AMONG_INDEXED
+    );
 }

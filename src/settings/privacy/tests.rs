@@ -247,7 +247,8 @@ fn repositories_the_index_never_names_are_listed_from_the_records() {
     assert_eq!(listed(), all);
     assert_eq!(sought(), before, "with no index every record is read");
     assert!(
-        !store.raw.has_repo_index().unwrap(),
+        !crate::raw::index::made(&store.raw, crate::raw::index::Builder::Pause)
+            .contains(&"records_repo"),
         "a read builds no index"
     );
     // The same names through the records' index, once something has built it.

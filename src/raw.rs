@@ -232,7 +232,7 @@ const PROMPT_SEQS_SINCE: &str = "SELECT seq FROM records INDEXED BY records_prom
 /// no earlier event reads them all (1.2 s warm and about 12 s cold on 717,000 records, 2026-11-04).
 /// Forget's `records_sessions` (`session_indexes`) does not serve it: ordered by seq, the seek
 /// still walks the primary key with that one in place (0.65 s on the same records). Only the
-/// worker creates this one, in a pause of the owner's work (`ensure_session_index`), never `open`,
+/// worker creates this one, in a pause of the owner's work (`index::Builder::Pause`), never `open`,
 /// a hook or a command: its first build on such a store takes seconds, longer than a hook's write
 /// waits (`OPEN_WAIT`).
 const SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS records_session_seq
@@ -257,6 +257,165 @@ const EXPIRED_AMONG: &str = "SELECT seq FROM records WHERE device = ?1 AND type 
 const EXPIRED_AMONG_INDEXED: &str = "SELECT seq FROM records INDEXED BY records_expired
      WHERE device = ?1 AND type = 'event' AND expired IS NOT NULL
        AND seq IN (SELECT value FROM json_each(?2))";
+
+/// The index of the events' repositories (`Raw::repo_index`, and the pause's: `index::Builder`).
+const REPO_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'";
+
+/// raw.db's optional indexes: those a store can be without, made after it exists, because a first
+/// build reads every record and takes seconds a hook's write would wait out (`OPEN_WAIT`). A
+/// builder names itself and a reader names its read; which indexes there are, what makes them, the
+/// order they are made in and whether one is built are this module's.
+///
+/// Through here so far: the worker's pause builds (`Builder::Pause`, `worker::maintain`), and
+/// `Raw::expired_among` reads (`EXPIRED_AMONG`). The other builders still name their indexes: a
+/// forget's preview and a retention batch (`Raw::session_indexes`), an exclusion read and a forget
+/// of a repository (`Raw::repo_index`) and the prompt reads (`PROMPT_INDEX`); forget's
+/// `denied_records_session` is made with its table.
+pub(crate) mod index {
+    use super::{Connection, Raw, Result};
+
+    /// One optional index: its name and the statement that makes it.
+    struct Index {
+        name: &'static str,
+        ddl: &'static str,
+    }
+
+    /// What the worker's pause keeps, in the one order it makes them. With no statistics SQLite
+    /// breaks a tie between indexes toward the one made last (#1036), so the order is part of the
+    /// plans: an index no store has yet goes at the end, as it lands last on an upgraded store.
+    const PAUSE: &[Index] = &[
+        Index {
+            name: "records_session_seq",
+            ddl: super::SESSION_INDEX,
+        },
+        Index {
+            name: "records_repo",
+            ddl: super::REPO_INDEX,
+        },
+        Index {
+            name: "records_expired",
+            ddl: super::EXPIRED_INDEX,
+        },
+        Index {
+            name: "records_prompt_fields",
+            ddl: super::PROMPT_FIELDS_INDEX,
+        },
+    ];
+
+    /// Who builds optional indexes through here: a closed list, so that a new builder is a new
+    /// variant, reviewed here with its reason.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Builder {
+        /// The worker, in a pause of the owner's work (`worker::maintain`): never `open`, a hook
+        /// or a reader.
+        Pause,
+    }
+
+    impl Builder {
+        fn indexes(self) -> &'static [Index] {
+            match self {
+                Builder::Pause => PAUSE,
+            }
+        }
+    }
+
+    /// The names of the indexes raw.db holds, in the order they were made: one read of
+    /// `sqlite_master`.
+    fn built(conn: &Connection) -> Result<Vec<String>> {
+        let mut st = conn
+            .prepare_cached("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY rowid")?;
+        let names = st.query_map([], |r| r.get(0))?;
+        Ok(names.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether `builder` has an index left to build: one read of `sqlite_master`.
+    pub(crate) fn missing(raw: &Raw, builder: Builder) -> Result<bool> {
+        let built = built(&raw.conn)?;
+        Ok(builder
+            .indexes()
+            .iter()
+            .any(|i| !built.iter().any(|b| b == i.name)))
+    }
+
+    /// Builds what `builder` keeps and raw.db lacks, in its order. Each build is one
+    /// `CREATE INDEX IF NOT EXISTS`, committed as it ends, and one that fails leaves no index, so
+    /// its reads stay on their plain forms. Every build is tried; the first failure is returned, and
+    /// the worker tries again at a later idle time.
+    pub(crate) fn build(raw: &Raw, builder: Builder) -> Result<()> {
+        let built = built(&raw.conn)?;
+        let mut failed = None;
+        for i in builder.indexes() {
+            if built.iter().any(|b| b == i.name) {
+                continue;
+            }
+            if let Err(e) = raw.conn.execute_batch(i.ddl) {
+                failed.get_or_insert(anyhow::Error::from(e).context(i.name));
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// A read with two statements, both the measured ones: its indexed form once its index is
+    /// built, its plain form before. The indexed form names its index, so that an index made later
+    /// cannot take its plan (#1036).
+    pub(crate) struct Twin {
+        index: &'static str,
+        indexed: &'static str,
+        plain: &'static str,
+    }
+
+    impl Twin {
+        /// The statement to run on `conn` now: one read of `sqlite_master`. It builds nothing and
+        /// writes nothing, so a read-only connection may ask.
+        pub(crate) fn sql(&self, conn: &Connection) -> Result<&'static str> {
+            let built: bool = conn
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                )?
+                .query_row([self.index], |r| r.get(0))?;
+            Ok(if built { self.indexed } else { self.plain })
+        }
+    }
+
+    /// `Raw::expired_among`: which of a device's seqs are events retention expired (#1037).
+    pub(crate) const EXPIRED_AMONG: Twin = Twin {
+        index: "records_expired",
+        indexed: super::EXPIRED_AMONG_INDEXED,
+        plain: super::EXPIRED_AMONG,
+    };
+
+    /// The indexes `builder` keeps that raw.db holds, in the order they were made.
+    #[cfg(test)]
+    pub(crate) fn made(raw: &Raw, builder: Builder) -> Vec<&'static str> {
+        built(&raw.conn)
+            .unwrap()
+            .iter()
+            .filter_map(|b| {
+                builder
+                    .indexes()
+                    .iter()
+                    .find(|i| i.name == b)
+                    .map(|i| i.name)
+            })
+            .collect()
+    }
+
+    /// Every index `builder` keeps, in its order.
+    #[cfg(test)]
+    pub(crate) fn keeps(builder: Builder) -> Vec<&'static str> {
+        builder.indexes().iter().map(|i| i.name).collect()
+    }
+
+    /// Builds the first `k` indexes `builder` keeps: a store an earlier worker left with part of
+    /// them.
+    #[cfg(test)]
+    pub(crate) fn build_first(raw: &Raw, builder: Builder, k: usize) {
+        for i in &builder.indexes()[..k] {
+            raw.conn.execute_batch(i.ddl).unwrap();
+        }
+    }
+}
 
 /// The repositories the events of `schema`'s records name, each once (`event_repos`). Through
 /// `records_repo` each name is one seek of the index: the least name, then the least one above
@@ -2635,18 +2794,11 @@ impl Raw {
             .collect())
     }
 
-    /// Whether `records_repo` is built.
-    pub(crate) fn has_repo_index(&self) -> Result<bool> {
-        has_repo_index(&self.conn, "main")
-    }
-
     /// The index of the events' repositories, built the first time something reads them by
     /// repository: an exclusion (`sessions_in`) or a forget's preview, or by the worker in a pause
-    /// of the owner's work (`worker::maintain`); never by `open`, a hook or a reader.
+    /// of the owner's work (`index::Builder::Pause`); never by `open`, a hook or a reader.
     pub(crate) fn repo_index(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS records_repo ON records(repo) WHERE type = 'event'",
-        )?;
+        self.conn.execute_batch(REPO_INDEX)?;
         Ok(())
     }
 
@@ -5040,36 +5192,9 @@ impl Raw {
     pub(crate) fn expired_among(&self, device: &str, seqs: &[i64]) -> Result<Vec<i64>> {
         Ok(self
             .conn
-            .prepare_cached(self.expired_among_sql()?)?
+            .prepare_cached(index::EXPIRED_AMONG.sql(&self.conn)?)?
             .query_map(params![device, serde_json::to_string(seqs)?], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// `expired_among`'s statement: through `EXPIRED_INDEX` once the worker built it, else a read
-    /// of each asked record's row (#1037).
-    pub(crate) fn expired_among_sql(&self) -> Result<&'static str> {
-        Ok(if self.has_expired_index()? {
-            EXPIRED_AMONG_INDEXED
-        } else {
-            EXPIRED_AMONG
-        })
-    }
-
-    /// Whether `records_expired` (`EXPIRED_INDEX`) is built.
-    pub(crate) fn has_expired_index(&self) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master
-               WHERE type = 'index' AND name = 'records_expired')",
-            [],
-            |r| r.get(0),
-        )?)
-    }
-
-    /// `EXPIRED_INDEX`, which only the worker builds, in a pause of the owner's work
-    /// (`worker::maintain`).
-    pub(crate) fn expired_index(&self) -> Result<()> {
-        self.conn.execute_batch(EXPIRED_INDEX)?;
-        Ok(())
     }
 
     /// Whether `records_prompt_fields` (`PROMPT_FIELDS_INDEX`) is built.
@@ -5080,13 +5205,6 @@ impl Raw {
             [],
             |r| r.get(0),
         )?)
-    }
-
-    /// `PROMPT_FIELDS_INDEX`, which only the worker builds, in a pause of the owner's work
-    /// (`worker::maintain`).
-    pub(crate) fn prompt_fields_index(&self) -> Result<()> {
-        self.conn.execute_batch(PROMPT_FIELDS_INDEX)?;
-        Ok(())
     }
 
     /// A prompt read that names the prompts index, naming instead the index of the prompts' fields
@@ -7206,22 +7324,6 @@ impl Raw {
         )?;
         let rows = st.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Whether `SESSION_INDEX` is built.
-    pub(crate) fn has_session_index(&self) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master
-               WHERE type = 'index' AND name = 'records_session_seq')",
-            [],
-            |r| r.get(0),
-        )?)
-    }
-
-    /// Builds `SESSION_INDEX`: the worker's, in a pause of the owner's work.
-    pub(crate) fn ensure_session_index(&self) -> Result<()> {
-        self.conn.execute_batch(SESSION_INDEX)?;
-        Ok(())
     }
 
     /// D9: the time of this device's newest record a hook wrote, walking down from the top past

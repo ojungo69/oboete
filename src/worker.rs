@@ -1749,32 +1749,25 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
 /// its events for the next hook to write back (docs/unwritten.md).
 const INDEX_PAUSE_MS: i64 = 30 * 60_000;
 
-/// What an idle worker keeps up besides the backups: raw's session index (`Raw::ensure_session_index`),
-/// the index of the events' repositories (`Raw::repo_index`, which the settings page's list of
-/// repositories reads: #899 W2), the index of the expired events (`Raw::expired_index`, which My
-/// Work reads: #1037) and the index of the prompts' fields (`Raw::prompt_fields_index`, which My
-/// Work's list and the sessions of the Sessions tab and Settings read: #1037), each built once in
-/// a pause of the owner's work, since its first build takes seconds a hook's write would wait out.
-/// Not while a command waits for the worker to step aside (R12) or it is leaving, nor with a call
-/// out (R10). A build that fails is tried again at a later idle time; the readers work without the
-/// indexes, only slower.
+/// What an idle worker keeps up besides the backups: raw's optional indexes of the pause
+/// (`raw::index::Builder::Pause`: the sessions' seek, the events' repositories that the settings
+/// page's list reads (#899 W2), the expired events and the prompts' fields that My Work, the
+/// Sessions tab and Settings read (#1037)), each built once in a pause of the owner's work, since
+/// its first build takes seconds a hook's write would wait out. Not while a command waits for the
+/// worker to step aside (R12) or it is leaving, nor with a call out (R10). A build that fails is
+/// tried again at a later idle time; the readers work without the indexes, only slower.
 fn maintain(home: &Path, raw: &Raw, leaving: bool, calling: bool) {
+    use crate::raw::index::{self, Builder};
     // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
-    let built = raw.has_session_index().unwrap_or(true)
-        && raw.has_repo_index().unwrap_or(true)
-        && raw.has_expired_index().unwrap_or(true)
-        && raw.has_prompt_fields_index().unwrap_or(true);
-    if leaving || calling || asked_aside(home) || built {
+    let missing = index::missing(raw, Builder::Pause).unwrap_or(false);
+    if leaving || calling || asked_aside(home) || !missing {
         return;
     }
     let paused = raw
         .last_hook_ts()
         .is_ok_and(|ts| ts.is_none_or(|ts| crate::db::now_ms() - ts >= INDEX_PAUSE_MS));
     if paused {
-        let _ = raw.ensure_session_index();
-        let _ = raw.repo_index();
-        let _ = raw.expired_index();
-        let _ = raw.prompt_fields_index();
+        let _ = index::build(raw, Builder::Pause);
     }
 }
 

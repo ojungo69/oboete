@@ -146,7 +146,7 @@ by the index as from every record, by seeks and with no read of the records, a n
 too); `settings::privacy::tests::repositories_the_index_never_names_are_listed_from_the_records`
 (a rule's record's repository and another device's are listed, with the index and without, with
 knowledge.db and without, and a read builds no index);
-`worker::tests::the_repository_index_is_built_in_a_pause_beside_the_session_index`.
+`worker::tests::the_pause_builds_what_it_keeps_on_a_store_with_any_part_of_it`.
 
 ## The cards' part of W4: a page of cards is read in an index's order
 
@@ -298,7 +298,7 @@ sessions 30.5 MB and 14 ms to 0.8 MB and 2 ms, the same rows.
 Tests: `raw::tests::the_prompt_reads_take_each_prompts_fields_from_their_index` (the three reads'
 plans read the index alone, with the indexes made in a live store's order and one made after
 it; the same answers before and after, an expired prompt and one a forget took whole included;
-a prompt that expires after the build), `worker::tests::the_prompt_fields_index_is_built_in_a_pause_beside_the_others`.
+a prompt that expires after the build), `worker::tests::the_pause_builds_what_it_keeps_on_a_store_with_any_part_of_it`.
 
 ## #1037: the removed lists and the sessions' counts, from partial indexes
 
