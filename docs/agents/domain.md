@@ -34,7 +34,7 @@ date, written as what was decided. It is not a file of its own.
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md` and the spec. Don't drift to synonyms they explicitly avoid. On the page, what the code calls a claim is 「覚えたこと」 in Japanese and "Learned" in English.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md` and the spec. Don't drift to synonyms they explicitly avoid.
 
 If the concept you need isn't defined yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 

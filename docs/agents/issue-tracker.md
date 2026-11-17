@@ -1,6 +1,8 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues for this repo live as GitHub issues, and so do the specs `/to-spec` writes, each for one
+piece of work. The spec of record is `docs/spec.md` with its amendments (`CLAUDE.md`): where a
+spec issue and it disagree, `docs/spec.md` holds. Use the `gh` CLI for all operations.
 
 ## This repository
 
