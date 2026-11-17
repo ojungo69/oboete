@@ -10,7 +10,7 @@
 //! right whatever writes: `raw_docs` by `Fts::step` (inserts), `reindex` (Fts and FtsText) and
 //! `Fts::rewind` (deletes); `derivations` by `Claims::step` (inserts), `Claims::rewind` and
 //! `Anchors` (deletes); `imported` by `Imported::step` (inserts), `Imported::rewind` and
-//! `forget::history::remove` (deletes). None of them updates a column counted (`Claims` sets a
+//! `forget::history::remove` (deletes). None of them updates a column counted (`Anchors` sets a
 //! derivation's status, which is not one), and such an update aborts (the `_kept` triggers). An
 //! `INSERT OR REPLACE` would delete the row it replaces with no trigger fired (recursive triggers
 //! are off), which a test keeps out.
@@ -93,12 +93,14 @@ INSERT INTO repo_counts
   SELECT repo, 'i', COUNT(DISTINCT uid), MAX(ts) FROM imported GROUP BY repo";
 
 /// Whether `k` holds this build's table and triggers and no other: then `repo_counts` holds what
-/// the tables count (they are made together, `keep`, and kept by the triggers since).
+/// the tables count (they are made together, `keep`, and kept by the triggers since). SQLite's
+/// names are of any case, `GLOB` is not: the namespace is read in lower case, so another build's
+/// `REPO_COUNTS_…` trigger, or one of these under another case, is no store this build holds.
 pub(crate) fn kept(k: &Connection) -> Result<bool> {
     let mut st = k.prepare_cached(
         "SELECT name, sql FROM sqlite_master
-         WHERE (type = 'table' AND name = 'repo_counts')
-            OR (type = 'trigger' AND name GLOB 'repo_counts_*')",
+         WHERE (type = 'table' AND lower(name) = 'repo_counts')
+            OR (type = 'trigger' AND lower(name) GLOB 'repo_counts_*')",
     )?;
     let found = st
         .query_map([], |r| {
@@ -134,10 +136,12 @@ pub(crate) fn keep(k: &Connection) -> Result<()> {
     crate::claims::schema(k)?;
     crate::consumer::imported::schema(k)?;
     crate::consumer::imported::cover(k)?;
-    // Every build's triggers go: an older or a newer build's left beside these would count twice.
+    // Every build's triggers go, of any case: an older or a newer build's left beside these would
+    // count twice, and one of these under another case would stop them being made.
     let theirs: Vec<String> = k
         .prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'repo_counts_*'",
+            "SELECT name FROM sqlite_master
+             WHERE type = 'trigger' AND lower(name) GLOB 'repo_counts_*'",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;

@@ -463,9 +463,10 @@ count keeps its index).
 
 ## #1037: the repository list, from counts the triggers keep
 
-What happened. The repository list (`GET /api/repos`, `view::repos_in`) and its names
-(`view::repo_names_in`, which Settings' privacy section reads) counted every repository's claims,
-imported documents and records on each read. On a copy of this PC's knowledge.db (4.3 GB, 965
+What happened. The repository list (`GET /api/repos`, `view::repos_in`) counted every
+repository's claims, imported documents and records on each read, and its names
+(`view::repo_names_in`, which Settings' privacy section reads) took the union of the three tables'
+repositories. On a copy of this PC's knowledge.db (4.3 GB, 965
 repositories, 2026-11-17), the list read 118.6 MB: 2.6 to 2.9 s on its first read and 0.8 s on the
 next. The page reads the list again each time the store's version moves.
 

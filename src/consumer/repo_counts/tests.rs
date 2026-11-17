@@ -52,6 +52,12 @@ fn the_counts_are_made_again_unless_the_store_holds_this_builds_own() {
         "CREATE TRIGGER repo_counts_r_more AFTER INSERT ON raw_docs BEGIN SELECT 1; END",
         "DROP TABLE repo_counts;
          CREATE TABLE repo_counts (repo TEXT, leg TEXT, n INTEGER, last INTEGER)",
+        // The local Codex review of #1068: a trigger of the namespace in another case, one more
+        // that would count a record twice, and one of these whose name another build cased.
+        "CREATE TRIGGER REPO_COUNTS_R_MORE AFTER INSERT ON raw_docs WHEN NEW.repo IS NOT NULL
+         BEGIN UPDATE repo_counts SET n = n + 1 WHERE repo = NEW.repo AND leg = 'r'; END",
+        "DROP TRIGGER repo_counts_r_add;
+         CREATE TRIGGER Repo_Counts_R_Add AFTER INSERT ON raw_docs BEGIN SELECT 1; END",
     ] {
         k.execute_batch(change).unwrap();
         assert!(!kept(&k).unwrap(), "{change}");
@@ -60,7 +66,8 @@ fn the_counts_are_made_again_unless_the_store_holds_this_builds_own() {
         assert_eq!(rows(&k, KEPT), before, "{change}");
         let more: i64 = k
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'repo_counts_r_more'",
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE lower(name) = 'repo_counts_r_more' OR name = 'Repo_Counts_R_Add'",
                 [],
                 |r| r.get(0),
             )
@@ -230,12 +237,29 @@ fn an_update_of_a_column_counted_aborts() {
 }
 
 /// No writer of `src/` replaces a row of a table counted: `INSERT OR REPLACE` deletes the row it
-/// replaces with no trigger fired (recursive triggers are off), and counts it again.
+/// replaces with no trigger fired (recursive triggers are off), and counts it again. A file is read
+/// whole, so a statement over lines is seen, and so are a schema's and a quoted table's names.
 #[test]
 fn no_writer_replaces_a_row_counted() {
-    let replace =
-        regex::Regex::new(r"(?i)\bREPLACE\s+INTO\s+(?:(?:raw_docs|derivations|imported)\b|\{)")
-            .unwrap();
+    let replace = regex::Regex::new(
+        r#"(?i)\bREPLACE\s+INTO\s+(?:(?:main|temp)\s*\.\s*)?["`\[]?(?:(?:raw_docs|derivations|imported)\b|\{)"#,
+    )
+    .unwrap();
+    for (text, found) in [
+        (
+            "INSERT OR REPLACE INTO\n           raw_docs(device) VALUES (?1)",
+            true,
+        ),
+        ("REPLACE INTO main.derivations VALUES (1)", true),
+        ("INSERT OR REPLACE INTO \"imported\" VALUES (1)", true),
+        ("REPLACE INTO `raw_docs` VALUES (1)", true),
+        ("replace into [derivations] values (1)", true),
+        ("INSERT OR REPLACE INTO {} VALUES (1)", true),
+        ("INSERT INTO raw_docs VALUES (1)", false),
+        ("INSERT OR REPLACE INTO meta VALUES (1)", false),
+    ] {
+        assert_eq!(replace.is_match(text), found, "{text}");
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut dirs = vec![root.join("src")];
     let mut found = Vec::new();
@@ -258,10 +282,9 @@ fn no_writer_replaces_a_row_counted() {
                 .contains(&name.as_str())
             {
                 let text = std::fs::read_to_string(&path).unwrap();
-                for (i, line) in text.lines().enumerate() {
-                    if replace.is_match(line) {
-                        found.push(format!("{}:{}", path.display(), i + 1));
-                    }
+                for m in replace.find_iter(&text) {
+                    let line = text[..m.start()].matches('\n').count() + 1;
+                    found.push(format!("{}:{line}", path.display()));
                 }
             }
         }
