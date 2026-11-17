@@ -4,6 +4,60 @@ use crate::raw::{Event, Target, test_event};
 use std::cell::RefCell;
 use std::path::Path;
 
+/// #1037: a page of summaries walks `turns_shown` in its order and sorts nothing, whatever it is
+/// asked, and Settings' list of removed summaries reads `turns_hidden`: with no index in that
+/// order each page read every summary's row and sorted them all (5.8 MB a page on this PC's
+/// store). Made as a live store makes them, after the table's other indexes, with ones made after
+/// them that SQLite would take otherwise; from a store without them, as one no writer of this
+/// version opened, the statements name none.
+#[test]
+fn the_summaries_pages_are_read_from_indexes_in_their_order() {
+    let k = rusqlite::Connection::open_in_memory().unwrap();
+    schema(&k).unwrap();
+    k.execute_batch(
+        "CREATE INDEX later_shown ON turns(ts, device, op_seq, agent, session, repo)
+           WHERE skipped = 0 AND hidden = 0;
+         CREATE INDEX later_hidden ON turns(ts, device, op_seq) WHERE hidden = 1 AND skipped = 0;",
+    )
+    .unwrap();
+    let plan = |sql: &str| -> String {
+        let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let unbound = vec![rusqlite::types::Null; st.parameter_count()];
+        let lines: Vec<String> = (st.query_map(rusqlite::params_from_iter(unbound), |r| r.get(3)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        lines.join(" | ")
+    };
+    let shown = crate::hide::shown(&k, "turns", "").unwrap();
+    let by = |index: &str| crate::hide::indexed_by(&k, index).unwrap();
+    let page = plan(&page_sql(&shown, &by("turns_shown")));
+    assert!(
+        page.contains("SCAN turns USING INDEX turns_shown") && !page.contains("TEMP B-TREE"),
+        "{page}"
+    );
+    let removed = plan(&removed_sql(&by("turns_hidden")));
+    assert!(
+        removed.contains("SCAN turns USING INDEX turns_hidden") && !removed.contains("TEMP B-TREE"),
+        "{removed}"
+    );
+    k.execute_batch(
+        "DROP INDEX turns_shown; DROP INDEX turns_hidden;
+         DROP INDEX later_shown; DROP INDEX later_hidden;",
+    )
+    .unwrap();
+    assert_eq!(
+        (by("turns_shown"), by("turns_hidden")),
+        (String::new(), String::new())
+    );
+    for read in [
+        plan(&page_sql(&shown, &by("turns_shown"))),
+        plan(&removed_sql(&by("turns_hidden"))),
+    ] {
+        assert!(read.contains("SCAN turns"), "{read}");
+    }
+}
+
 /// G09 of the 13.34.2 comparison: two turns' prompts are the same bytes up to the record, but
 /// for the sentence that names its fence, so a provider's prefix cache can serve them.
 #[test]

@@ -299,3 +299,83 @@ Tests: `raw::tests::the_prompt_reads_take_each_prompts_fields_from_their_index` 
 plans read the index alone, with the indexes made in a live store's order and one made after
 it; the same answers before and after, an expired prompt and one a forget took whole included;
 a prompt that expires after the build), `worker::tests::the_prompt_fields_index_is_built_in_a_pause_beside_the_others`.
+
+## #1037: the removed lists and the sessions' counts, from partial indexes
+
+What happened. Settings' list of what is removed from the page (`cards::removed`,
+`turns::removed`) and the Sessions tab's counts of each session's items (`view::sessions`) read
+every card's and every summary's row. The list of removed cards walked `cards_newest` to find the
+few removed ones and read each card's row for its mark; the summaries had no index in a page's
+order, so the list, and each page of summaries My Work reads (`turns::page`), read every row and
+sorted them all. The count of cards took `cards_session` and read every row for `replaced_by` and
+`hidden`. On this PC's store (57,749 cards, none removed; 2,666 summaries), measured statement by
+statement in the requests of the page with the throwaway build of the prompts' fields above:
+
+- the removed list: 68.1 MB of cards and 5.8 MB of summaries, for nothing to list
+- the Sessions tab: 67.7 MB of cards and 5.8 MB of summaries, of its 105 MB
+- My Work: 6.1 MB of summaries a page
+
+The change. Four partial indexes, made by `cards::schema` and `turns::schema` after each table's
+other indexes, in a new store as in one an older version made, so each store has them in one
+order:
+
+- `cards_hidden (ts, device, op_seq, n) WHERE hidden = 1 AND replaced_by IS NULL`
+- `cards_session_shown (agent, session, ts, replaced_by, hidden) WHERE replaced_by IS NULL AND
+  hidden = 0 AND agent IS NOT NULL AND session IS NOT NULL`
+- `turns_hidden (ts, device, op_seq) WHERE hidden = 1 AND skipped = 0`
+- `turns_shown (ts, device, op_seq, agent, session, repo) WHERE skipped = 0 AND hidden = 0`
+
+The removed lists, the counts and a page of summaries name their index once the store has it
+(`hide::indexed_by`), since with no statistics SQLite breaks a tie toward the index made last
+(#1036), and read the tables as before until it has. The columns of the cards' condition are
+columns of `cards_session_shown` too: SQLite takes a partial index's condition as known for only
+some of its terms, and without both `replaced_by` and `hidden` among its columns the count of
+cards still read every row. It takes both terms of the summaries' condition, so the count of
+summaries reads `turns_shown` alone. `cards_session_shown` names the sessions in its condition,
+so the feed's reads, which name none, cannot take it. Each first build reads its table once: on a copy of this
+PC's store 55 and 60 ms for the cards' two, 7 and 8 ms for the summaries' two. They are built
+where the schema is made, as `cards_unmarked` is: by the worker, the viewer, a search, retention,
+forget and doctor. No hook makes it: of the functions codegraph's call graph has above
+`cards::schema` and `turns::schema`, the 38 outside the tests include none of a hook's.
+
+On the copy, the first read of each statement on a new connection, before and after:
+
+| read | before | after |
+|---|---|---|
+| the count of cards | 67.5 MB, 28 ms | 2.9 MB, 4 ms |
+| the count of summaries | 5.8 MB, 3.9 ms | 0.3 MB, 1.1 ms |
+| the removed cards | 67.9 MB, 30 ms | 0.01 MB, 0.3 ms |
+| the removed summaries | 5.8 MB, 3.0 ms | 0.01 MB, 0.2 ms |
+| a page of summaries, every repository | 5.8 MB, 9.9 ms | 0.2 MB, 0.3 ms |
+| a page, the repository with the most | 5.8 MB, 7.9 ms | 0.2 MB, 0.3 ms |
+| a page, a repository with one | 5.8 MB, 3.6 ms | 0.3 MB, 0.5 ms |
+| a page, the oldest session's | 5.8 MB, 4.5 ms | 0.3 MB, 0.5 ms |
+
+The same rows in the same order before and after, every column compared: on the copy, and on
+the copy with every 97th card and every 13th summary marked removed and every 89th card
+replaced, where the removed lists held 573 cards and 184 summaries. Every other statement on the two tables was listed twice,
+independently, the lists checked by a third reader, and each planned before and after on an
+empty copy of the store's schema made in its order. No plan of the cards' changed but the two
+above: their page and the cards around a time keep theirs, as
+`cards::tests::the_newest_cards_are_read_in_the_order_of_an_index` holds. Four of the summaries'
+now take `turns_shown`, and each reads less:
+
+- the summaries around a time (`turns::around`), by their time instead of every row sorted
+- the embedder's page of summaries (`embed_phase::read_page`)
+- doctor's count of the summaries waiting for it
+- the full-text consumer's read of one summary (`consumer::fts::turns`), which read every row
+  for each summary it was given
+
+The one read that can take more is that consumer's backfill, which runs once, when a store makes
+`turns_fts` (#403): it reads each shown summary's row in the index's order. On a copy of this
+PC's store that took about as long as before. On a made-up store 40 times as large, its rows in
+no order of time, it took up to 1.75 times as long.
+
+Tests: `cards::tests::the_removed_cards_are_read_from_an_index_of_their_own`,
+`turns::tests::the_summaries_pages_are_read_from_indexes_in_their_order`,
+`view::tests::the_sessions_counts_are_read_from_indexes_alone` (each with the indexes made as a
+live store makes them and ones made after them that SQLite would take otherwise; from a store
+without them, the statements name none). What the counts and the lists answer is
+`view::tests::sessions_list_each_live_session_by_its_first_prompt`'s and
+`settings::hide::tests::settings_lists_every_removed_card_and_summary_page_by_page`'s, which read
+through the indexes.

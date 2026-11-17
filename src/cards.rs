@@ -92,6 +92,21 @@ pub const CONCEPTS: &[&str] = &[
     "trade-off",
 ];
 
+/// The current cards removed from the page, which Settings lists (`removed`): through
+/// `cards_newest` the list read every card's row to find the few removed ones, 68 MB on this PC's
+/// store for none (#1037).
+const HIDDEN_INDEX: &str = "CREATE INDEX IF NOT EXISTS cards_hidden
+    ON cards(ts, device, op_seq, n) WHERE hidden = 1 AND replaced_by IS NULL";
+
+/// The current cards on the page by session, which the Sessions tab counts (`view::sessions`):
+/// through `cards_session` the count read every card's row for its `replaced_by` and `hidden`,
+/// 67 MB on this PC's store (#1037). The condition's columns are the index's too: SQLite takes a
+/// partial index's condition as known for only some of its terms, so the count reads the index
+/// alone either way. The feed's reads, which name no session, cannot take it.
+const SESSION_SHOWN_INDEX: &str = "CREATE INDEX IF NOT EXISTS cards_session_shown
+    ON cards(agent, session, ts, replaced_by, hidden)
+    WHERE replaced_by IS NULL AND hidden = 0 AND agent IS NOT NULL AND session IS NOT NULL";
+
 pub(crate) fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "-- One row per card of a curated window op; the lists are JSON arrays of strings.
@@ -185,6 +200,11 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "CREATE INDEX IF NOT EXISTS cards_unmarked ON cards(ts) WHERE subagent IS NULL",
     )?;
+    // After every other index of the table, in a new store as in one an older version made, so
+    // that every store has them in one order: with no statistics SQLite breaks a tie toward the
+    // index made last (#1036). Each first build reads the table once: 0.1 s for both on a copy of
+    // this PC's store.
+    k.execute_batch(&format!("{HIDDEN_INDEX};\n{SESSION_SHOWN_INDEX};"))?;
     crate::hide::schema(k)
 }
 
@@ -1071,11 +1091,7 @@ pub(crate) fn removed(
     limit: usize,
     rules: &Rules,
 ) -> Result<(Vec<Card>, bool)> {
-    let sql = format!(
-        "SELECT {COLUMNS} FROM cards WHERE replaced_by IS NULL AND hidden = 1
-           AND (?1 IS NULL OR (ts, device, op_seq, n) < (?1, ?2, ?3, ?4))
-         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
-    );
+    let sql = removed_sql(&crate::hide::indexed_by(k, "cards_hidden")?);
     let (ts, device, op_seq, n) = before.map_or((None, None, None, None), |(ts, d, s, n)| {
         (Some(*ts), Some(d.as_str()), Some(*s), Some(*n))
     });
@@ -1086,6 +1102,15 @@ pub(crate) fn removed(
         rusqlite::params![ts, device, op_seq, n],
         limit,
         |r| read(r, raw, rules),
+    )
+}
+
+/// `removed`'s rows, through `by` (`hide::indexed_by`).
+fn removed_sql(by: &str) -> String {
+    format!(
+        "SELECT {COLUMNS} FROM cards {by} WHERE replaced_by IS NULL AND hidden = 1
+           AND (?1 IS NULL OR (ts, device, op_seq, n) < (?1, ?2, ?3, ?4))
+         ORDER BY ts DESC, device DESC, op_seq DESC, n DESC"
     )
 }
 

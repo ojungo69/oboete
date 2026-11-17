@@ -689,6 +689,19 @@ fn kept(v: &Value, rules: &Rules) -> BTreeMap<String, String> {
     out
 }
 
+/// The summaries removed from the page, which Settings lists (`removed`): with no index of theirs
+/// the list read every summary's row and sorted them, to find the few removed ones (#1037).
+const HIDDEN_INDEX: &str = "CREATE INDEX IF NOT EXISTS turns_hidden
+    ON turns(ts, device, op_seq) WHERE hidden = 1 AND skipped = 0";
+
+/// The summaries on the page in the order a page reads them (`page`), with what a page filters
+/// them by and the Sessions tab counts them by (`view::sessions`): with no index in that order, a
+/// page read every summary's row and sorted them all, 5.8 MB a page on this PC's store, and the
+/// count read every row too (#1037). SQLite takes both terms of the condition as known, so the
+/// count reads the index alone.
+const SHOWN_INDEX: &str = "CREATE INDEX IF NOT EXISTS turns_shown
+    ON turns(ts, device, op_seq, agent, session, repo) WHERE skipped = 0 AND hidden = 0";
+
 pub(crate) fn schema(k: &Connection) -> Result<()> {
     k.execute_batch(
         "-- Every turn op kept, a skip too: what was asked is not asked again.
@@ -716,6 +729,9 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
         "ALTER TABLE turns ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
     )?;
     crate::hide::schema(k)?;
+    // After the table's other indexes, in a new store as in an older one, as `cards::schema`
+    // makes its own.
+    k.execute_batch(&format!("{HIDDEN_INDEX};\n{SHOWN_INDEX};"))?;
     // knowledge.db's `user_version` 1: `turns_fts` holds the summaries' notes (#403). An index
     // built before them is built again, once: checked again under a write lock taken first, as
     // `claims::migrate` does, and waited for through the stores' initialization window, so a
@@ -798,14 +814,10 @@ pub fn page(
     if !crate::consumer::manifest::exists(k, "table", "turns")? {
         return Ok((Vec::new(), false));
     }
+    // The index before the column (`hide::indexed_by`).
+    let by = crate::hide::indexed_by(k, "turns_shown")?;
     let shown = crate::hide::shown(k, "turns", "")?;
-    let mut st = k.prepare(&format!(
-        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 {shown}
-           AND (?1 IS NULL OR repo = ?1)
-           AND (?5 IS NULL OR (agent = ?5 AND session = ?6))
-           AND (?2 IS NULL OR (ts, device, op_seq) < (?2, ?3, ?4))
-         ORDER BY ts DESC, device DESC, op_seq DESC"
-    ))?;
+    let mut st = k.prepare(&page_sql(&shown, &by))?;
     let mut rows = st.query(params![
         repo,
         before.map(|p| p.0),
@@ -824,6 +836,17 @@ pub fn page(
         }
     }
     Ok((out, false))
+}
+
+/// `page`'s rows, with `shown` (`hide::shown`) and through `by` (`hide::indexed_by`).
+fn page_sql(shown: &str, by: &str) -> String {
+    format!(
+        "SELECT {COLUMNS} FROM turns {by} WHERE skipped = 0 {shown}
+           AND (?1 IS NULL OR repo = ?1)
+           AND (?5 IS NULL OR (agent = ?5 AND session = ?6))
+           AND (?2 IS NULL OR (ts, device, op_seq) < (?2, ?3, ?4))
+         ORDER BY ts DESC, device DESC, op_seq DESC"
+    )
 }
 
 /// docs/tools.md T2, T3: a repository's (or all repositories') summaries on one side of `at`, as
@@ -870,17 +893,22 @@ pub(crate) fn removed(
     limit: usize,
     rules: &Rules,
 ) -> Result<(Vec<TurnSummary>, bool)> {
-    let sql = format!(
-        "SELECT {COLUMNS} FROM turns WHERE skipped = 0 AND hidden = 1
-           AND (?1 IS NULL OR (ts, device, op_seq) < (?1, ?2, ?3))
-         ORDER BY ts DESC, device DESC, op_seq DESC"
-    );
+    let sql = removed_sql(&crate::hide::indexed_by(k, "turns_hidden")?);
     let (ts, device, op_seq) = before.map_or((None, None, None), |(ts, d, s)| {
         (Some(*ts), Some(d.as_str()), Some(*s))
     });
     crate::hide::removed_page(k, "turns", &sql, params![ts, device, op_seq], limit, |r| {
         read_row(r, raw, rules)
     })
+}
+
+/// `removed`'s rows, through `by` (`hide::indexed_by`).
+fn removed_sql(by: &str) -> String {
+    format!(
+        "SELECT {COLUMNS} FROM turns {by} WHERE skipped = 0 AND hidden = 1
+           AND (?1 IS NULL OR (ts, device, op_seq) < (?1, ?2, ?3))
+         ORDER BY ts DESC, device DESC, op_seq DESC"
+    )
 }
 
 /// A summary's ID as `get` takes it, `S<device>.<op seq>` or `S<op seq>` of `local`, in parts.
