@@ -459,6 +459,60 @@ fn a_saved_key_ends_its_entries_rests_and_wakes_waits_on_time_or_the_owner() {
     assert_eq!((turn_at(7), turn_at(8)), (0, later));
 }
 
+/// The month's spend is read from `provider_calls_spend` alone, which `open` makes after the
+/// `usd` column on a ledger from before it, and each sum counts only the month's rows of its roles
+/// (docs/page-reads.md).
+#[test]
+fn the_months_spend_is_read_from_an_index_of_its_own() {
+    let home = tempfile::tempdir().unwrap();
+    Connection::open(home.path().join("providers.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE provider_calls(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+               provider TEXT NOT NULL, role TEXT NOT NULL, span TEXT, outcome TEXT NOT NULL,
+               ms INTEGER NOT NULL, detail TEXT, bytes_out INTEGER NOT NULL DEFAULT 0,
+               est_tokens INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER,
+               cached_tokens INTEGER, reasoning_tokens INTEGER);",
+        )
+        .unwrap();
+    let conn = open(home.path()).unwrap();
+    let start = chrono_free_month_start(now_ms());
+    let now = now_ms();
+    for (ts, role, outcome, usd) in [
+        (start, "curator", "ok", Some(0.25)),
+        (now, "summary", "reserved", Some(0.5)),
+        (now, "curator", "ok", None),
+        (now, "embed", "ok", Some(1.0)),
+        (now, "query", "reserved", Some(2.0)),
+        (start - 1, "curator", "ok", Some(8.0)),
+        (start - 1, "curator", "reserved", Some(16.0)),
+        (start - 1, "embed", "ok", Some(32.0)),
+    ] {
+        conn.execute(
+            "INSERT INTO provider_calls(ts, provider, role, outcome, ms, usd)
+             VALUES (?1, 'p', ?2, ?3, 1, ?4)",
+            params![ts, role, outcome, usd],
+        )
+        .unwrap();
+    }
+    assert_eq!(usd_this_month(&conn).unwrap(), 0.75);
+    assert_eq!(embed_usd_this_month(&conn).unwrap(), 3.0);
+    assert_eq!(reserved_usd_this_month(&conn).unwrap(), 0.5);
+    for sql in [
+        USD_THIS_MONTH,
+        EMBED_USD_THIS_MONTH,
+        RESERVED_USD_THIS_MONTH,
+    ] {
+        let plan: String = conn
+            .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [start], |r| r.get(3))
+            .unwrap();
+        assert!(
+            plan.contains("COVERING INDEX provider_calls_spend (ts>?)"),
+            "{plan}"
+        );
+    }
+}
+
 #[test]
 fn the_month_starts_on_the_first_at_midnight_utc() {
     // 2026-09-27T02:52:53Z -> 2026-09-01T00:00:00Z; 2024-03-01 after a leap day.
