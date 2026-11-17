@@ -72,6 +72,42 @@ fn the_newest_cards_are_read_in_the_order_of_an_index() {
     }
 }
 
+/// #1037: Settings' list of removed cards reads `cards_hidden` and sorts nothing: through
+/// `cards_newest` it read every card's row to find the few removed ones (68 MB on this PC's store
+/// for none). Made as a live store makes it, after the table's other indexes, with one made after
+/// it that SQLite would take otherwise; from a store without it, as one no writer of this version
+/// opened, the list's statement names none.
+#[test]
+fn the_removed_cards_are_read_from_an_index_of_their_own() {
+    let k = Connection::open_in_memory().unwrap();
+    schema(&k).unwrap();
+    k.execute_batch(
+        "CREATE INDEX later ON cards(ts, device, op_seq, n) WHERE hidden = 1 AND replaced_by IS NULL",
+    )
+    .unwrap();
+    let plan = |sql: &str| -> String {
+        let mut st = k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let unbound = vec![rusqlite::types::Null; st.parameter_count()];
+        let lines: Vec<String> = (st.query_map(rusqlite::params_from_iter(unbound), |r| r.get(3)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        lines.join(" | ")
+    };
+    let by = crate::hide::indexed_by(&k, "cards_hidden").unwrap();
+    let read = plan(&removed_sql(&by));
+    assert!(
+        read.contains("SCAN cards USING INDEX cards_hidden") && !read.contains("TEMP B-TREE"),
+        "{read}"
+    );
+    k.execute_batch("DROP INDEX cards_hidden; DROP INDEX later;")
+        .unwrap();
+    let by = crate::hide::indexed_by(&k, "cards_hidden").unwrap();
+    assert_eq!(by, "");
+    let read = plan(&removed_sql(&by));
+    assert!(read.contains("INDEX cards_newest"), "{read}");
+}
+
 fn jst() -> FixedOffset {
     FixedOffset::east_opt(9 * 3600).unwrap()
 }

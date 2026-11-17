@@ -171,6 +171,18 @@ pub(crate) fn removed_page<T>(
     Ok((out, false))
 }
 
+/// `INDEXED BY <index>` for a reader that names one of the indexes `cards::schema` and
+/// `turns::schema` make for the removed and the shown rows (#1037), or nothing while the store has
+/// not made it: a reader can open a store no writer of this version has opened yet. Each index
+/// holds the `hidden` column, so a store with one gives its readers `shown`'s condition too.
+pub(crate) fn indexed_by(k: &Connection, index: &str) -> Result<String> {
+    Ok(if crate::consumer::manifest::exists(k, "index", index)? {
+        format!("INDEXED BY {index}")
+    } else {
+        String::new()
+    })
+}
+
 /// `AND <alias>hidden = 0` for a reader of `table` (`cards` or `turns`), or nothing while the
 /// store has no such column yet: a hook can read a store the worker has not given it.
 pub(crate) fn shown(k: &Connection, table: &str, alias: &str) -> Result<String> {

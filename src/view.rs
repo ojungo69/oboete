@@ -3287,6 +3287,22 @@ fn session_page(
         .map_err(|_| bad("before"))
 }
 
+/// `sessions`' count of each session's cards, through `cards_session_shown` once the store has it
+/// (#1037: through `cards_session` the count read every card's row, 67 MB on this PC's store).
+const SESSION_CARDS: &str = "SELECT agent, session, COUNT(*) FROM cards {by}
+     WHERE replaced_by IS NULL AND agent IS NOT NULL AND session IS NOT NULL {shown}
+     GROUP BY agent, session";
+
+/// `sessions`' count of each session's summaries, through `turns_shown` once the store has it.
+const SESSION_TURNS: &str =
+    "SELECT agent, session, COUNT(*) FROM turns {by} WHERE skipped = 0 {shown}
+     GROUP BY agent, session";
+
+/// A count of `sessions` with `shown` (`hide::shown`) and through `by` (`hide::indexed_by`).
+fn sessions_count_sql(sql: &str, shown: &str, by: &str) -> String {
+    sql.replace("{shown}", shown).replace("{by}", by)
+}
+
 /// docs/page.md S2: the sessions hooks recorded in `repo` (every repository's when none), the
 /// newest first after `before`, at most `limit`: each by its first prompt's key, with its agent,
 /// session, repository, title, start and number of items; and the next page's place.
@@ -3312,26 +3328,21 @@ fn sessions(
     // Each kind as the feed counts it: current cards of the session's own windows (K2), and its
     // summaries that are no skip.
     // Parity row 3: a removed card or summary counts no more than the feed shows it.
-    let counts = |table: &str, sql: &str| -> Result<HashMap<(String, String), i64>> {
+    let counts = |table: &str, index: &str, sql: &str| -> Result<HashMap<(String, String), i64>> {
         if !crate::consumer::manifest::exists(&k, "table", table)? {
             return Ok(HashMap::new());
         }
-        let sql = sql.replace("{shown}", &crate::hide::shown(&k, table, "")?);
+        let sql = sessions_count_sql(
+            sql,
+            &crate::hide::shown(&k, table, "")?,
+            &crate::hide::indexed_by(&k, index)?,
+        );
         let mut st = k.prepare(&sql)?;
         let rows = st.query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     };
-    let cards = counts(
-        "cards",
-        "SELECT agent, session, COUNT(*) FROM cards
-         WHERE replaced_by IS NULL AND agent IS NOT NULL AND session IS NOT NULL {shown}
-         GROUP BY agent, session",
-    )?;
-    let turns = counts(
-        "turns",
-        "SELECT agent, session, COUNT(*) FROM turns WHERE skipped = 0 {shown}
-         GROUP BY agent, session",
-    )?;
+    let cards = counts("cards", "cards_session_shown", SESSION_CARDS)?;
+    let turns = counts("turns", "turns_shown", SESSION_TURNS)?;
     let gate = |s: &str| redact::outbound_with(s, &rules);
     let mut out = Vec::new();
     for s in &listed {

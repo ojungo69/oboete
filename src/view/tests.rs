@@ -3173,6 +3173,57 @@ fn feed_shows_saved_notes_scoped_paged_and_forgotten_ones_hidden() {
     );
 }
 
+/// #1037: the Sessions tab counts each session's cards and summaries from `cards_session_shown` and
+/// `turns_shown` alone, reading no card's or summary's row: through `cards_session` the count of
+/// cards read every card's (67 MB on this PC's store). Made as a live store makes them, after the
+/// tables' other indexes, with ones made after them that SQLite would take otherwise; from a store
+/// without them, as one no writer of this version opened, the counts name none. What each counts
+/// is `sessions_list_each_live_session_by_its_first_prompt`'s.
+#[test]
+fn the_sessions_counts_are_read_from_indexes_alone() {
+    let k = rusqlite::Connection::open_in_memory().unwrap();
+    crate::cards::schema(&k).unwrap();
+    crate::turns::schema(&k).unwrap();
+    k.execute_batch(
+        "CREATE INDEX later_cards ON cards(agent, session, ts, replaced_by, hidden)
+           WHERE replaced_by IS NULL AND hidden = 0 AND agent IS NOT NULL AND session IS NOT NULL;
+         CREATE INDEX later_turns ON turns(ts, device, op_seq, agent, session, repo)
+           WHERE skipped = 0 AND hidden = 0;",
+    )
+    .unwrap();
+    let plan = |table: &str, index: &str, sql: &str| -> (String, String) {
+        let by = crate::hide::indexed_by(&k, index).unwrap();
+        let sql = sessions_count_sql(sql, &crate::hide::shown(&k, table, "").unwrap(), &by);
+        let lines: Vec<String> = (k.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap())
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        (by, lines.join(" | "))
+    };
+    let (_, cards) = plan("cards", "cards_session_shown", SESSION_CARDS);
+    assert!(
+        cards.contains("USING COVERING INDEX cards_session_shown"),
+        "{cards}"
+    );
+    let (_, turns) = plan("turns", "turns_shown", SESSION_TURNS);
+    assert!(
+        turns.contains("USING COVERING INDEX turns_shown"),
+        "{turns}"
+    );
+    k.execute_batch(
+        "DROP INDEX cards_session_shown; DROP INDEX turns_shown;
+         DROP INDEX later_cards; DROP INDEX later_turns;",
+    )
+    .unwrap();
+    let (by, cards) = plan("cards", "cards_session_shown", SESSION_CARDS);
+    assert_eq!(by, "");
+    assert!(cards.contains("INDEX cards_session "), "{cards}");
+    let (by, turns) = plan("turns", "turns_shown", SESSION_TURNS);
+    assert_eq!(by, "");
+    assert!(turns.contains("SCAN turns"), "{turns}");
+}
+
 /// page.md slice 2 tests 1 and 2: the sessions hooks recorded, the newest first by their first
 /// prompt, each with its key, title, items and repository; a transcript's session is not
 /// listed, and a skip and a card of a window of two sessions are no item; pages read each once,
