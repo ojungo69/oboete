@@ -67,6 +67,151 @@ fn the_pause_builds_what_it_keeps_on_a_store_with_any_part_of_it() {
     }
 }
 
+/// The mark of the pause's wait in `p`'s raw.db, read through a connection of its own.
+fn pause_mark(p: &Path) -> Option<i64> {
+    rusqlite::Connection::open(p.join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [crate::raw::index::WAITING],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .map(|v| v.parse().unwrap())
+}
+
+/// `p`'s mark of the pause's wait moved `ms` back.
+fn pause_mark_back(p: &Path, ms: i64) {
+    let at = pause_mark(p).unwrap() - ms;
+    rusqlite::Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = ?2 WHERE key = ?1",
+            rusqlite::params![crate::raw::index::WAITING, at.to_string()],
+        )
+        .unwrap();
+}
+
+/// #1063: on a store whose hooks never stop for half an hour, the pause's indexes are built once
+/// they have waited their hour, at an idle time and in a round alike. The first look marks the
+/// wait, a look within the hour marks nothing, and a store that has them all drops its mark.
+#[test]
+fn the_pause_indexes_are_built_once_they_have_waited_their_hour() {
+    use crate::raw::index::{self, Builder::Pause};
+    for at in [Upkeep::Idle, Upkeep::Round] {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let e = crate::raw::Event {
+            ts: crate::db::now_ms() - 1_000,
+            ..crate::raw::test_event("a step")
+        };
+        raw.append(&e).unwrap();
+        assert!(!pause_upkeep(p, &raw, false, false, at));
+        assert!(
+            index::made(&raw, Pause).is_empty(),
+            "built before its hour: {at:?}"
+        );
+        let first = pause_mark(p).expect("the first look marks the wait");
+        assert!(!pause_upkeep(p, &raw, false, false, at));
+        assert_eq!(pause_mark(p), Some(first), "a look within the hour: {at:?}");
+        pause_mark_back(p, index::PAUSE_WAIT_MS);
+        assert!(!pause_upkeep(p, &raw, false, false, at));
+        assert_eq!(index::made(&raw, Pause), index::keeps(Pause), "{at:?}");
+        assert!(pause_upkeep(p, &raw, false, false, at));
+        assert_eq!(pause_mark(p), None, "a store that has them all: {at:?}");
+    }
+}
+
+/// #1063: a build its hour started that fails waits another hour before the next one no pause
+/// starts; the others are made, in the pause's one order, the one that failed after them.
+#[test]
+fn a_build_its_hour_started_that_fails_waits_another_hour() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - 1_000,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    let block = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    block
+        .execute_batch("CREATE TABLE records_expired(x)")
+        .unwrap();
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    pause_mark_back(p, index::PAUSE_WAIT_MS);
+    let start = crate::db::now_ms();
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    let others: Vec<&str> = (index::keeps(Pause).into_iter())
+        .filter(|i| *i != "records_expired")
+        .collect();
+    assert_eq!(index::made(&raw, Pause), others);
+    let again = pause_mark(p).unwrap();
+    assert!(again >= start, "the failed build marks a new wait");
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert_eq!(pause_mark(p), Some(again), "no other build within the hour");
+    block.execute_batch("DROP TABLE records_expired").unwrap();
+    pause_mark_back(p, index::PAUSE_WAIT_MS);
+    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    let mut last = others.clone();
+    last.push("records_expired");
+    assert_eq!(index::made(&raw, Pause), last);
+    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
+}
+
+/// #1063: a store that has every index the pause keeps pays nothing new for it, at an idle time or
+/// in a round: no build, no mark, no write at all.
+#[test]
+fn a_store_that_has_every_pause_index_writes_nothing_for_them() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    raw.append(&crate::raw::test_event("a step")).unwrap();
+    index::build(&raw, Pause).unwrap();
+    let other = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    let version = |c: &rusqlite::Connection| -> i64 {
+        c.query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = version(&other);
+    for at in [Upkeep::Idle, Upkeep::Round] {
+        assert!(pause_upkeep(p, &raw, false, false, at), "{at:?}");
+    }
+    maintain(p, &raw, false, false);
+    assert_eq!(version(&other), before, "a write for indexes already built");
+    assert_eq!(pause_mark(p), None);
+}
+
+/// #1063: a resident worker whose hooks never stop for its idle time builds the pause's indexes once
+/// they have waited their hour, in its rounds.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_busy_resident_worker_builds_the_pause_indexes_after_their_hour() {
+    let _contending = contending();
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    raw.append(&crate::raw::test_event("a step")).unwrap();
+    let waiting = crate::raw::index::waited(&raw, crate::db::now_ms()).unwrap();
+    assert!(!waiting);
+    pause_mark_back(p, crate::raw::index::PAUSE_WAIT_MS);
+    let built = || {
+        let raw = crate::raw::open(p).unwrap();
+        !crate::raw::index::missing(&raw, crate::raw::index::Builder::Pause).unwrap()
+    };
+    let worker = resident(p, 60_000);
+    // A hook's record a round reads: the idle time of a minute never passes meanwhile.
+    raw.append(&crate::raw::test_event("another step")).unwrap();
+    // Within `until`'s 10 s, so a round built them: the idle time is a minute.
+    until("the indexes built in a round", built);
+    std::fs::create_dir_all(p.join("state")).unwrap();
+    std::fs::write(yield_request(p), "").unwrap();
+    worker.join().unwrap().unwrap();
+}
+
 /// A resident worker that went idle before the pause came builds the indexes once it has: its
 /// idle times go on with nothing new.
 #[cfg(target_os = "linux")]

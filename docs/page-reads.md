@@ -544,3 +544,25 @@ Tests: `consumer::repo_counts::tests::the_counts_are_made_again_unless_the_store
 `no_writer_replaces_a_row_counted`; and `view::tests::the_repositories_are_read_from_the_counts_kept`,
 `the_repositories_counts_follow_every_writer` and
 `a_store_without_this_builds_counts_is_counted_from_its_tables`.
+
+## #1063: the pause's indexes on a machine that never pauses
+
+What happened. The worker builds raw.db's pause indexes (`raw::index::Builder::Pause`) only at an
+idle time, a minute with no new record, and only once no hook has recorded for 30 minutes. This
+PC's agents record all day. After their installs, `records_expired` and `records_prompt_fields`
+waited 13 hours, and they were built by hand in the end. Until then My Work
+(`GET /api/my-work?range=all`) read 424 MB, against 150 MB with them, and the Sessions tab read
+112 MB, against 8 MB.
+
+The change. The first time the worker finds one of them missing, it marks the time in raw.db's
+meta (`pause_index_waiting`), which outlasts the worker's exits. An hour after the mark, the worker
+builds them without the pause. It does so at an idle time or in a round, so a worker that never
+has an idle time builds them too. A build the hour starts first marks the time again, so a build
+that fails waits another hour. A hook during the build waits its 2 s and keeps its events for the
+next hook to write back, as during a pause's build. A pause still builds them as before. A store
+that has every pause index writes nothing for them: the mark goes when the last one is built.
+
+Tests: `worker::tests::the_pause_indexes_are_built_once_they_have_waited_their_hour` (at an idle
+time and in a round), `a_build_its_hour_started_that_fails_waits_another_hour`,
+`a_store_that_has_every_pause_index_writes_nothing_for_them` and
+`a_busy_resident_worker_builds_the_pause_indexes_after_their_hour`.

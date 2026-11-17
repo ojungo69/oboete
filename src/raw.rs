@@ -307,8 +307,8 @@ pub(crate) mod index {
     /// variant, reviewed here with its reason.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum Builder {
-        /// The worker, in a pause of the owner's work (`worker::maintain`): never `open`, a hook
-        /// or a reader.
+        /// The worker, in a pause of the owner's work, or once its indexes have waited their hour
+        /// (`waited`, `worker::maintain`): never `open`, a hook or a reader.
         Pause,
     }
 
@@ -354,6 +354,61 @@ pub(crate) mod index {
             }
         }
         failed.map_or(Ok(()), Err)
+    }
+
+    /// #1063: how long the pause's indexes wait for a pause of the owner's work before the worker
+    /// builds them anyway, from the first time it found one missing. A machine whose agents record
+    /// all day may have no quiet half hour (this PC had none for 13 hours on 2026-11-17).
+    pub(crate) const PAUSE_WAIT_MS: i64 = 60 * 60_000;
+
+    /// raw.db's meta key for when the worker first found the pause's indexes missing: kept across
+    /// the worker's exits, which a store whose hooks pause for a minute at a time has many of.
+    pub(crate) const WAITING: &str = "pause_index_waiting";
+
+    /// Whether the pause's indexes have waited `PAUSE_WAIT_MS` at `now`. The first ask marks
+    /// `now`, and so does one past the wait, before the build it starts: a build that fails waits
+    /// another hour before the next one no pause starts. A store that has them all drops its mark
+    /// (`settled`).
+    pub(crate) fn waited(raw: &Raw, now: i64) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        let since: Option<i64> = raw
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [WAITING], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse().ok());
+        let waited = since.is_some_and(|since| now - since >= PAUSE_WAIT_MS);
+        if since.is_none() || waited {
+            mark(raw, Some(now))?;
+        }
+        Ok(waited)
+    }
+
+    /// A store that has every index the pause keeps: its mark of a wait goes, if it holds one.
+    pub(crate) fn settled(raw: &Raw) -> Result<()> {
+        let held: bool = raw.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            [WAITING],
+            |r| r.get(0),
+        )?;
+        if held {
+            mark(raw, None)?;
+        }
+        Ok(())
+    }
+
+    fn mark(raw: &Raw, at: Option<i64>) -> Result<()> {
+        let tx = super::begin_batch(&raw.conn, crate::db::OPEN_WRITE_WAIT)?;
+        match at {
+            Some(at) => tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                rusqlite::params![WAITING, at.to_string()],
+            )?,
+            None => tx.execute("DELETE FROM meta WHERE key = ?1", [WAITING])?,
+        };
+        tx.commit()?;
+        Ok(())
     }
 
     /// A read with two statements, both the measured ones: its indexed form once its index is
