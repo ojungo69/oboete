@@ -140,7 +140,7 @@ fn goals_op(h: &mut Store, ts: i64, seq: i64, items: Value, summary: &str) {
 /// that two reviews found rising and that shipped after a review at 30%, Codex's that only asked, and a request of its own name with a
 /// list of one name in two repositories. Goals written over the first prompt ask for the parser (an area with an open
 /// ask), leave an open ask in an area nothing was asked for in (its `asked` is null), and one open
-/// ask under no area. Goals of 45 days ago make a finished month of Past focus.
+/// ask under no area. Goals of the 15th, two months back, make a finished month of Past focus.
 fn home() -> (Store, i64) {
     let mut h = Store::new();
     let t = crate::db::now_ms() - 10 * 60_000;
@@ -870,8 +870,10 @@ fn steady(v: &Value) -> Value {
 fn the_contract_snapshot_is_this_homes_answer() {
     // shortcut: in the first 15 minutes of a month (this machine's), the home's newest goals fall
     // in the month before and make a second month of Past focus, so the comparison waits for a
-    // later run; upgrade if the home's clock can be set.
-    let local = Local::now();
+    // later run; upgrade if the home's clock can be set. The home's own clock decides it, the one
+    // the goals' read takes, so that a run across a month's start is not compared.
+    let (h, now) = home();
+    let local = Local.timestamp_millis_opt(now).unwrap();
     let first_minutes = local.day() == 1 && local.hour() == 0 && local.minute() < 15;
     let write = std::env::var_os("OBOETE_CONTRACT_WRITE").is_some();
     assert!(
@@ -881,7 +883,6 @@ fn the_contract_snapshot_is_this_homes_answer() {
     if first_minutes {
         return;
     }
-    let (h, now) = home();
     let (work, goals) = answers(&h, now);
     let fresh = snapshot_at(&work, &goals, now, &Utc);
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/snapshot.json");
