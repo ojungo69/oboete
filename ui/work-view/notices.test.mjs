@@ -140,14 +140,23 @@ test('a font copied under its own name, with no hash, is a listed package\'s fil
 test('a font the build inlines as a data: URL is a listed package\'s file by its bytes, or it stops the build', () => {
   const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/x-latin-wght-normal.woff2']]]
   const sources = ['../../node_modules/x/i.js']
-  const url = (type, bytes) => `@font-face{src:url(data:${type};base64,${Buffer.from(bytes).toString('base64')}) format("woff2")}`
-  const listed = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', url('font/woff2', 'font')]] }))
+  const b64 = (bytes) => Buffer.from(bytes).toString('base64')
+  const css = (url) => [['dist/assets/index-AbCd1234.css', `@font-face{src:url(${url}) format("woff2")}`]]
+  const listed = notice(tree({ packages, sources, fonts: css(`data:font/woff2;base64,${b64('font')}`) }))
   assert.equal(listed.error, undefined)
-  const stray = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', url('font/woff2', 'other bytes')]] }))
-  assert.match(stray.error, /index-AbCd1234\.css: a font\/woff2 font inlined as a data: URL that no package listed here holds/)
-  // In a script, and of the older font types, as well.
-  const script = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.js', `const f = "${url('application/font-woff', 'other bytes')}"`]] }))
-  assert.match(script.error, /index-AbCd1234\.js: a application\/font-woff font inlined as a data: URL/)
-  const unread = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', '@font-face{src:url(data:font/woff2,wOF2)}']] }))
-  assert.match(unread.error, /index-AbCd1234\.css: a font\/woff2 data: URL not in base64/)
+  const stray = notice(tree({ packages, sources, fonts: css(`data:font/woff2;base64,${b64('other bytes')}`) }))
+  assert.match(stray.error, /index-AbCd1234\.css: a font inlined as a data: URL \(font\/woff2\) that no package listed here holds/)
+  // In a script, and of an older font type, as well.
+  const script = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.js', `const f = "data:application/font-woff;base64,${b64('other bytes')}"`]] }))
+  assert.match(script.error, /index-AbCd1234\.js: a font inlined as a data: URL \(application\/font-woff\)/)
+  // A font with no font type is known by its first bytes; other bytes in base64 are not a font.
+  const untyped = notice(tree({ packages, sources, fonts: css(`data:application/octet-stream;base64,${b64('wOF2 unlisted')}`) }))
+  assert.match(untyped.error, /a font inlined as a data: URL \(application\/octet-stream\)/)
+  const image = notice(tree({ packages, sources, fonts: css(`data:image/png;base64,${b64('\x89PNG not a font')}`) }))
+  assert.equal(image.error, undefined)
+  // A font's bytes the check cannot read whole stop the build: escaped, or not in base64.
+  for (const url of [`data:font/woff2;base64,${b64('font').replace(/=/g, '%3D')}`, 'data:font/woff2,wOF2']) {
+    const unread = notice(tree({ packages, sources, fonts: css(url) }))
+    assert.match(unread.error, /index-AbCd1234\.css: a font\/woff2 data: URL not in plain base64/, url)
+  }
 })

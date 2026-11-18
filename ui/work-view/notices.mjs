@@ -129,17 +129,28 @@ for (const font of dist.filter((f) => FONT.test(f))) {
   if (!source) throw new Error(`${shown(font)}: a font no package listed here holds, and no notice covers`)
   if (source.startsWith(own + sep)) hanken = true
 }
-// Each data: URL of a font type in the bundle's scripts, styles and pages: its bytes are a listed
-// package's font, or Hanken Grotesk's. Vite writes a font's bytes in base64; one it cannot read so
-// stops the build too.
-const DATA_FONT = /data:(font\/[\w.+-]+|application\/(?:x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)([^,'")\s]*),([A-Za-z0-9+/=]*)/gi
+// Each data: URL in the bundle's scripts, styles and pages that holds a font, by its type or by its
+// first bytes (a font labelled application/octet-stream too): its bytes are a listed package's
+// font, or Hanken Grotesk's. Vite writes a font's bytes in base64; a font whose bytes are written
+// otherwise (escaped, or with other characters) stops the build, as this check cannot read them.
+const DATA_URL = /data:([^;,'"()\s]*)((?:;[^;,'"()\s]*)*),([^'"()\s]*)/gi
+const FONT_TYPE = /^(font\/[\w.+-]+|application\/(x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)$/i
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+// woff2, woff, OpenType, TrueType (two signatures), a collection; an EOT has one of its three
+// versions at byte 8 and "LP" at byte 34.
+const isFont = (b) => ['wOF2', 'wOFF', 'OTTO', '\0\x01\0\0', 'true', 'ttcf'].some((m) => b.subarray(0, 4).equals(Buffer.from(m, 'latin1'))) ||
+  (b.length > 36 && [0x00010000, 0x00020001, 0x00020002].includes(b.readUInt32LE(8)) && b[34] === 0x4c && b[35] === 0x50)
 const known = [...sources.values()].flat()
 for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
-  for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_FONT)) {
-    if (!/;base64$/i.test(params)) throw new Error(`${shown(file)}: a ${type} data: URL not in base64, which this check cannot read`)
+  for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_URL)) {
+    const base64 = /;base64$/i.test(params) && BASE64.test(data)
+    const fontType = FONT_TYPE.test(type)
+    if (fontType && !base64) throw new Error(`${shown(file)}: a ${type} data: URL not in plain base64, which this check cannot read`)
+    if (!base64) continue
     const bytes = Buffer.from(data, 'base64')
+    if (!fontType && !isFont(bytes)) continue
     const source = known.find((f) => readFileSync(f).equals(bytes))
-    if (!source) throw new Error(`${shown(file)}: a ${type} font inlined as a data: URL that no package listed here holds, and no notice covers`)
+    if (!source) throw new Error(`${shown(file)}: a font inlined as a data: URL (${type || 'no type'}) that no package listed here holds, and no notice covers`)
     if (source.startsWith(own + sep)) hanken = true
   }
 }

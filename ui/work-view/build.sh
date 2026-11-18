@@ -64,10 +64,16 @@ trap 'exit 130' INT TERM HUP
 # A reserved folder of fetch.sh's that holds an UPSTREAM line is a fetch that did not finish: its
 # UPSTREAM is what says so, as a folder left only because its removal failed holds none. The trees
 # in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
-# run that was killed").
-for left in "$here"/.upstream.*/UPSTREAM; do
-  if [ -e "$left" ]; then
-    echo "build.sh: ${left%/UPSTREAM} is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+# run that was killed"). mktemp makes the folder its owner's alone: one this user cannot look in,
+# as when the build runs as another user than the fetch did, stops the run too.
+for left in "$here"/.upstream.*; do
+  [ -d "$left" ] || continue
+  if [ ! -r "$left" ] || [ ! -x "$left" ]; then
+    echo "build.sh: $(id -un) cannot look in $left, which may be a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+  if [ -e "$left/UPSTREAM" ]; then
+    echo "build.sh: $left is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
     exit 1
   fi
 done
