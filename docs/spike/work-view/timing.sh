@@ -2,8 +2,13 @@
 # Work-view spike, pass item 7: the median time of /api/work-view against /api/my-work plus
 # /api/my-goals, on the viewer running now. The token is read here and never printed.
 # Usage: VIEWER_OUT=<the viewer's output file> bash timing.sh <runs>. A failed request stops it.
+# At least 2 runs: the first is reported apart, and the median and the maximum are of the rest.
 set -u
-n=$1
+n=${1:-}
+case $n in
+  '' | *[!0-9]*) echo "runs: a whole number, at least 2"; exit 1 ;;
+esac
+[ "$n" -ge 2 ] || { echo "runs: at least 2"; exit 1; }
 T=$(sudo -n -u "${VIEWER_USER:-oboete-dogfood}" -H cat "${VIEWER_OUT:?the viewer output file}" | grep -oE '#t=[A-Za-z0-9_-]+' | head -1 | cut -c4-)
 [ -n "$T" ] || { echo "no token"; exit 1; }
 for p in "/api/work-view" "/api/my-work?range=week" "/api/my-goals"; do

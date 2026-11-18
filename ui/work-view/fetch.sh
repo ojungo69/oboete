@@ -27,24 +27,50 @@ paths=(
 )
 
 commit=$(git -C "$src" rev-parse --verify "$tag^{commit}")
-# The new tree and its UPSTREAM line are staged beside upstream/, so that each move below is a
-# rename on one file system. The old tree is kept until both are in place, and put back if either
-# move fails: the tree on disk is always the one UPSTREAM names.
-staged=$(mktemp -d "$here/.upstream.XXXXXX")
-old="$staged.old"
-record="$staged.UPSTREAM"
-trap 'rm -rf "$staged" "$record"' EXIT
-git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$staged"
-chmod 755 "$staged"
-printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$record"
-if [ -e "$here/upstream" ]; then
-  mv "$here/upstream" "$old"
-fi
-if ! mv "$staged" "$here/upstream" || ! mv "$record" "$here/UPSTREAM"; then
-  rm -rf "${here:?}/upstream"
-  if [ -e "$old" ]; then mv "$old" "$here/upstream"; fi
+# What it replaces must be a plain folder and a plain file: a link would take the moves below to
+# another place.
+if [ -L "$here/upstream" ] || [ -L "$here/UPSTREAM" ] || [ -d "$here/UPSTREAM" ]; then
+  echo "fetch.sh: upstream/ or UPSTREAM is a link, or UPSTREAM is a folder" >&2
   exit 1
 fi
-trap - EXIT
-rm -rf "$old"
+
+# One build or fetch at a time in a checkout: a second one would move its tree into the first
+# one's. The lock is a folder, made or refused in one step; a run that was killed leaves it behind.
+lock="$here/.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "fetch.sh: another build or fetch holds $lock; remove it if none is running" >&2
+  exit 1
+fi
+
+# One reserved folder beside upstream/ holds the new tree, its UPSTREAM line and, while they move
+# in, the old tree. Each move is a rename on one file system. The swap is done when the UPSTREAM
+# line has moved in. However the script ends before that (an error, Ctrl-C, a kill), the tree this
+# run put in goes and the old one comes back, so the tree on disk is always the one UPSTREAM names;
+# a tree that cannot be put back is kept in the reserved folder.
+swap=
+moving=
+cleanup() {
+  if [ -n "$moving" ] && [ -e "$swap/UPSTREAM" ]; then
+    if [ ! -e "$swap/new" ]; then rm -rf "${here:?}/upstream"; fi
+    if [ -e "$swap/old" ] && ! mv "$swap/old" "$here/upstream"; then
+      echo "fetch.sh: the old tree is kept in $swap/old" >&2
+      swap=
+    fi
+  fi
+  rm -rf ${swap:+"$swap"}
+  rmdir "$lock"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+swap=$(mktemp -d "$here/.upstream.XXXXXX")
+mkdir "$swap/new"
+git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"
+chmod 755 "$swap/new"
+printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$swap/UPSTREAM"
+moving=1
+if [ -e "$here/upstream" ]; then
+  mv "$here/upstream" "$swap/old"
+fi
+mv "$swap/new" "$here/upstream"
+mv "$swap/UPSTREAM" "$here/UPSTREAM"
 echo "upstream/ is claude-mem $tag ($commit): $(find "$here/upstream" -type f | wc -l) files"

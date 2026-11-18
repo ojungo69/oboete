@@ -119,15 +119,10 @@ How each oboete status shows. The adapter sends it as an explicit lifecycle, whi
 
 ## Next
 
-These are the study's pull requests, corrected by this spike. The study of serving claude-mem's web UI is kept outside the repository.
+These are the study's pull requests, corrected by this spike and by their reviews. The study of serving claude-mem's web UI is kept outside the repository.
 
-1. **Vendor** the pristine tree at the tag: the files above with the root `package.json` and the three `.d.mts`, and `NOTICE`. The review bots skip the vendored tree and the bundle.
-2. **Patches, build and serving.** This covers:
-   - P1 and the hiding patches;
-   - `build.sh`;
-   - the committed bundle;
-   - the Node job;
-   - the `/work-view/` arm with its CSP;
-   - the two comments above.
-3. **The read adapter**, `GET /api/work-view`, from `src/work_view.rs` here, with a contract test that runs `toWorkModel` over its answer.
-4. Then the writes, the rules, Japanese and the address of its own, one pull request each.
+1. **Vendor** the pristine tree at the tag: the files above with the root `package.json` and the three `.d.mts`, and `NOTICE` (#1080). Sonar skips the vendored tree and the bundle; Codacy's settings are #1081.
+2. **Patches and build**: P1 and the hiding patches, `build.sh`, the committed bundle and the Node job (#1082). Nothing is served.
+3. **The read adapter**: `GET /api/work-view`, from `src/work_view.rs` here, with a contract test that runs `toWorkModel` over its answer. It answers at the main page's address and with its token, as `/api/my-work` does, until serving gives it its own.
+4. **Serving, at an address of its own**: the `/work-view/` arm with its CSP, the address of its own, its token, and the two comments above. Serving waits for the address: the main page keeps its token in its origin's storage, which the bundle would share at the same address.
+5. Then the writes, the rules and Japanese, one pull request each.

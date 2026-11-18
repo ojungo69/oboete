@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Builds the work-view oboete serves into assets/work-view/ (decision 114): claude-mem's tree
+# (upstream/) with oboete's patches (patches/, in order), its packages installed with install
+# scripts off, and THIRD-PARTY-NOTICES.md for each package and font the bundle holds.
+# The bundle is committed; CI builds it again and fails when the two differ.
+# Usage: ui/work-view/build.sh
+set -euo pipefail
+
+# The folder this script is in, with links resolved, and the checkout's own assets/ beside it: a
+# link there would make the moves below act on another folder, so it stops instead.
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+case $here in
+  */ui/work-view) ;;
+  *) echo "build.sh: $here is not ui/work-view" >&2; exit 1 ;;
+esac
+assets="${here%/ui/work-view}/assets"
+if [ -L "$assets" ] || [ ! -d "$assets" ] || [ -L "$assets/work-view" ]; then
+  echo "build.sh: $assets or its work-view is a link or missing" >&2
+  exit 1
+fi
+
+# One build or fetch at a time in a checkout: a second one would move its tree into the first
+# one's. The lock is a folder, made or refused in one step; a run that was killed leaves it behind.
+lock="$here/.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "build.sh: another build or fetch holds $lock; remove it if none is running" >&2
+  exit 1
+fi
+
+work=
+swap=
+# However the script ends (an error, Ctrl-C, a kill), an unfinished swap puts the old bundle back,
+# and a bundle that cannot be put back is kept in its reserved folder rather than removed.
+cleanup() {
+  rm -rf ${work:+"$work"}
+  if [ -n "$swap" ]; then
+    if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
+      echo "build.sh: the old bundle is kept in $swap/old" >&2
+    else
+      rm -rf "$swap"
+    fi
+  fi
+  rmdir "$lock"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+work=$(mktemp -d)
+cp -a "$here/upstream/." "$work/"
+# GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
+# folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
+# skip each one, and succeed with nothing applied.
+for patch in "$here"/patches/*.patch; do
+  (cd "$work" && GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply "$patch")
+done
+# The files outside src/ui/my-work import packages from claude-mem's root node_modules, which its
+# own root install provides. Here they resolve to the work-view's own packages.
+ln -s src/ui/my-work/node_modules "$work/node_modules"
+app="$work/src/ui/my-work"
+# The tools come from the lockfile alone: dev dependencies installed whatever npm's settings say,
+# and run from node_modules/.bin rather than fetched by npx. --sourcemap hidden: maps for the
+# notices, with no reference to them in the files served.
+(cd "$app" && npm ci --ignore-scripts --include=dev --no-audit --no-fund \
+  && ./node_modules/.bin/tsc -b && ./node_modules/.bin/vite build --sourcemap hidden)
+node "$here/notices.mjs" "$work" "$here/licences" > "$app/dist/THIRD-PARTY-NOTICES.md"
+find "$app/dist" -name '*.map' -delete
+
+# One reserved folder beside assets/work-view/ holds the new bundle and, while it moves in, the
+# old one: each move is a rename, the old bundle is put back if the new one cannot move in, and
+# nothing outside the reserved folder is removed.
+swap=$(mktemp -d "$assets/.work-view.XXXXXX")
+cp -a "$app/dist" "$swap/new"
+chmod 755 "$swap/new"
+if [ -e "$assets/work-view" ]; then
+  mv "$assets/work-view" "$swap/old"
+fi
+mv "$swap/new" "$assets/work-view"
+echo "assets/work-view: $(find "$assets/work-view" -type f | wc -l) files, $(du -sb "$assets/work-view" | cut -f1) bytes"

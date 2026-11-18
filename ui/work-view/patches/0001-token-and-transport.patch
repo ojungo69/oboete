@@ -1,0 +1,281 @@
+diff --git a/src/ui/local-api-token-client.ts b/src/ui/local-api-token-client.ts
+index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e7368312724 100644
+--- a/src/ui/local-api-token-client.ts
++++ b/src/ui/local-api-token-client.ts
+@@ -1,96 +1,197 @@
+-// Local API token mode (#5141), browser side.
+-//
+-// With CLAUDE_MEM_LOCAL_API_TOKEN set, the worker refuses a request that does not carry
+-// the token. The viewer is opened as `http://localhost:37777/?token=...`. This reads the
+-// token from that URL once, keeps it for the tab in sessionStorage, drops it from the
+-// address bar, and from then on sends it on every request the page makes to its own
+-// origin: as a header on `fetch` (a write must send the header), and as `?token=` on an
+-// `EventSource`, which cannot set one. An `<img>` or a link cannot send a header either, so
+-// the URL builders for worker media wrap their URLs in `withLocalApiTokenQuery`. The page's
+-// own scripts, styles and fonts need no token: the worker serves those data-free files
+-// without one.
+-//
+-// Self-contained on purpose: the viewer and My Work are separate bundles and both load it.
+-
+-export const LOCAL_API_TOKEN_HEADER = 'X-Claude-Mem-Token';
+-const STORAGE_KEY = 'claude-mem.local-api-token';
+-
+-// The token installLocalApiToken found for this tab; '' when the page has none.
+-let installedToken = '';
+-
+-type EventSourceConstructor = new (url: string | URL, init?: { withCredentials?: boolean }) => object;
+-
+-/** The parts of `window` this uses, so the module also compiles in a project without the DOM lib. */
+-export interface TokenWindow {
+-  location: { href: string; origin: string };
+-  history: { state: unknown; replaceState(data: unknown, unused: string, url?: string | null): void };
+-  sessionStorage: { getItem(key: string): string | null; setItem(key: string, value: string): void };
+-  fetch: typeof fetch;
+-  EventSource?: EventSourceConstructor;
+-}
++// Modified by oboete: this file replaces claude-mem 15.19.0's src/ui/local-api-token-client.ts
++// (ui/work-view/patches/0001-token-and-transport.patch; decision 114, docs/page.md).
++// The token comes from #t= or the one this browser kept for these pages, and goes in the
++// X-Oboete-Token header. oboete's viewer holds no event streams (one thread per connection), so
++// window.EventSource for /api/work-view/events becomes a poll that hands the page the same events.
+ 
+-/** The token for this tab: the page URL's single `token`, else the one kept from earlier. */
+-function readToken(win: TokenWindow): string {
+-  const url = new URL(win.location.href);
+-  const given = url.searchParams.getAll('token');
+-  // A repeated `token` names no token; the worker refuses it too.
+-  if (given.length === 1 && given[0] !== '') {
+-    try {
+-      win.sessionStorage.setItem(STORAGE_KEY, given[0]);
+-    } catch {
+-      // Storage can be blocked; the token then lasts until the page reloads.
+-    }
+-    url.searchParams.delete('token');
+-    win.history.replaceState(win.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+-    return given[0];
+-  }
+-  try {
+-    return win.sessionStorage.getItem(STORAGE_KEY) ?? '';
+-  } catch {
+-    return '';
+-  }
+-}
++export const LOCAL_API_TOKEN_HEADER = 'X-Oboete-Token';
++// These pages' own key: never the token oboete's own page keeps.
++const STORAGE_KEY = 'oboete-work-view-token';
++const EVENTS_PATH = '/api/work-view/events';
++const VERSION_PATH = '/api/work-view/version';
++const WORK_VIEW_PATH = '/api/work-view';
++const POLL_MS = 3000; // app.js:11119
++const REREAD_MS = 60_000; // app.js:11026-11027: `v` ignores tool calls and replies
++// Reports oboete keeps no record of: answered here, never sent.
++const NOT_SENT = new Set(['/api/work-view/usage', '/api/viewer-usage', '/api/work-view/activity']);
++// claude-mem's setup probe. oboete has no setup page, and these pages' token reaches only the
++// work-view's paths, where a 401 would stop the page: it is answered here, as oboete would, 404.
++const SETUP_PROBE = '/api/setup/state';
++const REFUSED = 'This page needs the address oboete gave you for it, with the key after the #. Open that address again.';
+ 
+-/** Wrap `fetch` and `EventSource` so a request to this page's own origin carries the token. Returns the token, or '' when there is none. */
+-export function installLocalApiToken(win: TokenWindow = globalThis as unknown as TokenWindow): string {
+-  const token = readToken(win);
+-  installedToken = token;
+-  if (token === '') return '';
++let refusedOnce = false;
+ 
+-  const sameOrigin = (target: string | URL): URL | null => {
+-    const url = new URL(String(target), win.location.href);
+-    return url.origin === win.location.origin ? url : null;
++export function installLocalApiToken(
++  win: Window & typeof globalThis = globalThis as unknown as Window & typeof globalThis,
++): string {
++  const recall = (): string => {
++    try { return win.localStorage.getItem(STORAGE_KEY) ?? ''; } catch { return ''; }
++  };
++  const address = new URLSearchParams(win.location.hash.slice(1));
++  const fromAddress = address.get('t') || '';
++  if (fromAddress !== '') {
++    // The key leaves the address bar once read, as claude-mem's own client did: it is kept in this
++    // browser's storage for these pages (a token that reaches the work-view's paths alone), not in
++    // a screenshot, a copied address or the tab's history. replaceState fires no hashchange.
++    address.delete('t');
++    const rest = address.toString();
++    win.history.replaceState(win.history.state, '', `${win.location.pathname}${win.location.search}${rest ? `#${rest}` : ''}`);
++  }
++  const token = fromAddress || recall();
++  let kept = fromAddress === '';
++
++  const refused = (): void => {
++    if (refusedOnce) return;
++    refusedOnce = true;
++    try { if (fromAddress === '' && recall() === token) win.localStorage.removeItem(STORAGE_KEY); } catch { /* blocked */ }
++    const bar = win.document.createElement('div');
++    bar.setAttribute('role', 'alert');
++    bar.textContent = REFUSED;
++    Object.assign(bar.style, { position: 'fixed', inset: '0 0 auto 0', zIndex: '2147483647', padding: '12px 16px', background: '#7f1d1d', color: '#fff' });
++    win.document.body.prepend(bar);
+   };
+ 
+   const nativeFetch = win.fetch.bind(win);
+-  win.fetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
++  win.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+     const given = input instanceof URL ? input.href : input;
+-    // Two calls because Request's constructor takes a string or a Request, not their union.
+-    const request = typeof given === 'string' ? new Request(given, init) : new Request(given, init);
+-    if (sameOrigin(request.url) !== null && !request.headers.has(LOCAL_API_TOKEN_HEADER)) {
+-      request.headers.set(LOCAL_API_TOKEN_HEADER, token);
++    const url = new URL(typeof given === 'string' ? given : given.url, win.location.href);
++    if (url.origin !== win.location.origin) throw new TypeError(`oboete: no address but its own (${url.origin})`);
++    if (NOT_SENT.has(url.pathname)) return new Response(null, { status: 204 });
++    if (url.pathname === SETUP_PROBE) return new Response('not found', { status: 404 });
++    const withPolicy = {
++      ...init,
++      referrerPolicy: (init?.referrerPolicy || (typeof given === 'string' ? '' : given.referrerPolicy) || 'same-origin') as ReferrerPolicy,
++      // The token goes to this origin alone: a redirect elsewhere fails rather than carry the header.
++      mode: 'same-origin' as RequestMode,
++    };
++    // The address checked above, not the string: a <base> element would resolve that elsewhere.
++    const request = new Request(typeof given === 'string' ? url.href : given, withPolicy);
++    if (token !== '' && !request.headers.has(LOCAL_API_TOKEN_HEADER)) request.headers.set(LOCAL_API_TOKEN_HEADER, token);
++    const answer = await nativeFetch(request);
++    if (url.pathname.startsWith('/api/')) {
++      if (answer.status === 401) refused();
++      else if (answer.ok && !kept) {
++        kept = true;
++        try { win.localStorage.setItem(STORAGE_KEY, token); } catch { /* blocked */ }
++      }
+     }
+-    return nativeFetch(request);
++    return answer;
+   }) as typeof fetch;
+ 
+-  const NativeEventSource = win.EventSource;
+-  if (typeof NativeEventSource === 'function') {
+-    win.EventSource = class extends NativeEventSource {
+-      constructor(target: string | URL, init?: { withCredentials?: boolean }) {
+-        const url = sameOrigin(target);
+-        if (url !== null && !url.searchParams.has('token')) url.searchParams.set('token', token);
+-        super(url === null ? target : url.toString(), init);
++  class PollingEventSource extends EventTarget {
++    readyState = 0;
++    readonly url: string;
++    readonly withCredentials = false;
++    onopen: ((event: Event) => void) | null = null;
++    onerror: ((event: Event) => void) | null = null;
++    onmessage: ((event: MessageEvent) => void) | null = null;
++    private timer: ReturnType<typeof setTimeout> | undefined;
++    private abort = new AbortController();
++    private busy = false;
++    private seen: string | undefined;
++    private readAt = 0;
++    private source = { kind: 'oboete', connected: true, error: null as string | null };
++
++    constructor(url: URL) {
++      super();
++      this.url = url.href;
++      win.document.addEventListener('visibilitychange', this.wake);
++      this.timer = setTimeout(() => void this.tick(), 0); // after the page sets its listeners
++    }
++
++    dispatchEvent(event: Event): boolean {
++      const handler = (this as unknown as Record<string, unknown>)[`on${event.type}`];
++      if (typeof handler === 'function') { try { handler.call(this, event); } catch (error) { console.error(error); } }
++      return super.dispatchEvent(event);
++    }
++
++    close(): void {
++      this.readyState = 2;
++      clearTimeout(this.timer);
++      this.abort.abort();
++      win.document.removeEventListener('visibilitychange', this.wake);
++    }
++
++    private wake = (): void => {
++      if (win.document.visibilityState !== 'visible' || this.readyState === 2) return;
++      clearTimeout(this.timer);
++      void this.tick();
++    };
++
++    private next(): void {
++      if (this.readyState !== 2) this.timer = setTimeout(() => void this.tick(), POLL_MS);
++    }
++
++    // Error while readyState is not 2, or local-source.ts:602-604 reopens every second.
++    private refuse(): void {
++      this.readyState = 0;
++      this.dispatchEvent(new Event('error'));
++      this.close();
++    }
++
++    private async get(path: string): Promise<Response | null> {
++      const answer = await win.fetch(path, { cache: 'no-store', signal: this.abort.signal });
++      // Closed while the request was out: nothing more happens on it.
++      if (this.readyState === 2) return null;
++      if (answer.status !== 401) return answer;
++      this.refuse();
++      return null;
++    }
++
++    private async tick(): Promise<void> {
++      if (this.busy || this.readyState === 2) return;
++      if (refusedOnce) { this.refuse(); return; }
++      if (this.readyState === 1 && win.document.visibilityState === 'hidden') { this.next(); return; }
++      this.busy = true;
++      try {
++        const head = await this.get(VERSION_PATH);
++        if (head === null) return;
++        if (!head.ok) throw new Error(`HTTP ${head.status}`);
++        const { v } = (await head.json()) as { v?: unknown };
++        if (this.readyState === 2) return;
++        if (this.readyState !== 1) { this.readyState = 1; this.dispatchEvent(new Event('open')); }
++        const now = Date.now();
++        if (String(v) !== this.seen || now - this.readAt >= REREAD_MS) {
++          const page = await this.get(WORK_VIEW_PATH);
++          if (page === null) return;
++          if (page.ok) {
++            const data = await page.text();
++            if (this.readyState === 2) return;
++            this.seen = String(v);
++            this.readAt = now;
++            try {
++              const { source } = JSON.parse(data) as { source?: { connected?: unknown; error?: unknown } };
++              this.source = { kind: 'oboete', connected: source?.connected !== false, error: typeof source?.error === 'string' ? source.error : null };
++            } catch { /* the page drops an unreadable frame too */ }
++            this.dispatchEvent(new MessageEvent('work-view', { data }));
++          } else {
++            this.source = { kind: 'oboete', connected: false, error: `HTTP ${page.status}` };
++          }
++        }
++        const at = new Date().toISOString(); // 3 fraction digits, this browser's clock
++        this.dispatchEvent(new MessageEvent('heartbeat', { data: JSON.stringify({ at, source: { ...this.source, lastCheckedAt: at } }) }));
++      } catch {
++        if (this.readyState !== 2) { this.readyState = 0; this.seen = undefined; this.dispatchEvent(new Event('error')); }
++      } finally {
++        this.busy = false;
++        this.next();
+       }
+-    } as EventSourceConstructor;
++    }
+   }
++
++  const NativeEventSource = win.EventSource;
++  win.EventSource = function (target: string | URL, init?: EventSourceInit) {
++    const url = new URL(String(target), win.location.href);
++    return url.origin === win.location.origin && url.pathname === EVENTS_PATH
++      ? new PollingEventSource(url)
++      : new NativeEventSource(target, init);
++  } as unknown as typeof EventSource;
++
++  win.addEventListener('hashchange', () => win.location.reload());
+   return token;
+ }
+ 
+-/**
+- * `url` with `?token=` added, for a same-origin worker URL that an element loads itself (an
+- * `<img src>` or a link), which cannot send the header. Unchanged when the page has no token.
+- */
++/** oboete takes no token in a URL; an <img> cannot send the header, so the snapshot sends no media. */
+ export function withLocalApiTokenQuery(url: string): string {
+-  if (installedToken === '') return url;
+-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(installedToken)}`;
++  return url;
+ }

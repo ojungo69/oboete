@@ -1,0 +1,70 @@
+diff --git a/src/ui/my-work/src/App.tsx b/src/ui/my-work/src/App.tsx
+index 35eb64ba00f12202292e0bc572c614c9919e0e02..429eb140e52761fd6f2ac68fea150a622304ef50 100644
+--- a/src/ui/my-work/src/App.tsx
++++ b/src/ui/my-work/src/App.tsx
+@@ -232,10 +232,11 @@ function LoadedApp() {
+                     <Switch id="dark-mode" checked={dark} onCheckedChange={setDark} />
+                     <Label htmlFor="dark-mode" className="text-xs">{t('Dark')}</Label>
+                   </div>
+-                  <div className="flex items-center gap-1.5">
++                  {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): the specification overlay is claude-mem's own tool. */}
++                  {false && <div className="flex items-center gap-1.5">
+                     <Switch id="spec-overlay" checked={showSpec} onCheckedChange={setShowSpec} />
+                     <Label htmlFor="spec-overlay" className="text-xs">{t('Spec IDs')}</Label>
+-                  </div>
++                  </div>}
+                 </div>
+               </StickyBanner>
+ 
+@@ -250,8 +251,9 @@ function LoadedApp() {
+                     </Req>
+                     <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight whitespace-nowrap md:hidden [.header-pill_&]:text-base">{heading}</h1>
+                     <div className="ml-auto flex shrink-0 items-center gap-0.5 md:gap-2">
+-                      <TeamSwitch team={workspace.team} onChange={(team) => setWorkspace({ team })} />
+-                      <DeviceFreshness />
++                      {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete has no team view and syncs no machines. */}
++                      {false && <TeamSwitch team={workspace.team} onChange={(team) => setWorkspace({ team })} />}
++                      {false && <DeviceFreshness />}
+                       <LiveIndicator />
+                       <LanguageSelector />
+                       <ClassicViewerLink />
+diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
+index 1314782bfc7cef513a61275f8495c8164169560b..b87ccb2997402ca2c502cd53d1002b05ee041852 100644
+--- a/src/ui/my-work/src/live/local-source.ts
++++ b/src/ui/my-work/src/live/local-source.ts
+@@ -323,7 +323,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+ 
+   // Only the page this computer's worker serves can continue a conversation: a cloud-served page has no CLI here.
+   const conversationContinuation: Pick<WorkDataSource, 'loadConversationContinuation' | 'continueConversation' | 'stopConversationContinuation'
+-    | 'subscribeToConversationContinuations' | 'openConversationInApp'> = SOURCE_KIND !== 'local' ? {} : {
++    | 'subscribeToConversationContinuations' | 'openConversationInApp'> = (true || SOURCE_KIND !== 'local') ? {} : { // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete continues no conversation yet
+     loadConversationContinuation: (platform, conversationSessionId) => callConversationRoute(
+       `${WORK_VIEW_CONVERSATION_CONTINUATION_URL}?${new URLSearchParams({ platform, conversationSessionId })}`,
+       { cache: 'no-store' }, 'read this conversation', readConversationContinuationAnswer),
+diff --git a/src/ui/my-work/src/live/to-shared-focus.ts b/src/ui/my-work/src/live/to-shared-focus.ts
+index e6e1b818520cedbc0a6c60fe76303cdac4aeeff7..428f554f7ccda120d96b663b5de492e7cd607cfe 100644
+--- a/src/ui/my-work/src/live/to-shared-focus.ts
++++ b/src/ui/my-work/src/live/to-shared-focus.ts
+@@ -71,6 +71,8 @@ export function requestsInArea(model: Pick<WorkModel, 'requests' | 'focusAreas'>
+ 
+ /** Whether an area can be shared: a live area the owner sees, not Other, a suggestion or a merged-away one. */
+ export function canShareArea(area: FocusArea | undefined): area is FocusArea {
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete shares no area.
++  if (true as boolean) return false
+   return !!area && area.id !== OTHER_FOCUS_AREA_ID && !area.mergedInto && (area.status === 'kept' || area.status === 'done')
+ }
+ 
+diff --git a/src/ui/my-work/src/store/index.ts b/src/ui/my-work/src/store/index.ts
+index 5e9f77b0ee91e0ed3afd2e59244e92fcf8ad5f95..d23b5ecc0b415f4db5cf770928f2b01b7402f62b 100644
+--- a/src/ui/my-work/src/store/index.ts
++++ b/src/ui/my-work/src/store/index.ts
+@@ -44,7 +44,8 @@ const useStoreBase = createBoundStore({
+   // Sample fixtures are not usage. The hosted viewer uses the same local source
+   // (the cloud worker) but its worker sets DO_NOT_TRACK, so its counts go to
+   // the host's usage endpoint instead of /api/work-view/usage.
+-  reportsUsage: ACTIVE_SOURCE === localSource,
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete keeps no usage counts.
++  reportsUsage: false && ACTIVE_SOURCE === localSource,
+   sendUsage: isServedFromCloud(window.location.hostname) ? sendHostedUsage : sendUsageReport,
+   scrollToTop: () => window.scrollTo(0, 0),
+ })

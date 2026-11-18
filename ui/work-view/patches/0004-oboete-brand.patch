@@ -1,0 +1,96 @@
+diff --git a/src/ui/my-work/index.html b/src/ui/my-work/index.html
+index 37093b4de5b5bd99dbfe2d098f6a73b521edd491..ec5e03573af8038d69204f61fb64f667be8f3708 100644
+--- a/src/ui/my-work/index.html
++++ b/src/ui/my-work/index.html
+@@ -4,7 +4,8 @@
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>My Work · claude-mem</title>
++    <!-- Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): oboete's name. -->
++    <title>My Work · oboete</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/src/ui/my-work/public/favicon.svg b/src/ui/my-work/public/favicon.svg
+index 6893eb13237060adc0c968a690149a49faa2d7d3..c827a29998e9eaf6f1e2b771662a115b51c43c44 100644
+--- a/src/ui/my-work/public/favicon.svg
++++ b/src/ui/my-work/public/favicon.svg
+@@ -1 +1,2 @@
+-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z" style="fill:#863bff;fill:color(display-p3 .5252 .23 1);fill-opacity:1"/><mask id="a" width="48" height="46" x="0" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M25.842 44.938c-.664.844-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.183c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.498 0-3.579-1.842-3.579H1.133c-.92 0-1.456-1.04-.92-1.787L9.91.473c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.578 1.842 3.578h11.377c.943 0 1.473 1.088.89 1.832L25.843 44.94z" style="fill:#000;fill-opacity:1"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#ede6ff" rx="5.508" ry="14.704" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -4.47 31.516)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#ede6ff" rx="10.399" ry="29.851" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -39.328 7.883)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#7e14ff" rx="5.508" ry="30.487" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -25.913 -14.639)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -32.644 -3.334)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -34.34 30.47)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#ede6ff" rx="14.072" ry="22.078" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="rotate(93.35 24.506 48.493)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx=".387" cy="8.972" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(39.51 .387 8.972)"/></g><g filter="url(#k)"><ellipse cx="47.523" cy="-6.092" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 47.523 -6.092)"/></g><g filter="url(#l)"><ellipse cx="41.412" cy="6.333" fill="#47bfff" rx="5.971" ry="9.665" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 41.412 6.333)"/></g><g filter="url(#m)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#n)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#o)"><ellipse cx="35.651" cy="29.907" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 35.651 29.907)"/></g><g filter="url(#p)"><ellipse cx="38.418" cy="32.4" fill="#47bfff" rx="5.971" ry="15.297" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 38.418 32.4)"/></g></g><defs><filter id="b" width="60.045" height="41.654" x="-19.77" y="16.149" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-54.613" y="-7.533" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-49.64" y="2.03" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-45.045" y="20.029" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-43.513" y="21.178" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="15.756" y="-17.901" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-27.636" y="-22.853" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="20.116" y="-38.415" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="24.641" y="-11.323" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="8.244" y="-2.416" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="18.713" y="10.588" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter></defs></svg>
+\ No newline at end of file
++<!-- Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): oboete's favicon, from its assets/brand/favicon. -->
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title"><title id="title">oboete</title><rect width="1254" height="1254" fill="#fff"/><path fill="#2C2C2B" fill-rule="evenodd" d="M662.5 158.02C632.5 158.58 602.13 160.23 572.5 165.18C514.1 174.93 456.48 196.01 405.5 226.13C366.69 249.07 331.32 278.4 299.69 310.33C284.95 325.2 270.58 340.3 257.28 356.5C224.91 395.91 197.2 443.75 179.26 491.5C176.34 499.28 174.14 507.42 171.6 515.33C164.73 536.71 158.71 558.27 155.21 580.5C153.71 589.98 152.98 599.66 151.88 609.2C144.93 669 149.33 730.34 169.1 787.5C188.15 842.54 217.89 894.56 254.84 939.5C293.63 986.68 338.95 1027.91 391.8 1058.82C454.09 1095.26 510.86 1112.59 582.5 1119.72C602.7 1121.73 623.05 1121.05 643.25 1119.74C805.96 1109.17 953.21 1005.77 1034.79 867.2C1049.51 842.19 1062.93 815.89 1072.71 788.5C1080.52 766.66 1087.61 742.33 1091.78 719.5C1093.05 712.56 1093.55 705.38 1094.43 698.38C1095.55 689.46 1097.14 680.46 1097.81 671.5C1100.99 628.53 1096.56 576.4 1086.73 534.5C1080.78 509.14 1071.52 479.75 1057.89 457.5C1044.52 435.67 1022.56 414.37 1004.76 395.85L925.75 313.68C898.52 285.36 871.75 256.49 843.96 228.72C825.55 210.33 807.34 190.82 783.5 179.44C748.85 162.91 700.71 157.31 662.5 158.02ZM750.5 224.8L749.28 225.5C748.48 246.57 749.22 267.8 749.23 288.89C749.26 338.08 749.73 387.31 749.21 436.5L748.5 437.26C717.6 418.38 690.16 404.43 653.5 400.24C559.22 389.48 471.61 440.14 419.83 517C406.5 536.79 394.87 558.48 388.09 581.5C381.29 604.6 377.33 629.42 377.27 653.5C377.11 717.16 402.95 770.23 444.52 817.06C453.39 827.05 462.26 837.09 472.5 845.74C502.94 871.45 539.05 890.75 578.5 897.9C592.43 900.43 606.54 900.75 620.64 900.35C630.97 900.05 641.31 899.75 651.5 897.88C724.91 884.46 785.99 830.7 822.78 767.72C834.49 747.67 845.33 726.27 850.78 703.5C853.7 691.31 855.09 678.84 856.16 666.39C856.69 660.16 857.73 653.75 857.78 647.5C857.82 641.75 856.97 635.84 856.58 630.1C853.36 583.65 836.84 547.79 815.08 507.5L815.48 506.5C885.81 506.53 956.18 507.3 1026.5 506.37L1027.07 505.5C1024.04 498.57 1021.43 491.18 1017.89 484.5C1008.07 465.96 992.92 448.73 974.5 438.4C954.29 427.07 931.01 428.82 908.66 428.77L805.2 428.5C804.07 421.99 804.5 415.32 804.5 408.72L804.5 377.15L804.49 278.5C789.28 258.28 770.92 239.77 750.5 224.8Z"/></svg>
+diff --git a/src/ui/my-work/src/App.tsx b/src/ui/my-work/src/App.tsx
+index 429eb140e52761fd6f2ac68fea150a622304ef50..555e7b17402998c5c5a6ecddff85161f3d642d7a 100644
+--- a/src/ui/my-work/src/App.tsx
++++ b/src/ui/my-work/src/App.tsx
+@@ -14,7 +14,7 @@ import { ActivePill, ClassicViewerLink, DeviceFreshness, FeedbackLink, GitHubSta
+ import { Navbar, NavBody } from '@/components/aceternity/resizable-navbar'
+ import { Notch } from '@/components/aceternity/notch'
+ import { StickyBanner } from '@/components/aceternity/sticky-banner'
+-import { CmemMark } from '@/components/brand'
++import { OboeteMark } from '@/components/brand' // Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch):
+ import { FocusChipRow, FocusRail, PastFocusLink, SIDE_NAV_PILL } from '@/components/focus-nav'
+ import { cn } from '@/lib/utils'
+ import { MyWork } from '@/pages/my-work'
+@@ -245,8 +245,9 @@ function LoadedApp() {
+                   <HeaderBody>
+                     <Req ids={['R10.4']}>
+                       <span className="flex shrink-0 items-center gap-2">
+-                        <CmemMark className="size-8 text-[#D86441]" />
+-                        <span className="sr-only md:not-sr-only md:text-[0.95rem] md:font-semibold md:tracking-tight">claude-mem</span>
++                        {/* Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): oboete's mark and name. */}
++                        <OboeteMark className="size-8 text-[#105FAD]" />
++                        <span className="sr-only md:not-sr-only md:text-[0.95rem] md:font-semibold md:tracking-tight">oboete</span>
+                       </span>
+                     </Req>
+                     <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight whitespace-nowrap md:hidden [.header-pill_&]:text-base">{heading}</h1>
+@@ -256,9 +257,10 @@ function LoadedApp() {
+                       {false && <DeviceFreshness />}
+                       <LiveIndicator />
+                       <LanguageSelector />
+-                      <ClassicViewerLink />
+-                      <FeedbackLink />
+-                      <GitHubStars />
++                      {/* Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): claude-mem's own links (its classic viewer, its feedback, its GitHub stars). */}
++                      {false && <ClassicViewerLink />}
++                      {false && <FeedbackLink />}
++                      {false && <GitHubStars />}
+                     </div>
+                   </HeaderBody>
+                 </Navbar>
+diff --git a/src/ui/my-work/src/components/brand.tsx b/src/ui/my-work/src/components/brand.tsx
+index 171ade63d679ca82e80f35487131f4c9b0d4d0c1..1239f72215548a4532a07bd718916844949c02ea 100644
+--- a/src/ui/my-work/src/components/brand.tsx
++++ b/src/ui/my-work/src/components/brand.tsx
+@@ -7,6 +7,15 @@ import { BotIcon } from 'lucide-react'
+ import { cn } from '@/lib/utils'
+ import type { AgentTool } from '@/data'
+ 
++// Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): oboete's symbol, from oboete's assets/brand/icon, drawn in currentColor.
++export function OboeteMark({ className }: { className?: string }) {
++  return (
++    <svg viewBox="0 0 1254 1254" aria-hidden="true" className={className}>
++      <path fill="currentColor" fillRule="evenodd" d="M662.5 158.02C632.5 158.58 602.13 160.23 572.5 165.18C514.1 174.93 456.48 196.01 405.5 226.13C366.69 249.07 331.32 278.4 299.69 310.33C284.95 325.2 270.58 340.3 257.28 356.5C224.91 395.91 197.2 443.75 179.26 491.5C176.34 499.28 174.14 507.42 171.6 515.33C164.73 536.71 158.71 558.27 155.21 580.5C153.71 589.98 152.98 599.66 151.88 609.2C144.93 669 149.33 730.34 169.1 787.5C188.15 842.54 217.89 894.56 254.84 939.5C293.63 986.68 338.95 1027.91 391.8 1058.82C454.09 1095.26 510.86 1112.59 582.5 1119.72C602.7 1121.73 623.05 1121.05 643.25 1119.74C805.96 1109.17 953.21 1005.77 1034.79 867.2C1049.51 842.19 1062.93 815.89 1072.71 788.5C1080.52 766.66 1087.61 742.33 1091.78 719.5C1093.05 712.56 1093.55 705.38 1094.43 698.38C1095.55 689.46 1097.14 680.46 1097.81 671.5C1100.99 628.53 1096.56 576.4 1086.73 534.5C1080.78 509.14 1071.52 479.75 1057.89 457.5C1044.52 435.67 1022.56 414.37 1004.76 395.85L925.75 313.68C898.52 285.36 871.75 256.49 843.96 228.72C825.55 210.33 807.34 190.82 783.5 179.44C748.85 162.91 700.71 157.31 662.5 158.02ZM750.5 224.8L749.28 225.5C748.48 246.57 749.22 267.8 749.23 288.89C749.26 338.08 749.73 387.31 749.21 436.5L748.5 437.26C717.6 418.38 690.16 404.43 653.5 400.24C559.22 389.48 471.61 440.14 419.83 517C406.5 536.79 394.87 558.48 388.09 581.5C381.29 604.6 377.33 629.42 377.27 653.5C377.11 717.16 402.95 770.23 444.52 817.06C453.39 827.05 462.26 837.09 472.5 845.74C502.94 871.45 539.05 890.75 578.5 897.9C592.43 900.43 606.54 900.75 620.64 900.35C630.97 900.05 641.31 899.75 651.5 897.88C724.91 884.46 785.99 830.7 822.78 767.72C834.49 747.67 845.33 726.27 850.78 703.5C853.7 691.31 855.09 678.84 856.16 666.39C856.69 660.16 857.73 653.75 857.78 647.5C857.82 641.75 856.97 635.84 856.58 630.1C853.36 583.65 836.84 547.79 815.08 507.5L815.48 506.5C885.81 506.53 956.18 507.3 1026.5 506.37L1027.07 505.5C1024.04 498.57 1021.43 491.18 1017.89 484.5C1008.07 465.96 992.92 448.73 974.5 438.4C954.29 427.07 931.01 428.82 908.66 428.77L805.2 428.5C804.07 421.99 804.5 415.32 804.5 408.72L804.5 377.15L804.49 278.5C789.28 258.28 770.92 239.77 750.5 224.8Z" />
++    </svg>
++  )
++}
++
+ export function CmemMark({ className }: { className?: string }) {
+   return (
+     <svg viewBox="0 0 1167 1116" aria-hidden="true" className={className}>
+diff --git a/src/ui/my-work/src/index.css b/src/ui/my-work/src/index.css
+index fd11b31d26680bd5013e2f11e22dfedaf8d18a04..f7b1cd50046a9eacdb83349e6a0976dbb8c7c90d 100644
+--- a/src/ui/my-work/src/index.css
++++ b/src/ui/my-work/src/index.css
+@@ -7,7 +7,8 @@
+ 
+ @theme inline {
+     --font-heading: var(--font-sans);
+-    --font-sans: 'Geist Variable', sans-serif;
++    /* Modified by oboete (ui/work-view/patches/0004-oboete-brand.patch): Geist has no Japanese; oboete's DESIGN.md stack follows it. */
++    --font-sans: 'Geist Variable', system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Yu Gothic UI', 'Noto Sans JP', sans-serif;
+     --color-working: var(--working);
+     --color-working-foreground: var(--working-foreground);
+     --color-working-border: var(--working-border);
