@@ -1,0 +1,25 @@
+docs/hook-time.md
+  s_52c3955e48bff4::t_ea1634d870e047 49-50,70-71
+src/pi.ts
+  s_52c3955e48bff4::t_5b7fabcd367e3b 30-31,35,47-60,144-147
+src/testdata/pi/test.mjs
+  s_52c3955e48bff4::t_0f55d8216a42bb 404-429
+tests/hook_output.rs
+  s_52c3955e48bff4::t_48f33b91692790 123-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "12be1f68ad8d2501f07f25927ab3cb6882dfb6da",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
