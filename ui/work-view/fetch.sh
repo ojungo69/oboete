@@ -3,6 +3,11 @@
 # records the tag and its commit in ui/work-view/UPSTREAM (docs/spike/work-view.md, "Next").
 # Usage: ui/work-view/fetch.sh <a claude-mem checkout> <tag>
 set -euo pipefail
+# The scripts' own globbing, whatever a caller's exported SHELLOPTS, BASHOPTS or GLOBIGNORE say: the
+# guard and the patch list below read their folders through globs.
+set +f
+shopt -u failglob nullglob nocaseglob
+unset GLOBIGNORE
 src=${1:?a claude-mem checkout}
 tag=${2:?a tag, e.g. v15.19.0}
 

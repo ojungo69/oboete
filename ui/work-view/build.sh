@@ -5,6 +5,11 @@
 # The bundle is committed; CI builds it again and fails when the two differ.
 # Usage: ui/work-view/build.sh
 set -euo pipefail
+# The scripts' own globbing, whatever a caller's exported SHELLOPTS, BASHOPTS or GLOBIGNORE say: the
+# guard and the patch list below read their folders through globs.
+set +f
+shopt -u failglob nullglob nocaseglob
+unset GLOBIGNORE
 
 # The folder this script is in, with links resolved, and the checkout's own assets/ beside it: a
 # link there would make the moves below act on another folder, so it stops instead.

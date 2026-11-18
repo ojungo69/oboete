@@ -37,8 +37,8 @@ function checkout(files, use, prefix = 'work-view-') {
 }
 
 // A script's run: its status and what it wrote to stderr.
-function run(view, script, args = [], path = process.env.PATH) {
-  const r = spawnSync('bash', [join(view, script), ...args], { encoding: 'utf8', env: { ...env, PATH: path } })
+function run(view, script, args = [], path = process.env.PATH, more = {}) {
+  const r = spawnSync('bash', [join(view, script), ...args], { encoding: 'utf8', env: { ...env, PATH: path, ...more } })
   return { status: r.status, stderr: r.stderr }
 }
 
@@ -93,6 +93,24 @@ test('a fetch that did not finish stops the next build, which names it and leave
     assert.equal(status, 1, stderr)
     assert.match(stderr, /\.upstream\.AbCdEf is a fetch that did not finish; see ui\/work-view\/README\.md/)
     assert.equal(existsSync(join(view, '.lock')), false)
+  })
+})
+
+test('a caller\'s exported glob settings change neither guard', () => {
+  checkout({ ...unfinished, 'upstream/f.txt': 'a\n' }, ({ root, view }) => {
+    const src = claudeMem(root)
+    for (const more of [{ SHELLOPTS: 'noglob' }, { GLOBIGNORE: '.upstream.*' }]) {
+      for (const [script, args] of [['fetch.sh', [src, 'v1']], ['build.sh', []]]) {
+        const { status, stderr } = run(view, script, args, process.env.PATH, more)
+        assert.equal(status, 1, `${script} ${JSON.stringify(more)}: ${stderr}`)
+        assert.match(stderr, /\.upstream\.AbCdEf is a fetch that did not finish/, `${script} ${JSON.stringify(more)}`)
+      }
+    }
+  })
+  // With failglob, a checkout with no reserved folder still fetches.
+  checkout({}, ({ root, view }) => {
+    const { status, stderr } = run(view, 'fetch.sh', [claudeMem(root), 'v1'], process.env.PATH, { BASHOPTS: 'failglob' })
+    assert.equal(status, 0, stderr)
   })
 })
 

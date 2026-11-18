@@ -179,6 +179,13 @@ test('a font the build inlines as a data: URL is a listed package\'s file by its
   assert.equal(template.error, undefined)
   const strayFragment = notice(tree({ packages, sources, fonts: css(`"data:application/octet-stream;base64,${b64(woff2)}#x"`) }))
   assert.match(strayFragment.error, /a font inlined as a data: URL \(application\/octet-stream\) that no package listed here holds/)
+  // A base64 marker with spaces around it, which the Fetch standard reads as base64: the font is read.
+  for (const header of ['application/octet-stream; base64', 'application/octet-stream;base64 ']) {
+    const spaced = notice(tree({ packages, sources, fonts: css(`"data:${header},${b64(woff2)}"`) }))
+    assert.match(spaced.error, /a font inlined as a data: URL \(application\/octet-stream\) that no package listed here holds/, header)
+  }
+  const spacedListed = notice(tree({ packages, sources, fonts: css(`"data:font/woff2; base64,${b64('font')}"`) }))
+  assert.equal(spacedListed.error, undefined)
   // A tab inside a quoted URL, which the browser drops: the font is read whole, and is not plain.
   const tab = b64(woff2)
   const tabbed = notice(tree({ packages, sources, fonts: css(`"data:application/octet-stream;base64,${tab.slice(0, 8)}\t${tab.slice(8)}"`) }))

@@ -147,9 +147,12 @@ function* dataUrls(text) {
     const body = literal.split('#')[0]
     const comma = body.indexOf(',')
     if (comma < 0) continue
-    const [type, ...params] = body.slice(0, comma).split(';')
-    // `;base64` is the last of a data: URL's parameters (RFC 2397).
-    yield { type, base64: params.at(-1)?.toLowerCase() === 'base64', data: body.slice(comma + 1), written: text.slice(m.index, end) }
+    // The header as the Fetch standard's data: URL reading takes it: trimmed, and in base64 when
+    // it ends with `;`, any spaces, and `base64`.
+    const header = body.slice(0, comma).trim()
+    const marked = /^(.*?);[ ]*base64$/i.exec(header)
+    const type = (marked ? marked[1] : header).split(';')[0].trim()
+    yield { type, base64: !!marked, data: body.slice(comma + 1), written: text.slice(m.index, end) }
   }
 }
 const FONT_TYPE = /^(font\/[\w.+-]+|application\/(x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)$/i
