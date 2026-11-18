@@ -246,12 +246,14 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   their readers give them, each text gated at its source, and from the Build story's kept texts,
   and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
   it is sent, and the Build story whole, read before any mask as each kept text as it was kept,
-  the kept texts joined, each block, each heading as the pages show it and the story as sent, then
-  read again for what the masks left. No rule on a key takes what the pages read by it: the
-  counts, days and times are read by the keys the code names. A request's id and its
-  conversations' go through the gate as the main page sends them. A conversation the gate would
-  mask in its key or its agent's id goes by a keyed reference, the same in every place the pages
-  match it, and a work item's status goes as one of the words the pages read, or as none. The
+  the kept texts joined, each block as the pages split it (whole and with a heading's `#` marks
+  off) and the story as sent, then each of those views but the kept texts read again as the masks
+  leave it, until the rules find nothing new. No rule on a key takes what the pages read by it:
+  the counts, days and times are read by the keys the code names. A request or conversation whose
+  id My Work masked, or whose id the gate would change in a shape the snapshot writes it in, goes
+  by a reference, `m:` and the keyed print of its stored id, the same in every place the pages
+  match it; no id My Work gives begins `m:`. A work item's status goes as one of the words the
+  pages read, or as none. One read of the rules serves the references and the walk. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its

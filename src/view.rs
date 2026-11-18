@@ -2685,13 +2685,10 @@ impl Viewer {
                 // No store yet: an empty home's snapshot, at once. A reader that opened a store
                 // made meanwhile would read outside the hold below (Codex on #1087).
                 let Some(_stores) = crate::search::b::stores(&self.home)? else {
-                    let empty = crate::work_view::snapshot(&json!({}), &json!({}), now);
-                    return Ok(Response::json(&empty));
+                    return Ok(Response::json(&crate::work_view::empty(now)));
                 };
                 let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
-                let (work, goals) = crate::work_view::read(&self.home, now)?;
-                let snapshot = crate::work_view::snapshot(&work, &goals, now);
-                return Ok(Response::json(&snapshot));
+                return Ok(Response::json(&crate::work_view::answer(&self.home, now)?));
             }
             "work-view/version" => return self.api("version", q),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
@@ -3075,7 +3072,7 @@ fn put_id(v: &mut Value, id: Option<String>) {
 
 /// A My Work request's id, or its conversation's, taken out of it with its `fingerprint`, and
 /// gated but for that.
-pub(crate) fn request_id(request: &mut Value) -> Option<String> {
+fn request_id(request: &mut Value) -> Option<String> {
     let request = request.as_object_mut()?;
     let fingerprint = match request.remove("fingerprint") {
         Some(Value::String(print)) => Some(print),

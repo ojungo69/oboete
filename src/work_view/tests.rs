@@ -232,7 +232,7 @@ fn home() -> (Store, i64) {
 
 /// What the route reads (`read`): the two answers as their readers give them, and the story's kept texts.
 fn answers(h: &Store, now: i64) -> (Value, Value) {
-    read(h.home.path(), now).unwrap()
+    read(h.home.path(), now, &Gate::now()).unwrap()
 }
 
 /// The one item of `list` whose `key` is `value`.
@@ -252,7 +252,7 @@ fn an_area_nothing_was_asked_for_in_keeps_its_open_asks() {
     let docs = one(&work["areas"], "id", DOCS);
     assert!(docs["asked"].is_null(), "{docs}");
     assert_eq!(arr(&docs["asks"]).len(), 1, "{docs}");
-    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     let ask = one(&snapshot["goals"]["asks"], "title", "Write docs");
     assert_eq!(
         (&ask["focusAreaId"], &ask["focusArea"]),
@@ -286,7 +286,7 @@ fn the_goals_times_are_written_in_the_machines_zone() {
     assert_eq!(iso(ms), json!("2026-11-18T20:30:00.000Z"));
     let (h, now) = home();
     let (work, goals) = answers(&h, now);
-    let snapshot = snapshot_at(&work, &goals, now, &tokyo);
+    let snapshot = snapshot_at(&work, &goals, now, &tokyo, &Gate::now());
     let list = &snapshot["goals"];
     let generated = list["generatedAt"].as_str().unwrap_or("");
     assert!(generated.ends_with("+09:00"), "{list}");
@@ -321,7 +321,7 @@ fn a_masked_value_stays_masked() {
     let gated = one(&work["requests"], "id", "c:claude:s1");
     let title = gated["title"].as_str().unwrap_or("");
     assert!(!title.contains(&value) && title.contains("auth"), "{title}");
-    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     assert!(!snapshot.to_string().contains(&value));
     let key = json!(["conversation", "claude", "c:claude:s1"]).to_string();
     let request = one(&snapshot["humanRequests"], "id", &key);
@@ -338,7 +338,7 @@ fn a_done_request_is_completed_when_its_status_said_so() {
     let done = one(&work["requests"], "id", "c:claude:s3");
     assert_eq!(done["status"], json!("ready"), "{done}");
     let at = done["completed_at"].as_i64().expect("the time it was done");
-    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     let key = json!(["conversation", "claude", "c:claude:s3"]).to_string();
     assert_eq!(
         one(&snapshot["humanRequests"], "id", &key)["completedAtEpoch"],
@@ -351,7 +351,7 @@ fn a_done_request_is_completed_when_its_status_said_so() {
 fn a_list_of_one_name_in_two_repositories_is_two_workstreams() {
     let (h, now) = home();
     let (work, goals) = answers(&h, now);
-    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     let streams = &one(&snapshot["humanRequests"], "id", "r:rq1")["workstreams"];
     let tasks: Vec<Vec<&str>> = (arr(streams).iter())
         .map(|w| {
@@ -378,7 +378,7 @@ fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
             "completed": "2026-11-19", "completed_at": null,
             "readings": [{"ts": 1_795_050_000_000_i64, "percent": 100}]},
         "story": {"narrative": "Shipped.", "milestones": [{"date": "2026-11-18", "text": "Built"}]}}]});
-    let snapshot = snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc);
+    let snapshot = snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc, &Gate::now());
     let request = &snapshot["humanRequests"][0];
     assert!(request["completedAtEpoch"].is_null(), "{request}");
     let progress = &request["progress"];
@@ -393,7 +393,8 @@ fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
         "ask": {"text": "Notes.", "ts": 1_795_000_000_000_i64},
         "progress": {"percent": 100, "reviewed": null, "completed": "2026-11-19",
             "completed_at": 1_795_090_000_000_i64}}]});
-    let request = &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc)["humanRequests"][0];
+    let request =
+        &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc, &Gate::now())["humanRequests"][0];
     assert!(request["progress"].is_null(), "{request}");
     assert_eq!(request["completedAtEpoch"], json!(1_795_090_000_000_i64));
 }
@@ -405,18 +406,20 @@ fn the_build_story_keeps_its_weeks() {
     let chapters = json!([{"week": "2026-11-16", "text": "Built the adapter."},
         {"week": "2026-11-09", "text": "Ran the spike."}]);
     let work = json!({"story": {"recap": "Two weeks of the work-view.", "chapters": chapters}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     let want = "Two weeks of the work-view.\n\n## 2026-11-16\n\nBuilt the adapter.\n\n## 2026-11-09\n\nRan the spike.";
     assert_eq!(story, &json!(want));
     let work = json!({"story": {"recap": null, "chapters": chapters}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     assert!(
         story
             .as_str()
             .is_some_and(|n| n.starts_with("## 2026-11-16\n\nBuilt")),
         "{story}"
     );
-    assert!(snapshot_at(&json!({}), &json!({}), 0, &Utc)["story"].is_null());
+    assert!(snapshot_at(&json!({}), &json!({}), 0, &Utc, &Gate::now())["story"].is_null());
 }
 
 /// A list-level update has no task: its list names it, as on oboete's own page, and a missing
@@ -425,7 +428,8 @@ fn the_build_story_keeps_its_weeks() {
 fn a_list_level_update_is_named_by_its_list() {
     let work = json!({"requests": [{"id": "r:z", "status": "working",
         "work": [{"list": "release", "repo": "r", "task": null, "status": null, "updated": 1}]}]});
-    let item = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["items"][0];
+    let item =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0]["items"][0];
     assert_eq!(
         (&item["title"], &item["status"]),
         (&json!("release"), &json!(""))
@@ -439,7 +443,7 @@ fn an_items_status_is_read_as_my_work_reads_it() {
     let work = json!({"requests": [{"id": "r:s", "status": "working", "work": [
         {"list": "l", "repo": "r", "task": "Ship", "status": " Done ", "updated": 1},
         {"list": "l", "repo": "r", "task": "Ask", "status": "Needs_Input", "updated": 1}]}]});
-    let items = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["items"];
+    let items = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0]["items"];
     assert_eq!(
         (&items[0]["status"], &items[1]["status"]),
         (&json!("done"), &json!("needs-you"))
@@ -458,7 +462,8 @@ fn a_masked_review_day_leaves_the_request_readable() {
             "completed": "[REDACTED]", "completed_at": null,
             "readings": [{"ts": 1_795_050_000_000_i64, "percent": 100}]},
         "story": {"narrative": "Shipped.", "milestones": [{"date": "[REDACTED]", "text": "Built"}]}}]});
-    let request = &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc)["humanRequests"][0];
+    let request =
+        &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc, &Gate::now())["humanRequests"][0];
     assert_eq!(request["completedAtEpoch"], json!(1_795_100_000_000_i64));
     assert!(request["progress"]["shippedAt"].is_null(), "{request}");
     assert!(
@@ -476,7 +481,7 @@ fn a_conversation_is_titled_by_its_own_request() {
         {"id": "r:x", "status": "working", "title": "Explicit", "projects": ["a"], "sessions": [c]},
         {"id": "c:claude:c1", "status": "working", "title": "Its own", "projects": ["b"],
             "sessions": [c]}]});
-    let agents = &snapshot_at(&work, &json!({}), 0, &Utc)["agents"];
+    let agents = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["agents"];
     assert_eq!(agents.as_array().unwrap().len(), 1, "{agents}");
     let shown = (&agents[0]["sessionTitle"], &agents[0]["project"]);
     assert_eq!(shown, (&json!("Its own"), &json!("b")));
@@ -492,7 +497,8 @@ fn a_request_shipped_after_a_partial_review_keeps_the_reviews_percent() {
         "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-18",
             "completed_at": 1_795_090_000_000_i64, "readings": [
                 {"ts": 1_795_040_000_000_i64, "percent": 20}, {"ts": 1_795_050_000_000_i64, "percent": 50}]}}]});
-    let progress = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["progress"];
+    let progress =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0]["progress"];
     assert_eq!(
         (&progress["percent"], &progress["state"]),
         (&json!(50.0), &json!("in-progress"))
@@ -513,14 +519,14 @@ fn a_request_its_review_shipped_is_completed_on_the_reviews_day() {
     let work = json!({"requests": [{"id": "r:w", "status": "shipped", "title": "Release",
         "updated": 1_795_100_000_000_i64, "completed_at": null,
         "progress": {"percent": 100, "completed": "2026-11-19", "completed_at": null}}]});
-    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0];
     assert!(request["progress"].is_null(), "{request}");
     assert_eq!(request["completedAtEpoch"], json!(noon));
     let work = json!({"requests": [{"id": "r:v", "status": "shipped", "title": "Release",
         "updated": 1_795_100_000_000_i64, "completed_at": null,
         "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-19",
             "completed_at": null, "readings": [{"ts": 1_795_050_000_000_i64, "percent": 30}]}}]});
-    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0];
     assert_eq!(
         request["progress"]["state"],
         json!("in-progress"),
@@ -539,7 +545,7 @@ fn a_review_with_no_reading_of_its_own_does_not_go() {
         "updated": 1_795_100_000_000_i64, "completed_at": 1_795_090_000_000_i64,
         "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-19",
             "completed_at": 1_795_090_000_000_i64, "readings": []}}]});
-    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0];
     assert!(request["progress"].is_null(), "{request}");
     assert_eq!(request["completedAtEpoch"], json!(1_795_090_000_000_i64));
 }
@@ -552,7 +558,7 @@ fn the_current_goals_period_is_the_window_that_ends_now() {
     let page = json!({"current": {"written": 1_794_000_000_000_i64, "items": []},
         "window": {"days": 31, "prompts": 4}});
     // 2026-11-19 05:30 in Tokyo.
-    let goals = &snapshot_at(&json!({}), &page, 1_795_033_800_000, &tokyo)["goals"];
+    let goals = &snapshot_at(&json!({}), &page, 1_795_033_800_000, &tokyo, &Gate::now())["goals"];
     let period = (&goals["periodStart"], &goals["periodEnd"]);
     assert_eq!(period, (&json!("2026-10-19"), &json!("2026-11-20")));
     assert_eq!(goals["generatedAt"], zoned(1_794_000_000_000, &tokyo));
@@ -565,7 +571,8 @@ fn a_recap_that_opens_on_a_heading_stays_the_recap() {
     let chapters = json!([{"week": "2026-11-16", "text": "Built the adapter."}]);
     let work =
         json!({"story": {"recap": "# The work-view\nTwo weeks of it.", "chapters": chapters}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     let blocks: Vec<&str> = (story.as_str().unwrap().split("\n\n"))
         .map(str::trim)
         .filter(|b| !b.is_empty())
@@ -581,7 +588,8 @@ fn a_recap_that_opens_on_a_heading_stays_the_recap() {
 fn a_story_of_issue_numbers_and_headings_reads_as_written() {
     let chapters = json!([{"week": "2026-11-16", "text": "### Parser\nThe parser reads lines."}]);
     let work = json!({"story": {"recap": "#1087 shipped the adapter.", "chapters": chapters}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     let want = "\u{2060}#1087 shipped the adapter.\n\n## 2026-11-16\n\n### Parser\n\nThe parser reads lines.";
     assert_eq!(story, &json!(want));
 }
@@ -593,7 +601,7 @@ fn a_story_of_issue_numbers_and_headings_reads_as_written() {
 fn a_requests_times_go_each_from_its_own_field() {
     let work = json!({"requests": [{"id": "r:t", "status": "working", "started": 1_000,
         "updated": 2_000, "ask": {"text": "Ask.", "ts": 1_500}}]});
-    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0];
     let times = (
         &request["startedAtEpoch"],
         &request["updatedAtEpoch"],
@@ -627,11 +635,12 @@ fn a_story_of_marked_issue_numbers_reads_as_written() {
         ),
     ] {
         let work = json!({"story": {"recap": recap, "chapters": []}});
-        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        let story =
+            &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
         assert_eq!(story, &json!(want), "{recap:?}");
     }
     let work = json!({"story": {"recap": "** **", "chapters": []}});
-    assert!(snapshot_at(&work, &json!({}), 0, &Utc)["story"].is_null());
+    assert!(snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"].is_null());
 }
 
 /// A recap of headings alone gives their text as its paragraphs: the pages take the story's first
@@ -648,11 +657,13 @@ fn a_recap_of_headings_alone_gives_their_text() {
         ),
     ] {
         let work = json!({"story": {"recap": "## Shipped the adapter", "chapters": chapters}});
-        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        let story =
+            &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
         assert_eq!(story, &json!(want));
     }
     let work = json!({"story": {"recap": "## #1087\n### ", "chapters": []}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     assert_eq!(story, &json!("\u{2060}#1087"));
 }
 
@@ -661,7 +672,8 @@ fn a_recap_of_headings_alone_gives_their_text() {
 #[test]
 fn a_line_of_a_next_line_mark_alone_ends_no_paragraph() {
     let work = json!({"story": {"recap": "A\n\u{85}\nB", "chapters": []}});
-    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let story =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
     assert_eq!(story, &json!("A\n\u{85}\nB"));
 }
 
@@ -679,7 +691,8 @@ fn a_story_of_headings_alone_gives_its_first_heading_of_its_own() {
     ] {
         let chapters = json!([{"week": "2026-11-16", "text": text}]);
         let work = json!({"story": {"recap": "", "chapters": chapters}});
-        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        let story =
+            &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["story"]["story"]["narrative"];
         assert_eq!(story, &json!(want), "{text:?}");
     }
 }
@@ -779,7 +792,7 @@ fn a_workstream_goes_by_its_place() {
     let work = json!({"requests": [{"id": "r:w", "status": "working", "title": "Release",
         "work": [item("notes", None, "Write"), item("[REDACTED]", Some("aaaaaaaaaaaa"), "A"),
             item("[REDACTED]", Some("bbbbbbbbbbbb"), "B"), item("notes", None, "Read")]}]});
-    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0];
     let streams: Vec<(&str, usize)> = (request["workstreams"].as_array().unwrap().iter())
         .map(|w| {
             (
@@ -808,7 +821,8 @@ fn a_reviews_readings_go_each_at_its_own_time() {
     let work = json!({"requests": [{"id": "r:p", "status": "working", "title": "Migrate",
         "updated": 1_795_060_000_000_i64,
         "progress": {"percent": 50, "reviewed": 1_795_050_000_000_i64, "readings": readings}}]});
-    let progress = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["progress"];
+    let progress =
+        &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0]["progress"];
     let want = json!([{"at": "2026-11-18T22:13:20.000Z", "percent": 20.0},
         {"at": "2026-11-19T01:00:00.000Z", "percent": 50.0}]);
     assert_eq!(progress["readings"], want, "{progress}");
@@ -820,7 +834,8 @@ fn hex(t: &str, n: usize) -> bool {
 }
 
 /// What changes from home to home and run to run, written as its kind: the times, days and
-/// months, the keyed fingerprints and the masks' prints. What is left is what the answer says.
+/// months, the keyed fingerprints, the masks' prints and the references' (`refer`). What is left
+/// is what the answer says.
 fn steady(v: &Value) -> Value {
     match v {
         Value::Number(n) if n.as_i64().is_some_and(|n| n > 1_000_000_000_000) => json!("<ms>"),
@@ -829,10 +844,12 @@ fn steady(v: &Value) -> Value {
             let stamp = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$").unwrap();
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
+            let reference = regex::Regex::new(r"\bm:[0-9a-f]{12}\b").unwrap();
             let s = iso.replace_all(s, "<iso>");
             let s = stamp.replace_all(&s, "<day>");
             let s = month.replace_all(&s, "<month>");
-            json!(print.replace_all(&s, "#<print>"))
+            let s = print.replace_all(&s, "#<print>");
+            json!(reference.replace_all(&s, "m:<print>"))
         }
         Value::Array(a) => Value::Array(a.iter().map(steady).collect()),
         Value::Object(o) => Value::Object(
@@ -882,7 +899,7 @@ fn the_contract_snapshot_is_this_homes_answer() {
         return;
     }
     let (work, goals) = answers(&h, now);
-    let fresh = snapshot_at(&work, &goals, now, &Utc);
+    let fresh = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/snapshot.json");
     if write {
         let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
@@ -900,12 +917,40 @@ fn the_contract_snapshot_is_this_homes_answer() {
     );
 }
 
+/// The narrative as claude-mem's pages read it (`to-work-model.ts:434-442`), independent of how
+/// the adapter makes it: whole, and each block as it is split at blank lines, its bold and code
+/// marks off, its whitespace collapsed and trimmed, and with its leading `#` marks off.
+fn pages_views(narrative: &str) -> Vec<String> {
+    let js = |c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}';
+    let blank = Regex::new(r"\n[\s\u{FEFF}]*\n").unwrap();
+    let bold = Regex::new(r"\*\*([^*]+)\*\*").unwrap();
+    let code = Regex::new(r"`([^`]+)`").unwrap();
+    let mut views = vec![narrative.to_owned()];
+    for block in blank.split(narrative) {
+        let block = bold.replace_all(block, "$1");
+        let block = code.replace_all(&block, "$1");
+        let block: Vec<&str> = block.split(js).filter(|w| !w.is_empty()).collect();
+        let block = block.join(" ");
+        if block.is_empty() {
+            continue;
+        }
+        let shown = block
+            .trim_start_matches('#')
+            .trim_start_matches(js)
+            .to_owned();
+        views.extend([block, shown]);
+    }
+    views
+}
+
 /// The Build story is read whole before any mask (#1089), and keeps its blocks: a rule that needs,
 /// in the story the recap and a chapter make, a heading another rule masks first; a rule that runs
 /// past where the adapter puts a word joiner and a week's `## `; a heading followed by prose, read
 /// as the pages show it, its marks off; a rule that finds a value beside what a mask left, as the
 /// gate reads again what it masked; and a rule on a kept text as it was kept, a heading and a line
-/// of prose under it, or a recap of a heading alone, which the story writes in another shape.
+/// of prose under it, or a recap of a heading alone, which the story writes in another shape; and
+/// what the masks leave read again as the pages show each block, a heading masked in part or a
+/// paragraph a rule masked in part as it read the next.
 /// `ui/work-view/contract/gated-stories.json` is what it writes of each, which the Node test reads
 /// through the mapper; written again as the other contract files are (OBOETE_CONTRACT_WRITE=1).
 #[test]
@@ -919,7 +964,11 @@ fn a_story_is_read_whole_before_any_mask() {
                  { id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }, \
                  { id = \"glued\", regex = '\\[REDACTED\\]\\s+\\d{6}' }, \
                  { id = \"kept\", regex = '^## Release\\n(Orchid)$' }, \
-                 { id = \"alone\", regex = '^## Release$' }]\n";
+                 { id = \"alone\", regex = '^## Release$' }, \
+                 { id = \"token\", regex = '^## (Token) Orchid$' }, \
+                 { id = \"shown\", regex = '^\\[REDACTED\\] (Orchid)$' }, \
+                 { id = \"context\", regex = '(Alpha) 42 Beta\\s+Gamma' }, \
+                 { id = \"paragraph\", regex = '^\\[REDACTED\\] (\\d+) Beta$' }]\n";
     std::fs::write(gate.path().join("config.toml"), rules).unwrap();
     crate::redact::set_home(gate.path()).unwrap();
     let mut written = Vec::new();
@@ -968,6 +1017,20 @@ fn a_story_is_read_whole_before_any_mask() {
             "Release",
             false,
         ),
+        (
+            "a heading masked in part, read again as the pages show it",
+            "## Token Orchid",
+            "Nothing here.",
+            "Orchid",
+            false,
+        ),
+        (
+            "a paragraph masked in part by a rule that needs the next, read again alone",
+            "Alpha 42 Beta\n\nGamma",
+            "Nothing here.",
+            "42",
+            false,
+        ),
     ] {
         assert_eq!(
             [recap, text]
@@ -982,6 +1045,10 @@ fn a_story_is_read_whole_before_any_mask() {
             .unwrap()
             .to_owned();
         assert!(!narrative.contains(hidden), "{name}: {narrative}");
+        // Read as the pages read it, nothing of it is what a rule finds.
+        for view in pages_views(&narrative) {
+            assert_eq!(crate::redact::outbound(&view), view, "{name}: {narrative}");
+        }
         assert!(narrative.contains("\n\n## "), "{name}: {narrative}");
         let blocks = if recap.contains('\n') { 4 } else { 3 };
         assert_eq!(
@@ -1018,7 +1085,7 @@ fn an_items_status_goes_as_a_word_the_pages_read_or_as_none() {
         {"list": "l", "repo": "r", "task": "a", "status": "release_4827", "updated": 1},
         {"list": "l", "repo": "r", "task": "b", "status": "In Progress", "updated": 1},
         {"list": "l", "repo": "r", "task": "c", "status": "wip", "updated": 1}]}]});
-    let items = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["items"];
+    let items = &snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now())["humanRequests"][0]["items"];
     let statuses: Vec<&Value> = arr(items).iter().map(|i| &i["status"]).collect();
     assert_eq!(statuses, [&json!(""), &json!("in-progress"), &json!("")]);
 }
@@ -1031,7 +1098,8 @@ const GATED: &str = "[redaction]\nextra_rules = [{ id = \"prompts\", regex = '^p
     { id = \"completed\", regex = '^completed_at$' }, { id = \"spelling\", regex = 'release-4827' }, \
     { id = \"gemini\", regex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', \
     keywords = [\"gemini\"] }, { id = \"alpha\", regex = '^alpha' }, \
-    { id = \"beside\", regex = '^r:\\[REDACTED\\]-(Orchid)$' }]\n";
+    { id = \"beside\", regex = '^r:\\[REDACTED\\]-(Orchid)$' }, \
+    { id = \"printed\", regex = '(Orchid)#[0-9a-f]{12}$' }]\n";
 
 /// The Antigravity conversation's id in the gate home.
 const AGY: &str = "6f1c2a3b-4d5e-4f60-8a1b-2c3d4e5f6a7b";
@@ -1052,13 +1120,13 @@ fn gate_home() -> (Store, i64) {
     let spelled = json!({"task": "Cut it", "status": "release_4827"});
     wrote(&mut h, "agy", AGY, "plan", spelled);
     // A request its own id names, a part of which a rule masks as My Work shows the id, and one
-    // whose own id is, letter for letter, what the first one's would go as with no gate after My
-    // Work's: the two stay two.
+    // whose own id is, letter for letter, what the first one's went as when the main page's step
+    // read it again: the two stay two.
     let first = json!({"task": "One", "status": "doing", "request_id": "alpha-Orchid",
         "request": "Plan the first one"});
     noted(&mut h, R, "first", first);
     let print = crate::my_work::keyed_print("r:alpha-Orchid", h.home.path(), &mut None).unwrap();
-    let literal = format!("{}-Orchid#{print}", crate::redact::MASK);
+    let literal = format!("{0}-{0}#{print}", crate::redact::MASK);
     let second = json!({"task": "Two", "status": "doing", "request_id": literal,
         "request": "Plan the second one"});
     noted(&mut h, R, "second", second);
@@ -1066,6 +1134,25 @@ fn gate_home() -> (Store, i64) {
     std::fs::write(h.home.path().join("config.toml"), GATED).unwrap();
     crate::redact::set_home(h.home.path()).unwrap();
     (h, crate::db::now_ms())
+}
+
+/// Each string of `v` under a key the pages match on, which the walk leaves as it is (`OWN`).
+fn selectors(v: &Value, key: &str) -> Vec<(String, String)> {
+    const SELECTORS: [&str; 7] = [
+        "id",
+        "agentIds",
+        "conversationKeys",
+        "contentSessionId",
+        "focusAreaId",
+        "listId",
+        "platformSource",
+    ];
+    match v {
+        Value::String(s) if SELECTORS.contains(&key) => vec![(key.to_owned(), s.clone())],
+        Value::Array(xs) => xs.iter().flat_map(|x| selectors(x, key)).collect(),
+        Value::Object(m) => m.iter().flat_map(|(k, x)| selectors(x, k)).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// The contract under rules (#1089): `ui/work-view/contract/gated.json` is the gate home's
@@ -1085,7 +1172,7 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
         return;
     }
     let (work, goals) = answers(&h, now);
-    let fresh = snapshot_at(&work, &goals, now, &Utc);
+    let fresh = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     // The request a rule masks a part of the id of, and the one whose own id is what the first's
     // was before the gate read it again: each its own, and the first's shows no part it masks.
     let titled = |title: &str| -> Value {
@@ -1096,13 +1183,16 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
         found[0]["id"].clone()
     };
     let (first, second) = (titled("Plan the first one"), titled("Plan the second one"));
-    assert!(!first.to_string().contains("Orchid"), "{first}");
     assert_ne!(first, second);
     let text = fresh.to_string();
     assert!(
-        !text.contains(AGY) && !text.contains("release-4827"),
+        !text.contains(AGY) && !text.contains("release-4827") && !text.contains("Orchid"),
         "{text}"
     );
+    // Each selector the walk leaves as it is holds nothing a rule finds.
+    for (key, value) in selectors(&fresh, "") {
+        assert_eq!(crate::redact::outbound(&value), value, "{key}");
+    }
     // The counts and days, read by their keys.
     assert!(
         fresh["goals"]["sourcePromptCount"].is_i64(),
@@ -1138,9 +1228,8 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
         .filter(|r| r["id"].as_str().is_some_and(|id| id.contains("gemini")))
         .collect();
     assert_eq!(refs.len(), 1, "{}", fresh["humanRequests"]);
-    let reference = format!("c:{}#", crate::redact::MASK);
     let key: Vec<String> = serde_json::from_str(refs[0]["id"].as_str().unwrap()).unwrap();
-    assert!(key[2].starts_with(&reference), "{key:?}");
+    assert!(key[2].starts_with("m:"), "{key:?}");
     assert_eq!(refs[0]["conversationKeys"], json!([refs[0]["id"]]));
     let agent = format!("agy:{}", key[2]);
     assert_eq!(refs[0]["agentIds"], json!([agent]));
@@ -1154,7 +1243,7 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
     // The same from read to read.
     let (work, goals) = answers(&h, now);
     assert_eq!(
-        snapshot_at(&work, &goals, now, &Utc)["agents"],
+        snapshot_at(&work, &goals, now, &Utc, &Gate::now())["agents"],
         fresh["agents"]
     );
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/gated.json");
@@ -1195,7 +1284,7 @@ fn the_snapshot_leaves_through_the_gate_in_one_walk() {
         "sessions": [{"agent": "claude", "id": "c:claude:zebra1"}],
         "work": [{"list": "zebras", "repo": "r", "task": "Count the zebras", "status": "doing",
             "updated": 1}]}]});
-    let snapshot = snapshot_at(&work, &json!({}), 0, &Utc);
+    let snapshot = snapshot_at(&work, &json!({}), 0, &Utc, &Gate::now());
     let request = &snapshot["humanRequests"][0];
     let key = conversation_key("claude", "c:claude:zebra1");
     assert_eq!(request["id"], key);
@@ -1234,6 +1323,6 @@ fn the_route_reads_the_story_as_it_was_kept() {
     assert_eq!(listed["story"]["recap"], crate::redact::MASK);
     let (work, goals) = answers(&h, now);
     assert_eq!(work["story"]["recap"], "Project Phoenix");
-    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     assert_eq!(snapshot["story"]["story"]["narrative"], crate::redact::MASK);
 }

@@ -200,7 +200,7 @@ test('a conversation the gate would mask in its key goes by one reference, with 
   const masked = gatedModel.requests.filter((r) => r.id.startsWith('["conversation","gemini",'))
   assert.equal(masked.length, 1)
   const [request] = masked
-  assert.ok(request.id.includes('"c:[REDACTED]#'), request.id)
+  assert.ok(request.id.includes('"m:'), request.id)
   assert.notEqual(request.agentId, 'agent-not-recorded')
   const [conversation] = request.conversations
   assert.equal(conversation.platform, 'gemini')
@@ -224,6 +224,8 @@ test('each Build story a rule finds a value in reads, through the pinned mapper,
     'a value a rule finds beside what a mask left': ['[REDACTED]', ['[REDACTED]', '[REDACTED] is the code.', '2026-11-16', 'Nothing here.']],
     'a heading and a line of prose under it, as they were kept': ['[REDACTED]', ['[REDACTED]', '[REDACTED]', '2026-11-16', 'Nothing here.']],
     'a recap of a heading alone, as it was kept': ['[REDACTED]', ['[REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a heading masked in part, read again as the pages show it': ['[REDACTED] [REDACTED]', ['[REDACTED] [REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a paragraph masked in part by a rule that needs the next, read again alone': ['[REDACTED] [REDACTED] Beta', ['[REDACTED] [REDACTED] Beta', 'Gamma', '2026-11-16', 'Nothing here.']],
   }
   assert.deepEqual(gatedStories.map((s) => s.name).sort(), Object.keys(want).sort())
   const shown = (text) => text.replace(/⁠/g, '')
@@ -242,7 +244,7 @@ test('a request a rule masks a part of the id of, and one whose own id is what t
     return found[0]
   })
   assert.notEqual(first.id, second.id)
-  assert.ok(!first.id.includes('Orchid'), first.id)
+  assert.ok(!JSON.stringify(gated).includes('Orchid'), 'no part of either id goes')
   assert.equal(gatedById(first.id), first)
   assert.equal(gatedById(second.id), second)
 })

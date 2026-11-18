@@ -58,5 +58,25 @@
         "writtenAt": null
       }
     }
+  },
+  {
+    "name": "a heading masked in part, read again as the pages show it",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED] [REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a paragraph masked in part by a rule that needs the next, read again alone",
+    "hidden": "42",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED] [REDACTED] Beta\n\nGamma\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
   }
 ]

@@ -16,18 +16,27 @@ use chrono::{Local, Months, NaiveDate, SecondsFormat, TimeZone, Utc};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
-/// The snapshot, its goals' times in this machine's zone: the pages show those as written.
-pub(crate) fn snapshot(work: &Value, goals: &Value, now: i64) -> Value {
-    snapshot_at(work, goals, now, &Local)
+/// `GET /api/work-view`'s answer: what `read` reads, made into the snapshot, its goals' times in
+/// this machine's zone, which the pages show as written. One read of the rules serves both: the
+/// references of what the gate would mask (`refer`) and the walk and the story of the snapshot
+/// (#1089).
+pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
+    let gate = Gate::now();
+    let (work, goals) = read(home, now, &gate)?;
+    Ok(snapshot_at(&work, &goals, now, &Local, &gate))
 }
 
-/// `snapshot`, its goals' times in `tz`.
-pub(crate) fn snapshot_at<Tz: TimeZone>(work: &Value, goals: &Value, now: i64, tz: &Tz) -> Value
+/// The snapshot of `work` and `goals`, its goals' times in `tz`, through `gate`.
+pub(crate) fn snapshot_at<Tz: TimeZone>(
+    work: &Value,
+    goals: &Value,
+    now: i64,
+    tz: &Tz,
+    gate: &Gate,
+) -> Value
 where
     Tz::Offset: Display,
 {
-    // One read of the rules for the whole answer.
-    let gate = Gate::now();
     let mut agents = Vec::new();
     let mut seen = HashMap::new();
     let requests: Vec<Value> = (arr(&work["requests"]).iter())
@@ -43,7 +52,7 @@ where
         "focusAreas": areas, "goals": goals_list(work, goals, now, tz),
         "goalHistory": history(goals, now, tz),
         "ruleScopes": [{"id": "everywhere", "tier": "everywhere", "name": "Everywhere"}],
-        "rules": [], "story": build_story(&work["story"], &gate), "refresh": null,
+        "rules": [], "story": build_story(&work["story"], gate), "refresh": null,
         // oboete has no cloud sync: a valid "unconfigured" block (`sync-presentation.ts:23-36`)
         // shows "Cloud sync off" where a missing one shows "Cloud freshness unknown".
         "sync": {"configured": false, "state": "unconfigured", "mode": "disabled",
@@ -53,67 +62,65 @@ where
             "completeness": {"pushQuarantine": 0, "pullQuarantine": 0, "excludedNative": null,
                 "scope": "unknown"}},
     });
-    leaving(snapshot, "", &gate)
+    leaving(snapshot, "", gate)
 }
 
 /// What the snapshot is made of, read as `GET /api/work-view` reads it, in the readers' hold
 /// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
 /// text gated at its source and none of their keys, so that the counts, days and times the pages
 /// need are read by the keys this file names whatever a rule finds in a key; the Build story's
-/// texts as they were kept (`build_story` gates the story it makes of them); and each conversation
-/// the gate would mask in a shape this file writes it in, marked with its reference (`refer`).
-pub(crate) fn read(home: &Path, now: i64) -> anyhow::Result<(Value, Value)> {
+/// texts as they were kept (`build_story` gates the story it makes of them); and each request and
+/// conversation whose id goes by a reference, marked with it (`refer`).
+pub(crate) fn read(home: &Path, now: i64, gate: &Gate) -> anyhow::Result<(Value, Value)> {
     // The work-view shows no deliverables yet: their links are not made.
     let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
     let mut work = crate::my_work::listed_kept(home, crate::my_work::Range::Week, now, &tag)?;
     let goals = crate::my_work_goals::page(home, now)?;
-    ids(&mut work);
-    refer(home, &mut work, &Gate::now())?;
+    refer(home, &mut work, gate)?;
     Ok((work, goals))
 }
 
-/// Each request's id and each of its conversations', through the gate as the main page sends them
-/// (`view::request_id`): the part before a masked id's print read again, the print kept. So a rule
-/// that finds a value beside the mask My Work put in an id finds it here too, and an id stays its
-/// own: no other request's literal id is the one it goes as.
-fn ids(work: &mut Value) {
-    let requests = work.get_mut("requests").and_then(Value::as_array_mut);
-    for r in requests.into_iter().flatten() {
-        let sessions = r.get_mut("sessions").and_then(Value::as_array_mut);
-        for c in sessions.into_iter().flatten() {
-            if let Some(id) = crate::view::request_id(c) {
-                c["id"] = json!(id);
-            }
-        }
-        if let Some(id) = crate::view::request_id(r) {
-            r["id"] = json!(id);
-        }
-    }
+/// The snapshot of a home with no store yet.
+pub(crate) fn empty(now: i64) -> Value {
+    snapshot_at(&json!({}), &json!({}), now, &Local, &Gate::now())
 }
 
-/// Marks each conversation of `work`'s requests whose id the gate would change in a shape the
-/// snapshot writes it in (its agent's id, its key: `request`) with a reference that stands for it
-/// there: `c:[REDACTED]#` and a keyed print of the id, the same from read to read and in every
-/// request that names the conversation, and nothing of a guess at the id, as My Work's own prints
-/// are (`my_work::shown_id`).
+/// Marks each request and each conversation of `work` whose id goes by a reference in the
+/// snapshot (`ref`): one My Work masked (its `fingerprint`), or one the gate would change in a
+/// shape the snapshot writes it in (a conversation's id, its agent's id and its key; a request's
+/// id). The reference is `m:` and the keyed print of the stored id, as My Work's own prints are
+/// (`my_work::shown_id`): the same from read to read and in every request that names it, and
+/// nothing of a guess at the id. No id My Work gives begins `m:` (its ids are `c:`, `r:` and
+/// `g:`), so no request's or conversation's own id is another's reference, and each reference is
+/// one stored id's (#1089). A group's id is its print alone already, and goes as it is.
 fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
     let mut key = None;
+    let mut refer = |v: &mut Value, shapes: Vec<String>| -> anyhow::Result<()> {
+        let id = v["id"].as_str().unwrap_or_default().to_owned();
+        let print = v["fingerprint"].as_str().map(str::to_owned);
+        let group = print.as_ref().is_some_and(|p| id == format!("g:{p}"));
+        if (print.is_some() && !group) || shapes.iter().any(|s| gate.out(s) != *s) {
+            // A masked id's fingerprint is the keyed print of the stored one; an id My Work shows
+            // is the stored one.
+            let print = match print {
+                Some(print) => print,
+                None => crate::my_work::keyed_print(&id, home, &mut key)?,
+            };
+            v["ref"] = json!(format!("m:{print}"));
+        }
+        Ok(())
+    };
     let requests = work.get_mut("requests").and_then(Value::as_array_mut);
     for r in requests.into_iter().flatten() {
         let sessions = r.get_mut("sessions").and_then(Value::as_array_mut);
         for c in sessions.into_iter().flatten() {
             let agent = c["agent"].as_str().unwrap_or("").to_owned();
             let id = c["id"].as_str().unwrap_or("").to_owned();
-            let shapes = [
-                id.clone(),
-                agent_id(&agent, &id),
-                conversation_key(&agent, &id),
-            ];
-            if shapes.iter().any(|s| gate.out(s) != *s) {
-                let print = crate::my_work::keyed_print(&id, home, &mut key)?;
-                c["ref"] = json!(format!("c:{}#{print}", crate::redact::MASK));
-            }
+            let shapes = vec![agent_id(&agent, &id), conversation_key(&agent, &id), id];
+            refer(c, shapes)?;
         }
+        let id = r["id"].as_str().unwrap_or("").to_owned();
+        refer(r, vec![id])?;
     }
     Ok(())
 }
@@ -199,11 +206,11 @@ fn leaving(v: Value, key: &str, gate: &Gate) -> Value {
 /// read them text by text. The story made of them goes through the gate once, as it leaves
 /// (#1089). What the gate hides is found before any of it is masked: in each kept text as it was
 /// kept, in the story joined with none of the adapter's marks but its blank lines, in each block
-/// and each heading as the pages show it (its `#` marks off), and in the story as it is sent. So
-/// no mask takes the context a rule needs elsewhere, and no word joiner of the adapter's stands
-/// inside a match. Then the rules read what the masks left until they find nothing new. Its own
-/// marks stay: the blank lines between its blocks, a week heading's `## ` and a paragraph's word
-/// joiner.
+/// as the pages split it, whole and with a heading's `#` marks off, and in the story as it is
+/// sent. So no mask takes the context a rule needs elsewhere, and no word joiner of the adapter's
+/// stands inside a match. Then the rules read each of those views again as the masks leave it,
+/// until they find nothing new (`Narrative::leave`). Its own marks stay: the blank lines between
+/// its blocks, a week heading's `## ` and a paragraph's word joiner.
 fn build_story(story: &Value, gate: &Gate) -> Value {
     let recap = story["recap"].as_str().unwrap_or_default();
     let mut texts = vec![recap];
@@ -240,10 +247,10 @@ fn build_story(story: &Value, gate: &Gate) -> Value {
 
 /// The rules of one answer, read once (`redact::rules_now`): none while their table is wrong,
 /// which masks every text whole, as `redact::outbound` does.
-struct Gate(Option<std::sync::Arc<crate::redact::Rules>>);
+pub(crate) struct Gate(Option<std::sync::Arc<crate::redact::Rules>>);
 
 impl Gate {
-    fn now() -> Gate {
+    pub(crate) fn now() -> Gate {
         Gate(crate::redact::rules_now())
     }
 
@@ -258,14 +265,6 @@ impl Gate {
     /// What the gate hides in `text`; none when it masks the whole of it.
     fn hidden(&self, text: &str) -> Option<Vec<(usize, usize)>> {
         crate::redact::hidden(text, self.0.as_ref()?)
-    }
-
-    /// `text` with what the rules find in it masked, `kept` as it is (`redact::outbound_but`).
-    fn but(&self, text: &str, kept: &[(usize, usize)]) -> String {
-        match &self.0 {
-            Some(rules) => crate::redact::outbound_but_with(text, kept, rules),
-            None => crate::redact::MASK.to_owned(),
-        }
     }
 }
 
@@ -400,29 +399,30 @@ fn blocks(text: &str, from: usize) -> Vec<Block> {
     out
 }
 
-/// The Build story as it is made (#1089): `sent`, the narrative as it leaves, the adapter's marks
-/// in it at `marks`; for each kept text, where each of its bytes went in `sent`, if it went
-/// (`went`); `plain`, the story's words joined with none of the adapter's marks but its blank
-/// lines, each of its bytes at `at` in `sent`; and the parts of `plain` the gate reads alone too,
-/// each block and each heading as the pages show it (`views`).
+/// The Build story as it is made (#1089): `sent`, the narrative as it leaves, and which of its
+/// bytes are the adapter's own marks (`mark`); for each kept text, where each of its bytes went in
+/// `sent`, if it went (`went`); and `plain`, the story's words joined with none of the adapter's
+/// marks but its blank lines, each of its bytes at `at` in `sent`.
 struct Narrative {
     sent: String,
-    marks: Vec<(usize, usize)>,
+    mark: Vec<bool>,
     went: Vec<Vec<Option<usize>>>,
     plain: String,
-    at: Vec<usize>,
-    views: Vec<std::ops::Range<usize>>,
+    at: Vec<Option<usize>>,
 }
+
+/// The most times the story is read again for what its masks left: as many as the gate reads one
+/// text (`redact`'s own bound). Still finding then, every word of it is masked.
+const PASSES: usize = 64;
 
 impl Narrative {
     fn new(texts: &[&str]) -> Narrative {
         Narrative {
             sent: String::new(),
-            marks: Vec::new(),
+            mark: Vec::new(),
             went: texts.iter().map(|t| vec![None; t.len()]).collect(),
             plain: String::new(),
             at: Vec::new(),
-            views: Vec::new(),
         }
     }
 
@@ -437,7 +437,6 @@ impl Narrative {
         if b.joiner {
             self.mark("\u{2060}", false);
         }
-        let start = self.plain.len();
         for p in &b.pieces {
             let at = self.sent.len();
             let went = &mut self.went[b.from][p.at..p.at + p.text.len()];
@@ -446,15 +445,6 @@ impl Narrative {
             }
             self.words(&p.text);
         }
-        let block = start..self.plain.len();
-        // A heading as the pages show it, its marks off.
-        if b.heading && !b.week {
-            let shown = self.plain[block.clone()]
-                .trim_start_matches('#')
-                .trim_start_matches(space);
-            self.views.push(block.end - shown.len()..block.end);
-        }
-        self.views.push(block);
     }
 
     /// One of the adapter's own marks in `sent`, and in `plain` too when it is the blank line
@@ -462,10 +452,10 @@ impl Narrative {
     fn mark(&mut self, mark: &str, plain: bool) {
         let at = self.sent.len();
         self.sent.push_str(mark);
-        self.marks.push((at, self.sent.len()));
+        self.mark.resize(self.sent.len(), true);
         if plain {
             self.plain.push_str(mark);
-            self.at.extend(at..self.sent.len());
+            self.at.extend((at..self.sent.len()).map(Some));
         }
     }
 
@@ -473,88 +463,115 @@ impl Narrative {
     fn words(&mut self, text: &str) {
         let at = self.sent.len();
         self.sent.push_str(text);
+        self.mark.resize(self.sent.len(), false);
         self.plain.push_str(text);
-        self.at.extend(at..self.sent.len());
+        self.at.extend((at..self.sent.len()).map(Some));
     }
 
-    /// `sent` with what the gate hides in each kept text as it was kept, in `plain` and each part
-    /// of it read alone, or in `sent` itself, all found before any of it is masked and masked once;
-    /// then with what the rules find in what the masks left, as the gate reads a text it masked
-    /// until it finds nothing new there (a remainder glued to a mask). The adapter's marks stay as
-    /// they are: a mask that runs over one is split on each side of it.
+    /// `sent` with what the gate hides masked, found before any mask and then read again until it
+    /// finds nothing new, as the gate reads one text (#1089). Each pass reads the views of the story
+    /// as its masks so far leave it: the story as sent; its words joined with no mark of the
+    /// adapter's but its blank lines; and each of its blocks as the pages split it, whole and, as
+    /// the pages show every block, with a heading's leading `#` marks off. The first pass, before
+    /// any mask, reads each kept text as it was kept too. A pass reads all its views before it
+    /// masks what they found, so that no mask of one takes the context a rule needs in another. The
+    /// adapter's marks stay as they are: a mask that runs over one is cut on each side of it. Still
+    /// finding after `PASSES`, every word is masked.
     fn leave(self, texts: &[&str], gate: &Gate) -> String {
-        let mut runs = Vec::new();
-        for (text, went) in texts.iter().zip(&self.went) {
-            let found = gate.hidden(text).unwrap_or_else(|| vec![(0, text.len())]);
-            for (s, e) in found {
-                spans(went[s..e].iter().flatten().copied(), &mut runs);
+        let mut masked = vec![false; self.sent.len()];
+        let sent_at: Vec<Option<usize>> = (0..self.sent.len()).map(Some).collect();
+        for pass in 0..=PASSES {
+            let sent = shown(&self.sent, &sent_at, &masked);
+            let mut views = vec![shown(&self.plain, &self.at, &masked)];
+            views.extend(page_blocks(&sent));
+            if pass == 0 {
+                let kept = texts.iter().zip(&self.went);
+                views.extend(kept.map(|(text, went)| ((*text).to_owned(), went.clone())));
+            }
+            views.push(sent);
+            let mut found = Vec::new();
+            for (text, at) in &views {
+                let hidden = gate.hidden(text).unwrap_or_else(|| vec![(0, text.len())]);
+                for (s, e) in hidden {
+                    let words = at[s..e].iter().flatten().copied();
+                    found.extend(words.filter(|&p| !self.mark[p] && !masked[p]));
+                }
+            }
+            if found.is_empty() {
+                break;
+            }
+            if pass == PASSES {
+                masked = self.mark.iter().map(|m| !m).collect();
+                break;
+            }
+            for p in found {
+                masked[p] = true;
             }
         }
-        let views = std::iter::once(0..self.plain.len()).chain(self.views.iter().cloned());
-        for v in views.filter(|v| !v.is_empty()) {
-            let found = gate.hidden(&self.plain[v.clone()]);
-            let found = found.unwrap_or_else(|| vec![(0, v.len())]);
-            let found = found.into_iter().filter(|(s, e)| s < e);
-            runs.extend(found.map(|(s, e)| (self.at[v.start + s], self.at[v.start + e - 1] + 1)));
-        }
-        let sent = gate.hidden(&self.sent);
-        runs.extend(sent.unwrap_or_else(|| vec![(0, self.sent.len())]));
-        let runs = outside(&crate::redact::merged_runs(runs), &self.marks);
-        let masked = crate::redact::masked_part(&self.sent, 0..self.sent.len(), &runs);
-        let marks = crate::redact::merged_runs(shifted(&self.marks, &runs));
-        gate.but(&masked, &marks)
+        shown(&self.sent, &sent_at, &masked).0
     }
 }
 
-/// Each run of consecutive positions in `at` (increasing) as a byte range, added to `runs`.
-fn spans(at: impl Iterator<Item = usize>, runs: &mut Vec<(usize, usize)>) {
-    let mut run: Option<(usize, usize)> = None;
-    for p in at {
-        run = match run {
-            Some((s, e)) if e == p => Some((s, p + 1)),
-            Some(done) => {
-                runs.push(done);
-                Some((p, p + 1))
-            }
-            None => Some((p, p + 1)),
-        };
-    }
-    runs.extend(run);
-}
-
-/// `runs` (sorted, apart) with what falls in `marks` (sorted, apart) taken out of them.
-fn outside(runs: &[(usize, usize)], marks: &[(usize, usize)]) -> Vec<(usize, usize)> {
-    let (mut out, mut first) = (Vec::new(), 0);
-    for &(start, end) in runs {
-        while first < marks.len() && marks[first].1 <= start {
-            first += 1;
-        }
-        let mut from = start;
-        for &(m, n) in marks[first..].iter().take_while(|(m, _)| *m < end) {
-            if m > from {
-                out.push((from, m));
-            }
-            from = from.max(n);
-        }
-        if from < end {
-            out.push((from, end));
+/// `text` with each run of its bytes that stand for a masked byte of the story as sent (`at`)
+/// shown as one mask, and, for each byte of what comes back, the byte of the story it stands for:
+/// none for a mask, which is masked already, or for what the story does not send.
+fn shown(text: &str, at: &[Option<usize>], masked: &[bool]) -> (String, Vec<Option<usize>>) {
+    let hidden = |i: usize| at[i].is_some_and(|p| masked[p]);
+    let (mut out, mut from) = (
+        String::with_capacity(text.len()),
+        Vec::with_capacity(text.len()),
+    );
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if hidden(i) {
+            while chars.next_if(|&(j, _)| hidden(j)).is_some() {}
+            out.push_str(crate::redact::MASK);
+            from.resize(out.len(), None);
+        } else {
+            out.push(c);
+            from.extend_from_slice(&at[i..i + c.len_utf8()]);
         }
     }
-    out
+    (out, from)
 }
 
-/// `marks` (sorted, apart, outside `runs`) where they are once each of `runs` (sorted, apart) is
-/// one mask.
-fn shifted(marks: &[(usize, usize)], runs: &[(usize, usize)]) -> Vec<(usize, usize)> {
-    let (mut out, mut next, mut removed, mut masks) = (Vec::new(), 0, 0, 0);
-    for &(m, n) in marks {
-        while next < runs.len() && runs[next].1 <= m {
-            removed += runs[next].1 - runs[next].0;
-            masks += 1;
-            next += 1;
+/// The blocks of a narrative as the pages split it (`to-work-model.ts:435`: at a line of nothing
+/// but whitespace), each trimmed, and each that opens with `#` once more with those marks and the
+/// whitespace after them off, as the pages show every block (`to-work-model.ts:439`), each with the
+/// story's byte for each of its bytes.
+fn page_blocks((text, at): &(String, Vec<Option<usize>>)) -> Vec<(String, Vec<Option<usize>>)> {
+    // Where each blank line is: from a line break to the last line break of the whitespace after it.
+    let mut cuts = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '\n' {
+            continue;
         }
-        let at = m - removed + masks * crate::redact::MASK.len();
-        out.push((at, at + (n - m)));
+        let mut last = None;
+        while let Some((j, w)) = chars.next_if(|&(_, w)| space(w)) {
+            if w == '\n' {
+                last = Some(j);
+            }
+        }
+        if let Some(last) = last {
+            cuts.push((i, last + 1));
+        }
+    }
+    let starts = std::iter::once(0).chain(cuts.iter().map(|c| c.1));
+    let ends = cuts.iter().map(|c| c.0).chain(std::iter::once(text.len()));
+    let mut out = Vec::new();
+    for (start, end) in starts.zip(ends) {
+        let block = text[start..end].trim_matches(space);
+        if block.is_empty() {
+            continue;
+        }
+        let from = offset(text, block);
+        out.push((block.to_owned(), at[from..from + block.len()].to_vec()));
+        let shown = block.trim_start_matches('#').trim_start_matches(space);
+        if shown.len() < block.len() && !shown.is_empty() {
+            let from = offset(text, shown);
+            out.push((shown.to_owned(), at[from..from + shown.len()].to_vec()));
+        }
     }
     out
 }
@@ -688,7 +705,12 @@ fn request<Tz: TimeZone>(
     tz: &Tz,
 ) -> Value {
     let status = r["status"].as_str().unwrap_or("unknown");
-    let mut own = r["id"].clone();
+    // A request whose id goes by a reference goes by it (`refer`).
+    let mut own = if r["ref"].is_string() {
+        r["ref"].clone()
+    } else {
+        r["id"].clone()
+    };
     let mut agent_ids = Vec::new();
     let mut keys = Vec::new();
     for c in arr(&r["sessions"]) {
@@ -696,8 +718,7 @@ fn request<Tz: TimeZone>(
             c["agent"].as_str().unwrap_or(""),
             c["id"].as_str().unwrap_or(""),
         );
-        // A conversation the gate would mask in one of the shapes below goes by its reference
-        // there (`refer`).
+        // A conversation whose id goes by a reference goes by it in each shape below (`refer`).
         let id = c["ref"].as_str().unwrap_or(held);
         let key = agent_id(agent, id);
         let at = *seen.entry(key.clone()).or_insert_with(|| {
