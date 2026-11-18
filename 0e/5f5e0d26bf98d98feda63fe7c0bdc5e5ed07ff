@@ -1,0 +1,29 @@
+docs/spike/work-view.md
+  s_52c3955e48bff4::t_e0d0df56644f53 47,111,116
+docs/spike/work-view/drive.mjs
+  s_52c3955e48bff4::t_1615baec605d2e 3,15-31,33-41,43-79
+docs/spike/work-view/get.sh
+  s_52c3955e48bff4::t_7a99fd1e1dff2e 3,12-14
+docs/spike/work-view/licences.mjs
+  s_52c3955e48bff4::t_99d7896061d29c 3-5
+docs/spike/work-view/live.mjs
+  s_52c3955e48bff4::t_1634d6b82129bb 2-3,10-13,15-50
+docs/spike/work-view/timing.sh
+  s_52c3955e48bff4::t_571c08f158d917 4,11-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e5f5e0d26bf98d98feda63fe7c0bdc5e5ed07ff",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
