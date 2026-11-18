@@ -107,8 +107,8 @@ for (const { entry, text, folders } of entries.values()) section(entry, text, fo
 // Every font the bundle emits, in any of its folders, is a file of a package listed above or
 // claude-mem's own Hanken Grotesk, with its licence below, byte for byte: Vite copies fonts as they
 // are. The emitted name is the file's with `-` and an 8-character hash before the extension, or the
-// file's own when it is copied as it is; a font under Vite's `assetsInlineLimit` (4 KiB) is inlined
-// in a script or a style as a `data:` URL instead, and is read by its bytes alone.
+// file's own when it is copied as it is. Patch 0005 keeps Vite from inlining any font as a `data:`
+// URL, so every font is such a file; one inlined all the same stops the build (below).
 const FONT = /\.(woff2?|ttf|otf|eot|ttc|otc)$/i
 // A package's own files, not its nested node_modules (packages of their own); every file of a folder.
 const walk = (dir, nested = true) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>

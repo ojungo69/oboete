@@ -2,7 +2,7 @@
 // build. node --test 'ui/work-view/*.test.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -164,4 +164,15 @@ test('a font the build inlines as a data: URL stops the build, listed or not; ot
   for (const text of [`url(data:image/png;base64,${b64('png')})`, `"data:application/json;base64,${b64('true')}"`, 'see data: below']) {
     assert.equal(file('dist/assets/index-AbCd1234.css', text).error, undefined, text)
   }
+})
+
+// Vite inlines an asset under 4 KiB as a data: URL typed by its extension, a .otc as
+// application/octet-stream; patch 0005 sends a file of each extension notices.mjs reads as a font
+// as a file instead, so that it is read against the package it comes from. Both name the same.
+test('every extension notices.mjs reads as a font is one the build sends as a file', () => {
+  const font = /^const FONT = \/(.+)\/i$/m.exec(readFileSync(notices, 'utf8'))?.[1]
+  const patch = readFileSync(fileURLToPath(new URL('./patches/0005-fonts-as-files.patch', import.meta.url)), 'utf8')
+  const inline = /^\+ +assetsInlineLimit: \(file: string\) => \(\/(.+)\/i\.test\(file\) \? false : undefined\),$/m.exec(patch)?.[1]
+  assert.ok(font, 'notices.mjs names its font extensions')
+  assert.equal(inline, font)
 })
