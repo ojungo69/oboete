@@ -2058,6 +2058,39 @@ fn the_my_goals_and_status_routes_take_the_token() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Decision 114: the work-view's route reads My Work through the gate, as `/api/my-work` does.
+/// A value a rule masks is in none of its answer, and two requests whose ids a rule masks alike
+/// stay two, each with its own id (Codex on #1087).
+#[test]
+fn the_work_view_route_answers_through_the_gate() {
+    let (dir, v) = viewer("work-view-gate");
+    let value = format!("q9Zx8mL2vB4nR7tY1wK3{}", "pS6dJ0aF5hU2cE8g");
+    let mut raw = crate::raw::open(&dir).unwrap();
+    for (id, plan) in [("sess-7", "Plan A"), ("sess-8", "Plan B")] {
+        let fields = json!({"task": format!("{plan}: auth = \"{value}\""), "request_id": id,
+            "request": "Fix the release notes", "status": "doing"});
+        raw.work_state(R, "plan", fields.as_object().unwrap(), None)
+            .unwrap();
+    }
+    drop(raw);
+    crate::worker::run_once(&dir).unwrap();
+    let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
+    std::fs::write(dir.join("config.toml"), rule).unwrap();
+    let snapshot = get(&v, "/api/work-view");
+    let text = snapshot.to_string();
+    assert!(!text.contains(&value) && !text.contains("sess-"), "{text}");
+    let ids: Vec<&str> = (snapshot["humanRequests"].as_array().unwrap().iter())
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    assert_eq!(ids.len(), 2, "{text}");
+    assert_ne!(ids[0], ids[1]);
+    assert!(
+        ids.iter().all(|id| id.starts_with("r:[REDACTED]#")),
+        "{ids:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Decision 114: the work-view's snapshot and its version take the token. Over an empty home the
 /// snapshot has no request and no goals, and its source is connected; its version is the page's.
 #[test]

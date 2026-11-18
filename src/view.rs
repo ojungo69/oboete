@@ -2673,8 +2673,19 @@ impl Viewer {
             }
             // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
             // from the two answers above as they leave the gate, the requests of the last 7 days.
-            // Each text in it is one of theirs (`work_view`), so it is not gated again.
+            // Each text in it is one of theirs (`work_view`), so it is not gated again. One readers'
+            // hold from the first read to the snapshot (#439), as one page's read takes: a forget
+            // registers before both answers or after it. raw.db first, then the hold, the order a
+            // restore takes them in; each reader takes its own hold within this one.
             "work-view" => {
+                let stores = crate::search::b::stores(&self.home)?;
+                let _read = match stores {
+                    Some(_) => Some(crate::dispatch::reading(
+                        &self.home,
+                        crate::db::OPEN_WRITE_WAIT,
+                    )?),
+                    None => None,
+                };
                 // The work-view shows no deliverables yet: their links are not made.
                 let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
                 let now = crate::db::now_ms();

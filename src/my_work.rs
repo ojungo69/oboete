@@ -356,7 +356,7 @@ fn meaningful(v: &Value) -> Option<String> {
 
 /// claude-mem's `normalizeRecordedStatus`: lower-cased, `_` and spaces read as `-`, and the
 /// aliases of needs you and, since claude-mem 15.1, of needs review.
-fn normalized(status: &str) -> String {
+pub(crate) fn normalized(status: &str) -> String {
     let s = status.trim().to_lowercase().replace(['_', ' '], "-");
     match s.as_str() {
         "needs-input" | "waiting-on-user" | "awaiting-approval" | "needs-approval" => {
@@ -2595,6 +2595,10 @@ fn answer(
             "status": status,
             "updated": updated,
             "started": original.ts,
+            // When the newest status recorded completed the request (claude-mem's
+            // `completedAtEpoch`), whatever the page shows of it: the work-view stops a done
+            // request's clock by it.
+            "completed_at": completed_at,
             "agents": agents,
             "sessions": conversations,
             "projects": names,

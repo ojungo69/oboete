@@ -17,10 +17,10 @@ Decision 114 (2026-11-17) serves claude-mem's work-view on oboete's engine: My W
   - it writes `THIRD-PARTY-NOTICES.md` with `notices.mjs`, which lists every package and font the bundle holds with its licence. `licences/` holds the texts of the packages that ship none, and the build stops at a package with no text.
 
   Run it as a user who cannot read your keys: the build's tools run native code even with install scripts off.
-- `contract/` holds the contract between oboete's answer and the pages: `snapshot.json`, the answer of `GET /api/work-view` (`src/work_view.rs`) for a synthetic home, which the Rust test `work_view::tests::the_contract_snapshot_is_this_homes_answer` keeps current, and a Node test that runs claude-mem's mapper, unchanged, over it (`node --test 'ui/work-view/contract/*.test.mjs'`). A bump of claude-mem runs the new mapper over the same answer.
+- `contract/` holds the contract between oboete's answer and the pages: `snapshot.json`, the answer of `GET /api/work-view` (`src/work_view.rs`) for a synthetic home, which the Rust test `work_view::tests::the_contract_snapshot_is_this_homes_answer` keeps current (it compares the two with times and keyed prints written as their kind; with `OBOETE_CONTRACT_WRITE=1` it writes this run's answer, whatever it is), and a Node test that runs claude-mem's mapper, unchanged, over it (`node --test 'ui/work-view/contract/*.test.mjs'`). A bump of claude-mem runs the new mapper over the same answer.
 - `.github/workflows/work-view.yml` runs `build.sh` again in CI. It fails when the bundle it makes differs from the committed one by a byte.
 
-Nothing here is served yet. The route, the pages' own address and their token come in the next pull request.
+The bundle is not served yet. Its data is `GET /api/work-view` (`src/work_view.rs`), which answers at the main page's address with its token; the pages' own address and their token come in the pull request that serves them.
 
 ## Following claude-mem
 

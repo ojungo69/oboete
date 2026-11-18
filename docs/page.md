@@ -246,10 +246,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
-  oboete keeps in other shapes is mapped: a work list is a workstream, a finished month of goals is a
-  period of Past focus, a conversation's own request is known by the conversation's key, and the
-  goals' times are this machine's. What oboete lacks yet is left empty: the deliverables and
-  evidence links (X37), the rules (they come with My Rules), and continuing a conversation (X36).
+  oboete keeps in other shapes is mapped: a work list is a workstream (one per repository), the
+  weekly chapters of the Build story follow its recap, a finished month of goals is a period of Past
+  focus, a conversation's own request is known by the conversation's key, a request is complete when
+  its newest status completed it (or, shipped by a review alone, on the review's day), and the goals'
+  times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
+  (oboete's own page shows them), the evidence links (X37), the subagents (a later pull request),
+  the rules (they come with My Rules), and continuing a conversation (X36).
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow

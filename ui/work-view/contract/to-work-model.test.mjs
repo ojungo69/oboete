@@ -15,32 +15,54 @@ const byId = (id) => model.requests.find((r) => r.id === id)
 
 test('every request is read, in the state its records give it', () => {
   assert.deepEqual(model.requestReadErrors, [])
-  const states = Object.fromEntries(model.requests.map((r) => [r.id, r.state]))
-  assert.deepEqual(states, {
+  // Pairs, not a map: a request read twice, or one more than the home made, fails too.
+  const byKey = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+  const states = model.requests.map((r) => [r.id, r.state]).sort(byKey)
+  assert.deepEqual(states, [
     // Its work state shipped the request.
-    [key('claude', 'c:claude:s2')]: 'shipped',
+    [key('claude', 'c:claude:s2'), 'shipped'],
     // Its work waits for the owner (Needs_Input).
-    [key('claude', 'c:claude:s1')]: 'your-move',
+    [key('claude', 'c:claude:s1'), 'your-move'],
+    // Its work state said done: it waits for the owner's check.
+    [key('claude', 'c:claude:s3'), 'needs-check'],
+    // A request of its own name, worked on in two repositories.
+    ['r:rq1', 'working'],
     // Codex only asked, minutes ago: a request with no state of its own reads as being worked on
     // for 6 hours (status-normalization.ts:10, :106).
-    [key('codex', 'c:codex:c1')]: 'working',
-  })
+    [key('codex', 'c:codex:c1'), 'working'],
+  ].sort(byKey))
 })
 
 test('each request has its agent, its conversation at the time of its ask, and its work list', () => {
   const tools = Object.fromEntries(model.agents.map((a) => [a.id, a.tool]))
   assert.deepEqual(tools, {
+    'claude:c:claude:s3': 'claude',
     'claude:c:claude:s2': 'claude',
     'claude:c:claude:s1': 'claude',
     'codex:c:codex:c1': 'codex',
+    // The mapper's own, for the request no conversation recorded.
+    'agent-not-recorded': 'other',
   })
-  for (const request of model.requests) {
+  for (const request of model.requests.filter((r) => r.id !== 'r:rq1')) {
     assert.equal(request.conversations.length, 1, request.id)
     assert.notEqual(request.conversations[0].at, 'Time not recorded', request.id)
   }
+  assert.deepEqual(byId('r:rq1').conversations, [])
   assert.deepEqual(byId(key('claude', 'c:claude:s1')).workstreams, [
     { title: 'parser', tasks: [{ name: 'Report the line', done: false }] },
   ])
+  // A list of one name in two repositories is two workstreams.
+  const release = byId('r:rq1').workstreams.map((w) => w.tasks.map((t) => t.name)).sort()
+  assert.deepEqual(release, [['Bump the version'], ['Tag the release']])
+})
+
+test('a request done or shipped is complete: its clock stops, and a shipment by status has no reading', () => {
+  const done = byId(key('claude', 'c:claude:s3'))
+  assert.ok(!done.runningLive, 'a done request does not count on')
+  const shipped = byId(key('claude', 'c:claude:s2'))
+  assert.ok(shipped.progress.completedAt, 'a shipped request has its completion')
+  assert.equal(shipped.progress.readings, 0)
+  assert.ok(byId(key('claude', 'c:claude:s1')).runningLive, 'an open request counts on')
 })
 
 test('the focus screens read the areas, their open asks and Past focus', () => {
@@ -56,7 +78,8 @@ test('the focus screens read the areas, their open asks and Past focus', () => {
   assert.equal(model.pastPeriods.length, 1)
   const [month] = model.pastPeriods
   // A whole month, from its first day.
-  assert.match(month.label, /^[A-Z][a-z]{2} 1 – [A-Z][a-z]{2} \d{2}$/)
+  // The month 45 days back is in the year before in January and February: its label names the year.
+  assert.match(month.label, /^[A-Z][a-z]{2} 1 – [A-Z][a-z]{2} \d{2}(, \d{4})?$/)
   assert.equal(month.headline, 'Worked on the lexer.')
   assert.deepEqual(month.areas.map((a) => [a.title, a.timesAsked, a.quote?.quote]), [
     ['Lexer', 1, "the lexer's tokens"],
