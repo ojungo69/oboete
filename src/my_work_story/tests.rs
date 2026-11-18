@@ -490,3 +490,24 @@ fn the_story_so_far_is_the_last_answered_text() {
         "{prompt}"
     );
 }
+
+/// #1089: the work-view's chapters are the page's, chosen by the length of their texts gated: a
+/// chapter whose kept text is longer than the room the newer ones leave, and whose gated text is
+/// not, goes, as it was kept.
+#[test]
+fn the_kept_chapters_are_the_pages_chosen_by_their_gated_length() {
+    let newest = "a".repeat(PAGE_CHARS - 800);
+    let weeks = BTreeMap::from([
+        ("2026-11-16".to_owned(), Some((newest.clone(), newest))),
+        (
+            "2026-11-09".to_owned(),
+            Some(("b".repeat(700), "c".repeat(1_000))),
+        ),
+    ]);
+    let kept = chapters(weeks.clone(), true);
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[1]["text"], "c".repeat(1_000));
+    let shown = chapters(weeks, false);
+    assert_eq!(shown.len(), 2);
+    assert_eq!(shown[1]["text"], "b".repeat(700));
+}

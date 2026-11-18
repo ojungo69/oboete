@@ -744,7 +744,7 @@ fn the_contract_stories_are_the_adapters_answer() {
             let chapters: Vec<Value> = (chapters.iter())
                 .map(|(week, text)| json!({"week": week, "text": text}))
                 .collect();
-            let story = build_story(&json!({"recap": recap, "chapters": chapters}));
+            let story = build_story(&json!({"recap": recap, "chapters": chapters}), &Gate::now());
             json!({"name": name, "story": story})
         })
         .collect();
@@ -854,6 +854,21 @@ fn steady(v: &Value) -> Value {
     }
 }
 
+/// shortcut: in the first 15 minutes of a month (this machine's), the home's newest goals fall in
+/// the month before and make a second month of Past focus, so a contract that holds goals is not
+/// compared, nor written, until a later run; upgrade if the home's clock can be set. The home's own
+/// clock decides it, the one the goals' read takes, so that a run across a month's start is not
+/// compared.
+fn first_minutes(now: i64, write: bool) -> bool {
+    let local = Local.timestamp_millis_opt(now).unwrap();
+    let first = local.day() == 1 && local.hour() == 0 && local.minute() < 15;
+    assert!(
+        !(first && write),
+        "no contract snapshot is written in a month's first 15 minutes: wait for them to pass"
+    );
+    first
+}
+
 /// The contract: `ui/work-view/contract/snapshot.json` is this home's answer, which the Node
 /// test there runs claude-mem's mapper over (`node --test 'ui/work-view/contract/*.test.mjs'`).
 /// After a change to the answer, run this test with OBOETE_CONTRACT_WRITE=1, which writes this
@@ -861,19 +876,9 @@ fn steady(v: &Value) -> Value {
 /// test, and commit both.
 #[test]
 fn the_contract_snapshot_is_this_homes_answer() {
-    // shortcut: in the first 15 minutes of a month (this machine's), the home's newest goals fall
-    // in the month before and make a second month of Past focus, so the comparison waits for a
-    // later run; upgrade if the home's clock can be set. The home's own clock decides it, the one
-    // the goals' read takes, so that a run across a month's start is not compared.
     let (h, now) = home();
-    let local = Local.timestamp_millis_opt(now).unwrap();
-    let first_minutes = local.day() == 1 && local.hour() == 0 && local.minute() < 15;
     let write = std::env::var_os("OBOETE_CONTRACT_WRITE").is_some();
-    assert!(
-        !(first_minutes && write),
-        "no contract snapshot is written in a month's first 15 minutes: wait for them to pass"
-    );
-    if first_minutes {
+    if first_minutes(now, write) {
         return;
     }
     let (work, goals) = answers(&h, now);
@@ -897,10 +902,12 @@ fn the_contract_snapshot_is_this_homes_answer() {
 
 /// The Build story is read whole before any mask (#1089), and keeps its blocks: a rule that needs,
 /// in the story the recap and a chapter make, a heading another rule masks first; a rule that runs
-/// past where the adapter puts a word joiner and a week's `## `; and a heading followed by prose,
-/// read as the pages show it, its marks off. `ui/work-view/contract/gated-stories.json` is what it
-/// writes of each, which the Node test reads through the mapper; written again as the other
-/// contract files are (OBOETE_CONTRACT_WRITE=1).
+/// past where the adapter puts a word joiner and a week's `## `; a heading followed by prose, read
+/// as the pages show it, its marks off; a rule that finds a value beside what a mask left, as the
+/// gate reads again what it masked; and a rule on a kept text as it was kept, a heading and a line
+/// of prose under it, or a recap of a heading alone, which the story writes in another shape.
+/// `ui/work-view/contract/gated-stories.json` is what it writes of each, which the Node test reads
+/// through the mapper; written again as the other contract files are (OBOETE_CONTRACT_WRITE=1).
 #[test]
 fn a_story_is_read_whole_before_any_mask() {
     if !crate::view::tests::in_child("work_view::tests::a_story_is_read_whole_before_any_mask") {
@@ -909,43 +916,79 @@ fn a_story_is_read_whole_before_any_mask() {
     let gate = tempfile::tempdir().unwrap();
     let rules = "[redaction]\nextra_rules = [{ id = \"whole\", regex = '^Project Phoenix$' }, \
                  { id = \"after\", regex = 'Phoenix\\s+[\\d-]+\\s+\\w{14}' }, \
-                 { id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }]\n";
+                 { id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }, \
+                 { id = \"glued\", regex = '\\[REDACTED\\]\\s+\\d{6}' }, \
+                 { id = \"kept\", regex = '^## Release\\n(Orchid)$' }, \
+                 { id = \"alone\", regex = '^## Release$' }]\n";
     std::fs::write(gate.path().join("config.toml"), rules).unwrap();
     crate::redact::set_home(gate.path()).unwrap();
     let mut written = Vec::new();
-    for (name, recap, text, hidden) in [
+    // Each case's kept texts, the value the story must not show, and whether the kept texts, each
+    // read alone, hold nothing the rules find.
+    for (name, recap, text, hidden, alone) in [
         (
             "a heading masked whole, which another rule needs in the story",
             "## Project Phoenix",
             "qwertyuiopasdf is in the drawer.",
             "qwertyuiopasdf",
+            true,
         ),
         (
             "an issue's number after a recap that ends on a rule's keyword",
             "Ask for the zebracode",
             "#1087 asdfghjklzxcvb went out.",
             "asdfghjklzxcvb",
+            true,
         ),
         (
             "a heading followed by prose, as the pages show it",
             "## Project Phoenix\nThe rest is prose.",
             "Nothing here.",
             "Project Phoenix",
+            true,
+        ),
+        (
+            "a value a rule finds beside what a mask left",
+            "Project Phoenix\n\n123456 is the code.",
+            "Nothing here.",
+            "123456",
+            true,
+        ),
+        (
+            "a heading and a line of prose under it, as they were kept",
+            "## Release\nOrchid",
+            "Nothing here.",
+            "Orchid",
+            false,
+        ),
+        (
+            "a recap of a heading alone, as it was kept",
+            "## Release",
+            "Nothing here.",
+            "Release",
+            false,
         ),
     ] {
-        // Each kept text, read alone, holds nothing the rules find.
-        for kept in [recap, text] {
-            assert_eq!(crate::redact::outbound(kept), kept);
-        }
+        assert_eq!(
+            [recap, text]
+                .iter()
+                .all(|k| crate::redact::outbound(k) == *k),
+            alone,
+            "{name}"
+        );
         let story = json!({"recap": recap, "chapters": [{"week": "2026-11-16", "text": text}]});
-        let narrative = build_story(&story)["story"]["narrative"]
+        let narrative = build_story(&story, &Gate::now())["story"]["narrative"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert!(!narrative.contains(hidden), "{narrative}");
-        assert!(narrative.contains("\n\n## "), "{narrative}");
+        assert!(!narrative.contains(hidden), "{name}: {narrative}");
+        assert!(narrative.contains("\n\n## "), "{name}: {narrative}");
         let blocks = if recap.contains('\n') { 4 } else { 3 };
-        assert_eq!(narrative.split("\n\n").count(), blocks, "{narrative}");
+        assert_eq!(
+            narrative.split("\n\n").count(),
+            blocks,
+            "{name}: {narrative}"
+        );
         let story = json!({"story": {"narrative": narrative, "writtenAt": null}});
         written.push(json!({"name": name, "hidden": hidden, "story": story}));
     }
@@ -987,7 +1030,8 @@ const GATED: &str = "[redaction]\nextra_rules = [{ id = \"prompts\", regex = '^p
     { id = \"days\", regex = '^days$' }, { id = \"reviewed\", regex = '^reviewed$' }, \
     { id = \"completed\", regex = '^completed_at$' }, { id = \"spelling\", regex = 'release-4827' }, \
     { id = \"gemini\", regex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', \
-    keywords = [\"gemini\"] }]\n";
+    keywords = [\"gemini\"] }, { id = \"alpha\", regex = '^alpha' }, \
+    { id = \"beside\", regex = '^r:\\[REDACTED\\]-(Orchid)$' }]\n";
 
 /// The Antigravity conversation's id in the gate home.
 const AGY: &str = "6f1c2a3b-4d5e-4f60-8a1b-2c3d4e5f6a7b";
@@ -1007,6 +1051,17 @@ fn gate_home() -> (Store, i64) {
     );
     let spelled = json!({"task": "Cut it", "status": "release_4827"});
     wrote(&mut h, "agy", AGY, "plan", spelled);
+    // A request its own id names, a part of which a rule masks as My Work shows the id, and one
+    // whose own id is, letter for letter, what the first one's would go as with no gate after My
+    // Work's: the two stay two.
+    let first = json!({"task": "One", "status": "doing", "request_id": "alpha-Orchid",
+        "request": "Plan the first one"});
+    noted(&mut h, R, "first", first);
+    let print = crate::my_work::keyed_print("r:alpha-Orchid", h.home.path(), &mut None).unwrap();
+    let literal = format!("{}-Orchid#{print}", crate::redact::MASK);
+    let second = json!({"task": "Two", "status": "doing", "request_id": literal,
+        "request": "Plan the second one"});
+    noted(&mut h, R, "second", second);
     h.run();
     std::fs::write(h.home.path().join("config.toml"), GATED).unwrap();
     crate::redact::set_home(h.home.path()).unwrap();
@@ -1025,8 +1080,24 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
         return;
     }
     let (h, now) = gate_home();
+    let write = std::env::var_os("OBOETE_CONTRACT_WRITE").is_some();
+    if first_minutes(now, write) {
+        return;
+    }
     let (work, goals) = answers(&h, now);
     let fresh = snapshot_at(&work, &goals, now, &Utc);
+    // The request a rule masks a part of the id of, and the one whose own id is what the first's
+    // was before the gate read it again: each its own, and the first's shows no part it masks.
+    let titled = |title: &str| -> Value {
+        let found: Vec<&Value> = (arr(&fresh["humanRequests"]).iter())
+            .filter(|r| r["title"] == title)
+            .collect();
+        assert_eq!(found.len(), 1, "{title}");
+        found[0]["id"].clone()
+    };
+    let (first, second) = (titled("Plan the first one"), titled("Plan the second one"));
+    assert!(!first.to_string().contains("Orchid"), "{first}");
+    assert_ne!(first, second);
     let text = fresh.to_string();
     assert!(
         !text.contains(AGY) && !text.contains("release-4827"),

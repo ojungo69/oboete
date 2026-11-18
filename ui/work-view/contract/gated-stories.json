@@ -28,5 +28,35 @@
         "writtenAt": null
       }
     }
+  },
+  {
+    "name": "a value a rule finds beside what a mask left",
+    "hidden": "123456",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n[REDACTED] is the code.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading and a line of prose under it, as they were kept",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n[REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap of a heading alone, as it was kept",
+    "hidden": "Release",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
   }
 ]

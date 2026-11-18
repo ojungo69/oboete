@@ -3075,7 +3075,7 @@ fn put_id(v: &mut Value, id: Option<String>) {
 
 /// A My Work request's id, or its conversation's, taken out of it with its `fingerprint`, and
 /// gated but for that.
-fn request_id(request: &mut Value) -> Option<String> {
+pub(crate) fn request_id(request: &mut Value) -> Option<String> {
     let request = request.as_object_mut()?;
     let fingerprint = match request.remove("fingerprint") {
         Some(Value::String(print)) => Some(print),

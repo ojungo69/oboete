@@ -748,13 +748,19 @@ impl Request {
 /// deliverables (`listed`, the route's).
 #[cfg(test)]
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
-    Ok(read_held(home, range, now, None)?.0)
+    Ok(read_held(home, range, now, None, false)?.0)
 }
 
 /// `read` as the page's list shows it: each request's card with its deliverables (docs/
 /// deliverables.md, slice 2b), a copy's link tag made by `tag`.
 pub(crate) fn listed(home: &Path, range: Range, now: i64, tag: Tag) -> Result<Value> {
-    Ok(read_held(home, range, now, Some(tag))?.0)
+    Ok(read_held(home, range, now, Some(tag), false)?.0)
+}
+
+/// `listed` with the Build story's texts as they were kept (`my_work_story::kept`), not as its
+/// read gates them: the work-view's read (#1089), which gates the story it makes of them.
+pub(crate) fn listed_kept(home: &Path, range: Range, now: i64, tag: Tag) -> Result<Value> {
+    Ok(read_held(home, range, now, Some(tag), true)?.0)
 }
 
 /// What makes a copy's link tag (the viewer's `file_tag`).
@@ -768,7 +774,7 @@ pub(crate) fn anchored(anchor: &Key) -> String {
 /// `read` of every range, with what each request's check is filed under, in the answer's order:
 /// the review route's (rule 6).
 pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
-    read_held(home, Range::All, now, None)
+    read_held(home, Range::All, now, None, false)
 }
 
 /// What My Work reads of the stores before it makes requests: each conversation with its
@@ -948,6 +954,7 @@ fn read_held(
     range: Range,
     now: i64,
     cards: Option<Tag>,
+    kept_story: bool,
 ) -> Result<(Value, Vec<Held>)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
@@ -1061,7 +1068,10 @@ fn read_held(
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
-    let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
+    let story = match kept_story {
+        true => crate::my_work_story::kept(&k, raw.device(), &hidden, &rules)?,
+        false => crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?,
+    };
     // The page's read alone (`listed`), in its readers' hold.
     let subagents = match cards {
         Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,

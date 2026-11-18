@@ -523,35 +523,40 @@ pub(crate) fn page(
     hidden: &Hidden,
     rules: &Rules,
 ) -> Result<Value> {
-    read_with(k, device, hidden, |text| {
-        crate::redact::outbound_with(text, rules)
-    })
+    read_with(k, device, hidden, rules, false)
 }
 
-/// The story `page` reads, its texts as they were kept: the gate of their writing read them text
-/// by text (`keep`), and no read's gate has yet. For the work-view (#1089), which finds what the
-/// gate hides in the story it joins before any mask, and gates what it sends. None while none was
-/// written.
-pub(crate) fn kept(home: &std::path::Path) -> Result<Value> {
-    let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(Value::Null);
-    };
-    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
-    let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
-    read_with(&k, raw.device(), &hidden, str::to_owned)
+/// The story `page` reads, the same recap and chapters, its texts as they were kept: the gate of
+/// their writing read them text by text (`keep`), and no read's gate has yet. For the work-view
+/// (#1089), which finds what the gate hides in the story it joins before any mask, and gates what
+/// it sends. None while none was written.
+pub(crate) fn kept(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &Hidden,
+    rules: &Rules,
+) -> Result<Value> {
+    read_with(k, device, hidden, rules, true)
 }
 
-/// `page`, each text as `gate` gives it.
+/// `page`'s story, each text gated or, when `kept`, as it was kept: the chapters are chosen by
+/// the length of their texts gated, as the page shows them, either way.
 fn read_with(
     k: &rusqlite::Connection,
     device: &str,
     hidden: &Hidden,
-    gate: impl Fn(&str) -> String,
+    rules: &Rules,
+    kept: bool,
 ) -> Result<Value> {
     let all = crate::my_work_ops::shown(k, (NAME, None), Some(device), hidden, true, usize::MAX)?;
     // #733: a week whose facts are gone has no chapter.
     let (current, _) = facts_by_week(k, device, hidden, &chrono::Local)?;
-    let text = |k: &Kept| k.op.fields.get("text").and_then(Value::as_str).map(&gate);
+    let gate = |text: &str| crate::redact::outbound_with(text, rules);
+    let text = |k: &Kept| {
+        let text = k.op.fields.get("text").and_then(Value::as_str)?;
+        Some((gate(text), text.to_owned()))
+    };
+    let pick = |(gated, stored): (String, String)| if kept { stored } else { gated };
     let (mut recap, mut weeks) = (None, BTreeMap::new());
     for kept in &all {
         if kept.op.about == RECAP {
@@ -565,17 +570,26 @@ fn read_with(
     if recap.is_none() && weeks.is_empty() {
         return Ok(Value::Null);
     }
-    let (mut chapters, mut room) = (Vec::new(), PAGE_CHARS);
+    let chapters = chapters(weeks, kept);
+    Ok(json!({"recap": recap.flatten().map(pick), "chapters": chapters}))
+}
+
+/// The chapters the page shows, the newest week first, as far as `PAGE_CHARS` characters of their
+/// texts gated go: each text as gated or, when `kept`, as it was kept (#1089).
+fn chapters(weeks: BTreeMap<String, Option<(String, String)>>, kept: bool) -> Vec<Value> {
+    let (mut out, mut room) = (Vec::new(), PAGE_CHARS);
     for (week, text) in weeks.into_iter().rev() {
-        let Some(text) = text else { continue };
-        let n = text.chars().count();
+        let Some((gated, stored)) = text else {
+            continue;
+        };
+        let n = gated.chars().count();
         if n > room {
             break;
         }
         room -= n;
-        chapters.push(json!({"week": week, "text": text}));
+        out.push(json!({"week": week, "text": if kept { stored } else { gated }}));
     }
-    Ok(json!({"recap": recap.flatten(), "chapters": chapters}))
+    out
 }
 
 #[cfg(test)]

@@ -197,9 +197,10 @@ test('under rules on the keys it reads, the snapshot keeps the goals, their asks
 })
 
 test('a conversation the gate would mask in its key goes by one reference, with its agent and its time', () => {
-  const masked = gatedModel.requests.filter((r) => r.id.includes('[REDACTED]#'))
+  const masked = gatedModel.requests.filter((r) => r.id.startsWith('["conversation","gemini",'))
   assert.equal(masked.length, 1)
   const [request] = masked
+  assert.ok(request.id.includes('"c:[REDACTED]#'), request.id)
   assert.notEqual(request.agentId, 'agent-not-recorded')
   const [conversation] = request.conversations
   assert.equal(conversation.platform, 'gemini')
@@ -220,6 +221,9 @@ test('each Build story a rule finds a value in reads, through the pinned mapper,
     "a heading masked whole, which another rule needs in the story": ['[REDACTED]', ['[REDACTED]', '[REDACTED]', '[REDACTED] is in the drawer.']],
     "an issue's number after a recap that ends on a rule's keyword": ['Ask for the [REDACTED]', ['Ask for the [REDACTED]', '[REDACTED]', '[REDACTED] went out.']],
     'a heading followed by prose, as the pages show it': ['The rest is prose.', ['[REDACTED]', 'The rest is prose.', '2026-11-16', 'Nothing here.']],
+    'a value a rule finds beside what a mask left': ['[REDACTED]', ['[REDACTED]', '[REDACTED] is the code.', '2026-11-16', 'Nothing here.']],
+    'a heading and a line of prose under it, as they were kept': ['[REDACTED]', ['[REDACTED]', '[REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a recap of a heading alone, as it was kept': ['[REDACTED]', ['[REDACTED]', '2026-11-16', 'Nothing here.']],
   }
   assert.deepEqual(gatedStories.map((s) => s.name).sort(), Object.keys(want).sort())
   const shown = (text) => text.replace(/⁠/g, '')
@@ -229,4 +233,16 @@ test('each Build story a rule finds a value in reads, through the pinned mapper,
     assert.ok(!JSON.stringify(got).includes(hidden), name)
     assert.deepEqual(got, want[name], name)
   }
+})
+
+test('a request a rule masks a part of the id of, and one whose own id is what the first one\'s was, are each their own', () => {
+  const [first, second] = ['Plan the first one', 'Plan the second one'].map((title) => {
+    const found = gatedModel.requests.filter((r) => r.title === title)
+    assert.equal(found.length, 1, title)
+    return found[0]
+  })
+  assert.notEqual(first.id, second.id)
+  assert.ok(!first.id.includes('Orchid'), first.id)
+  assert.equal(gatedById(first.id), first)
+  assert.equal(gatedById(second.id), second)
 })

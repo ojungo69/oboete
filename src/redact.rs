@@ -709,11 +709,10 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
     Some(merged_runs([g.blocks, g.masks].concat()))
 }
 
-/// `hidden` with the rules as they are now, which `outbound` reads with: `None` when the gate masks
-/// the whole text, as it masks all of one when its table went wrong.
-pub fn hidden_now(text: &str) -> Option<Vec<(usize, usize)>> {
-    let rules = egress()?;
-    hidden(text, &rules)
+/// The rules as they are now, which `outbound` reads with: none while the table is wrong, which
+/// masks every text whole. For a reader that gates many texts of one answer with one read of them.
+pub fn rules_now() -> Option<std::sync::Arc<Rules>> {
+    egress()
 }
 
 /// A text as the gate sees it: `plain` is what it scans (blocks removed tag by tag, trimmed,

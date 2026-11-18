@@ -245,12 +245,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
   their readers give them, each text gated at its source, and from the Build story's kept texts,
   and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
-  it is sent, and the Build story whole, read before any mask as its kept texts joined, each kept
-  text, each block, each heading as the pages show it and the story as sent. No rule on a key
-  takes what the pages read by it: the counts, days and times are read by the keys the code names.
-  A conversation the gate would mask in its key or its agent's id goes by a keyed reference, the
-  same in every place the pages match it, and a work item's status goes as one of the words the
-  pages read, or as none. The
+  it is sent, and the Build story whole, read before any mask as each kept text as it was kept,
+  the kept texts joined, each block, each heading as the pages show it and the story as sent, then
+  read again for what the masks left. No rule on a key takes what the pages read by it: the
+  counts, days and times are read by the keys the code names. A request's id and its
+  conversations' go through the gate as the main page sends them. A conversation the gate would
+  mask in its key or its agent's id goes by a keyed reference, the same in every place the pages
+  match it, and a work item's status goes as one of the words the pages read, or as none. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its
