@@ -972,7 +972,8 @@ fn a_story_is_read_whole_before_any_mask() {
                  { id = \"shown\", regex = '^\\[REDACTED\\] (Orchid)$' }, \
                  { id = \"context\", regex = '(Alpha) 42 Beta\\s+Gamma' }, \
                  { id = \"paragraph\", regex = '^\\[REDACTED\\] (\\d+) Beta$' }, \
-                 { id = \"issue\", regex = '^#1087 (zebravalue)$' }]\n";
+                 { id = \"issue\", regex = '^#1087 (zebravalue)$' }, \
+                 { id = \"nel\", regex = '^(?u:\\x{0085})(Orchid)' }]\n";
     std::fs::write(gate.path().join("config.toml"), rules).unwrap();
     crate::redact::set_home(gate.path()).unwrap();
     let mut written = Vec::new();
@@ -1040,6 +1041,13 @@ fn a_story_is_read_whole_before_any_mask() {
             "#1087 zebravalue\n\nOther.",
             "Nothing here.",
             "zebravalue",
+            true,
+        ),
+        (
+            "a block that would open with a character the gate's reading drops",
+            "## \u{0085}Orchid",
+            "Nothing here.",
+            "\u{0085}",
             true,
         ),
     ] {
@@ -1110,7 +1118,8 @@ const GATED: &str = "[redaction]\nextra_rules = [{ id = \"prompts\", regex = '^p
     { id = \"gemini\", regex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', \
     keywords = [\"gemini\"] }, { id = \"alpha\", regex = '^alpha' }, \
     { id = \"beside\", regex = '^r:\\[REDACTED\\]-(Orchid)$' }, \
-    { id = \"printed\", regex = '(Orchid)#[0-9a-f]{12}$' }]\n";
+    { id = \"printed\", regex = '(Orchid)#[0-9a-f]{12}$' }, \
+    { id = \"raw\", regex = '^(tenant-orchid):' }]\n";
 
 /// The Antigravity conversation's id in the gate home.
 const AGY: &str = "6f1c2a3b-4d5e-4f60-8a1b-2c3d4e5f6a7b";
@@ -1141,10 +1150,29 @@ fn gate_home() -> (Store, i64) {
     let second = json!({"task": "Two", "status": "doing", "request_id": literal,
         "request": "Plan the second one"});
     noted(&mut h, R, "second", second);
+    // A conversation of an agent the raw hook named as it was given.
+    event(
+        &mut h,
+        "prompt",
+        "tenant-orchid",
+        "raw-1",
+        t + 1_000,
+        json!({"prompt": "Plan the raw one."}),
+    );
     h.run();
     std::fs::write(h.home.path().join("config.toml"), GATED).unwrap();
     crate::redact::set_home(h.home.path()).unwrap();
     (h, crate::db::now_ms())
+}
+
+/// Every string of `v`.
+fn strings(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(xs) => xs.iter().flat_map(strings).collect(),
+        Value::Object(m) => m.values().flat_map(strings).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Each string of `v` under a key the pages match on, which the walk leaves as it is (`OWN`).
@@ -1200,10 +1228,24 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
         !text.contains(AGY) && !text.contains("release-4827") && !text.contains("Orchid"),
         "{text}"
     );
-    // Each selector the walk leaves as it is holds nothing a rule finds.
+    // Each selector the walk leaves as it is holds nothing a rule finds, nor does any other string.
     for (key, value) in selectors(&fresh, "") {
         assert_eq!(crate::redact::outbound(&value), value, "{key}");
     }
+    for value in strings(&fresh) {
+        assert_eq!(crate::redact::outbound(&value), value);
+    }
+    // The raw agent's conversation goes under the platform `other`, its own name in no selector.
+    let raw = (arr(&fresh["agents"]).iter())
+        .find(|a| a["sessionTitle"] == "Plan the raw one.")
+        .expect("the raw agent's conversation");
+    assert_eq!(raw["platformSource"], "other", "{raw}");
+    assert!(
+        raw["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("other:")),
+        "{raw}"
+    );
     // The counts and days, read by their keys.
     assert!(
         fresh["goals"]["sourcePromptCount"].is_i64(),
@@ -1242,7 +1284,7 @@ fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
     let key: Vec<String> = serde_json::from_str(refs[0]["id"].as_str().unwrap()).unwrap();
     assert!(key[2].starts_with("m:"), "{key:?}");
     assert_eq!(refs[0]["conversationKeys"], json!([refs[0]["id"]]));
-    let agent = format!("agy:{}", key[2]);
+    let agent = format!("gemini:{}", key[2]);
     assert_eq!(refs[0]["agentIds"], json!([agent]));
     let agents: Vec<&Value> = arr(&fresh["agents"])
         .iter()

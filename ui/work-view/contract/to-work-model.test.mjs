@@ -227,6 +227,7 @@ test('each Build story a rule finds a value in reads, through the pinned mapper,
     'a heading masked in part, read again as the pages show it': ['[REDACTED] [REDACTED]', ['[REDACTED] [REDACTED]', '2026-11-16', 'Nothing here.']],
     'a paragraph masked in part by a rule that needs the next, read again alone': ['[REDACTED] [REDACTED] Beta', ['[REDACTED] [REDACTED] Beta', 'Gamma', '2026-11-16', 'Nothing here.']],
     "a paragraph that opens with an issue's number, read without its word joiner": ['#1087 [REDACTED]', ['#1087 [REDACTED]', 'Other.', '2026-11-16', 'Nothing here.']],
+    "a block that would open with a character the gate's reading drops": ['Orchid', ['Orchid', '2026-11-16', 'Nothing here.']],
   }
   assert.deepEqual(gatedStories.map((s) => s.name).sort(), Object.keys(want).sort())
   const shown = (text) => text.replace(/⁠/g, '')
@@ -248,4 +249,15 @@ test('a request a rule masks a part of the id of, and one whose own id is what t
   assert.ok(!JSON.stringify(gated).includes('Orchid'), 'no part of either id goes')
   assert.equal(gatedById(first.id), first)
   assert.equal(gatedById(second.id), second)
+})
+
+test('a conversation of an agent the raw hook named goes under the platform other, and keeps its agent', () => {
+  const found = gatedModel.requests.filter((r) => r.title === 'Plan the raw one.')
+  assert.equal(found.length, 1)
+  const [conversation] = found[0].conversations
+  assert.equal(conversation.platform, 'other')
+  assert.equal(conversation.title, 'Plan the raw one.')
+  // The rule on its name, `^(tenant-orchid):`, finds no string of the snapshot.
+  const strings = (v) => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
+  assert.ok(!strings(gated).some((s) => s.startsWith('tenant-orchid:')), 'no string opens with its name')
 })

@@ -125,9 +125,11 @@ fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
 }
 
 /// A conversation's agent's id in the snapshot, by which the pages give a request its agent
-/// (`agentIds`, `to-work-model.ts:154`).
+/// (`agentIds`, `to-work-model.ts:154`): its platform, a word of this file's, and the
+/// conversation's id or reference. An agent's own name, which the raw hook takes as given, goes in
+/// no selector (#1089).
 fn agent_id(agent: &str, id: &str) -> String {
-    format!("{agent}:{id}")
+    format!("{}:{id}", platform(agent))
 }
 
 /// A conversation's key, which the pages parse for its platform and id (`to-work-model.ts:88-92`).
@@ -292,7 +294,7 @@ fn offset(text: &str, part: &str) -> usize {
 
 impl Block {
     fn heading(text: &str, line: &str, from: usize) -> Block {
-        let line = line.trim_matches(space);
+        let line = line.trim_matches(edge);
         let pieces = vec![Piece {
             text: line.to_owned(),
             at: offset(text, line),
@@ -340,10 +342,10 @@ impl Block {
             }
             let mut words: &str = line;
             if i == 0 {
-                words = words.trim_start_matches(space);
+                words = words.trim_start_matches(edge);
             }
             if i == last {
-                words = words.trim_end_matches(space);
+                words = words.trim_end_matches(edge);
             }
             pieces.push(Piece {
                 text: words.to_owned(),
@@ -483,7 +485,10 @@ impl Narrative {
         for pass in 0..=PASSES {
             let sent = shown(&self.sent, &sent_at, &masked);
             let plain = shown(&self.plain, &self.at, &masked);
-            let blocks = [page_blocks(&sent), page_blocks(&plain)];
+            let blocks = [
+                (&sent, page_blocks(&sent.0)),
+                (&plain, page_blocks(&plain.0)),
+            ];
             let mut found = Vec::new();
             // Each view is read where it is, none copied.
             let mut read = |text: &str, at: &[Option<usize>]| {
@@ -493,8 +498,10 @@ impl Narrative {
                     found.extend(words.filter(|&p| !self.mark[p] && !masked[p]));
                 }
             };
-            for (text, at) in blocks.iter().flatten() {
-                read(text, at);
+            for ((text, at), ranges) in &blocks {
+                for r in ranges {
+                    read(&text[r.clone()], &at[r.clone()]);
+                }
             }
             if pass == 0 {
                 for (text, went) in texts.iter().zip(&self.went) {
@@ -541,11 +548,10 @@ fn shown(text: &str, at: &[Option<usize>], masked: &[bool]) -> (String, Vec<Opti
     (out, from)
 }
 
-/// The blocks of a narrative as the pages split it (`to-work-model.ts:435`: at a line of nothing
-/// but whitespace), each trimmed, and each that opens with `#` once more with those marks and the
-/// whitespace after them off, as the pages show every block (`to-work-model.ts:439`), each with the
-/// story's byte for each of its bytes.
-fn page_blocks((text, at): &(String, Vec<Option<usize>>)) -> Vec<(String, Vec<Option<usize>>)> {
+/// Where the blocks of a narrative are as the pages split it (`to-work-model.ts:435`: at a line of
+/// nothing but whitespace), each trimmed, and each that opens with `#` once more with those marks
+/// and the whitespace after them off, as the pages show every block (`to-work-model.ts:439`).
+fn page_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
     // Where each blank line is: from a line break to the last line break of the whitespace after it.
     let mut cuts = Vec::new();
     let mut chars = text.char_indices().peekable();
@@ -572,11 +578,11 @@ fn page_blocks((text, at): &(String, Vec<Option<usize>>)) -> Vec<(String, Vec<Op
             continue;
         }
         let from = offset(text, block);
-        out.push((block.to_owned(), at[from..from + block.len()].to_vec()));
+        out.push(from..from + block.len());
         let shown = block.trim_start_matches('#').trim_start_matches(space);
         if shown.len() < block.len() && !shown.is_empty() {
             let from = offset(text, shown);
-            out.push((shown.to_owned(), at[from..from + shown.len()].to_vec()));
+            out.push(from..from + shown.len());
         }
     }
     out
@@ -610,6 +616,14 @@ fn item_status(status: &str) -> &'static str {
 /// JavaScript's `\s`, by which the pages split and trim: Rust's whitespace but U+0085, and U+FEFF.
 fn space(c: char) -> bool {
     (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}'
+}
+
+/// What a block is trimmed of at its edges: JavaScript's whitespace, which the pages trim, and
+/// Rust's, which the gate trims before it reads a text (`redact::hidden`). So no block of the
+/// story opens or ends with a character the pages keep and the gate's reading drops (U+0085), and
+/// a rule anchored at a block's edge reads the block as the pages show it (#1089).
+fn edge(c: char) -> bool {
+    space(c) || c.is_whitespace()
 }
 
 /// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.
@@ -664,13 +678,20 @@ fn arr(v: &Value) -> &[Value] {
     v.as_array().map_or(&[][..], Vec::as_slice)
 }
 
-/// claude-mem's platform for an oboete agent. The same name goes in the conversation keys, which
-/// find their agent by it (`to-work-model.ts:226`); a name claude-mem does not know shows as the
-/// tool "other".
-fn platform(agent: &str) -> &str {
+/// claude-mem's platform for an oboete agent. The same word goes in the agents' ids and the
+/// conversation keys, which find their agent by it (`to-work-model.ts:226`): one of oboete's own
+/// agents' names, or `other` for any other, so that a name the raw hook took as given goes in no
+/// selector. claude-mem shows a platform it does not know as the tool "other".
+fn platform(agent: &str) -> &'static str {
     match agent {
-        "agy" => "gemini",
-        a => a,
+        "agy" | "gemini" => "gemini",
+        "claude" => "claude",
+        "codex" => "codex",
+        "grok" => "grok",
+        "cursor" => "cursor",
+        "opencode" => "opencode",
+        "pi" => "pi",
+        _ => "other",
     }
 }
 
