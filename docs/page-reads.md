@@ -544,3 +544,35 @@ Tests: `consumer::repo_counts::tests::the_counts_are_made_again_unless_the_store
 `no_writer_replaces_a_row_counted`; and `view::tests::the_repositories_are_read_from_the_counts_kept`,
 `the_repositories_counts_follow_every_writer` and
 `a_store_without_this_builds_counts_is_counted_from_its_tables`.
+
+## #1063: the pause's indexes on a machine that never pauses
+
+What happened. The worker builds raw.db's pause indexes (`raw::index::Builder::Pause`) only at an
+idle time, a minute with no new record, and only once no hook has recorded for 30 minutes. This
+PC's agents record all day. After their installs, `records_expired` and `records_prompt_fields`
+waited 13 hours, and they were built by hand in the end. Until then My Work
+(`GET /api/my-work?range=all`) read 424 MB, against 150 MB with them, and the Sessions tab read
+112 MB, against 8 MB.
+
+The change. The first time the worker finds one of them missing, it marks the time in raw.db's
+meta (`pause_index_waiting`), which outlasts the worker's exits. A look that a call out holds off
+from the build marks it too; one while the worker is leaving, or while a command asks it aside,
+writes nothing. An hour after the mark, the worker
+builds them without the pause. It does so at an idle time or in a round, so a worker that never
+has an idle time builds them too, and a round whose time runs out before its consumers have read
+what it began with looks too, so a backlog that outlasts the hour does not hold them off. A build the hour starts first marks the time again, so after a
+build that fails, the next one with no pause waits another hour; a pause still builds them at any
+time, as before. A hook during the build waits for the store as it does for any held store (2 s,
+or for a call Pi waits for, until a second before Pi kills it: #955) and keeps its events for the
+next hook to write back, as during a pause's build. A store that has every pause index writes
+nothing for them: the mark goes when the last one is built.
+
+Tests: `worker::tests::the_pause_indexes_are_built_once_they_have_waited_their_hour` (at an idle
+time and in a round), `a_build_its_hour_started_that_fails_waits_another_hour`,
+`a_store_that_has_every_pause_index_writes_nothing_for_them`,
+`a_busy_resident_worker_builds_the_pause_indexes_after_their_hour`,
+`a_round_behind_its_backlog_builds_the_pause_indexes_after_their_hour`, and for the mark and the
+checks before a look: `a_mark_left_beside_every_pause_index_stays_while_leaving_or_asked_aside`,
+`a_mark_no_build_writes_starts_the_wait_again`, `a_mark_whose_delete_failed_goes_at_the_next_look`,
+`a_round_whose_store_a_newer_oboete_stamped_writes_no_pause_mark` and
+`an_idle_upkeep_whose_store_a_newer_oboete_stamped_builds_nothing`.
