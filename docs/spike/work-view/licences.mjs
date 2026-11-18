@@ -17,12 +17,13 @@ for (const f of readdirSync(dist).filter((f) => f.endsWith('.map'))) {
     const rest = s.slice(i + 13).split('/')
     const name = rest[0].startsWith('@') ? `${rest[0]}/${rest[1]}` : rest[0]
     const dir = s.slice(0, i + 13) + name
-    if (!pkgs.has(name)) pkgs.set(name, { dir, files: new Set() })
-    pkgs.get(name).files.add(f.replace(/-[A-Za-z0-9_-]{8}\.js\.map$/, ''))
+    // Each copy by its folder: two versions of one package (a nested node_modules) are two rows.
+    if (!pkgs.has(dir)) pkgs.set(dir, { name, files: new Set() })
+    pkgs.get(dir).files.add(f.replace(/-[A-Za-z0-9_-]{8}\.js\.map$/, ''))
   }
 }
 const rows = []
-for (const [name, { dir, files }] of pkgs) {
+for (const [dir, { name, files }] of pkgs) {
   const p = join(dist, dir, 'package.json')
   const j = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {}
   const lic = typeof j.license === 'string' ? j.license : j.license?.type ?? (j.licenses ? JSON.stringify(j.licenses) : 'NONE')
