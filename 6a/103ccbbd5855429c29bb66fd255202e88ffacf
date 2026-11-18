@@ -1,0 +1,27 @@
+ui/work-view/README.md
+  s_52c3955e48bff4::t_45eae03ea77cca 32,49,51-53
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_3209068b35ee59 34-36,38-39,44,50-55,61-64,70-71,75-76
+ui/work-view/fetch.sh
+  s_52c3955e48bff4::t_cfb661dfed1d33 50-52,56-57,65,69-74
+ui/work-view/notices.mjs
+  s_52c3955e48bff4::t_1ac419f120909a 9,67-68,72-73,97,105-107,109-116,118-128
+ui/work-view/notices.test.mjs
+  s_52c3955e48bff4::t_e7c42e59e36b85 15-16,36,70-72,74-75,88-92,95,99,101,103-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6a103ccbbd5855429c29bb66fd255202e88ffacf",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
