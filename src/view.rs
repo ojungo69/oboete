@@ -2671,6 +2671,33 @@ impl Viewer {
                 answer["status"] = crate::my_work_run::status(&self.home, &goals, now)?;
                 answer
             }
+            // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
+            // from the two answers above as they leave the gate, the requests of the last 7 days.
+            // Each text in it is one of theirs, and the text it makes of them, its Build story, goes
+            // through the gate again as it leaves (`work_view::gate`). One readers'
+            // hold from the first read to the snapshot (#439), as one page's read takes: a forget
+            // registers before both answers or after it. raw.db first, then the hold, the order a
+            // restore takes them in. The goals' read takes no hold of its own, so this one is its
+            // hold; My Work's read takes one more within it.
+            "work-view" => {
+                let now = crate::db::now_ms();
+                // No store yet: an empty home's snapshot, at once. A reader that opened a store
+                // made meanwhile would read outside the hold below (Codex on #1087).
+                let Some(_stores) = crate::search::b::stores(&self.home)? else {
+                    let empty = crate::work_view::snapshot(&json!({}), &json!({}), now);
+                    return Ok(Response::json(&empty));
+                };
+                let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
+                // The work-view shows no deliverables yet: their links are not made.
+                let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
+                let week = crate::my_work::Range::Week;
+                let work = crate::my_work::listed(&self.home, week, now, &tag)?;
+                let goals = crate::my_work_goals::page(&self.home, now)?;
+                let (work, goals) = (answered("my-work", work), answered("my-goals", goals));
+                let snapshot = crate::work_view::snapshot(&work, &goals, now);
+                return Ok(Response::json(&snapshot));
+            }
+            "work-view/version" => return self.api("version", q),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
                 let now = crate::db::now_ms();

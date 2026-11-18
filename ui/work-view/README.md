@@ -17,19 +17,20 @@ Decision 114 (2026-11-17) serves claude-mem's work-view on oboete's engine: My W
   - it writes `THIRD-PARTY-NOTICES.md` with `notices.mjs`, which lists every package and font the bundle holds with its licence. `licences/` holds the texts of the packages that ship none, and the build stops at a package with no text.
 
   Run it as a user who cannot read your keys: the build's tools run native code even with install scripts off.
+- `contract/` holds the contract between oboete's answer and the pages: `snapshot.json`, the answer of `GET /api/work-view` (`src/work_view.rs`) for a synthetic home, which the Rust test `work_view::tests::the_contract_snapshot_is_this_homes_answer` keeps current (it compares the two with times and keyed prints written as their kind; with `OBOETE_CONTRACT_WRITE=1` it writes this run's answer, whatever it is. In the first 15 minutes of a month, when the home's newest goals fall in the month before, it refuses to write and does not compare), `stories.json`, the Build story the adapter writes for each case of `STORIES` in the same Rust file (its test `the_contract_stories_are_the_adapters_answer` keeps it current the same way), and a Node test that runs claude-mem's mapper, unchanged, over both (`node --test 'ui/work-view/contract/*.test.mjs'`, which the workflow runs again with `TZ=America/Los_Angeles`, as the pages run in the browser's zone). A bump of claude-mem runs the new mapper over the same answer.
 - `.github/workflows/work-view.yml` runs `build.sh` again in CI. It fails when the bundle it makes differs from the committed one by a byte.
 
-Nothing here is served yet. The route, the pages' own address and their token come in the next pull request.
+The bundle is not served yet. Its data is `GET /api/work-view` (`src/work_view.rs`), which answers at the main page's address with its token; the pages' own address and their token come in the pull request that serves them.
 
 ## Following claude-mem
 
 At each new release that is wanted:
 
 1. Read the contract diff first: `git diff <old> <new> -- src/ui/my-work/src/live/ src/ui/my-work/src/data.ts src/ui/my-work/src/data-rules.ts src/ui/my-work/test-fixtures/ src/services/worker/http/routes/WorkViewRoutes.ts src/services/work-view/` in the claude-mem checkout.
-2. Run `fetch.sh` with the new tag.
+2. Run `fetch.sh` with the new tag, then the contract test: the new mapper must read oboete's answer. A mapper that changed what it reads is answered in `src/work_view.rs`, and its Rust test writes the snapshot again (`OBOETE_CONTRACT_WRITE=1`).
 3. Run `build.sh`. When a patch no longer applies, make it again against the new tree: put the old tree, with its patched copy on top, in a scratch git repository, and use `git apply --3way` or a rebase.
 4. Read the diff of `assets/work-view/THIRD-PARTY-NOTICES.md` and check each package that is new or changed: where it comes from, what it runs when installed, and the advisories against it (decision 114).
-5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together. `NOTICE` names `UPSTREAM`, so it does not change.
+5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together, with `src/work_view.rs` and the snapshot written again when step 2 changed them, after the Node test has run over the new snapshot. `NOTICE` names `UPSTREAM`, so it does not change.
 
 ## Advisories
 

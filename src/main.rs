@@ -75,6 +75,7 @@ mod view;
 mod watchdog;
 mod work_product;
 mod work_state;
+mod work_view;
 mod worker;
 
 use std::path::PathBuf;

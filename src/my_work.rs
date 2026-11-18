@@ -356,7 +356,7 @@ fn meaningful(v: &Value) -> Option<String> {
 
 /// claude-mem's `normalizeRecordedStatus`: lower-cased, `_` and spaces read as `-`, and the
 /// aliases of needs you and, since claude-mem 15.1, of needs review.
-fn normalized(status: &str) -> String {
+pub(crate) fn normalized(status: &str) -> String {
     let s = status.trim().to_lowercase().replace(['_', ' '], "-");
     match s.as_str() {
         "needs-input" | "waiting-on-user" | "awaiting-approval" | "needs-approval" => {
@@ -2595,6 +2595,10 @@ fn answer(
             "status": status,
             "updated": updated,
             "started": original.ts,
+            // When the newest status recorded completed the request (claude-mem's
+            // `completedAtEpoch`), whatever the page shows of it: the work-view stops a done
+            // request's clock by it.
+            "completed_at": completed_at,
             "agents": agents,
             "sessions": conversations,
             "projects": names,
@@ -2729,6 +2733,11 @@ fn progress(
         // gives staying for "Asked again after ship" (#731).
         "completed_at": completed_at.filter(|_| shipped),
         "estimate": (!shipped).then(|| crate::my_work_progress::estimate(readings)).flatten(),
+        // The readings it was measured from (the newest two), oldest first, as claude-mem's
+        // progress has its history: its pages measure their estimate from them as `estimate` does.
+        "readings": (readings.iter().rev())
+            .map(|r| json!({"ts": r.ts, "percent": r.percent}))
+            .collect::<Vec<_>>(),
     })
 }
 

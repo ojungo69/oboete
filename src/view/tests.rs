@@ -2058,6 +2058,131 @@ fn the_my_goals_and_status_routes_take_the_token() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Decision 114: the work-view's route sends My Work through the outbound gate, as `/api/my-work`
+/// does (Codex on #1087). The gate's own rules live apart from the store's, as a read the route's
+/// gate outlives would have them: a codename only the gate's rules match is in none of the answer,
+/// as is a value My Work's reading masks. Two requests whose ids a rule masks alike stay two, and
+/// two lists of one request that a rule masks alike stay two workstreams, each the same from read
+/// to read.
+#[test]
+fn the_work_view_route_answers_through_the_gate() {
+    if !in_child("view::tests::the_work_view_route_answers_through_the_gate") {
+        return;
+    }
+    let (dir, v) = viewer("work-view-gate");
+    let value = format!("q9Zx8mL2vB4nR7tY1wK3{}", "pS6dJ0aF5hU2cE8g");
+    let mut raw = crate::raw::open(&dir).unwrap();
+    for (id, plan, list) in [
+        ("sess-7", "Plan A", "plan-1"),
+        ("sess-7", "Plan B", "plan-2"),
+        ("sess-8", "Plan C", "plan-1"),
+    ] {
+        let task = format!("{plan}: auth = \"{value}\", codename ZEPHYR-4417");
+        let fields = json!({"task": task, "request_id": id, "request": "Fix the release notes",
+            "status": "doing"});
+        raw.work_state(R, list, fields.as_object().unwrap(), None)
+            .unwrap();
+    }
+    drop(raw);
+    crate::worker::run_once(&dir).unwrap();
+    let rules = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }, \
+                 { id = \"list\", regex = '^plan-[0-9]$' }]\n";
+    std::fs::write(dir.join("config.toml"), rules).unwrap();
+    let gate = dir.join("gate-home");
+    std::fs::create_dir_all(&gate).unwrap();
+    let code = "[redaction]\nextra_rules = [{ id = \"code\", regex = 'ZEPHYR-[0-9]{4}' }]\n";
+    std::fs::write(gate.join("config.toml"), code).unwrap();
+    redact::set_home(&gate).unwrap();
+    let read = || get(&v, "/api/work-view");
+    let first = read();
+    let text = first.to_string();
+    for shown in [value.as_str(), "ZEPHYR-4417", "sess-", "plan-"] {
+        assert!(!text.contains(shown), "{shown}: {text}");
+    }
+    let ids = |s: &Value| -> Vec<String> {
+        (s["humanRequests"].as_array().unwrap().iter())
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let streams = |s: &Value| -> Vec<Vec<String>> {
+        (s["humanRequests"].as_array().unwrap().iter())
+            .map(|r| {
+                (r["workstreams"].as_array().unwrap().iter())
+                    .filter_map(|w| w["id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .collect()
+    };
+    let (read_ids, read_streams) = (ids(&first), streams(&first));
+    assert_eq!(read_ids.len(), 2, "{text}");
+    assert_ne!(read_ids[0], read_ids[1]);
+    assert!(
+        read_ids.iter().all(|id| id.starts_with("r:[REDACTED]#")),
+        "{read_ids:?}"
+    );
+    let two: Vec<&Vec<String>> = read_streams.iter().filter(|w| w.len() == 2).collect();
+    assert_eq!(two.len(), 1, "{read_streams:?}");
+    assert_ne!(two[0][0], two[0][1]);
+    // Each goes by its place in its request, which carries no name of its list.
+    let place = |w: &String| {
+        w.strip_prefix('w')
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+    };
+    assert!(read_streams.iter().flatten().all(place), "{read_streams:?}");
+    let again = read();
+    assert_eq!((ids(&again), streams(&again)), (read_ids, read_streams));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// What the work-view makes of its answers' texts leaves through the gate: a heading's text that
+/// becomes the recap, by itself, and the story the recap and its chapters make, where a rule finds
+/// across them what it finds in neither stored text. The story keeps its blocks (Codex on #1087).
+#[test]
+fn the_work_views_story_leaves_through_the_gate() {
+    if !in_child("view::tests::the_work_views_story_leaves_through_the_gate") {
+        return;
+    }
+    let gate = tempfile::tempdir().unwrap();
+    let rules = "[redaction]\nextra_rules = [{ id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }, \
+                 { id = \"whole\", regex = '^Project Phoenix$' }]\n";
+    std::fs::write(gate.path().join("config.toml"), rules).unwrap();
+    redact::set_home(gate.path()).unwrap();
+    let (recap, chapter) = ("Ask for the zebracode", "qwertyuiopasdf is in the drawer.");
+    // Each stored text, as My Work's answer gives it, holds nothing the rules find.
+    for text in [recap, chapter, "## Project Phoenix"] {
+        assert_eq!(redact::outbound(text), text);
+    }
+    let chapters = json!([{"week": "2026-11-16", "text": chapter}]);
+    for (recap, hidden) in [
+        (recap, "qwertyuiopasdf"),
+        ("## Project Phoenix", "Project Phoenix"),
+    ] {
+        let work = json!({"story": {"recap": recap, "chapters": chapters}});
+        let snapshot = crate::work_view::snapshot(&work, &json!({}), 0);
+        let narrative = snapshot["story"]["story"]["narrative"].as_str().unwrap();
+        assert!(!narrative.contains(hidden), "{narrative}");
+        assert_eq!(narrative.split("\n\n").count(), 3, "{narrative}");
+        assert!(narrative.contains("\n\n## "), "{narrative}");
+    }
+}
+
+/// Decision 114: the work-view's snapshot and its version take the token. Over an empty home the
+/// snapshot has no request and no goals, and its source is connected; its version is the page's.
+#[test]
+fn the_work_view_routes_take_the_token() {
+    let (dir, v) = viewer("work-view");
+    for target in ["/api/work-view", "/api/work-view/version"] {
+        assert_eq!(v.route("GET", target, &[HOST]).status, 401, "{target}");
+    }
+    let snapshot = get(&v, "/api/work-view");
+    assert_eq!(snapshot["humanRequests"], json!([]));
+    assert_eq!(snapshot["source"]["connected"], json!(true));
+    assert!(snapshot["goals"].is_null(), "{snapshot}");
+    let version = get(&v, "/api/work-view/version");
+    assert_eq!(version["v"], get(&v, "/api/version")["v"], "{version}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// V3: the My Rules route and its action take the token; over an empty home the page answers
 /// nothing waiting and no rules, the action no such suggestion.
 #[test]

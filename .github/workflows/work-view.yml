@@ -1,6 +1,7 @@
 # The work-view bundle (decision 114, ui/work-view/README.md). Built again from claude-mem's pinned
 # tree and oboete's patches, with install scripts off, it must be the committed assets/work-view/
-# byte for byte, so that what is served is what the sources and the patches make.
+# byte for byte, so that what is served is what the sources and the patches make. First, the
+# pinned tree's own mapper reads oboete's answer (ui/work-view/contract/).
 name: work-view
 
 on:
@@ -22,6 +23,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.3
+      # claude-mem's mapper, unchanged, reads oboete's answer (src/work_view.rs): the snapshot a Rust
+      # test keeps current. No package is installed for it. Twice: the pages run in the browser's
+      # zone, which need not be the one the answer was written in.
+      - name: The pinned mapper reads oboete's work-view answer
+        run: |
+          node --test 'ui/work-view/contract/*.test.mjs'
+          TZ=America/Los_Angeles node --test 'ui/work-view/contract/*.test.mjs'
       - name: Build the bundle again from the pinned tree and the patches
         run: ui/work-view/build.sh
       - name: The committed bundle is the one built

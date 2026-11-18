@@ -1,0 +1,945 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-18T13:18:14.033Z",
+  "revision": "1795007894033",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-18T13:18:14.033Z"
+  },
+  "agents": [
+    {
+      "id": "claude:c:claude:s5",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Deploy the release.",
+      "project": "r",
+      "contentSessionId": "c:claude:s5"
+    },
+    {
+      "id": "claude:c:claude:s4",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Write the migration.",
+      "project": "r",
+      "contentSessionId": "c:claude:s4"
+    },
+    {
+      "id": "claude:c:claude:s3",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Write the changelog.",
+      "project": "r",
+      "contentSessionId": "c:claude:s3"
+    },
+    {
+      "id": "claude:c:claude:s2",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Ship the release notes.",
+      "project": "r",
+      "contentSessionId": "c:claude:s2"
+    },
+    {
+      "id": "claude:c:claude:s1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1"
+    },
+    {
+      "id": "codex:c:codex:c1",
+      "label": "Codex",
+      "platformSource": "codex",
+      "sessionTitle": "Rename the lexer.",
+      "project": "r",
+      "contentSessionId": "c:codex:c1"
+    },
+    {
+      "id": "claude:c:claude:s6",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Publish the docs.",
+      "project": "r",
+      "contentSessionId": "c:claude:s6"
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "r:rq1",
+      "contentFingerprint": "556233b7165bd6b490b9be914bed53a29a98a1769cec31f76a8da9bf21559955",
+      "title": "Cut the release",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Cut the release",
+        "summary": "Tag the release",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "release"
+          },
+          {
+            "id": "w1",
+            "title": "release"
+          }
+        ]
+      },
+      "original": {
+        "text": "Cut the release",
+        "atEpoch": 1795007893896
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Tag the release",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893898,
+          "sourceRefs": [],
+          "url": ""
+        },
+        {
+          "id": "w1",
+          "kind": "work-state",
+          "title": "Bump the version",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893896,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "release",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Tag the release",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893898,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        },
+        {
+          "id": "w1",
+          "title": "release",
+          "items": [
+            {
+              "id": "w1",
+              "kind": "work-state",
+              "title": "Bump the version",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893896,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Tag the release",
+          "detail": null,
+          "atEpoch": 1795007893898,
+          "url": ""
+        },
+        {
+          "id": "u1",
+          "kind": "work-state",
+          "title": "Bump the version",
+          "detail": null,
+          "atEpoch": 1795007893896,
+          "url": ""
+        }
+      ],
+      "agentIds": [],
+      "conversationKeys": [],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007893896,
+      "updatedAtEpoch": 1795007893898,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "in-progress",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s5\"]",
+      "contentFingerprint": "398f2768ec322cd2d282c43b32494ee01b33e06ed2e5b9ffb61caffa10034fc1",
+      "title": "Deploy the release.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Deploy the release.",
+        "summary": "Deploy",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "deploy"
+          }
+        ]
+      },
+      "original": {
+        "text": "Deploy the release.",
+        "atEpoch": 1795007403853
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Deploy",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893889,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "deploy",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Deploy",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893889,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Deploy",
+          "detail": null,
+          "atEpoch": 1795007893889,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s5"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s5\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007403853,
+      "updatedAtEpoch": 1795007893889,
+      "completedAtEpoch": 1795007893889,
+      "lifecycle": {
+        "status": "shipped",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": {
+        "state": "in-progress",
+        "percent": 30.0,
+        "checkedAt": "2026-11-18T13:13:13.853Z",
+        "shippedAt": null,
+        "readings": [
+          {
+            "at": "2026-11-18T13:13:13.853Z",
+            "percent": 30.0
+          }
+        ],
+        "narrative": "The migration came first.",
+        "milestones": []
+      },
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s4\"]",
+      "contentFingerprint": "2eb86be9953ddeb317aa2946ea290cd0f04bc99af1ae4e7916ae3b68822dd1aa",
+      "title": "Write the migration.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Write the migration.",
+        "summary": "Migration",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "migration"
+          }
+        ]
+      },
+      "original": {
+        "text": "Write the migration.",
+        "atEpoch": 1795007393853
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Migration",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893877,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "migration",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Migration",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893877,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Migration",
+          "detail": null,
+          "atEpoch": 1795007893877,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s4"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s4\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007393853,
+      "updatedAtEpoch": 1795007893877,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "in-progress",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": {
+        "state": "in-progress",
+        "percent": 50.0,
+        "checkedAt": "2026-11-18T13:16:13.853Z",
+        "shippedAt": null,
+        "readings": [
+          {
+            "at": "2026-11-18T13:12:13.853Z",
+            "percent": 20.0
+          },
+          {
+            "at": "2026-11-18T13:16:13.853Z",
+            "percent": 50.0
+          }
+        ],
+        "narrative": "The migration came first.",
+        "milestones": []
+      },
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s3\"]",
+      "contentFingerprint": "91735d8a7626a76bd7af481690a310731b7f53c4ef6165f97898df3c0f9fbfbf",
+      "title": "Write the changelog.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Write the changelog.",
+        "summary": "Changelog",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "changelog"
+          }
+        ]
+      },
+      "original": {
+        "text": "Write the changelog.",
+        "atEpoch": 1795007383853
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Changelog",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893871,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "changelog",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Changelog",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893871,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Changelog",
+          "detail": null,
+          "atEpoch": 1795007893871,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s3"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s3\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007383853,
+      "updatedAtEpoch": 1795007893871,
+      "completedAtEpoch": 1795007893871,
+      "lifecycle": {
+        "status": "needs-review",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": true
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s2\"]",
+      "contentFingerprint": "f629e646b1acdd597952f72c4e52ecdb0a419fe6d2633ad9459433e76eb67864",
+      "title": "Ship the release notes.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Ship the release notes.",
+        "summary": "Notes",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "release"
+          }
+        ]
+      },
+      "original": {
+        "text": "Ship the release notes.",
+        "atEpoch": 1795007353853
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Notes",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893865,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "release",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Notes",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893865,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Notes",
+          "detail": null,
+          "atEpoch": 1795007893865,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s2"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s2\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007353853,
+      "updatedAtEpoch": 1795007893865,
+      "completedAtEpoch": 1795007893865,
+      "lifecycle": {
+        "status": "shipped",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
+      "contentFingerprint": "f47e0b8d8e017bcab56095e80f44b2400a16b77ec7552b8cc54f87aa5a5a3314",
+      "title": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+        "summary": "Report the line",
+        "workstreams": [
+          {
+            "id": "w0",
+            "title": "parser"
+          }
+        ]
+      },
+      "original": {
+        "text": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+        "atEpoch": 1795007293853
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Report the line",
+          "status": "needs-you",
+          "nextStep": null,
+          "lastUpdateEpoch": 1795007893859,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "w0",
+          "title": "parser",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Report the line",
+              "status": "needs-you",
+              "nextStep": null,
+              "lastUpdateEpoch": 1795007893859,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Report the line",
+          "detail": null,
+          "atEpoch": 1795007893859,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007293853,
+      "updatedAtEpoch": 1795007893859,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "needs-you",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"codex\",\"c:codex:c1\"]",
+      "contentFingerprint": "26203312885c72ce5c7d68fd51012559179702d85cf8d97e13638122c05a18fe",
+      "title": "Rename the lexer.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Rename the lexer.",
+        "summary": "Rename the lexer.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Rename the lexer.",
+        "atEpoch": 1795007413853
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "codex:c:codex:c1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"codex\",\"c:codex:c1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007413853,
+      "updatedAtEpoch": 1795007413853,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s6\"]",
+      "contentFingerprint": "9c3115dbc5ec1d577e8432df2e98e7a548b58b09f2ad723f8940f94fd64f3f3f",
+      "title": "Publish the docs.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Publish the docs.",
+        "summary": "Publish the docs.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Publish the docs.",
+        "atEpoch": 1795007408853
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "claude:c:claude:s6"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s6\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795007408853,
+      "updatedAtEpoch": 1795007408853,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "shipped",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": {
+        "state": "shipped",
+        "percent": 100.0,
+        "checkedAt": "2026-11-18T13:13:33.853Z",
+        "shippedAt": "2026-11-17T12:00:00",
+        "readings": [
+          {
+            "at": "2026-11-18T13:13:33.853Z",
+            "percent": 100.0
+          }
+        ],
+        "narrative": "The docs went out.",
+        "milestones": []
+      },
+      "anchorConversationKey": null
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [
+    {
+      "focusAreaId": "fa_aaaaaaaaaaaa",
+      "name": "Parser",
+      "goal": null,
+      "about": null,
+      "status": "kept",
+      "priorityRank": 1,
+      "ownerRank": null,
+      "source": "owner",
+      "mergedInto": null,
+      "evidence": null,
+      "decidedBy": "owner",
+      "savedAt": null
+    },
+    {
+      "focusAreaId": "fa_bbbbbbbbbbbb",
+      "name": "Docs",
+      "goal": null,
+      "about": null,
+      "status": "kept",
+      "priorityRank": null,
+      "ownerRank": null,
+      "source": "owner",
+      "mergedInto": null,
+      "evidence": null,
+      "decidedBy": "owner",
+      "savedAt": null
+    }
+  ],
+  "goals": {
+    "listId": "goals",
+    "listName": "goals",
+    "history": false,
+    "project": "",
+    "updatedAt": "2026-11-18T13:18:14.033Z",
+    "periodStart": "2026-10-18",
+    "periodEnd": "2026-11-19",
+    "summary": null,
+    "generatedAt": "2026-11-18T13:11:13.853+00:00",
+    "windowDays": 31,
+    "sourcePromptCount": 1,
+    "mapPath": null,
+    "areas": [
+      {
+        "task": "",
+        "goal": null,
+        "status": "todo",
+        "id": "a:fa_aaaaaaaaaaaa",
+        "kind": "focus-area",
+        "rank": 1,
+        "title": "Parser",
+        "focusArea": "Parser",
+        "focusAreaId": "fa_aaaaaaaaaaaa",
+        "product": null,
+        "latestAt": "2026-11-18 13:08",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 13:08",
+            "quote": "the parser's error messages"
+          }
+        ]
+      }
+    ],
+    "asks": [
+      {
+        "task": "",
+        "goal": null,
+        "status": "todo",
+        "id": "g2",
+        "kind": "ask",
+        "rank": 1,
+        "title": "A header test",
+        "focusArea": "Parser",
+        "focusAreaId": "fa_aaaaaaaaaaaa",
+        "product": null,
+        "latestAt": "2026-11-18 13:08",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 13:08",
+            "quote": "a header test"
+          }
+        ]
+      },
+      {
+        "task": "",
+        "goal": null,
+        "status": "todo",
+        "id": "g3",
+        "kind": "ask",
+        "rank": 2,
+        "title": "Write docs",
+        "focusArea": "Docs",
+        "focusAreaId": "fa_bbbbbbbbbbbb",
+        "product": null,
+        "latestAt": "2026-11-18 13:08",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 13:08",
+            "quote": "write docs"
+          }
+        ]
+      },
+      {
+        "task": "",
+        "goal": null,
+        "status": "todo",
+        "id": "g4",
+        "kind": "ask",
+        "rank": 3,
+        "title": "Fail fast",
+        "focusArea": null,
+        "focusAreaId": null,
+        "product": null,
+        "latestAt": "2026-11-18 13:08",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 13:08",
+            "quote": "fail fast"
+          }
+        ]
+      }
+    ]
+  },
+  "goalHistory": [
+    {
+      "listId": "goals:2026-09",
+      "listName": "2026-09",
+      "history": true,
+      "project": "",
+      "updatedAt": "2026-11-18T13:18:14.033Z",
+      "periodStart": "2026-09-01",
+      "periodEnd": "2026-10-01",
+      "summary": "Worked on the lexer.",
+      "generatedAt": null,
+      "windowDays": null,
+      "sourcePromptCount": 1,
+      "mapPath": null,
+      "areas": [
+        {
+          "task": "",
+          "goal": null,
+          "status": "todo",
+          "id": "p:2026-09:1",
+          "kind": "focus-area",
+          "rank": 1,
+          "title": "Lexer",
+          "focusArea": null,
+          "focusAreaId": null,
+          "product": null,
+          "latestAt": null,
+          "timesAsked": 1.0,
+          "evidence": [
+            {
+              "at": "2026-09-15 12:00",
+              "quote": "the lexer's tokens"
+            }
+          ]
+        }
+      ],
+      "asks": []
+    }
+  ],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    }
+  ],
+  "rules": [],
+  "story": {
+    "story": {
+      "narrative": "⁠**#1087** shipped the read adapter.\n\n⁠`#1088` fixed the gate.\n\n### Next\n\nServe the pages.",
+      "writtenAt": null
+    }
+  },
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1795007894033,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}
