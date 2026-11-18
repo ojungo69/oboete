@@ -1,0 +1,546 @@
+ui/work-view/README.md
+  s_52c3955e48bff4::t_816eace0683020 1-5,7,18,23-29
+  s_52c3955e48bff4::t_2b66cae39168f4 6,8-17,19-22,30-32
+ui/work-view/fetch.sh
+  s_52c3955e48bff4::t_48eadea12873da 1-7,15-29,37,48,50
+  s_52c3955e48bff4::t_cce9f0b845662a 8-14,33-34,38,40-42,45-47,49
+  s_52c3955e48bff4::t_a05229b535c717 30-32,35-36,39,43-44
+.gitattributes
+  s_52c3955e48bff4::t_66fef13a07bddd 1-2
+  s_52c3955e48bff4::t_e4320cdf338cf1 3-4
+NOTICE
+  s_52c3955e48bff4::t_204acb876be3a3 28-30
+  s_52c3955e48bff4::t_dc4bbb348a1d0d 31-36
+ui/work-view/UPSTREAM
+  s_52c3955e48bff4::t_a1bcb34dbc3220 1
+ui/work-view/upstream/LICENSE
+  s_52c3955e48bff4::t_f5c16534a4e5fe 1-202
+ui/work-view/upstream/NOTICE
+  s_52c3955e48bff4::t_7876597c4ab0d4 1-8
+ui/work-view/upstream/package.json
+  s_52c3955e48bff4::t_1bd94debf3299d 1-259
+ui/work-view/upstream/src/services/work-view/my-focus.d.mts
+  s_52c3955e48bff4::t_b7c50f256db5c8 1-89
+ui/work-view/upstream/src/services/work-view/my-rules.d.mts
+  s_52c3955e48bff4::t_ba05eaa114da33 1-17
+ui/work-view/upstream/src/services/work-view/nav-words.d.mts
+  s_52c3955e48bff4::t_e88640e4aab12d 1-3
+ui/work-view/upstream/src/services/work-view/nav-words.mjs
+  s_52c3955e48bff4::t_9e4011dc2cc6ec 1-14
+ui/work-view/upstream/src/shared/conversation-continuation.ts
+  s_52c3955e48bff4::t_0cf0d895e4fc3b 1-139
+ui/work-view/upstream/src/shared/focus-change-version.ts
+  s_52c3955e48bff4::t_e5278e301cca96 1-27
+ui/work-view/upstream/src/shared/setup-funnel.ts
+  s_52c3955e48bff4::t_b7494d7e1f54ab 1-94
+ui/work-view/upstream/src/shared/setup-install.ts
+  s_52c3955e48bff4::t_4b7a91dbe2886b 1-56
+ui/work-view/upstream/src/ui/i18n/core.ts
+  s_52c3955e48bff4::t_8ee713f1c9960d 1-78
+ui/work-view/upstream/src/ui/i18n/errors.ts
+  s_52c3955e48bff4::t_b058b4df61c77b 1-43
+ui/work-view/upstream/src/ui/i18n/index.ts
+  s_52c3955e48bff4::t_13b4371604bc7b 1-9
+ui/work-view/upstream/src/ui/i18n/locale.ts
+  s_52c3955e48bff4::t_1536e6e0ece0e0 1-19
+ui/work-view/upstream/src/ui/i18n/mywork-fr.ts
+  s_52c3955e48bff4::t_1b0af3d7ac6ece 1-580
+ui/work-view/upstream/src/ui/i18n/mywork-ko.ts
+  s_52c3955e48bff4::t_cea4e92375ec0a 1-559
+ui/work-view/upstream/src/ui/i18n/mywork-tr.ts
+  s_52c3955e48bff4::t_8059f01183ddc1 1-559
+ui/work-view/upstream/src/ui/i18n/mywork-zh.ts
+  s_52c3955e48bff4::t_d69622aca1fa5d 1-580
+ui/work-view/upstream/src/ui/i18n/settings-fr.ts
+  s_52c3955e48bff4::t_d2255d87c29820 1-192
+ui/work-view/upstream/src/ui/i18n/settings-ko.ts
+  s_52c3955e48bff4::t_03d8fc9197a776 1-192
+ui/work-view/upstream/src/ui/i18n/settings-zh.ts
+  s_52c3955e48bff4::t_0a7d4cf82893e4 1-192
+ui/work-view/upstream/src/ui/i18n/setup-fr.ts
+  s_52c3955e48bff4::t_cecd0da16b0698 1-243
+ui/work-view/upstream/src/ui/i18n/setup-ko.ts
+  s_52c3955e48bff4::t_838f7e860ca943 1-220
+ui/work-view/upstream/src/ui/i18n/setup-zh.ts
+  s_52c3955e48bff4::t_107aeb2b8dd08b 1-243
+ui/work-view/upstream/src/ui/i18n/viewer-fr.ts
+  s_52c3955e48bff4::t_845243c8f7bff9 1-202
+ui/work-view/upstream/src/ui/i18n/viewer-ko.ts
+  s_52c3955e48bff4::t_049025635568a7 1-202
+ui/work-view/upstream/src/ui/i18n/viewer-zh.ts
+  s_52c3955e48bff4::t_f6fecacdc6dee6 1-204
+ui/work-view/upstream/src/ui/install-local-api-token.ts
+  s_52c3955e48bff4::t_1607036289dc23 1-5
+ui/work-view/upstream/src/ui/local-api-token-client.ts
+  s_52c3955e48bff4::t_9ec0cc0613b3f2 1-96
+ui/work-view/upstream/src/ui/my-work/.gitignore
+  s_52c3955e48bff4::t_bf8e15fb590eae 1-27
+ui/work-view/upstream/src/ui/my-work/.oxlintrc.json
+  s_52c3955e48bff4::t_8f7a1d8fe1a9e7 1-8
+ui/work-view/upstream/src/ui/my-work/COVERAGE.md
+  s_52c3955e48bff4::t_27613d0858e91f 1-110
+ui/work-view/upstream/src/ui/my-work/README.md
+  s_52c3955e48bff4::t_3a278466486d41 1-37
+ui/work-view/upstream/src/ui/my-work/components.json
+  s_52c3955e48bff4::t_7a7af8bdd2adb7 1-25
+ui/work-view/upstream/src/ui/my-work/index.html
+  s_52c3955e48bff4::t_7675d0b7e3fc38 1-13
+ui/work-view/upstream/src/ui/my-work/package-lock.json
+  s_52c3955e48bff4::t_c83a54b31389ec 1-8338
+ui/work-view/upstream/src/ui/my-work/package.json
+  s_52c3955e48bff4::t_8bd050fad658e0 1-47
+ui/work-view/upstream/src/ui/my-work/public/favicon.svg
+  s_52c3955e48bff4::t_eda2da93d70b86 1
+ui/work-view/upstream/src/ui/my-work/scripts/coverage.mjs
+  s_52c3955e48bff4::t_259bb4c08383d2 1-54
+ui/work-view/upstream/src/ui/my-work/src/App.tsx
+  s_52c3955e48bff4::t_3088f7d20cc2f7 1-336
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/card-spotlight.tsx
+  s_52c3955e48bff4::t_22393308adc701 1-55
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/dotted-glow-background.tsx
+  s_52c3955e48bff4::t_50b335cea02332 1-328
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/draggable-card.tsx
+  s_52c3955e48bff4::t_021aedc54ecae0 1-201
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/encrypted-text.tsx
+  s_52c3955e48bff4::t_7e63d49e5ccdc9 1-155
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/glare-card.tsx
+  s_52c3955e48bff4::t_5428adfe72cd4a 1-132
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/glowing-effect.tsx
+  s_52c3955e48bff4::t_708a95c1df26b5 1-209
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/notch.tsx
+  s_52c3955e48bff4::t_09814017174e8e 1-316
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/placeholders-and-vanish-input.tsx
+  s_52c3955e48bff4::t_f7173c1932cbca 1-285
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/pointer-highlight.tsx
+  s_52c3955e48bff4::t_39ee62272ab56f 1-118
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/resizable-navbar.tsx
+  s_52c3955e48bff4::t_edab1bfe2615db 1-287
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/sparkles.tsx
+  s_52c3955e48bff4::t_5f964e3e21b313 1-433
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/stateful-button.tsx
+  s_52c3955e48bff4::t_c0d75373903f90 1-198
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/sticky-banner.tsx
+  s_52c3955e48bff4::t_1fe153a234deac 1-86
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/timeline.tsx
+  s_52c3955e48bff4::t_7a984308e658e2 1-81
+ui/work-view/upstream/src/ui/my-work/src/components/aceternity/tracing-beam.tsx
+  s_52c3955e48bff4::t_070a4aa1cad34c 1-129
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/agent.tsx
+  s_52c3955e48bff4::t_1362750e571378 1-139
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/artifact.tsx
+  s_52c3955e48bff4::t_813b1bd9db4634 1-148
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/chain-of-thought.tsx
+  s_52c3955e48bff4::t_f4cb75e4a78a13 1-222
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/confirmation.tsx
+  s_52c3955e48bff4::t_3781dbeea409bb 1-169
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/inline-citation.tsx
+  s_52c3955e48bff4::t_8fdc6ac108686a 1-297
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/queue.tsx
+  s_52c3955e48bff4::t_4c36b925d06005 1-274
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/shimmer.tsx
+  s_52c3955e48bff4::t_7232a920ad0715 1-77
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/task.tsx
+  s_52c3955e48bff4::t_239687978b2c37 1-87
+ui/work-view/upstream/src/ui/my-work/src/components/ai-elements/terminal.tsx
+  s_52c3955e48bff4::t_212b600d97f31e 1-273
+ui/work-view/upstream/src/ui/my-work/src/components/bits.tsx
+  s_52c3955e48bff4::t_b95d95e46bb5bf 1-395
+ui/work-view/upstream/src/ui/my-work/src/components/brand.tsx
+  s_52c3955e48bff4::t_499590f5c20ada 1-37
+ui/work-view/upstream/src/ui/my-work/src/components/conversation-continue.tsx
+  s_52c3955e48bff4::t_248f40742bfb1f 1-432
+ui/work-view/upstream/src/ui/my-work/src/components/focus-artwork.tsx
+  s_52c3955e48bff4::t_982bc730f1456c 1-33
+ui/work-view/upstream/src/ui/my-work/src/components/focus-change-message.ts
+  s_52c3955e48bff4::t_245cc154326280 1-53
+ui/work-view/upstream/src/ui/my-work/src/components/focus-changes.tsx
+  s_52c3955e48bff4::t_e61c5bc355a874 1-120
+ui/work-view/upstream/src/ui/my-work/src/components/focus-header.tsx
+  s_52c3955e48bff4::t_4bfb41d2d12339 1-288
+ui/work-view/upstream/src/ui/my-work/src/components/focus-nav.tsx
+  s_52c3955e48bff4::t_cfe9ea7309bf70 1-126
+ui/work-view/upstream/src/ui/my-work/src/components/focus-overview.css
+  s_52c3955e48bff4::t_3e043e44a8e065 1-77
+ui/work-view/upstream/src/ui/my-work/src/components/focus-overview.tsx
+  s_52c3955e48bff4::t_3c4fe1948e93b3 1-88
+ui/work-view/upstream/src/ui/my-work/src/components/live-motion.tsx
+  s_52c3955e48bff4::t_761dbea49f6f23 1-121
+ui/work-view/upstream/src/ui/my-work/src/components/observation-media/ObsMedia.tsx
+  s_52c3955e48bff4::t_44df6f9ab7ad41 1-439
+ui/work-view/upstream/src/ui/my-work/src/components/observation-media/media.ts
+  s_52c3955e48bff4::t_cb89f413d1c89a 1-188
+ui/work-view/upstream/src/ui/my-work/src/components/observation-media/request-images.ts
+  s_52c3955e48bff4::t_09729a7d049327 1-12
+ui/work-view/upstream/src/ui/my-work/src/components/observation-media/sample-media.ts
+  s_52c3955e48bff4::t_cd06f893ef93c9 1-34
+ui/work-view/upstream/src/ui/my-work/src/components/observation-media/worker-media-source.ts
+  s_52c3955e48bff4::t_0c53919a9cabbe 1-47
+ui/work-view/upstream/src/ui/my-work/src/components/request-card.tsx
+  s_52c3955e48bff4::t_7addafe0650ff5 1-242
+ui/work-view/upstream/src/ui/my-work/src/components/request-detail.tsx
+  s_52c3955e48bff4::t_c228805056842a 1-409
+ui/work-view/upstream/src/ui/my-work/src/components/save-button.tsx
+  s_52c3955e48bff4::t_7bfa26e4affb5f 1-13
+ui/work-view/upstream/src/ui/my-work/src/components/share-focus.tsx
+  s_52c3955e48bff4::t_5c6d701205e40f 1-221
+ui/work-view/upstream/src/ui/my-work/src/components/split-flap.tsx
+  s_52c3955e48bff4::t_a6bae45afbe04c 1-62
+ui/work-view/upstream/src/ui/my-work/src/components/ui/accordion.tsx
+  s_52c3955e48bff4::t_3dd79e3e3e91bf 1-78
+ui/work-view/upstream/src/ui/my-work/src/components/ui/alert.tsx
+  s_52c3955e48bff4::t_6bf19abb372455 1-75
+ui/work-view/upstream/src/ui/my-work/src/components/ui/badge.tsx
+  s_52c3955e48bff4::t_b6b8b737cfb248 1-48
+ui/work-view/upstream/src/ui/my-work/src/components/ui/button.tsx
+  s_52c3955e48bff4::t_1fbf8da297d144 1-66
+ui/work-view/upstream/src/ui/my-work/src/components/ui/card.tsx
+  s_52c3955e48bff4::t_7aea8979676080 1-102
+ui/work-view/upstream/src/ui/my-work/src/components/ui/carousel.tsx
+  s_52c3955e48bff4::t_1c3ab504b1d0f1 1-242
+ui/work-view/upstream/src/ui/my-work/src/components/ui/collapsible.tsx
+  s_52c3955e48bff4::t_3ce247143ddc94 1-33
+ui/work-view/upstream/src/ui/my-work/src/components/ui/dialog.tsx
+  s_52c3955e48bff4::t_ebc1431a4864a5 1-168
+ui/work-view/upstream/src/ui/my-work/src/components/ui/dropdown-menu.tsx
+  s_52c3955e48bff4::t_0a4f6f4eb124db 1-266
+ui/work-view/upstream/src/ui/my-work/src/components/ui/empty.tsx
+  s_52c3955e48bff4::t_831e7eadde5727 1-103
+ui/work-view/upstream/src/ui/my-work/src/components/ui/hover-card.tsx
+  s_52c3955e48bff4::t_7d6cc67feac9b4 1-41
+ui/work-view/upstream/src/ui/my-work/src/components/ui/input.tsx
+  s_52c3955e48bff4::t_d5c4739ea01b6d 1-18
+ui/work-view/upstream/src/ui/my-work/src/components/ui/label.tsx
+  s_52c3955e48bff4::t_9f65c947b82977 1-21
+ui/work-view/upstream/src/ui/my-work/src/components/ui/progress.tsx
+  s_52c3955e48bff4::t_f5da5eb28522bc 1-30
+ui/work-view/upstream/src/ui/my-work/src/components/ui/scroll-area.tsx
+  s_52c3955e48bff4::t_29c063d16eaafe 1-54
+ui/work-view/upstream/src/ui/my-work/src/components/ui/select.tsx
+  s_52c3955e48bff4::t_5557a890933f50 1-191
+ui/work-view/upstream/src/ui/my-work/src/components/ui/sheet.tsx
+  s_52c3955e48bff4::t_ddf4bd92d4c805 1-145
+ui/work-view/upstream/src/ui/my-work/src/components/ui/spinner.tsx
+  s_52c3955e48bff4::t_dea076cbd37798 1-12
+ui/work-view/upstream/src/ui/my-work/src/components/ui/switch.tsx
+  s_52c3955e48bff4::t_b9fb0308456343 1-32
+ui/work-view/upstream/src/ui/my-work/src/components/ui/table.tsx
+  s_52c3955e48bff4::t_f56dc1ea3fe2de 1-113
+ui/work-view/upstream/src/ui/my-work/src/components/ui/textarea.tsx
+  s_52c3955e48bff4::t_14fefcdc38bca6 1-17
+ui/work-view/upstream/src/ui/my-work/src/components/ui/toggle-group.tsx
+  s_52c3955e48bff4::t_52962b0b66a12e 1-87
+ui/work-view/upstream/src/ui/my-work/src/components/ui/toggle.tsx
+  s_52c3955e48bff4::t_8acfcc937cab7a 1-46
+ui/work-view/upstream/src/ui/my-work/src/components/ui/tooltip.tsx
+  s_52c3955e48bff4::t_0b8394772e1bf0 1-56
+ui/work-view/upstream/src/ui/my-work/src/data-goals.ts
+  s_52c3955e48bff4::t_b4ec380ea951b5 1-117
+ui/work-view/upstream/src/ui/my-work/src/data-rules.ts
+  s_52c3955e48bff4::t_437992cdabf4f2 1-143
+ui/work-view/upstream/src/ui/my-work/src/data.ts
+  s_52c3955e48bff4::t_68ec39837b742c 1-317
+ui/work-view/upstream/src/ui/my-work/src/index.css
+  s_52c3955e48bff4::t_1e87ac60103152 1-532
+ui/work-view/upstream/src/ui/my-work/src/lib/deliverables.ts
+  s_52c3955e48bff4::t_7af04f31ba8c72 1-11
+ui/work-view/upstream/src/ui/my-work/src/lib/display-time.ts
+  s_52c3955e48bff4::t_31b1d133d2d31c 1-31
+ui/work-view/upstream/src/ui/my-work/src/lib/i18n.ts
+  s_52c3955e48bff4::t_947372f8a1ca91 1-11
+ui/work-view/upstream/src/ui/my-work/src/lib/product-icons.ts
+  s_52c3955e48bff4::t_c9ee58913e517c 1-8
+ui/work-view/upstream/src/ui/my-work/src/lib/prompt-time.ts
+  s_52c3955e48bff4::t_e0ea3dc935cb3c 1-11
+ui/work-view/upstream/src/ui/my-work/src/lib/swipe-to-decide.ts
+  s_52c3955e48bff4::t_57b17c856f1f60 1-15
+ui/work-view/upstream/src/ui/my-work/src/lib/use-media.ts
+  s_52c3955e48bff4::t_a6b3b81bc9f920 1-11
+ui/work-view/upstream/src/ui/my-work/src/lib/use-now.ts
+  s_52c3955e48bff4::t_0a29d611714820 1-29
+ui/work-view/upstream/src/ui/my-work/src/lib/utils.ts
+  s_52c3955e48bff4::t_c5b6a9413c30c3 1
+ui/work-view/upstream/src/ui/my-work/src/lib/words.ts
+  s_52c3955e48bff4::t_9bb8c6d2d9485c 1-4
+ui/work-view/upstream/src/ui/my-work/src/live/card-groups.test.ts
+  s_52c3955e48bff4::t_e82900124272e0 1-28
+ui/work-view/upstream/src/ui/my-work/src/live/card-groups.ts
+  s_52c3955e48bff4::t_6de592c14e0abf 1-36
+ui/work-view/upstream/src/ui/my-work/src/live/connection-status.test.ts
+  s_52c3955e48bff4::t_d57ca215c26cce 1-129
+ui/work-view/upstream/src/ui/my-work/src/live/connection-status.ts
+  s_52c3955e48bff4::t_8c5c9a0ad79568 1-141
+ui/work-view/upstream/src/ui/my-work/src/live/conversation-continuation.test.ts
+  s_52c3955e48bff4::t_286a74d9d5a6cc 1-579
+ui/work-view/upstream/src/ui/my-work/src/live/conversation-continuation.ts
+  s_52c3955e48bff4::t_6724ca5163950e 1-481
+ui/work-view/upstream/src/ui/my-work/src/live/focus-nav.test.ts
+  s_52c3955e48bff4::t_ff488cfe8cc0d1 1-64
+ui/work-view/upstream/src/ui/my-work/src/live/focus-nav.ts
+  s_52c3955e48bff4::t_a8a71c13409589 1-28
+ui/work-view/upstream/src/ui/my-work/src/live/focus-overview.test.ts
+  s_52c3955e48bff4::t_bbbd9205e71286 1-51
+ui/work-view/upstream/src/ui/my-work/src/live/focus-overview.ts
+  s_52c3955e48bff4::t_e5725ba5237061 1-55
+ui/work-view/upstream/src/ui/my-work/src/live/focus-shares.test.ts
+  s_52c3955e48bff4::t_2a06cb27c12f21 1-92
+ui/work-view/upstream/src/ui/my-work/src/live/focus-shares.ts
+  s_52c3955e48bff4::t_6cdade102eac5f 1-140
+ui/work-view/upstream/src/ui/my-work/src/live/local-source.test.ts
+  s_52c3955e48bff4::t_1fb23cdb8f0890 1-1081
+ui/work-view/upstream/src/ui/my-work/src/live/local-source.ts
+  s_52c3955e48bff4::t_0c5f4a24c52728 1-662
+ui/work-view/upstream/src/ui/my-work/src/live/measured-estimate.test.ts
+  s_52c3955e48bff4::t_a282428fbf9b9c 1-25
+ui/work-view/upstream/src/ui/my-work/src/live/measured-estimate.ts
+  s_52c3955e48bff4::t_35c74b9ec93a96 1-20
+ui/work-view/upstream/src/ui/my-work/src/live/parse-sse-frame.test.ts
+  s_52c3955e48bff4::t_782114679dc614 1-67
+ui/work-view/upstream/src/ui/my-work/src/live/parse-sse-frame.ts
+  s_52c3955e48bff4::t_31191af9d2491c 1-40
+ui/work-view/upstream/src/ui/my-work/src/live/prompt-echo.ts
+  s_52c3955e48bff4::t_cb532a22f5bb5c 1-11
+ui/work-view/upstream/src/ui/my-work/src/live/request-detail-state.test.ts
+  s_52c3955e48bff4::t_13233553853652 1-119
+ui/work-view/upstream/src/ui/my-work/src/live/request-detail-state.ts
+  s_52c3955e48bff4::t_ab072d4d39bce2 1-59
+ui/work-view/upstream/src/ui/my-work/src/live/review-response.test.ts
+  s_52c3955e48bff4::t_99069233382e1e 1-51
+ui/work-view/upstream/src/ui/my-work/src/live/review-response.ts
+  s_52c3955e48bff4::t_9ac1b579eded33 1-63
+ui/work-view/upstream/src/ui/my-work/src/live/rule-actions.test.ts
+  s_52c3955e48bff4::t_7dcc64a9c01b85 1-69
+ui/work-view/upstream/src/ui/my-work/src/live/rule-actions.ts
+  s_52c3955e48bff4::t_3f659a20be8656 1-44
+ui/work-view/upstream/src/ui/my-work/src/live/sample-source.ts
+  s_52c3955e48bff4::t_c22c917af0c0b1 1-186
+ui/work-view/upstream/src/ui/my-work/src/live/served-from.test.ts
+  s_52c3955e48bff4::t_a8792c4c51a7ca 1-98
+ui/work-view/upstream/src/ui/my-work/src/live/served-from.ts
+  s_52c3955e48bff4::t_6cc417b485d522 1-47
+ui/work-view/upstream/src/ui/my-work/src/live/shared-state-presentation.test.ts
+  s_52c3955e48bff4::t_a97e9813e3ef95 1-27
+ui/work-view/upstream/src/ui/my-work/src/live/shared-state-presentation.ts
+  s_52c3955e48bff4::t_05b825fa4365ab 1-21
+ui/work-view/upstream/src/ui/my-work/src/live/status-normalization.test.ts
+  s_52c3955e48bff4::t_d22af97a1becb6 1-60
+ui/work-view/upstream/src/ui/my-work/src/live/status-normalization.ts
+  s_52c3955e48bff4::t_71f9b241e1dcdf 1-108
+ui/work-view/upstream/src/ui/my-work/src/live/to-focus-model.test.ts
+  s_52c3955e48bff4::t_31ae3327c20484 1-153
+ui/work-view/upstream/src/ui/my-work/src/live/to-focus-model.ts
+  s_52c3955e48bff4::t_c7682e07e375a4 1-111
+ui/work-view/upstream/src/ui/my-work/src/live/to-goals-model.test.ts
+  s_52c3955e48bff4::t_694b20c935f133 1-62
+ui/work-view/upstream/src/ui/my-work/src/live/to-rules-model.test.ts
+  s_52c3955e48bff4::t_93099ee00ea65d 1-56
+ui/work-view/upstream/src/ui/my-work/src/live/to-shared-focus.test.ts
+  s_52c3955e48bff4::t_cb5b454b8c0bdf 1-88
+ui/work-view/upstream/src/ui/my-work/src/live/to-shared-focus.ts
+  s_52c3955e48bff4::t_4ef8bd271c4475 1-115
+ui/work-view/upstream/src/ui/my-work/src/live/to-work-model.test.ts
+  s_52c3955e48bff4::t_694afefca33235 1-494
+ui/work-view/upstream/src/ui/my-work/src/live/to-work-model.ts
+  s_52c3955e48bff4::t_5e0bd87b217b20 1-486
+ui/work-view/upstream/src/ui/my-work/src/live/update-queue.test.ts
+  s_52c3955e48bff4::t_f07753d098db12 1-65
+ui/work-view/upstream/src/ui/my-work/src/live/update-queue.ts
+  s_52c3955e48bff4::t_18405bcab39f76 1-57
+ui/work-view/upstream/src/ui/my-work/src/live/usage.test.ts
+  s_52c3955e48bff4::t_9ffc0354afefd0 1-17
+ui/work-view/upstream/src/ui/my-work/src/live/usage.ts
+  s_52c3955e48bff4::t_57fedbfc6c6c25 1-63
+ui/work-view/upstream/src/ui/my-work/src/live/work-data-source.ts
+  s_52c3955e48bff4::t_a23e6f4550443a 1-144
+ui/work-view/upstream/src/ui/my-work/src/live/work-view-api-types.ts
+  s_52c3955e48bff4::t_82f5f2345eb1c2 1-343
+ui/work-view/upstream/src/ui/my-work/src/live/work-view-overview.ts
+  s_52c3955e48bff4::t_b2be6aec1b7078 1-40
+ui/work-view/upstream/src/ui/my-work/src/main.tsx
+  s_52c3955e48bff4::t_def566efec1983 1-11
+ui/work-view/upstream/src/ui/my-work/src/pages/my-rules.tsx
+  s_52c3955e48bff4::t_68fb7d1c64cdb0 1-875
+ui/work-view/upstream/src/ui/my-work/src/pages/my-work.tsx
+  s_52c3955e48bff4::t_8134e2db821b58 1-621
+ui/work-view/upstream/src/ui/my-work/src/pages/past-focus.tsx
+  s_52c3955e48bff4::t_a568b31efd94de 1-149
+ui/work-view/upstream/src/ui/my-work/src/pages/suggested-areas.tsx
+  s_52c3955e48bff4::t_b930d27a469038 1-150
+ui/work-view/upstream/src/ui/my-work/src/setup/assets/HankenGrotesk-OFL.txt
+  s_52c3955e48bff4::t_a1f07dda445b0f 1-94
+ui/work-view/upstream/src/ui/my-work/src/setup/format.ts
+  s_52c3955e48bff4::t_864c35943a7361 1-11
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/checkout-screen.tsx
+  s_52c3955e48bff4::t_34318c77ea2ac0 1-76
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/choice-screen.tsx
+  s_52c3955e48bff4::t_243ea74d548329 1-61
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/finish-setup-screen.tsx
+  s_52c3955e48bff4::t_5c1c795a9a5f7c 1-146
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/import-screen.tsx
+  s_52c3955e48bff4::t_6767f872b1d83e 1-24
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/install-screen.tsx
+  s_52c3955e48bff4::t_89380cd666d7c8 1-113
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/launch-screen.tsx
+  s_52c3955e48bff4::t_49e3caa6f6f7f1 1-61
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/reveal-screen.tsx
+  s_52c3955e48bff4::t_812b6bf938b259 1-115
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/savings-screen.tsx
+  s_52c3955e48bff4::t_7ad310b4a7c826 1-58
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/scan-screen.tsx
+  s_52c3955e48bff4::t_cf8545d6aa51e0 1-110
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/shared.tsx
+  s_52c3955e48bff4::t_45a693f4625604 1-24
+ui/work-view/upstream/src/ui/my-work/src/setup/screens/workspace-screen.tsx
+  s_52c3955e48bff4::t_76bae1ba749b3b 1-143
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-data.ts
+  s_52c3955e48bff4::t_da90d0acb71334 1-377
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-flow.test.ts
+  s_52c3955e48bff4::t_3dab1b2c3a4328 1-79
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-flow.ts
+  s_52c3955e48bff4::t_244e5ce93abefc 1-85
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-page.tsx
+  s_52c3955e48bff4::t_d46df3af4ca1f0 1-299
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-reveal.test.ts
+  s_52c3955e48bff4::t_6b89aa5b5dec8a 1-101
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-reveal.ts
+  s_52c3955e48bff4::t_ed7acb8cc3c17d 1-100
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-sample.ts
+  s_52c3955e48bff4::t_b15fd6f601d579 1-170
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-scan-status.test.ts
+  s_52c3955e48bff4::t_0b80e8e84bcd27 1-18
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-scan-status.ts
+  s_52c3955e48bff4::t_a0e3c3b7dce6d8 1-8
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-search.test.ts
+  s_52c3955e48bff4::t_147615129da481 1-29
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-search.ts
+  s_52c3955e48bff4::t_6b8a8fc9c5a888 1-46
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-telemetry.test.ts
+  s_52c3955e48bff4::t_2e0998dc86aba2 1-201
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-telemetry.ts
+  s_52c3955e48bff4::t_e20ac3d44f1779 1-111
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-usage.test.ts
+  s_52c3955e48bff4::t_119724bafe7988 1-23
+ui/work-view/upstream/src/ui/my-work/src/setup/setup-usage.ts
+  s_52c3955e48bff4::t_c0593c6b2400a4 1-40
+ui/work-view/upstream/src/ui/my-work/src/setup/setup.css
+  s_52c3955e48bff4::t_2c675a82d52033 1-551
+ui/work-view/upstream/src/ui/my-work/src/spec/req.tsx
+  s_52c3955e48bff4::t_986dc8eb7072a0 1-34
+ui/work-view/upstream/src/ui/my-work/src/spec/requirements.ts
+  s_52c3955e48bff4::t_7dd9b4b245f7e9 1-158
+ui/work-view/upstream/src/ui/my-work/src/store/create-selectors.ts
+  s_52c3955e48bff4::t_f439f83565fe40 1-20
+ui/work-view/upstream/src/ui/my-work/src/store/create-store.ts
+  s_52c3955e48bff4::t_2b187d5ce74ef7 1-70
+ui/work-view/upstream/src/ui/my-work/src/store/index.ts
+  s_52c3955e48bff4::t_cd026a75bc2e82 1-104
+ui/work-view/upstream/src/ui/my-work/src/store/slices/focus-slice.ts
+  s_52c3955e48bff4::t_8dcaa1340955a2 1-70
+ui/work-view/upstream/src/ui/my-work/src/store/slices/rules-slice.ts
+  s_52c3955e48bff4::t_c2bb9e568c24bb 1-63
+ui/work-view/upstream/src/ui/my-work/src/store/slices/view-slice.ts
+  s_52c3955e48bff4::t_14406ce1e2c328 1-152
+ui/work-view/upstream/src/ui/my-work/src/store/slices/work-slice.ts
+  s_52c3955e48bff4::t_5e532c121f7079 1-203
+ui/work-view/upstream/src/ui/my-work/src/store/store-types.ts
+  s_52c3955e48bff4::t_c001b6542855c7 1-187
+ui/work-view/upstream/src/ui/my-work/src/store/store.test.ts
+  s_52c3955e48bff4::t_1c5093a60c38d8 1-561
+ui/work-view/upstream/src/ui/my-work/test-fixtures/work-view-goals.scrubbed.json
+  s_52c3955e48bff4::t_784a1926dd5ad8 1-41
+ui/work-view/upstream/src/ui/my-work/test-fixtures/work-view-snapshot.trimmed.json
+  s_52c3955e48bff4::t_789476c5603dbb 1-909
+ui/work-view/upstream/src/ui/my-work/tsconfig.app.json
+  s_52c3955e48bff4::t_3652577b823444 1-38
+ui/work-view/upstream/src/ui/my-work/tsconfig.json
+  s_52c3955e48bff4::t_53af35b6cd750e 1-18
+ui/work-view/upstream/src/ui/my-work/tsconfig.node.json
+  s_52c3955e48bff4::t_8e9ab600bbe845 1-23
+ui/work-view/upstream/src/ui/my-work/vite.config.ts
+  s_52c3955e48bff4::t_4330b364a21ea2 1-28
+ui/work-view/upstream/src/ui/ui-message.ts
+  s_52c3955e48bff4::t_676a18146a132c 1-18
+ui/work-view/upstream/src/ui/viewer/utils/sync-presentation.ts
+  s_52c3955e48bff4::t_4a460aaed4e3c6 1-69
+ui/work-view/upstream/src/ui/viewer/utils/viewer-activity.ts
+  s_52c3955e48bff4::t_3653c0e672b7f8 1-93
+.github/workflows/work-view.yml
+  s_52c3955e48bff4::t_93c8d3992b1972 1-30
+assets/work-view/THIRD-PARTY-NOTICES.md
+  s_52c3955e48bff4::t_b98678bf49b761 1-3197
+assets/work-view/assets/animate-DcL0WwVp.js
+  s_52c3955e48bff4::t_59d968c6f77676 1
+assets/work-view/assets/data-goals-OEak7sSc.js
+  s_52c3955e48bff4::t_eabd1050a4fe8f 1
+assets/work-view/assets/data-lcZTvPaL.js
+  s_52c3955e48bff4::t_2129423cd1fc52 1
+assets/work-view/assets/glare-card-C7g9yTa9.js
+  s_52c3955e48bff4::t_34d2dc58e8b74a 1
+assets/work-view/assets/index-B67kPZPa.css
+  s_52c3955e48bff4::t_e3185986602cd8 1-2
+assets/work-view/assets/index-CuqFI_0c.js
+  s_52c3955e48bff4::t_163de2057e40ad 1-39
+assets/work-view/assets/my-rules-BI9fPJTs.js
+  s_52c3955e48bff4::t_096ddfb3fa29a3 1-2
+assets/work-view/assets/parse-sse-frame-RQ5Ec6Uw.js
+  s_52c3955e48bff4::t_7fbdf704c8cfeb 1
+assets/work-view/assets/past-focus-A4yszERC.js
+  s_52c3955e48bff4::t_373ec0914ab01c 1
+assets/work-view/assets/request-detail-C6mxCxyF.js
+  s_52c3955e48bff4::t_f4e789d9b823fb 1
+assets/work-view/assets/setup-data-B-mQFvVr.js
+  s_52c3955e48bff4::t_b754ac35181dd8 1-2
+assets/work-view/assets/setup-page-B8sQmQI5.css
+  s_52c3955e48bff4::t_06ca0ddabb300a 1
+assets/work-view/assets/setup-page-CirBQ5QW.js
+  s_52c3955e48bff4::t_2f59542470d6f3 1-8
+assets/work-view/assets/setup-sample-B4bL9lOM.js
+  s_52c3955e48bff4::t_c76268250d9c0c 1
+assets/work-view/assets/sparkles-cIwuCLke.js
+  s_52c3955e48bff4::t_c8975f1e991729 1
+assets/work-view/assets/suggested-areas-COB488Vy.js
+  s_52c3955e48bff4::t_94766487b31ca0 1
+assets/work-view/assets/swipe-to-decide-m-VXgpP3.js
+  s_52c3955e48bff4::t_8997fb211945c4 1
+assets/work-view/assets/textarea-f-rWmCHz.js
+  s_52c3955e48bff4::t_9ed15e69c8e89c 1-51
+assets/work-view/assets/ui-message-DZaehoq1.js
+  s_52c3955e48bff4::t_4cabedb6cc4a3a 1
+assets/work-view/assets/use-animation-DQN7w6OE.js
+  s_52c3955e48bff4::t_376b18b41cf29c 1
+assets/work-view/favicon.svg
+  s_52c3955e48bff4::t_92de6844bc0ea2 1
+assets/work-view/index.html
+  s_52c3955e48bff4::t_81bde14f74a01f 1-21
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_4febeeeffe2add 1-47
+ui/work-view/licences/ansi-to-react.txt
+  s_52c3955e48bff4::t_ca2308f5b0d9d7 1-29
+ui/work-view/licences/react-remove-scroll-bar.txt
+  s_52c3955e48bff4::t_a7805c702b239d 1-21
+ui/work-view/notices.mjs
+  s_52c3955e48bff4::t_05bef58679de69 1-50
+ui/work-view/patches/0001-token-and-transport.patch
+  s_52c3955e48bff4::t_8fe879793c18b5 1-274
+ui/work-view/patches/0002-build-output.patch
+  s_52c3955e48bff4::t_1549f8ef444386 1-14
+ui/work-view/patches/0003-hide-what-oboete-lacks.patch
+  s_52c3955e48bff4::t_9ee98bf9520ba3 1-70
+ui/work-view/patches/0004-oboete-brand.patch
+  s_52c3955e48bff4::t_2e3964517b1a3f 1-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c6db2c0c5c3eac4a6091b2d357b96093070ac520",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}

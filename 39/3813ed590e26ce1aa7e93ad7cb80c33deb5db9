@@ -1,0 +1,25 @@
+assets/work-view/THIRD-PARTY-NOTICES.md
+  s_52c3955e48bff4::t_da63881369c3e3 2904-2940
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_f89f671d546b7c 24-36,62
+ui/work-view/fetch.sh
+  s_52c3955e48bff4::t_f8c1d9bd173fc3 30-36,38-40,42-53,61-62
+ui/work-view/notices.mjs
+  s_52c3955e48bff4::t_1b8f3ae44b2f77 12-14,16-28,32,39-40,42,46-48,59-66,68-70,78-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "393813ed590e26ce1aa7e93ad7cb80c33deb5db9",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
