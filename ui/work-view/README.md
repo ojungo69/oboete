@@ -46,16 +46,17 @@ The other eleven name six packages, none of which is in the bundle (`THIRD-PARTY
 
 ## A run that was killed
 
-`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind. With no build or fetch running, what the run's reserved folder holds says how far it got. No reserved folder: nothing moved.
+`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind; so does a signal at the moment a run takes the lock, before its handler is set. With no build or fetch running, what the run's reserved folder holds says how far it got. No reserved folder: nothing moved.
 
 - `build.sh`, `assets/.work-view.*`:
   - `old`, and no `assets/work-view/`: the old bundle was moved aside and the new one never moved in. Move `old` back to `assets/work-view`.
-  - Neither `old` nor `assets/work-view/`: there was no bundle before, and none moved in. Run `build.sh` again.
+  - Neither `old` nor `assets/work-view/`: there was no bundle before, and none moved in. Run `build.sh` again once the lock is gone.
   - Anything else: the bundle in place is whole.
 - `fetch.sh`, `ui/work-view/.upstream.*`:
   - No `UPSTREAM`: the run stopped before the swap, or after it was done. The tree in place and its `UPSTREAM` line are a pair.
   - `UPSTREAM` and `new`: the new tree never moved in. With `old` too, the old tree was moved aside: move it back to `ui/work-view/upstream`.
-  - `UPSTREAM` and no `new`: the new tree moved in, without its line. Remove `ui/work-view/upstream/`, then move `old`, if there is one, back to `ui/work-view/upstream`.
+  - `UPSTREAM` and `old`, and no `new`: the new tree moved in, without its line. Remove `ui/work-view/upstream/` if it is there, and move `old` back to `ui/work-view/upstream`.
+  - `UPSTREAM` alone: a first fetch's new tree moved in, or a run putting things back had moved the old tree back. The tree in place says which: if `git status --porcelain -- ui/work-view/upstream ui/work-view/UPSTREAM` prints nothing, it is the committed one, so leave it; otherwise put back what is committed, as below.
 - Or put back what is committed, as both trees and the bundle are: move `ui/work-view/upstream/`, `ui/work-view/UPSTREAM` and `assets/work-view/` aside, run `git restore --source=HEAD --staged --worktree -- ui/work-view/upstream ui/work-view/UPSTREAM assets/work-view`, and remove what was moved aside. A plain checkout over the trees would leave the files a partial swap added.
 
 Then remove the reserved folder, and only then `ui/work-view/.lock`.

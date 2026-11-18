@@ -32,8 +32,8 @@ swap=
 # However the script ends (an error, Ctrl-C, a kill other than SIGKILL), an unfinished swap puts the
 # old bundle back, and a bundle that cannot be put back is kept in its reserved folder rather than
 # removed. Each step runs whatever failed before it (set +e), and no signal stops the clean-up
-# halfway. A run whose clean-up left the lock, the old bundle or the reserved folder fails,
-# whatever came before.
+# halfway. A run whose clean-up left the lock, the old bundle, the reserved folder or the scratch
+# tree fails, whatever came before.
 # A SIGKILL runs no handler: the README says how to recover.
 cleanup() {
   local status=$? failed=
@@ -48,7 +48,10 @@ cleanup() {
       failed=1
     fi
   fi
-  rm -rf ${work:+"$work"}
+  if [ -n "$work" ] && ! rm -rf "$work"; then
+    echo "build.sh: $work is left" >&2
+    failed=1
+  fi
   if ! rmdir "$lock"; then
     echo "build.sh: $lock is left; remove it if no build or fetch is running" >&2
     failed=1

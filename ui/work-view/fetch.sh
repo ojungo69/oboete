@@ -53,14 +53,22 @@ fi
 swap=
 moving=
 cleanup() {
-  local status=$? failed=
+  local status=$? failed= kept=
   trap '' INT TERM HUP
   set +e
   if [ -n "$moving" ] && [ -e "$swap/UPSTREAM" ]; then
-    if [ ! -e "$swap/new" ]; then rm -rf "${here:?}/upstream"; fi
+    # A new tree that cannot be removed keeps the reserved folder, whose UPSTREAM says a swap was
+    # under way, as a first fetch has no old tree to say it.
+    if [ ! -e "$swap/new" ] && ! rm -rf "${here:?}/upstream"; then
+      echo "fetch.sh: the new tree is left in upstream/; $swap is kept" >&2
+      kept=1
+    fi
     # A tree left in its place (its removal failed) would take the old one in as a folder of its own.
     if [ -e "$swap/old" ] && { [ -e "$here/upstream" ] || ! mv "$swap/old" "$here/upstream"; }; then
       echo "fetch.sh: the old tree is kept in $swap/old" >&2
+      kept=1
+    fi
+    if [ -n "$kept" ]; then
       swap=
       failed=1
     fi
