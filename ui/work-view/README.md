@@ -46,7 +46,7 @@ The other eleven name six packages, none of which is in the bundle (`THIRD-PARTY
 
 ## A run that was killed
 
-`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind; so does a signal at the moment a run takes the lock, before its handler is set. With no build or fetch running, what the run's reserved folder holds says how far it got. No reserved folder: nothing moved.
+`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind; so does a signal at the moment a run takes the lock, before its handler is set. With no build or fetch running, what the run's reserved folder holds says how far it got. No reserved folder: the run moved nothing, or it had finished and only its lock was left; the tree and the bundle in place are whole.
 
 - `build.sh`, `assets/.work-view.*`:
   - `old`, and no `assets/work-view/`: the old bundle was moved aside and the new one never moved in. Move `old` back to `assets/work-view`.
@@ -56,7 +56,7 @@ The other eleven name six packages, none of which is in the bundle (`THIRD-PARTY
   - No `UPSTREAM`: the run stopped before the swap, or after it was done. The tree in place and its `UPSTREAM` line are a pair.
   - `UPSTREAM` and `new`: the new tree never moved in. With `old` too, the old tree was moved aside: move it back to `ui/work-view/upstream`.
   - `UPSTREAM` and `old`, and no `new`: the new tree moved in, without its line. Remove `ui/work-view/upstream/` if it is there, and move `old` back to `ui/work-view/upstream`.
-  - `UPSTREAM` alone: a first fetch's new tree moved in, or a run putting things back had moved the old tree back, which may be a tree fetched before and not yet committed. Leave the tree in place, and once the reserved folder and the lock are gone, run `fetch.sh` again with the tag the tree is to be: it makes the tree and its `UPSTREAM` line again, whatever is there.
+  - `UPSTREAM` alone: a first fetch's new tree moved in, or a run putting things back had moved the old tree back, which may be a tree fetched before and not yet committed. Leave the tree in place, and read the reserved folder's `UPSTREAM`, which names the tag the run was fetching. Once the reserved folder and the lock are gone, run `fetch.sh` again with the tag the tree is to be: it makes the tree and its `UPSTREAM` line again, whatever is there.
 - Or, to drop what is not committed, put back what is: move `ui/work-view/upstream/`, `ui/work-view/UPSTREAM` and `assets/work-view/` aside, run `git restore --source=HEAD --staged --worktree -- ui/work-view/upstream ui/work-view/UPSTREAM assets/work-view`, and remove what was moved aside. This discards a fetch or a build not yet committed. A plain checkout over the trees would leave the files a partial swap added.
 
 Then remove the reserved folder, and only then `ui/work-view/.lock`.
