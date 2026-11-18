@@ -30,7 +30,7 @@ At each new release that is wanted:
 2. Run `fetch.sh` with the new tag, then the contract test: the new mapper must read oboete's answer. A mapper that changed what it reads is answered in `src/work_view.rs`, and its Rust test writes the snapshot again (`OBOETE_CONTRACT_WRITE=1`).
 3. Run `build.sh`. When a patch no longer applies, make it again against the new tree: put the old tree, with its patched copy on top, in a scratch git repository, and use `git apply --3way` or a rebase.
 4. Read the diff of `assets/work-view/THIRD-PARTY-NOTICES.md` and check each package that is new or changed: where it comes from, what it runs when installed, and the advisories against it (decision 114).
-5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together. `NOTICE` names `UPSTREAM`, so it does not change.
+5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together, with `src/work_view.rs` and the snapshot written again when step 2 changed them, after the Node test has run over the new snapshot. `NOTICE` names `UPSTREAM`, so it does not change.
 
 ## Advisories
 

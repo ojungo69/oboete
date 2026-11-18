@@ -351,7 +351,8 @@ fn a_list_of_one_name_in_two_repositories_is_two_workstreams() {
 }
 
 /// A request shipped by its review alone has no completing status: the review's day completes
-/// it, at noon with no zone so the browser shows that day, and a later update moves nothing.
+/// it, at noon (with no zone in the review's own day, so the browser shows that day), and a later
+/// update moves nothing.
 #[test]
 fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
     let work = json!({"requests": [{"id": "r:x", "status": "shipped", "title": "Release",
@@ -362,7 +363,8 @@ fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
         "story": {"narrative": "Shipped.", "milestones": [{"date": "2026-11-18", "text": "Built"}]}}]});
     let snapshot = snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc);
     let request = &snapshot["humanRequests"][0];
-    assert!(request["completedAtEpoch"].is_null(), "{request}");
+    let noon = Utc.with_ymd_and_hms(2026, 11, 19, 12, 0, 0).unwrap();
+    assert_eq!(request["completedAtEpoch"], json!(noon.timestamp_millis()));
     let progress = &request["progress"];
     assert_eq!(progress["shippedAt"], json!("2026-11-19T12:00:00"));
     assert_eq!(
@@ -481,17 +483,33 @@ fn a_request_shipped_after_a_partial_review_keeps_the_reviews_percent() {
     assert_eq!(progress["readings"].as_array().map(Vec::len), Some(2));
 }
 
-/// A review's day completes a request shipped by that review alone only when the review goes
-/// with it: with no review time (a rule took its key), the last update completes it (Codex on
-/// #1087).
+/// A review's day completes a request shipped by that review alone, whether the review goes or
+/// not (a rule took its time's key), and whatever its percent: a review that shipped the request
+/// at 30% goes as a review at 30%, which the pages do not take as a shipment of its own (CodeRabbit
+/// and Codex on #1087).
 #[test]
-fn a_shipped_request_whose_review_cannot_go_is_completed_at_its_last_update() {
+fn a_request_its_review_shipped_is_completed_on_the_reviews_day() {
+    let noon = Utc
+        .with_ymd_and_hms(2026, 11, 19, 12, 0, 0)
+        .unwrap()
+        .timestamp_millis();
     let work = json!({"requests": [{"id": "r:w", "status": "shipped", "title": "Release",
         "updated": 1_795_100_000_000_i64, "completed_at": null,
         "progress": {"percent": 100, "completed": "2026-11-19", "completed_at": null}}]});
     let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
     assert!(request["progress"].is_null(), "{request}");
-    assert_eq!(request["completedAtEpoch"], json!(1_795_100_000_000_i64));
+    assert_eq!(request["completedAtEpoch"], json!(noon));
+    let work = json!({"requests": [{"id": "r:v", "status": "shipped", "title": "Release",
+        "updated": 1_795_100_000_000_i64, "completed_at": null,
+        "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-19",
+            "completed_at": null, "readings": [{"ts": 1_795_050_000_000_i64, "percent": 30}]}}]});
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    assert_eq!(
+        request["progress"]["state"],
+        json!("in-progress"),
+        "{request}"
+    );
+    assert_eq!(request["completedAtEpoch"], json!(noon));
 }
 
 /// The current goals' period is the window the goals page read, the 31 days that end now, in this

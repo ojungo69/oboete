@@ -25,7 +25,7 @@ where
     let mut agents = Vec::new();
     let mut seen = HashMap::new();
     let requests: Vec<Value> = (arr(&work["requests"]).iter())
-        .map(|r| request(r, &mut agents, &mut seen))
+        .map(|r| request(r, &mut agents, &mut seen, tz))
         .collect();
     let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
     // The pages count unlinked work and read nothing of it.
@@ -192,7 +192,12 @@ fn lifecycle(status: &str) -> &'static str {
 
 /// One My Work request as claude-mem's human request; each conversation's agent goes in `agents`
 /// once, titled by the conversation's own request, else by the first request that names it.
-fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashMap<String, usize>) -> Value {
+fn request<Tz: TimeZone>(
+    r: &Value,
+    agents: &mut Vec<Value>,
+    seen: &mut HashMap<String, usize>,
+    tz: &Tz,
+) -> Value {
     let status = r["status"].as_str().unwrap_or("unknown");
     let mut own = r["id"].clone();
     let mut agent_ids = Vec::new();
@@ -293,14 +298,18 @@ fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashMap<String, usize>
             .map_or(progress["percent"].as_f64(), |r| r["percent"].as_f64()),
     );
     // When the newest status recorded completed the request: a done one's clock stops by it. A
-    // request shipped by its review alone has no such time, and the review's day
-    // (`progress.completed`) completes it when the review goes. Its last update is the last
-    // resort: a shipped request needs a completion (`data.ts:276`).
+    // request shipped by its review alone has no such time: the review's day, at noon on this
+    // machine, completes it, whatever the review's percent and whether the review goes. Its last
+    // update is the last resort: a shipped request needs a completion (`data.ts:276`).
     let shipped_on = noon(&progress["completed"]);
+    let shipped_at = (progress["completed"].as_str())
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .and_then(|d| d.and_hms_opt(12, 0, 0))
+        .and_then(|t| tz.from_local_datetime(&t).earliest())
+        .map(|t| t.timestamp_millis());
     let completed = match (r["completed_at"].as_i64(), status) {
         (Some(at), _) => json!(at),
-        (None, "shipped") if reviewed.is_some() && !shipped_on.is_null() => Value::Null,
-        (None, "shipped") => r["updated"].clone(),
+        (None, "shipped") => shipped_at.map_or_else(|| r["updated"].clone(), |at| json!(at)),
         _ => Value::Null,
     };
     // A review's progress, when a review was recorded: a request shipped by its status alone is

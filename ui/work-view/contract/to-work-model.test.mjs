@@ -113,8 +113,10 @@ test('a request two reviews found rising has its history and the estimate its pa
   // 30 points in the 4 minutes between the reviews leave 50 for less than 7 more: the day of the
   // newer review, or the next one when it fell just before midnight.
   const reviewed = snapshot.humanRequests.find((r) => r.id === key('claude', 'c:claude:s4')).progress.readings
-  const newer = Date.parse(reviewed.at(-1).at)
-  const days = [0, 1].map((d) => new Date(newer + d * 86_400_000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))
+  const newer = new Date(Date.parse(reviewed.at(-1).at))
+  // The next calendar day here, not 24 hours on: a change of summer time makes a day of 23 or 25.
+  const next = new Date(newer.getFullYear(), newer.getMonth(), newer.getDate() + 1)
+  const days = [newer, next].map((d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))
   assert.ok(days.map((d) => `at this pace, about ${d}`).includes(rising.estimate), rising.estimate)
 })
 
