@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,14 @@ pub(crate) const SLOW: Duration = Duration::from_secs(2);
 /// What a hook keeps of the timeout its time is counted from (`setup::hook_timeout`) for its own
 /// end (the marker, the worker's start, its answer on stdout) and for the time before `main`.
 pub(crate) const MARGIN: Duration = Duration::from_secs(1);
+/// The environment variable an agent's plugin sets to the time, in ms since the epoch, at which
+/// it stops waiting for the hook's answer and kills the hook: Pi's, for the calls it waits for
+/// (#955).
+pub(crate) const ANSWER_BY: &str = "OBOETE_ANSWER_BY_MS";
+/// What a hook told its answer's time keeps of it for the keep after a store it waited for in
+/// vain (docs/unwritten.md U2): the keep's own wait (`unwritten::KEEP_WAIT`) and its file and
+/// marker. A hook with less than this left waits for no store and keeps at once.
+pub(crate) const KEEP_ROOM: Duration = Duration::from_millis(1_000);
 /// The record's size at which it starts again, the one before it kept beside it.
 const CAP: u64 = 256 * 1024;
 const FILE: &str = "hook-time.jsonl";
@@ -76,6 +84,21 @@ fn process() -> (Instant, i64) {
     *PROCESS.get_or_init(|| (Instant::now(), crate::db::now_ms()))
 }
 
+/// The end of a hook's time for what it injects, in ms after its start at `wall_ms`, when its
+/// agent stops waiting for the answer at `at` (both ms since the epoch): half of `MARGIN` before
+/// `at`, the time before `main` being in it already. Negative: over at the start.
+fn answer_end(at: i64, wall_ms: i64) -> i64 {
+    at.saturating_sub(wall_ms)
+        .saturating_sub(i64::try_from((MARGIN / 2).as_millis()).unwrap_or(0))
+}
+
+/// The end of the record's waits for the store, in ms after the hook's start, when its agent
+/// kills it at `at`: `KEEP_ROOM` before, for the keep after a wait in vain. Negative: no wait.
+fn record_end(at: i64, wall_ms: i64) -> i64 {
+    at.saturating_sub(wall_ms)
+        .saturating_sub(i64::try_from(KEEP_ROOM.as_millis()).unwrap_or(0))
+}
+
 /// One hook's clock: its start, when each phase began, and the end of its time for what it
 /// injects. Marks are atomics, read by the thread `watch` starts: a hook inside its time does no
 /// I/O for them.
@@ -87,6 +110,12 @@ pub(crate) struct Clock {
     slow: Duration,
     /// ms after `start` at which the time for what the hook injects is over, plus one; 0 is none.
     by: AtomicU32,
+    /// When the agent stops waiting for the hook's answer, in ms since the epoch (`ANSWER_BY`); 0
+    /// is never.
+    answer_by: AtomicI64,
+    /// ms after `start` at which the record's waits for the store end (`record_end`); `i64::MAX`
+    /// is none.
+    record_by: AtomicI64,
     /// ms after `start` at which each phase began, plus one; 0 is a phase not begun.
     began: [AtomicU32; NAMES.len()],
     doing: AtomicU8,
@@ -126,6 +155,8 @@ impl Clock {
             process,
             slow,
             by: AtomicU32::new(0),
+            answer_by: AtomicI64::new(0),
+            record_by: AtomicI64::new(i64::MAX),
             began: Default::default(),
             doing: AtomicU8::new(0),
         };
@@ -153,15 +184,62 @@ impl Clock {
 
     /// The hook's time for what it injects ends `timeout` less `MARGIN` after its start: `timeout`
     /// is `setup::hook_timeout`'s, which the agent's own may be longer than. An agent whose
-    /// timeout oboete does not write has none: `None` leaves the hook's waits as they are.
+    /// timeout oboete does not write has none: `None` leaves the hook's waits as they are, unless
+    /// its plugin said when it stops waiting for the answer (`answer_by`, #955). Then the time
+    /// ends half of `MARGIN` before that: the time before `main` is in it already, and the half
+    /// is the hook's own end. The record's waits for the store end `KEEP_ROOM` before it
+    /// (`record_within`). A hook with a timeout of oboete's keeps it and reads no answer's time,
+    /// which a process its hook started (the worker, and what it starts) would inherit.
     pub(crate) fn inject_within(&self, timeout: Option<Duration>) {
-        let by = timeout.map_or(0, |t| {
-            u32::try_from(t.saturating_sub(MARGIN).as_millis())
+        let (end, record) = match (timeout, self.answer_by.load(Ordering::Relaxed)) {
+            (Some(t), _) => (
+                Some(i64::try_from(t.saturating_sub(MARGIN).as_millis()).unwrap_or(i64::MAX)),
+                i64::MAX,
+            ),
+            (None, 0) => (None, i64::MAX),
+            (None, at) => (
+                Some(answer_end(at, self.wall_ms)),
+                record_end(at, self.wall_ms),
+            ),
+        };
+        self.record_by.store(record, Ordering::Relaxed);
+        let by = end.map_or(0, |ms| {
+            u32::try_from(ms.max(0))
                 .unwrap_or(u32::MAX)
                 .min(u32::MAX - 1)
                 + 1
         });
         self.by.store(by, Ordering::Relaxed);
+    }
+
+    /// The time, in ms since the epoch, at which the agent stops waiting for the hook's answer, as
+    /// its plugin said (`ANSWER_BY`).
+    pub(crate) fn answer_by(&self, at: i64) {
+        self.answer_by.store(at, Ordering::Relaxed);
+    }
+
+    /// `wait` for the store, or what remains before the record's waits end when that is less
+    /// (`inject_within`): a hook its agent kills at its answer's time keeps what it could not
+    /// write before then (#955).
+    pub(crate) fn record_within(&self, wait: Duration) -> Duration {
+        match self.record_by.load(Ordering::Relaxed) {
+            i64::MAX => wait,
+            end => {
+                let left = end.saturating_sub(i64::from(self.ms()));
+                wait.min(Duration::from_millis(u64::try_from(left).unwrap_or(0)))
+            }
+        }
+    }
+
+    /// When the record's waits for the store end, all of them together (`inject_within`), if
+    /// they end at a time.
+    pub(crate) fn record_until(&self) -> Option<Instant> {
+        match self.record_by.load(Ordering::Relaxed) {
+            i64::MAX => None,
+            end => self
+                .start
+                .checked_add(Duration::from_millis(u64::try_from(end).unwrap_or(0))),
+        }
     }
 
     /// When the hook's time for what it injects is over, if it has one.

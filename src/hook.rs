@@ -60,6 +60,17 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     // docs/hook-time.md: this hook is its process, so its time is counted from the process's
     // start. The thread beside it writes down a hook that is still running at 2 s.
     let clock = Clock::of_process();
+    // #955: Pi's plugin says when it stops waiting for the answer of a call it waits for. A value
+    // that is no number is none.
+    // An hour on at most: Pi waits 2 s, and a time past that is none.
+    let soon = crate::db::now_ms().saturating_add(3_600_000);
+    if let Some(at) = std::env::var(crate::hook_time::ANSWER_BY)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&at| at > 0 && at <= soon)
+    {
+        clock.answer_by(at);
+    }
     clock.watch(home, agent, event);
     let result = run_clocked(
         home,
@@ -330,7 +341,15 @@ fn run_clocked(
         let settings = crate::capture::Settings::load(home)?;
         // Recording keeps its own waits whatever the hook's time is (docs/hook-time.md).
         clock.begin(Phase::Open);
-        let mut store = match crate::raw::open_within(home, STORE_WAIT) {
+        // #955: a hook its agent kills at its answer's time waits for the store, its open and
+        // the record's statements together, until `hook_time::KEEP_ROOM` before then.
+        let opened = crate::raw::open_within(home, clock.record_within(STORE_WAIT));
+        let mut store = match opened.and_then(|mut store| {
+            if let Some(at) = clock.record_until() {
+                store.wait_until(at)?;
+            }
+            Ok(store)
+        }) {
             Ok(store) => store,
             Err(e) => {
                 // The store failed now: the keep after may wait and sync, and overlapping hooks
@@ -1521,8 +1540,13 @@ pub(crate) fn record_if(
         None => None,
     };
     // docs/unwritten.md U3: what earlier calls kept goes first, so the seqs follow their times.
+    // A record whose waits end at a time (#955) writes none back: it keeps its own behind them.
     let back;
-    (*written_back, back) = crate::unwritten::write_back(home, raw, settings);
+    (*written_back, back) = if raw.bounded() {
+        (0, Ok(()))
+    } else {
+        crate::unwritten::write_back(home, raw, settings)
+    };
     let recovers = !ending || recovery.is_some();
     let (built, prompt) = built(
         home,
@@ -1555,16 +1579,19 @@ pub(crate) fn record_if(
     // behind them, so the seqs follow the events' order (Codex on #440). A spool that cannot be
     // listed takes no file either (U1 names each file from the list): the events are appended,
     // and doctor says the spool cannot be listed.
-    if !built.is_empty()
-        && crate::unwritten::counts(home).is_ok_and(|(kept, _)| kept > 0)
-        && keep(home, agent, &built, settings, false)
-    {
+    let behind =
+        !built.is_empty() && crate::unwritten::counts(home).is_ok_and(|(kept, _)| kept > 0);
+    if behind && keep(home, agent, &built, settings, false) {
         return Ok(Recorded {
             events: Vec::new(),
             prompt,
             kept: true,
         });
     }
+    // #955: a record whose waits end at a time waits for the spool once at most: after a keep
+    // behind the kept files that failed, an append that fails marks the failure at once, before
+    // the agent kills the hook.
+    let spool_waited = behind && raw.bounded();
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
         let read = (b.read.0.as_str(), b.read.1.as_deref());
@@ -1574,7 +1601,9 @@ pub(crate) fn record_if(
             Ok(None) => {}
             Err(e) => {
                 *failed = crate::failure::now();
-                keep(home, agent, &built[n..], settings, true);
+                if !spool_waited {
+                    keep(home, agent, &built[n..], settings, true);
+                }
                 return Err(e);
             }
         }

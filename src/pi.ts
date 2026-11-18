@@ -21,13 +21,18 @@ export default function (pi) {
   // keeps what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it
   // died before either, and its event was lost with nothing to say so. A call whose answer Pi
   // waits for keeps Pi's 2 s: what its hook prints after Pi went on must not come to count as
-  // shown (#955: on a held store those calls' events are lost still).
+  // shown. Its hook is told when it is killed (`OBOETE_ANSWER_BY_MS`), and on a held store waits
+  // only until it has the room to keep its event before then (#955, docs/hook-time.md). A call
+  // whose wait is over before it starts is not started (#1075).
   const CAPTURE_KILL_MS = 3000;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
     const remaining = deadline === undefined ? CAPTURE_KILL_MS : Math.min(2000, deadline - Date.now());
     if (remaining <= 0) { resolve(""); return; }
+    const env = deadline === undefined
+      ? undefined
+      : { ...process.env, OBOETE_ANSWER_BY_MS: String(Date.now() + remaining) };
     const child = spawn(OBOETE_BIN, [...OBOETE_ARGS, "hook", "pi", event], {
-      cwd, stdio: ["pipe", "pipe", "ignore"],
+      cwd, env, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
     const finish = (text) => { clearTimeout(timer); resolve(text); };

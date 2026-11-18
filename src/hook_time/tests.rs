@@ -41,6 +41,69 @@ fn what_a_hook_injects_takes_what_remains_of_its_agents_timeout() {
     assert_eq!(clock.no_later(far), far);
 }
 
+/// #955: an agent whose timeout oboete does not write may say when it stops waiting for the
+/// hook's answer (`ANSWER_BY`: Pi's plugin, for the calls it waits for). The hook's time for what
+/// it injects ends half of `MARGIN` before it, the time before `main` being in it already. A hook
+/// with a timeout of oboete's reads none.
+#[test]
+fn a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before() {
+    // Half of `MARGIN` before the answer's time, counted from the hook's start, and the record's
+    // waits `KEEP_ROOM` before it.
+    assert_eq!(super::answer_end(1_000_000 + 10_000, 1_000_000), 9_500);
+    assert_eq!(super::answer_end(1_000_000 + 400, 1_000_000), -100);
+    assert_eq!(super::answer_end(i64::MIN, 1), i64::MIN);
+    assert_eq!(super::record_end(1_000_000 + 10_000, 1_000_000), 9_000);
+    assert_eq!(super::record_end(1_000_000 + 400, 1_000_000), -600);
+    // Its answer wanted 10 s from now, counted from the clock's own start: 9.5 s remain. The
+    // bounds leave a slow machine 2 s.
+    let clock = Clock::started_process(Duration::from_secs(1));
+    clock.answer_by(clock.wall_ms + 11_000);
+    clock.inject_within(None);
+    let left = clock.left(Duration::from_secs(60));
+    assert!(left <= Duration::from_millis(9_500), "{left:?}");
+    assert!(left > Duration::from_millis(7_500), "{left:?}");
+    // The store is waited for its 2 s: they end well before the record's waits.
+    assert_eq!(
+        clock.record_within(Duration::from_secs(2)),
+        Duration::from_secs(2)
+    );
+    // Wanted 1.5 s from now: the store is waited for 0.5 s at most.
+    let near = Clock::started_process(Duration::ZERO);
+    near.answer_by(near.wall_ms + 1_500);
+    near.inject_within(None);
+    let wait = near.record_within(Duration::from_secs(2));
+    assert!(wait <= Duration::from_millis(500), "{wait:?}");
+    assert!(!near.over());
+    // Wanted 0.4 s from now, or no longer: nothing remains, and the store is not waited for.
+    for at in [400, -1] {
+        let late = Clock::started_process(Duration::from_secs(1));
+        late.answer_by(crate::db::now_ms() + at);
+        late.inject_within(None);
+        assert!(late.over(), "{at}");
+        assert_eq!(late.left(Duration::from_secs(1)), Duration::ZERO, "{at}");
+        assert_eq!(
+            late.record_within(Duration::from_secs(2)),
+            Duration::ZERO,
+            "{at}"
+        );
+    }
+    // A hook with a timeout of oboete's keeps it, and reads no answer's time: one its process
+    // inherited (the worker's children) ends nothing sooner, and later is no longer.
+    let both = Clock::started_process(Duration::ZERO);
+    both.answer_by(crate::db::now_ms() - 1);
+    both.inject_within(Some(Duration::from_secs(60)));
+    assert!(!both.over());
+    assert!(both.left(Duration::from_secs(60)) > Duration::from_secs(50));
+    assert_eq!(
+        both.record_within(Duration::from_secs(2)),
+        Duration::from_secs(2)
+    );
+    let both = Clock::started_process(Duration::ZERO);
+    both.answer_by(crate::db::now_ms() + 600_000);
+    both.inject_within(Some(Duration::from_secs(5)));
+    assert!(both.left(Duration::from_secs(60)) <= Duration::from_secs(4));
+}
+
 /// Each phase is written under its own name: `NAMES` is in `Phase`'s order.
 #[test]
 fn each_phase_is_written_under_its_name() {

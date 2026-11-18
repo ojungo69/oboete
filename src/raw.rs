@@ -1163,6 +1163,8 @@ pub struct Raw {
     gate: Option<crate::redact::Rules>,
     /// Which open of this process it is (`opened`).
     opened: u64,
+    /// #955: when the record's waits for the store end, all of them together (`wait_until`).
+    record_by: Option<std::time::Instant>,
 }
 
 /// The opens of raw.db this process has made (`Raw::opened`).
@@ -1899,6 +1901,36 @@ pub fn open(home: &Path) -> Result<Raw> {
 pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
     open_within_report(home, wait, None, &mut |_| Ok(()))
 }
+
+impl Raw {
+    /// #955: the record's waits for the store, all of them together, end at `at`, and no later
+    /// than a hook's store wait from now: a hook its agent kills sooner keeps what it could not
+    /// write before then. No kept file is written back (`bounded`): the call keeps its own events
+    /// behind them (docs/unwritten.md U3).
+    pub(crate) fn wait_until(&mut self, at: std::time::Instant) -> Result<()> {
+        let now = std::time::Instant::now();
+        let at = now
+            .checked_add(crate::hook::STORE_WAIT)
+            .map_or(at, |most| at.min(most));
+        self.record_by = Some(at);
+        // By the clock: SQLite's busy timeout adds up the sleeps it asks for, and on a loaded
+        // machine each runs long (0.2 s of them took 0.67 s on macOS CI, #1073).
+        self.conn.busy_handler(Some(move |_tries: i32| {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+            true
+        }))?;
+        Ok(())
+    }
+
+    /// Whether the record's waits end at a time (`wait_until`).
+    pub(crate) fn bounded(&self) -> bool {
+        self.record_by.is_some()
+    }
+}
 pub(crate) fn open_report(
     home: &Path,
     guard: Option<&crate::executable::CommandHome>,
@@ -2121,6 +2153,7 @@ fn open_within_report(
         gated_off: false,
         gate: None,
         opened: OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        record_by: None,
     })
 }
 

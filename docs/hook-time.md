@@ -46,10 +46,33 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   - a read's hook (the note on a file, a memory lookup) gives nothing once its time is over, and
     its lookup's wait, its store's wait and its fence's wait take what remains.
 - An agent whose hook oboete writes no timeout for (OpenCode's and Pi's plugins, an agent with no
-  adapter) has no such deadline: its waits are as they were. The plugins kill the hooks they
+  adapter) has no such deadline unless its plugin passes the answer's time (Pi's, below): the
+  waits of a call it passes none for are as they were. The plugins kill the hooks they
   start themselves: OpenCode's each after 3 s; Pi's after 3 s where nothing waits for the hook's
   answer, and as its own 2 s wait ends where it waits for one. Pi's wait for its queue at a
   session's end, 2 s at most, kills nothing (docs/unwritten.md U2).
+- Pi waits 2 s for the answer to a prompt and to a session's start, queue time included. Its
+  plugin gives each such call what is left of the wait, kills its hook then and tells it when
+  (`OBOETE_ANSWER_BY_MS`, ms since the epoch, `hook_time::ANSWER_BY`), and starts none with
+  nothing left, as before #955:
+  - their time for what they inject ends half of `MARGIN` before then, the time before `main`
+    being in it already;
+  - their waits for the store, its open and the record's statements together, end `KEEP_ROOM`
+    (1 s) before then, and 2 s on at most (`Raw::wait_until`), so a hook whose store is held
+    keeps its events before the kill (docs/unwritten.md U2). The record's waits end by the
+    clock, a busy handler's: SQLite's busy timeout adds up the sleeps it asks for, and on a
+    loaded machine each runs long (macOS CI on #1073: 0.2 s of them took 0.67 s). A hook with
+    less than `KEEP_ROOM` left waits for no store at all. Such a hook writes no kept file back (U3): it keeps
+    its own events behind them. It waits for the spool's lock once at most: after a keep behind
+    the kept files that failed, an append that fails marks the failure at once. Recording is not
+    cut short: what is not written is kept, or marked as lost before the kill.
+
+  No call ends later than before #955: Pi exits once its 2 s wait for the queue ends as it
+  quits, and the session's end must not wait behind a call that outlives the plugin's times.
+  A call whose wait is over before it starts is still not started, and its event is lost
+  (#1075). Before #955 a hook whose store was held waited its 2 s past the kill: the prompt was
+  neither written nor kept. A hook with a timeout of oboete's reads no such time: a process the
+  hook starts, and what that starts, inherit it.
 - A hook run inside another process (a test) has a clock that starts when it is called and no
   deadline unless the test sets one.
 
@@ -207,6 +230,20 @@ section).
   file's turn-over at its cap, a turn-over another hook made first, and one that fails; a line
   cut short; doctor's line; an end's longest phase.
 - `tests/doctor_hook_time.rs`: doctor prints the line, with `[inject]` right or wrong.
+- `hook_time::tests::a_hook_told_when_its_answer_is_wanted_injects_until_half_a_margin_before`,
+  `hook::tests::a_pi_prompt_whose_answer_is_no_longer_wanted_is_recorded_and_given_nothing`,
+  `tests/hook_output.rs`'s `a_pi_prompt_past_its_answers_time_is_recorded_and_given_nothing` (the
+  time from the environment), `a_pi_hook_on_a_held_store_keeps_its_event_before_pi_kills_it` (a
+  prompt and a session's start, killed at Pi's 2 s) and
+  `a_pi_hook_pi_waits_for_keeps_its_event_behind_the_kept_files`,
+  `raw::tests::a_bounded_store_waits_only_what_remains_of_its_time` and
+  `a_store_whose_write_lock_is_held_opens_at_once`,
+  `hook::tests::a_bounded_record_waits_for_the_spool_once`,
+  `a_pi_hook_told_a_time_far_off_records_as_one_told_none` and
+  `a_pi_hook_told_a_time_hours_off_writes_the_kept_files_back` (an hour on at most),
+  and the Pi harness (`src/testdata/pi/test.mjs`, under
+  `setup::tests::pi_generated_extension_matches_event_and_tool_contract`): what Pi waits for,
+  when it kills, and the time a prompt behind a capture is told (#955).
 - `hook::tests::a_hook_with_no_time_left_records_and_injects_nothing`,
   `the_read_fence_is_waited_for_within_the_hooks_time`,
   `the_prompt_points_wait_ends_with_the_hooks_time`,

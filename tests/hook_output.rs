@@ -39,12 +39,24 @@ fn hook_output(
     event: &str,
     input: &str,
 ) -> std::process::Output {
+    hook_output_with(home, agent, event, input, &[])
+}
+
+/// `hook_output`, with `env` set for the hook.
+fn hook_output_with(
+    home: &std::path::Path,
+    agent: &str,
+    event: &str,
+    input: &str,
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
         .arg(home)
         .args(["hook", agent, event])
         // No worker is wanted for a hook's output.
         .env("OBOETE_NO_SPAWN", "1")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,6 +68,286 @@ fn hook_output(
         .write_all(input.as_bytes())
         .unwrap();
     hook.wait_with_output().unwrap()
+}
+
+/// #955: Pi's plugin gives a hook it waits for the time its wait ends (`OBOETE_ANSWER_BY_MS`, ms
+/// since the epoch). A prompt whose answer is no longer wanted is recorded, and its hook injects
+/// nothing.
+#[test]
+fn a_pi_prompt_past_its_answers_time_is_recorded_and_given_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        - 1;
+    let out = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt Pi stopped waiting for"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &past.to_string())],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nothing injected: the hook's time is over"),
+        "{stderr}"
+    );
+    let raw = rusqlite::Connection::open_with_flags(
+        home.path().join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let recorded: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE body LIKE '%a prompt Pi stopped waiting for%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, 1);
+}
+
+/// ms since the epoch.
+fn epoch_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
+/// A Pi hook told that Pi kills it 2 s on, killed then if it is still running: what it did,
+/// for a failed assert to say (whether it ended by itself, when, and its stderr).
+fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input: &str) -> String {
+    // The kill and the answer's time from one moment, before the spawn (CodeRabbit on #1073).
+    let started = Instant::now();
+    let kill_at = started + Duration::from_millis(2_000);
+    let by = epoch_ms() + 2_000;
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(home)
+        .args(["hook", "pi", event])
+        .env("OBOETE_NO_SPAWN", "1")
+        .env("OBOETE_ANSWER_BY_MS", by.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    while hook.try_wait().unwrap().is_none() && Instant::now() < kill_at {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let ended = hook.try_wait().unwrap().is_some();
+    let took = started.elapsed();
+    let _ = hook.kill();
+    let out = hook.wait_with_output().unwrap();
+    format!(
+        "{event} {}, {took:?} on, stderr: {}",
+        if ended {
+            "ended by itself"
+        } else {
+            "was killed"
+        },
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
+/// What `home`'s kept files hold.
+fn kept_text(home: &std::path::Path) -> String {
+    std::fs::read_dir(home.join("unwritten"))
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .filter_map(|f| std::fs::read_to_string(f.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// #955: a prompt and a session's start that Pi waits for, on a store whose write lock is held,
+/// killed as Pi's 2 s wait ends: each hook waits for the store only until 1 s before then, and
+/// keeps its event before the kill.
+#[test]
+fn a_pi_hook_on_a_held_store_keeps_its_event_before_pi_kills_it() {
+    let home = tempfile::tempdir().unwrap();
+    let first = hook_output(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"the store is made"}"#,
+    );
+    assert!(first.status.success());
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let prompt = pi_hook_killed_at_its_answers_time(
+        home.path(),
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt on a held store"}"#,
+    );
+    let start = pi_hook_killed_at_its_answers_time(
+        home.path(),
+        "SessionStart",
+        r#"{"session_id":"t","source":"startup"}"#,
+    );
+    lock.execute_batch("ROLLBACK").unwrap();
+    let kept = kept_text(home.path());
+    assert!(
+        kept.contains("a prompt on a held store"),
+        "{prompt}\nkept: {kept}"
+    );
+    assert!(kept.contains("\"t\""), "{start}\nkept: {kept}");
+}
+
+/// #955: an answer's time further off than an hour is none: the hook records as one given no
+/// time, with no overflow of its clock.
+#[test]
+fn a_pi_hook_told_a_time_far_off_records_as_one_told_none() {
+    let home = tempfile::tempdir().unwrap();
+    let out = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt with a time far off"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &i64::MAX.to_string())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let raw = rusqlite::Connection::open_with_flags(
+        home.path().join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let recorded: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE body LIKE '%a prompt with a time far off%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, 1);
+}
+
+/// #955 (the local Codex review of #1073): an answer's time further off than an hour is read as
+/// none. With a kept file left, a prompt told a time two hours on writes it back, as a call told
+/// no time does.
+#[test]
+fn a_pi_hook_told_a_time_hours_off_writes_the_kept_files_back() {
+    let home = tempfile::tempdir().unwrap();
+    let made = hook_output(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"the store is made"}"#,
+    );
+    assert!(made.status.success());
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let past = (epoch_ms() - 1).to_string();
+    let kept = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"kept on a held store"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &past)],
+    );
+    assert!(kept.status.success());
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(kept_text(home.path()).contains("kept on a held store"));
+    let later = (epoch_ms() + 2 * 3_600_000).to_string();
+    let told = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"told a time hours on"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &later)],
+    );
+    assert!(told.status.success());
+    let left = kept_text(home.path());
+    assert!(
+        !left.contains("kept on a held store"),
+        "not written back: {left}"
+    );
+}
+
+/// #955: a hook Pi waits for writes no kept file back (docs/unwritten.md U3): it keeps its own
+/// events behind them, and the next call that waits as long as it likes writes them all back in
+/// their order.
+#[test]
+fn a_pi_hook_pi_waits_for_keeps_its_event_behind_the_kept_files() {
+    let home = tempfile::tempdir().unwrap();
+    let made = hook_output(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"the store is made"}"#,
+    );
+    assert!(made.status.success());
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let past = (epoch_ms() - 1).to_string();
+    let kept = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"first, kept on a held store"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &past)],
+    );
+    assert!(kept.status.success());
+    lock.execute_batch("ROLLBACK").unwrap();
+    let ahead = (epoch_ms() + 2_000).to_string();
+    let second = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"second, on a free store"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &ahead)],
+    );
+    assert!(second.status.success());
+    let both = kept_text(home.path());
+    assert!(
+        both.contains("first, kept on a held store") && both.contains("second, on a free store"),
+        "{both}"
+    );
+    let third = hook_output(
+        home.path(),
+        "pi",
+        "PostToolUse",
+        r#"{"session_id":"s","tool_name":"read","tool_input":{},"tool_response":"third"}"#,
+    );
+    assert!(third.status.success());
+    let left = kept_text(home.path());
+    assert!(
+        !left.contains("first, kept") && !left.contains("second, on"),
+        "all written back: {left}"
+    );
+    let raw = rusqlite::Connection::open_with_flags(
+        home.path().join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let order: Vec<String> = raw
+        .prepare(
+            "SELECT CAST(body AS TEXT) FROM records WHERE body LIKE '%first, kept%'
+             OR body LIKE '%second, on%' OR body LIKE '%third%' ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|b| b.unwrap())
+        .collect();
+    let at = |what: &str| order.iter().position(|b| b.contains(what)).expect(what);
+    assert!(
+        at("first, kept") < at("second, on") && at("second, on") < at("third"),
+        "{order:?}"
+    );
 }
 
 #[test]

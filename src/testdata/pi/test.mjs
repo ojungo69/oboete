@@ -310,6 +310,9 @@ remaining.fireFirstTimer();
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(remaining.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
 assert.equal(remaining.timeouts.at(-1), 500);
+// Its hook is told when it is killed (#955); a capture is told no time.
+assert.equal(remaining.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
+assert.equal(remaining.hooks[0].options.env, undefined, "a capture is told no time");
 remaining.advance(500);
 remaining.fireLastTimer();
 await limitedInput;
