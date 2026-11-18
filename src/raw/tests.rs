@@ -3712,3 +3712,22 @@ fn a_bounded_store_waits_only_what_remains_of_its_time() {
     lock.execute_batch("ROLLBACK").unwrap();
     assert!(took < std::time::Duration::from_millis(600), "{took:?}");
 }
+
+/// #955: a hook's bounded record waits for the store's write lock in its appends, not in its
+/// open: a store whose write lock another connection holds opens at once.
+#[test]
+fn a_store_whose_write_lock_is_held_opens_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    open(home.path())
+        .unwrap()
+        .append(&test_event("made"))
+        .unwrap();
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let opened = open_within(home.path(), std::time::Duration::from_secs(2));
+    let took = started.elapsed();
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(opened.is_ok(), "{:?}", opened.err());
+    assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+}

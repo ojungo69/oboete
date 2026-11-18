@@ -20,48 +20,27 @@ export default function (pi) {
   // 2 s for the queue and goes on), and a hook whose store is held waits 2 s for the store, then
   // keeps what it could not write and marks the failure (docs/unwritten.md U2): killed at 2 s it
   // died before either, and its event was lost with nothing to say so. A call whose answer Pi
-  // waits for dies with Pi's 2 s wait: what its hook prints later must not come to count as
-  // shown. Its hook is told when the wait ends (`OBOETE_ANSWER_BY_MS`), and waits for a held store
-  // no longer than leaves it `KEEP_ROOM_MS` to keep its events before then (#955). A call with
-  // less than that left, or none, only records: its hook is told the wait is over, so it waits
-  // for no store and injects nothing, and it gets the capture's 3 s; what it prints joins
-  // nothing. As Pi quits, a call gets what is left of its wait and no more, and one with none
-  // left is not started, as before: Pi exits once its 2 s wait for the queue ends, and the
-  // session's end must not wait behind it. A record-only call already running then is killed
-  // as its wait ends (`running`), as the old plugin killed it.
+  // waits for keeps Pi's 2 s: what its hook prints after Pi went on must not come to count as
+  // shown. Its hook is told when it is killed (`OBOETE_ANSWER_BY_MS`), and on a held store waits
+  // only until it has the room to keep its event before then (#955, docs/hook-time.md). A call
+  // whose wait is over before it starts is not started (#1075).
   const CAPTURE_KILL_MS = 3000;
-  const KEEP_ROOM_MS = 1000;
-  let quitting = false;
-  let running = null;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
-    const left = deadline === undefined ? undefined : Math.min(2000, deadline - Date.now());
-    if (quitting && left !== undefined && left <= 0) { resolve(""); return; }
-    const waited = left !== undefined && (left >= KEEP_ROOM_MS || quitting);
-    const env = left === undefined
-      ? process.env
-      : { ...process.env, OBOETE_ANSWER_BY_MS: String(waited ? deadline : Date.now()) };
+    const remaining = deadline === undefined ? CAPTURE_KILL_MS : Math.min(2000, deadline - Date.now());
+    if (remaining <= 0) { resolve(""); return; }
+    const env = deadline === undefined
+      ? undefined
+      : { ...process.env, OBOETE_ANSWER_BY_MS: String(Date.now() + remaining) };
     const child = spawn(OBOETE_BIN, [...OBOETE_ARGS, "hook", "pi", event], {
       cwd, env, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
-    let timer;
-    const kill = () => { child.kill("SIGKILL"); finish(""); };
-    const finish = (text) => {
-      clearTimeout(timer);
-      if (running?.child === child) running = null;
-      resolve(text);
-    };
-    timer = setTimeout(kill, waited ? left : CAPTURE_KILL_MS);
-    if (left !== undefined && !waited) {
-      running = {
-        child,
-        cut: () => { clearTimeout(timer); timer = setTimeout(kill, Math.max(0, deadline - Date.now())); },
-      };
-    }
+    const finish = (text) => { clearTimeout(timer); resolve(text); };
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, remaining);
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });
-    child.on("close", (code) => finish(code === 0 && (left === undefined || waited) ? out : ""));
+    child.on("close", (code) => finish(code === 0 ? out : ""));
     child.stdin.on("error", ignore);
     child.stdin.end(payload);
   });
@@ -117,7 +96,7 @@ export default function (pi) {
   // Pi awaits this before the run starts: what the prompt gets joins the stash.
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return;
-    // Queue time counts too: a prompt's hook that starts after Pi moved on records and shows nothing.
+    // Queue time counts too: an expired prompt must not update shown state after Pi moves on.
     const deadline = Date.now() + 2000;
     const text = contextOf(await wait(send("UserPromptSubmit", ctx, { prompt: event.text }, deadline)));
     if (text) pending = pending ? `${pending}\n${text}` : text;
@@ -140,11 +119,6 @@ export default function (pi) {
   });
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "reload") return;
-    // Pi exits after a quit; a session replaced by another leaves the process, and its queue, on.
-    if (event.reason === "quit") {
-      quitting = true;
-      running?.cut();
-    }
     void send("SessionEnd", ctx, { reason: event.reason });
     await wait(chain);
   });

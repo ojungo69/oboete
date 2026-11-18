@@ -117,11 +117,12 @@ fn epoch_ms() -> u128 {
         .as_millis()
 }
 
-/// `oboete hook pi <event>` with `input`, told that Pi waits 2 s for its answer, and killed as that
-/// wait ends, as Pi's plugin kills it.
-fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input: &str) {
+/// A Pi hook told that Pi kills it 2 s on, killed then if it is still running: what it did,
+/// for a failed assert to say (whether it ended by itself, when, and its stderr).
+fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input: &str) -> String {
     // The kill and the answer's time from one moment, before the spawn (CodeRabbit on #1073).
-    let kill_at = Instant::now() + Duration::from_millis(2_000);
+    let started = Instant::now();
+    let kill_at = started + Duration::from_millis(2_000);
     let by = epoch_ms() + 2_000;
     let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
@@ -131,7 +132,7 @@ fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input
         .env("OBOETE_ANSWER_BY_MS", by.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     hook.stdin
@@ -142,8 +143,19 @@ fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input
     while hook.try_wait().unwrap().is_none() && Instant::now() < kill_at {
         std::thread::sleep(Duration::from_millis(10));
     }
+    let ended = hook.try_wait().unwrap().is_some();
+    let took = started.elapsed();
     let _ = hook.kill();
-    hook.wait().unwrap();
+    let out = hook.wait_with_output().unwrap();
+    format!(
+        "{event} {}, {took:?} on, stderr: {}",
+        if ended {
+            "ended by itself"
+        } else {
+            "was killed"
+        },
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 /// What `home`'s kept files hold.
@@ -172,20 +184,23 @@ fn a_pi_hook_on_a_held_store_keeps_its_event_before_pi_kills_it() {
     assert!(first.status.success());
     let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    pi_hook_killed_at_its_answers_time(
+    let prompt = pi_hook_killed_at_its_answers_time(
         home.path(),
         "UserPromptSubmit",
         r#"{"session_id":"s","prompt":"a prompt on a held store"}"#,
     );
-    pi_hook_killed_at_its_answers_time(
+    let start = pi_hook_killed_at_its_answers_time(
         home.path(),
         "SessionStart",
         r#"{"session_id":"t","source":"startup"}"#,
     );
     lock.execute_batch("ROLLBACK").unwrap();
     let kept = kept_text(home.path());
-    assert!(kept.contains("a prompt on a held store"), "{kept}");
-    assert!(kept.contains("\"t\""), "the start of session t: {kept}");
+    assert!(
+        kept.contains("a prompt on a held store"),
+        "{prompt}\nkept: {kept}"
+    );
+    assert!(kept.contains("\"t\""), "{start}\nkept: {kept}");
 }
 
 /// #955: an answer's time further off than an hour is none: the hook records as one given no

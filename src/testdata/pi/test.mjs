@@ -248,8 +248,8 @@ assert.deepEqual(recovering.hooks.map(h => h.payload.session_id), ["old-session"
 assert.deepEqual(recovering.hooks.map(h => h.payload.prompt), ["first", "second", undefined]);
 
 for (const [eventName, event, expected] of [
-  ["session_start", { reason: "startup" }, ["UserPromptSubmit", "SessionStart"]],
-  ["session_compact", { reason: "manual", compactionEntry: { summary: "summary" } }, ["UserPromptSubmit", "PostCompact", "SessionStart"]],
+  ["session_start", { reason: "startup" }, ["UserPromptSubmit"]],
+  ["session_compact", { reason: "manual", compactionEntry: { summary: "summary" } }, ["UserPromptSubmit", "PostCompact"]],
   ["session_shutdown", { reason: "quit" }, ["UserPromptSubmit", "SessionEnd"]],
 ]) {
   const bounded = await load({}, true);
@@ -277,8 +277,7 @@ for (const [eventName, event, expected] of [
   }
 }
 
-// A prompt that expires behind queued capture work is still recorded (#955): its hook runs once
-// the queue goes on, told that Pi's wait ended, and what it prints joins nothing.
+// A prompt that expires behind queued capture work must never run its mutating hook later.
 const expired = await load({}, true);
 expired.stallNextHook = true;
 expired.handlers.get("tool_result")(toolEvent, ctx);
@@ -289,22 +288,16 @@ expired.advance(2000);
 expired.fireLastTimer();
 await expiredInput;
 assert.deepEqual(expired.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
-expired.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "too late" } });
 expired.fireFirstTimer();
 await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(expired.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-assert.equal(expired.hooks[1].payload.prompt, "expired prompt");
-assert.equal(expired.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
-assert.equal(expired.hooks[0].options.env.OBOETE_ANSWER_BY_MS, undefined, "a capture is given no time");
-assert.equal(await expired.emit("before_agent_start", { prompt: "after it" }, ctx), undefined);
+assert.deepEqual(expired.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
 expired.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "later prompt" } });
 await expired.emit("input", { source: "interactive", text: "fresh prompt" }, ctx);
 assert.deepEqual(plain(await expired.emit("before_agent_start", { prompt: "fresh prompt" }, ctx)), {
   message: { customType: "oboete", content: "later prompt", display: false },
 });
 
-// Starting with less than the room for a keep of Pi's wait left, a prompt's hook only records: it
-// is told that Pi's wait is over, and lives the capture's 3 s (#955).
+// Starting before expiry gets only the time left after the preceding capture work.
 const remaining = await load({}, true);
 remaining.stallNextHook = true;
 remaining.handlers.get("tool_result")(toolEvent, ctx);
@@ -316,45 +309,14 @@ remaining.stallNextHook = true;
 remaining.fireFirstTimer();
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(remaining.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-assert.equal(remaining.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "1500");
-assert.equal(remaining.timeouts.at(-1), 3000);
-remaining.tick(500);
+assert.equal(remaining.timeouts.at(-1), 500);
+// Its hook is told when it is killed (#955); a capture is told no time.
+assert.equal(remaining.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
+assert.equal(remaining.hooks[0].options.env, undefined, "a capture is told no time");
+remaining.advance(500);
+remaining.fireLastTimer();
 await limitedInput;
 assert.equal(await remaining.emit("before_agent_start", { prompt: "after timeout" }, ctx), undefined);
-assert.equal(remaining.kills.length, 1, "only the capture is killed as Pi's wait ends");
-
-// What a record-only call prints joins nothing, though Pi still waits for the answer (#955).
-const quiet = await load({}, true);
-quiet.stallNextHook = true;
-quiet.handlers.get("tool_result")(toolEvent, ctx);
-await Promise.resolve();
-const quietInput = quiet.emit("input", { source: "interactive", text: "quiet prompt" }, ctx);
-await Promise.resolve();
-quiet.advance(1500);
-quiet.nextHookOutput = JSON.stringify({ hookSpecificOutput: { additionalContext: "late context" } });
-quiet.fireFirstTimer();
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(quiet.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "1500");
-await quietInput;
-assert.equal(await quiet.emit("before_agent_start", { prompt: "quiet prompt" }, ctx), undefined, "a record-only call's output joins nothing");
-
-// With that room left, a prompt's hook is told when Pi's wait ends, and dies with it (#955).
-const room = await load({}, true);
-room.stallNextHook = true;
-room.handlers.get("tool_result")(toolEvent, ctx);
-await Promise.resolve();
-const roomInput = room.emit("input", { source: "interactive", text: "room prompt" }, ctx);
-await Promise.resolve();
-room.advance(800);
-room.stallNextHook = true;
-room.fireFirstTimer();
-await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(room.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-assert.equal(room.hooks[1].options.env.OBOETE_ANSWER_BY_MS, "2000");
-assert.equal(room.timeouts.at(-1), 1200);
-room.tick(1200);
-await roomInput;
-assert.deepEqual(room.kills, [800, 2000], "killed as Pi's wait ends");
 
 // What Pi waits for ends at 2 seconds. A capture's child, which nothing waits for, lives 3: its
 // hook waits 2 seconds for a held store before it keeps what it could not write.
@@ -367,7 +329,7 @@ await Promise.resolve();
 clock.tick(1999);
 assert.equal(clock.kills.length, 0);
 clock.tick(1);
-await behind; // Pi goes on; its prompt's hook, queued behind the capture, has not started
+await behind; // Pi goes on; its prompt's hook, queued behind the capture, never started
 assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
 assert.equal(clock.kills.length, 0, "a capture's child is not killed at 2 seconds");
 clock.tick(999);
@@ -375,66 +337,13 @@ assert.equal(clock.kills.length, 0, "nor before 3");
 clock.tick(1);
 assert.deepEqual(clock.kills, [3000], "a capture's child is killed at 3 seconds");
 await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-// As Pi quits, a call whose wait ended while it queued is not started, as before #955: Pi exits
-// once its 2 s wait for the queue ends, and the session's end must not wait behind it. At a
-// session's replacement the process goes on, and the call records.
-for (const [reason, started] of [["quit", false], ["new", true]]) {
-  const ending = await load({}, true);
-  ending.stallNextHook = true;
-  ending.handlers.get("tool_result")(toolEvent, ctx);
-  await Promise.resolve();
-  const typed = ending.emit("input", { source: "interactive", text: "typed behind a capture" }, ctx);
-  await Promise.resolve();
-  ending.advance(2000);
-  ending.fireLastTimer();
-  await typed;
-  const shutdown = ending.emit("session_shutdown", { reason }, ctx);
-  await Promise.resolve();
-  ending.fireFirstTimer();
-  await new Promise(resolve => setImmediate(resolve));
-  await shutdown;
-  assert.deepEqual(
-    ending.hooks.map(h => h.payload.hook_event_name),
-    started ? ["PostToolUse", "UserPromptSubmit", "SessionEnd"] : ["PostToolUse", "SessionEnd"],
-    reason,
-  );
-}
-
-// A record-only call already running as Pi quits is killed as its wait ends, as the old plugin
-// killed it, and the session's end starts within Pi's wait for the queue (#955).
-const runningQuit = await load({}, true);
-runningQuit.stallNextHook = true;
-runningQuit.handlers.get("tool_result")(toolEvent, ctx);
-await Promise.resolve();
-const behindQuit = runningQuit.emit("input", { source: "interactive", text: "record-only at a quit" }, ctx);
-await Promise.resolve();
-runningQuit.advance(1500);
-runningQuit.stallNextHook = true;
-runningQuit.fireFirstTimer();
-await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(runningQuit.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
-runningQuit.tick(500);
-await behindQuit;
-const quitWait = runningQuit.emit("session_shutdown", { reason: "quit" }, ctx);
-await Promise.resolve();
-runningQuit.tick(0);
-await new Promise(resolve => setImmediate(resolve));
-assert.deepEqual(runningQuit.kills, [1500, 2000], "killed as its wait ends");
-assert.deepEqual(
-  runningQuit.hooks.map(h => h.payload.hook_event_name),
-  ["PostToolUse", "UserPromptSubmit", "SessionEnd"],
-);
-await quitWait;
-
+assert.deepEqual(clock.hooks.map(h => h.payload.hook_event_name), ["PostToolUse"]);
 // A hook Pi waits for dies with the wait: what it prints later must not come to count as shown.
-// It is told when (#955), and keeps what it could not write before then.
 const waited = await load({}, true);
 waited.stallNextHook = true;
 const stalled = waited.emit("input", { source: "interactive", text: "stalled" }, ctx);
 await Promise.resolve();
 waited.tick(1999);
-assert.equal(waited.hooks[0].options.env.OBOETE_ANSWER_BY_MS, "2000");
 assert.equal(waited.kills.length, 0);
 waited.tick(1);
 await stalled;

@@ -35,7 +35,7 @@ pub(crate) const MARGIN: Duration = Duration::from_secs(1);
 pub(crate) const ANSWER_BY: &str = "OBOETE_ANSWER_BY_MS";
 /// What a hook told its answer's time keeps of it for the keep after a store it waited for in
 /// vain (docs/unwritten.md U2): the keep's own wait (`unwritten::KEEP_WAIT`) and its file and
-/// marker. Pi's plugin gives such a call no less (`KEEP_ROOM_MS`).
+/// marker. A hook with less than this left waits for no store and keeps at once.
 pub(crate) const KEEP_ROOM: Duration = Duration::from_millis(1_000);
 /// The record's size at which it starts again, the one before it kept beside it.
 const CAP: u64 = 256 * 1024;

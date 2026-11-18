@@ -1903,29 +1903,32 @@ pub fn open_within(home: &Path, wait: std::time::Duration) -> Result<Raw> {
 }
 
 impl Raw {
-    /// #955: the record's waits for the store, all of them together, end at `at`: a hook its
-    /// agent kills sooner keeps what it could not write before then. Each append waits what
-    /// remains (`wait_left`, at the append's start), and no kept file is written back
-    /// (`bounded`): the call keeps its own events behind them (docs/unwritten.md U3).
+    /// #955: the record's waits for the store, all of them together, end at `at`, and no later
+    /// than a hook's store wait from now: a hook its agent kills sooner keeps what it could not
+    /// write before then. No kept file is written back (`bounded`): the call keeps its own events
+    /// behind them (docs/unwritten.md U3).
     pub(crate) fn wait_until(&mut self, at: std::time::Instant) -> Result<()> {
+        let now = std::time::Instant::now();
+        let at = now
+            .checked_add(crate::hook::STORE_WAIT)
+            .map_or(at, |most| at.min(most));
         self.record_by = Some(at);
-        self.wait_left()
+        // By the clock: SQLite's busy timeout adds up the sleeps it asks for, and on a loaded
+        // machine each runs long (0.2 s of them took 0.67 s on macOS CI, #1073).
+        self.conn.busy_handler(Some(move |_tries: i32| {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+            true
+        }))?;
+        Ok(())
     }
 
     /// Whether the record's waits end at a time (`wait_until`).
     pub(crate) fn bounded(&self) -> bool {
         self.record_by.is_some()
-    }
-
-    /// The next statement waits for the store's lock what remains before the record's waits end,
-    /// when they end at a time (`wait_until`).
-    pub(crate) fn wait_left(&self) -> Result<()> {
-        if let Some(at) = self.record_by {
-            // No longer than a hook's store wait: a time far off is no longer wait.
-            let left = at.saturating_duration_since(std::time::Instant::now());
-            self.conn.busy_timeout(left.min(crate::hook::STORE_WAIT))?;
-        }
-        Ok(())
     }
 }
 pub(crate) fn open_report(
@@ -4910,8 +4913,6 @@ impl Raw {
         settings: Option<&crate::capture::Settings>,
         read: Option<(&str, Option<&str>)>,
     ) -> Result<Option<i64>> {
-        // #955: a bounded record's append waits what remains of its time (`wait_until`).
-        self.wait_left()?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
