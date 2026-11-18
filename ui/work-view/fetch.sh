@@ -27,12 +27,30 @@ paths=(
 )
 
 commit=$(git -C "$src" rev-parse --verify "$tag^{commit}")
+# What it replaces must be a plain folder and a plain file: a link would take the moves below to
+# another place.
+if [ -L "$here/upstream" ] || [ -L "$here/UPSTREAM" ] || [ -d "$here/UPSTREAM" ]; then
+  echo "fetch.sh: upstream/ or UPSTREAM is a link, or UPSTREAM is a folder" >&2
+  exit 1
+fi
+
 # One reserved folder beside upstream/ holds the new tree, its UPSTREAM line and, while they move
-# in, the old tree: each move is a rename on one file system, the old tree is put back if either
-# move fails (the tree on disk is always the one UPSTREAM names), and nothing outside the reserved
-# folder is removed.
+# in, the old tree. Each move is a rename on one file system. However the script ends (an error,
+# Ctrl-C, a kill), an unfinished swap puts the old tree back, so the tree on disk is always the one
+# UPSTREAM names, and a tree that cannot be put back is kept in the reserved folder.
 swap=$(mktemp -d "$here/.upstream.XXXXXX")
-trap 'rm -rf ${swap:+"$swap"}' EXIT
+cleanup() {
+  if [ -e "$swap/old" ] && { [ -e "$swap/new" ] || [ -e "$swap/UPSTREAM" ]; }; then
+    rm -rf "${here:?}/upstream"
+    if ! mv "$swap/old" "$here/upstream"; then
+      echo "fetch.sh: the old tree is kept in $swap/old" >&2
+      return 0
+    fi
+  fi
+  rm -rf "$swap"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 mkdir "$swap/new"
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"
 chmod 755 "$swap/new"
@@ -40,14 +58,6 @@ printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$swap/UPSTREAM"
 if [ -e "$here/upstream" ]; then
   mv "$here/upstream" "$swap/old"
 fi
-if ! mv "$swap/new" "$here/upstream" || ! mv "$swap/UPSTREAM" "$here/UPSTREAM"; then
-  if [ -e "$swap/old" ]; then
-    rm -rf "${here:?}/upstream"
-    if ! mv "$swap/old" "$here/upstream"; then
-      echo "fetch.sh: the old tree is kept in $swap/old" >&2
-      swap=
-    fi
-  fi
-  exit 1
-fi
+mv "$swap/new" "$here/upstream"
+mv "$swap/UPSTREAM" "$here/UPSTREAM"
 echo "upstream/ is claude-mem $tag ($commit): $(find "$here/upstream" -type f | wc -l) files"

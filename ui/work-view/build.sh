@@ -21,7 +21,19 @@ fi
 
 work=$(mktemp -d)
 swap=
-trap 'rm -rf "$work" ${swap:+"$swap"}' EXIT
+# However the script ends (an error, Ctrl-C, a kill), an unfinished swap puts the old bundle back,
+# and a bundle that cannot be put back is kept in its reserved folder rather than removed.
+cleanup() {
+  rm -rf "$work"
+  [ -n "$swap" ] || return 0
+  if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
+    echo "build.sh: the old bundle is kept in $swap/old" >&2
+    return 0
+  fi
+  rm -rf "$swap"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 cp -a "$here/upstream/." "$work/"
 for patch in "$here"/patches/*.patch; do
   (cd "$work" && git apply "$patch")
@@ -47,11 +59,5 @@ chmod 755 "$swap/new"
 if [ -e "$assets/work-view" ]; then
   mv "$assets/work-view" "$swap/old"
 fi
-if ! mv "$swap/new" "$assets/work-view"; then
-  if [ -e "$swap/old" ] && ! mv "$swap/old" "$assets/work-view"; then
-    echo "build.sh: the old bundle is kept in $swap/old" >&2
-    swap=
-  fi
-  exit 1
-fi
+mv "$swap/new" "$assets/work-view"
 echo "assets/work-view: $(find "$assets/work-view" -type f | wc -l) files, $(du -sb "$assets/work-view" | cut -f1) bytes"
