@@ -160,8 +160,8 @@ for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
   for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_URL)) {
     // The bytes as the browser reads them, escapes undone, to tell a font by; a font goes in
     // plain base64 alone, the form this check compares.
-    let text = data
-    try { text = decodeURIComponent(data) } catch { /* a stray %: read as it is */ }
+    // Each %XX escape as the byte it stands for, whatever the bytes are (a font's are not UTF-8).
+    const text = data.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     const base64 = /;base64$/i.test(params)
     const bytes = Buffer.from(text, base64 ? 'base64' : 'latin1')
     if (!FONT_TYPE.test(type) && !isFont(bytes)) continue

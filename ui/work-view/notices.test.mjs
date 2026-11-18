@@ -163,6 +163,8 @@ test('a font the build inlines as a data: URL is a listed package\'s file by its
   const woff2 = Buffer.alloc(49)
   woff2.write('wOF2', 0, 'latin1')
   woff2.writeUInt32BE(49, 8)
+  const binary = Buffer.from(woff2)
+  binary[20] = 0xff
   const untyped = notice(tree({ packages, sources, fonts: css(`data:application/octet-stream;base64,${b64(woff2)}`) }))
   assert.match(untyped.error, /a font inlined as a data: URL \(application\/octet-stream\)/)
   // Other bytes in base64 are not a font: an image, and JSON's `true`, which opens as TrueType does.
@@ -177,6 +179,8 @@ test('a font the build inlines as a data: URL is a listed package\'s file by its
     ['data:font/woff2;base64,Zm9udA=', 'font\\/woff2'],
     ['data:font/woff2,wOF2', 'font\\/woff2'],
     [escaped(woff2, 'application/octet-stream'), 'application\\/octet-stream'],
+    // Its bytes escaped one by one, not in base64; not UTF-8 either.
+    [`data:application/octet-stream,${[...binary].map((b) => `%${b.toString(16).padStart(2, '0')}`).join('')}`, 'application\\/octet-stream'],
   ]) {
     const unread = notice(tree({ packages, sources, fonts: css(url) }))
     assert.match(unread.error, new RegExp(`index-AbCd1234\\.css: a font in a data: URL \\(${type}\\) not in plain base64`), url)

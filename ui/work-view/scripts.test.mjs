@@ -2,7 +2,7 @@
 // they leave. node --test 'ui/work-view/*.test.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -17,8 +17,10 @@ const env = { ...kept, LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_N
 
 // A checkout with ui/work-view/ (the two scripts and `files`, each a path under it and its text)
 // and an empty assets/ beside it; it is removed after `use`.
-function checkout(files, use) {
-  const root = mkdtempSync(join(tmpdir(), 'work-view-'))
+function checkout(files, use, prefix = 'work-view-') {
+  // Absolute, even under a relative TMPDIR: the npm stub's PATH entry and Git's ceiling are read
+  // from other folders.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
   const view = join(root, 'ui/work-view')
   mkdirSync(join(root, 'assets'), { recursive: true })
   mkdirSync(view, { recursive: true })
@@ -152,6 +154,15 @@ test('a reserved folder with no UPSTREAM, left when its removal failed, stops ne
     assert.equal(readFileSync(join(view, 'upstream/NOTICE'), 'utf8'), 'NOTICE\n')
     assert.equal(existsSync(join(view, '.lock')), false)
   })
+})
+
+test('a checkout whose path holds glob characters builds its patches as any other', () => {
+  const plain = { ...patched, 'patches/0001-a.patch': '--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n a\n+b\n' }
+  checkout(plain, ({ root, view }) => {
+    const { status, stderr } = run(view, 'build.sh', [], npmStops(root))
+    assert.equal(status, 3, stderr)
+    assert.ok(stderr.includes('PATCHED<a\nb>'), stderr)
+  }, 'work-view-[2]*-')
 })
 
 test('a patch that adds a line opening with "Skipped patch", trailing whitespace and all, applies as it is', () => {

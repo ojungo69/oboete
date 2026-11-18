@@ -92,12 +92,16 @@ cp -a "$here/upstream/." "$work/"
 # folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
 # skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
 # oboete's patches carry its token, its transport and its name: a build without one is not the
-# work-view oboete serves, so an empty patches/ stops it.
-if ! compgen -G "$here/patches/*.patch" > /dev/null; then
+# work-view oboete serves, so an empty patches/ stops it. The list is made once, the checkout's
+# own path taken as it is, whatever characters it holds.
+shopt -s nullglob
+patches=("$here"/patches/*.patch)
+shopt -u nullglob
+if [ "${#patches[@]}" -eq 0 ]; then
   echo "build.sh: $here/patches holds no patch" >&2
   exit 1
 fi
-for patch in "$here"/patches/*.patch; do
+for patch in "${patches[@]}"; do
   # LC_ALL=C: Git words its messages in the caller's language, and the skip is read in English.
   # --whitespace=nowarn: a warning prints the line it is about by itself, which a line of the patch
   # that opens with "Skipped patch" would make read as a skip. The patch applies as it is either way.
