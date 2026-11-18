@@ -1,0 +1,46 @@
+docs/spike/work-view.md
+  s_52c3955e48bff4::t_9779310597b75f 1-131
+  s_52c3955e48bff4::t_5fd6e63e8093ce 132
+docs/page.md
+  s_52c3955e48bff4::t_658bb1aa2f2fe7 237-238
+docs/spike/work-view/compare.py
+  s_52c3955e48bff4::t_8405c53facf9de 1-39
+docs/spike/work-view/contract-min.json
+  s_52c3955e48bff4::t_e3d1197310b354 1-126
+docs/spike/work-view/drive.mjs
+  s_52c3955e48bff4::t_d40628fd43c7af 1-63
+docs/spike/work-view/get.sh
+  s_52c3955e48bff4::t_45028f9f02a593 1-15
+docs/spike/work-view/licences.json
+  s_52c3955e48bff4::t_ba1b5b49232490 1
+docs/spike/work-view/licences.mjs
+  s_52c3955e48bff4::t_ebc19c145d73c3 1-32
+docs/spike/work-view/live.mjs
+  s_52c3955e48bff4::t_61a7811f018fed 1-40
+docs/spike/work-view/local-api-token-client.ts
+  s_52c3955e48bff4::t_dfb3599f23af3e 1-175
+docs/spike/work-view/server.diff
+  s_52c3955e48bff4::t_285a08fe10abee 1-369
+docs/spike/work-view/spike-check.ts
+  s_52c3955e48bff4::t_b385197036afc0 1-15
+docs/spike/work-view/synth.py
+  s_52c3955e48bff4::t_d71d5662b67415 1-140
+docs/spike/work-view/timing.sh
+  s_52c3955e48bff4::t_187da7d60a173b 1-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "503aa4b24fc4cb7f056d8522bf90ec930700eb69",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
