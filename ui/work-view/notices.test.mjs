@@ -171,6 +171,18 @@ test('a font the build inlines as a data: URL is a listed package\'s file by its
   for (const url of [`data:image/png;base64,${b64('\x89PNG not a font')}`, `data:application/json;base64,${b64('true')}`]) {
     assert.equal(notice(tree({ packages, sources, fonts: css(url) })).error, undefined, url)
   }
+  // A URL is read to the end of its literal, as the browser reads it: a listed font with a
+  // fragment, or in a template literal, is the listed font; an unlisted one with a fragment is not.
+  const listedFragment = notice(tree({ packages, sources, fonts: css(`"data:font/woff2;base64,${b64('font')}#x"`) }))
+  assert.equal(listedFragment.error, undefined)
+  const template = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.js', 'const f = `data:font/woff2;base64,' + b64('font') + '`']] }))
+  assert.equal(template.error, undefined)
+  const strayFragment = notice(tree({ packages, sources, fonts: css(`"data:application/octet-stream;base64,${b64(woff2)}#x"`) }))
+  assert.match(strayFragment.error, /a font inlined as a data: URL \(application\/octet-stream\) that no package listed here holds/)
+  // A tab inside a quoted URL, which the browser drops: the font is read whole, and is not plain.
+  const tab = b64(woff2)
+  const tabbed = notice(tree({ packages, sources, fonts: css(`"data:application/octet-stream;base64,${tab.slice(0, 8)}\t${tab.slice(8)}"`) }))
+  assert.match(tabbed.error, /a font in a data: URL \(application\/octet-stream\) not in plain base64/)
   // A font's bytes the check cannot read whole stop the build: escaped, padded wrong, or not in
   // base64, whatever its type says.
   const escaped = (bytes, type) => `data:${type};base64,${b64(bytes).replace(/=/g, '%3D').replace(/\+/g, '%2B')}`

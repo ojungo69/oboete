@@ -130,10 +130,28 @@ for (const font of dist.filter((f) => FONT.test(f))) {
   if (source.startsWith(own + sep)) hanken = true
 }
 // Each data: URL in the bundle's scripts, styles and pages that holds a font, by its type or by its
-// first bytes (a font labelled application/octet-stream too): its bytes are a listed package's
-// font, or Hanken Grotesk's. Vite writes a font's bytes in base64; a font whose bytes are written
-// otherwise (escaped, or with other characters) stops the build, as this check cannot read them.
-const DATA_URL = /data:([^;,'"()\s]*)((?:;[^;,'"()\s]*)*),([^'"()\s]*)/gi
+// header (a font labelled application/octet-stream too): its bytes are a listed package's font, or
+// Hanken Grotesk's. A URL is read as the browser reads it: to the end of the literal it is in (the
+// quote, backtick or parenthesis before it closes it; a bare one ends at whitespace), without the
+// tabs and line breaks URL parsing drops, and without its #fragment. Vite writes a font's bytes in
+// base64; a font whose payload is not plain base64 as written stops the build, as this check
+// compares that form alone.
+const DATA = /data:/gi
+const CLOSE = { '"': '"', "'": "'", '`': '`', '(': ')' }
+function* dataUrls(text) {
+  for (const m of text.matchAll(DATA)) {
+    const close = CLOSE[text[m.index - 1]]
+    let end = m.index
+    while (end < text.length && (close ? text[end] !== close : !/[\s"'`()]/.test(text[end]))) end++
+    const literal = text.slice(m.index + 5, end).replace(/[\t\n\r]/g, '')
+    const body = literal.split('#')[0]
+    const comma = body.indexOf(',')
+    if (comma < 0) continue
+    const [type, ...params] = body.slice(0, comma).split(';')
+    // `;base64` is the last of a data: URL's parameters (RFC 2397).
+    yield { type, base64: params.at(-1)?.toLowerCase() === 'base64', data: body.slice(comma + 1), written: text.slice(m.index, end) }
+  }
+}
 const FONT_TYPE = /^(font\/[\w.+-]+|application\/(x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)$/i
 // Base64 as Vite writes it: whole groups of four, `=` only to pad the last.
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
@@ -157,15 +175,15 @@ function isFont(b) {
 }
 const known = [...sources.values()].flat()
 for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
-  for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_URL)) {
-    // The bytes as the browser reads them, escapes undone, to tell a font by; a font goes in
-    // plain base64 alone, the form this check compares.
-    // Each %XX escape as the byte it stands for, whatever the bytes are (a font's are not UTF-8).
+  for (const { type, base64, data, written } of dataUrls(readFileSync(file, 'utf8'))) {
+    // The bytes as the browser reads them, each %XX escape the byte it stands for (a font's are
+    // not UTF-8), to tell a font by.
     const text = data.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    const base64 = /;base64$/i.test(params)
     const bytes = Buffer.from(text, base64 ? 'base64' : 'latin1')
     if (!FONT_TYPE.test(type) && !isFont(bytes)) continue
-    if (!base64 || !BASE64.test(data)) throw new Error(`${shown(file)}: a font in a data: URL (${type || 'no type'}) not in plain base64, which this check cannot read`)
+    // Plain base64 as written: no escape, no tab or line break inside.
+    const payload = written.split('#')[0].slice(written.indexOf(',') + 1)
+    if (!base64 || !BASE64.test(payload)) throw new Error(`${shown(file)}: a font in a data: URL (${type || 'no type'}) not in plain base64, which this check cannot read`)
     const source = known.find((f) => readFileSync(f).equals(bytes))
     if (!source) throw new Error(`${shown(file)}: a font inlined as a data: URL (${type || 'no type'}) that no package listed here holds, and no notice covers`)
     if (source.startsWith(own + sep)) hanken = true
