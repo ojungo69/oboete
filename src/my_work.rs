@@ -748,13 +748,26 @@ impl Request {
 /// deliverables (`listed`, the route's).
 #[cfg(test)]
 pub(crate) fn read(home: &Path, range: Range, now: i64) -> Result<Value> {
-    Ok(read_held(home, range, now, None)?.0)
+    Ok(read_held(home, range, now, None, None)?.0)
 }
 
 /// `read` as the page's list shows it: each request's card with its deliverables (docs/
 /// deliverables.md, slice 2b), a copy's link tag made by `tag`.
 pub(crate) fn listed(home: &Path, range: Range, now: i64, tag: Tag) -> Result<Value> {
-    Ok(read_held(home, range, now, Some(tag))?.0)
+    Ok(read_held(home, range, now, Some(tag), None)?.0)
+}
+
+/// `listed` with the Build story's texts as they were kept (`my_work_story::kept`), not as its
+/// read gates them, and every other text gated under `rules`, the rules the reader's answer is
+/// made under: the work-view's read (#1089), which gates the story it makes of them.
+pub(crate) fn listed_kept(
+    home: &Path,
+    range: Range,
+    now: i64,
+    tag: Tag,
+    rules: &Rules,
+) -> Result<Value> {
+    Ok(read_held(home, range, now, Some(tag), Some(rules))?.0)
 }
 
 /// What makes a copy's link tag (the viewer's `file_tag`).
@@ -768,7 +781,7 @@ pub(crate) fn anchored(anchor: &Key) -> String {
 /// `read` of every range, with what each request's check is filed under, in the answer's order:
 /// the review route's (rule 6).
 pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
-    read_held(home, Range::All, now, None)
+    read_held(home, Range::All, now, None, None)
 }
 
 /// What My Work reads of the stores before it makes requests: each conversation with its
@@ -943,11 +956,14 @@ fn gather(raw: &Raw, k: &Connection, rules: &Rules) -> Result<Gathered> {
     Ok(Gathered { convs, work, named })
 }
 
+/// `kept`: the work-view's read (`listed_kept`), under its answer's rules; else the rules are
+/// loaded here.
 fn read_held(
     home: &Path,
     range: Range,
     now: i64,
     cards: Option<Tag>,
+    kept: Option<&Rules>,
 ) -> Result<(Value, Vec<Held>)> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
@@ -961,7 +977,10 @@ fn read_held(
         Some(_) => Some(crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?),
         None => None,
     };
-    let rules = Rules::load(home)?;
+    let rules = match kept {
+        Some(rules) => rules.clone(),
+        None => Rules::load(home)?,
+    };
     let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
     let Built {
         convs,
@@ -1061,7 +1080,10 @@ fn read_held(
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
-    let story = crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?;
+    let story = match kept {
+        Some(_) => crate::my_work_story::kept(&k, raw.device(), &hidden, &rules)?,
+        None => crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?,
+    };
     // The page's read alone (`listed`), in its readers' hold.
     let subagents = match cards {
         Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,
@@ -2231,7 +2253,7 @@ fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
 }
 
 /// `keyed`'s first 12 hex digits: the fingerprint of a stored text the gate masks.
-fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+pub(crate) fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     Ok(keyed(held, home, key)?[..12].to_owned())
 }
 

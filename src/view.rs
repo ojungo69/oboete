@@ -2672,30 +2672,23 @@ impl Viewer {
                 answer
             }
             // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
-            // from the two answers above as they leave the gate, the requests of the last 7 days.
-            // Each text in it is one of theirs, and the text it makes of them, its Build story, goes
-            // through the gate again as it leaves (`work_view::gate`). One readers'
+            // from the two answers above as their readers give them, the requests of the last 7
+            // days, and the Build story's kept texts (`work_view::read`). Each text in it is one of
+            // theirs, gated at its source, and the snapshot goes through the gate in one walk as it
+            // leaves (#1089). One readers'
             // hold from the first read to the snapshot (#439), as one page's read takes: a forget
             // registers before both answers or after it. raw.db first, then the hold, the order a
-            // restore takes them in. The goals' read takes no hold of its own, so this one is its
-            // hold; My Work's read takes one more within it.
+            // restore takes them in. The goals' read and the story's take no hold of their own, so
+            // this one is theirs; My Work's read takes one more within it.
             "work-view" => {
                 let now = crate::db::now_ms();
                 // No store yet: an empty home's snapshot, at once. A reader that opened a store
                 // made meanwhile would read outside the hold below (Codex on #1087).
                 let Some(_stores) = crate::search::b::stores(&self.home)? else {
-                    let empty = crate::work_view::snapshot(&json!({}), &json!({}), now);
-                    return Ok(Response::json(&empty));
+                    return Ok(Response::json(&crate::work_view::empty(now)));
                 };
                 let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
-                // The work-view shows no deliverables yet: their links are not made.
-                let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
-                let week = crate::my_work::Range::Week;
-                let work = crate::my_work::listed(&self.home, week, now, &tag)?;
-                let goals = crate::my_work_goals::page(&self.home, now)?;
-                let (work, goals) = (answered("my-work", work), answered("my-goals", goals));
-                let snapshot = crate::work_view::snapshot(&work, &goals, now);
-                return Ok(Response::json(&snapshot));
+                return Ok(Response::json(&crate::work_view::answer(&self.home, now)?));
             }
             "work-view/version" => return self.api("version", q),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
@@ -3907,4 +3900,4 @@ fn params(query: &str) -> HashMap<String, String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

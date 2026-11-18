@@ -243,8 +243,27 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   address but oboete's own.
 - The pages read `GET /api/work-view`, claude-mem's snapshot of the work (`src/work_view.rs`). It is
   made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
-  they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not; the
-  text it makes of them, the Build story, goes through the gate again as it leaves. The
+  their readers give them, each text gated at its source, and from the Build story's kept texts,
+  and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
+  it is sent, and the Build story whole, read before any mask: each kept text as it was kept, as
+  the gate reads a stored text; and the views the pages receive and show (the kept texts joined,
+  each block of both as the pages split it, whole and with a heading's `#` marks off, and the story
+  as sent), each read so too and with its edges as they are (the pages keep a U+0085 the gate's own
+  reading trims). Then each view but the kept texts is read again as the masks leave it, until the
+  rules find nothing new. A rule that matches only a part of one stored
+  text the story cuts out, or only stored texts it joins, and that the stored text's own gate leaves
+  as oboete's own page does, is a known limit (decision 115). No rule on a key takes what the pages read by it:
+  the counts, days and times are read by the keys the code names. A request or conversation whose
+  id My Work masked, or whose id the gate would change in a shape the snapshot writes it in, goes
+  by a reference, `m:` and the keyed print of its stored id, the same in every place the pages
+  match it; no id My Work gives begins `m:`. A focus area's id (whole, within a goals item's
+  `a:<id>`, and as a request's area) and an open ask's go so too, by the print of the id in a
+  namespace of its kind; Other, the code's own placement, goes as its word. A work item's status goes as one of the words the
+  pages read, or as none. My Work and the goals gate their texts at their source under the home's
+  rules, and the references and the walk read with the rules the answer leaves through; both sets
+  are read before the stores and again once they are read, and the stores are read again under the
+  new sets when either changed meanwhile, so that a rule saved during the reads is in force in each
+  shape a text is gated in. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its

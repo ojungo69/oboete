@@ -791,6 +791,11 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
     page_at(home, now, &chrono::Local)
 }
 
+/// `page`, each text gated under `rules`: the work-view's read (#1089), under its answer's rules.
+pub(crate) fn page_with(home: &std::path::Path, now: i64, rules: &Rules) -> Result<Value> {
+    page_under(home, now, &chrono::Local, rules)
+}
+
 /// The current goals are this device's newest answered goals op's, each item with its quotes of
 /// the last 31 days and their times, the newest first: an item with none left is not shown, and
 /// the ranks are counted again within each kind, as the op can be older than the window (M5).
@@ -798,10 +803,19 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
 /// month's goals (M5) with the prompts read in it, the newest first. Every text through the gate
 /// (S6).
 fn page_at(home: &std::path::Path, now: i64, tz: &impl TimeZone) -> Result<Value> {
+    page_under(home, now, tz, &Rules::load(home)?)
+}
+
+/// `page_at` under `rules`.
+fn page_under(
+    home: &std::path::Path,
+    now: i64,
+    tz: &impl TimeZone,
+    rules: &Rules,
+) -> Result<Value> {
     let days = WINDOW_MS / DAY_MS;
     let this = local(now, tz, "%Y-%m");
-    let rules = Rules::load(home)?;
-    let gate = |t: &str| crate::redact::outbound_with(t, &rules);
+    let gate = |t: &str| crate::redact::outbound_with(t, rules);
     // No store yet: no goals, and the page's answer as it is for none.
     let (ops, times) = match crate::search::b::stores(home)? {
         None => (Vec::new(), Vec::new()),

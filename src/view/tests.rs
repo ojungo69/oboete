@@ -2116,8 +2116,9 @@ fn the_work_view_route_answers_through_the_gate() {
     let (read_ids, read_streams) = (ids(&first), streams(&first));
     assert_eq!(read_ids.len(), 2, "{text}");
     assert_ne!(read_ids[0], read_ids[1]);
+    // Each goes by its reference, which tells nothing of it (#1089).
     assert!(
-        read_ids.iter().all(|id| id.starts_with("r:[REDACTED]#")),
+        read_ids.iter().all(|id| id.starts_with("m:")),
         "{read_ids:?}"
     );
     let two: Vec<&Vec<String>> = read_streams.iter().filter(|w| w.len() == 2).collect();
@@ -2158,7 +2159,8 @@ fn the_work_views_story_leaves_through_the_gate() {
         ("## Project Phoenix", "Project Phoenix"),
     ] {
         let work = json!({"story": {"recap": recap, "chapters": chapters}});
-        let snapshot = crate::work_view::snapshot(&work, &json!({}), 0);
+        let gate = crate::work_view::Gate::now();
+        let snapshot = crate::work_view::snapshot_at(&work, &json!({}), 0, &chrono::Local, &gate);
         let narrative = snapshot["story"]["story"]["narrative"].as_str().unwrap();
         assert!(!narrative.contains(hidden), "{narrative}");
         assert_eq!(narrative.split("\n\n").count(), 3, "{narrative}");
@@ -4243,7 +4245,7 @@ fn the_page_forgets_a_session_and_its_reads_show_it_gone() {
 /// Egress is process-wide: a test that exercises its real configuration runs alone in a child
 /// process, without changing the rules seen by unrelated tests running in this process. True
 /// in the child; here, false once the child passed.
-fn in_child(test: &str) -> bool {
+pub(crate) fn in_child(test: &str) -> bool {
     // The test's own name, so that a value this process inherited runs nothing here
     // (Sourcery on #576).
     const CHILD: &str = "OBOETE_EGRESS_TEST_CHILD";

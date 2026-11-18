@@ -1,0 +1,122 @@
+[
+  {
+    "name": "a heading masked whole, which another rule needs in the story",
+    "hidden": "qwertyuiopasdf",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n## [REDACTED]\n\n[REDACTED] is in the drawer.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "an issue's number after a recap that ends on a rule's keyword",
+    "hidden": "asdfghjklzxcvb",
+    "story": {
+      "story": {
+        "narrative": "Ask for the [REDACTED]\n\n## [REDACTED]\n\n⁠[REDACTED] went out.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading followed by prose, as the pages show it",
+    "hidden": "Project Phoenix",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nThe rest is prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a value a rule finds beside what a mask left",
+    "hidden": "123456",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n[REDACTED] is the code.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading and a line of prose under it, as they were kept",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n[REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap of a heading alone, as it was kept",
+    "hidden": "Release",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading masked in part, read again as the pages show it",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED] [REDACTED]\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a paragraph masked in part by a rule that needs the next, read again alone",
+    "hidden": "42",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED] [REDACTED] Beta\n\nGamma\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a paragraph that opens with an issue's number, read without its word joiner",
+    "hidden": "zebravalue",
+    "story": {
+      "story": {
+        "narrative": "⁠#1087 [REDACTED]\n\nOther.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a block that would open with a character the gate's reading drops",
+    "hidden": "",
+    "story": {
+      "story": {
+        "narrative": "Orchid\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading over prose whose text opens with a character the gate's reading drops",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nOrdinary prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading over prose whose text a rule finds once the gate's reading trims it",
+    "hidden": "Zinnia",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nOrdinary prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  }
+]

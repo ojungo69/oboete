@@ -1,26 +1,62 @@
 //! claude-mem 15.19.0's work-view snapshot (decision 114, docs/page.md): the answer of
 //! `GET /api/work-view`, which the vendored pages read in claude-mem's legacy mode
-//! (`ui/work-view/`). It is made from oboete's My Work and goals answers after the outbound gate
-//! (`view::answered`), and reads nothing else: each text in it is one of theirs or a word of this
-//! file's. The names follow claude-mem's `live/work-view-api-types.ts`. The contract test runs
+//! (`ui/work-view/`). It is made from oboete's My Work and goals answers as their readers give
+//! them, each text gated at its source, and the Build story's kept texts (`read`), and reads
+//! nothing else: each text in it is one of theirs or a word of this file's. It goes through the
+//! gate in one walk as it leaves (`leaving`, #1089). The names follow claude-mem's `live/work-view-api-types.ts`. The contract test runs
 //! claude-mem's own mapper, `live/to-work-model.ts`, over the answer of a synthetic home
 //! (`ui/work-view/contract/`).
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use chrono::{Local, Months, NaiveDate, SecondsFormat, TimeZone, Utc};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
-/// The snapshot, its goals' times in this machine's zone: the pages show those as written.
-pub(crate) fn snapshot(work: &Value, goals: &Value, now: i64) -> Value {
-    snapshot_at(work, goals, now, &Local)
+/// `GET /api/work-view`'s answer: what `read` reads, made into the snapshot, its goals' times in
+/// this machine's zone, which the pages show as written.
+pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
+    answered(home, now, Gate::now)
 }
 
-/// `snapshot`, its goals' times in `tz`.
-pub(crate) fn snapshot_at<Tz: TimeZone>(work: &Value, goals: &Value, now: i64, tz: &Tz) -> Value
+/// How many times `answered` reads the stores before it gives up on rules that keep changing.
+const READS: usize = 3;
+
+/// `answer`, the rules it leaves through as `rules_now` reads them: two sets of rules for the
+/// whole answer, read before the stores are read and again once they are, the home's, which My
+/// Work and its goals gate their texts under at their source (`read`), and those the references of
+/// what the gate would mask (`refer`) and the walk and the story of the snapshot read with (the
+/// same file's in the viewer). When either changed while the stores were read, they are read again
+/// under the new sets, so that a rule saved meanwhile is in force in the shapes My Work gates at
+/// its source and the walk does not read again too (an id's parts, a work item's text beside its
+/// key: Codex on #1093).
+fn answered(home: &Path, now: i64, mut rules_now: impl FnMut() -> Gate) -> anyhow::Result<Value> {
+    let mut gate = rules_now();
+    let mut source = crate::redact::Rules::load(home)?;
+    for _ in 0..READS {
+        let (mut work, goals) = read(home, now, &source)?;
+        let after = rules_now();
+        let after_source = crate::redact::Rules::load(home)?;
+        if after.version() == gate.version() && after_source.version() == source.version() {
+            refer(home, &mut work, &gate)?;
+            return Ok(snapshot_at(&work, &goals, now, &Local, &gate));
+        }
+        (gate, source) = (after, after_source);
+    }
+    anyhow::bail!("the redaction rules changed while each of {READS} reads of the work view ran")
+}
+
+/// The snapshot of `work` and `goals`, its goals' times in `tz`, through `gate`.
+pub(crate) fn snapshot_at<Tz: TimeZone>(
+    work: &Value,
+    goals: &Value,
+    now: i64,
+    tz: &Tz,
+    gate: &Gate,
+) -> Value
 where
     Tz::Offset: Display,
 {
@@ -32,14 +68,14 @@ where
     let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
     // The pages count unlinked work and read nothing of it.
     let unlinked = usize::try_from(work["unlinked"].as_u64().unwrap_or(0)).unwrap_or(0);
-    json!({
+    let snapshot = json!({
         "version": 1, "generatedAt": iso(now), "revision": now.to_string(),
         "source": {"kind": "oboete", "connected": true, "error": null, "lastCheckedAt": iso(now)},
         "agents": agents, "humanRequests": requests, "unlinkedWork": vec![json!({}); unlinked],
         "focusAreas": areas, "goals": goals_list(work, goals, now, tz),
         "goalHistory": history(goals, now, tz),
         "ruleScopes": [{"id": "everywhere", "tier": "everywhere", "name": "Everywhere"}],
-        "rules": [], "story": build_story(&work["story"]), "refresh": null,
+        "rules": [], "story": build_story(&work["story"], gate), "refresh": null,
         // oboete has no cloud sync: a valid "unconfigured" block (`sync-presentation.ts:23-36`)
         // shows "Cloud sync off" where a missing one shows "Cloud freshness unknown".
         "sync": {"configured": false, "state": "unconfigured", "mode": "disabled",
@@ -48,7 +84,187 @@ where
             "projection": {"remaining": null},
             "completeness": {"pushQuarantine": 0, "pullQuarantine": 0, "excludedNative": null,
                 "scope": "unknown"}},
-    })
+    });
+    leaving(snapshot, "", gate)
+}
+
+/// What the snapshot is made of, read as `GET /api/work-view` reads it, in the readers' hold
+/// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
+/// text gated at its source and none of their keys, so that the counts, days and times the pages
+/// need are read by the keys this file names whatever a rule finds in a key; and the Build story's
+/// texts as they were kept (`build_story` gates the story it makes of them). Both gate their texts
+/// under `rules`, the home's as the answer read them.
+pub(crate) fn read(
+    home: &Path,
+    now: i64,
+    rules: &crate::redact::Rules,
+) -> anyhow::Result<(Value, Value)> {
+    // The work-view shows no deliverables yet: their links are not made.
+    let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
+    let week = crate::my_work::Range::Week;
+    let work = crate::my_work::listed_kept(home, week, now, &tag, rules)?;
+    let goals = crate::my_work_goals::page_with(home, now, rules)?;
+    Ok((work, goals))
+}
+
+/// The snapshot of a home with no store yet.
+pub(crate) fn empty(now: i64) -> Value {
+    snapshot_at(&json!({}), &json!({}), now, &Local, &Gate::now())
+}
+
+/// Marks each request and each conversation of `work` whose id goes by a reference in the
+/// snapshot (`ref`): one My Work masked (its `fingerprint`), or one the gate would change in a
+/// shape the snapshot writes it in (a conversation's id, its agent's id and its key; a request's
+/// id). The reference is `m:` and the keyed print of the stored id, as My Work's own prints are
+/// (`my_work::shown_id`): the same from read to read and in every request that names it, and
+/// nothing of a guess at the id. No id My Work gives begins `m:` (its ids are `c:`, `r:` and
+/// `g:`), so no request's or conversation's own id is another's reference, and each reference is
+/// one stored id's (#1089). A group's id is its print alone already, and goes as it is. A focus
+/// area's id, which the snapshot writes whole (an area's, a request's area, an ask's area) and
+/// within a goals item's (`a:<id>`), and an open ask's id go so too, by the print of the id in a
+/// namespace of its kind (Codex on #1093).
+fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
+    let mut key = None;
+    let mut refer = |v: &mut Value, shapes: Vec<String>| -> anyhow::Result<()> {
+        let id = v["id"].as_str().unwrap_or_default().to_owned();
+        let print = v["fingerprint"].as_str().map(str::to_owned);
+        let group = print.as_ref().is_some_and(|p| id == format!("g:{p}"));
+        if (print.is_some() && !group) || shapes.iter().any(|s| gate.out(s) != *s) {
+            // A masked id's fingerprint is the keyed print of the stored one; an id My Work shows
+            // is the stored one.
+            let print = match print {
+                Some(print) => print,
+                None => crate::my_work::keyed_print(&id, home, &mut key)?,
+            };
+            v["ref"] = json!(format!("m:{print}"));
+        }
+        Ok(())
+    };
+    let requests = work.get_mut("requests").and_then(Value::as_array_mut);
+    for r in requests.into_iter().flatten() {
+        let sessions = r.get_mut("sessions").and_then(Value::as_array_mut);
+        for c in sessions.into_iter().flatten() {
+            let agent = c["agent"].as_str().unwrap_or("").to_owned();
+            let id = c["id"].as_str().unwrap_or("").to_owned();
+            let shapes = vec![agent_id(&agent, &id), conversation_key(&agent, &id), id];
+            refer(c, shapes)?;
+        }
+        let id = r["id"].as_str().unwrap_or("").to_owned();
+        refer(r, vec![id])?;
+    }
+    let mut swap = |v: Option<&mut Value>, kind: &str| -> anyhow::Result<()> {
+        let Some(v) = v else {
+            return Ok(());
+        };
+        let Some(id) = v.as_str().map(str::to_owned) else {
+            return Ok(());
+        };
+        // Other is a placement of the code's, not an area's id: the pages read it by its word.
+        if kind == "area" && id == crate::my_work_focus::OTHER {
+            return Ok(());
+        }
+        let mut shapes = vec![id.clone()];
+        if kind == "area" {
+            shapes.push(format!("a:{id}"));
+        }
+        if shapes.iter().any(|s| gate.out(s) != *s) {
+            let print = crate::my_work::keyed_print(&format!("{kind}:{id}"), home, &mut key)?;
+            *v = json!(format!("m:{print}"));
+        }
+        Ok(())
+    };
+    let requests = work.get_mut("requests").and_then(Value::as_array_mut);
+    for r in requests.into_iter().flatten() {
+        swap(r.get_mut("focus"), "area")?;
+    }
+    let areas = work.get_mut("areas").and_then(Value::as_array_mut);
+    for a in areas.into_iter().flatten() {
+        swap(a.get_mut("id"), "area")?;
+        let asks = a.get_mut("asks").and_then(Value::as_array_mut);
+        for k in asks.into_iter().flatten() {
+            swap(k.get_mut("id"), "ask")?;
+        }
+    }
+    let others = work.get_mut("other_asks").and_then(Value::as_array_mut);
+    for k in others.into_iter().flatten() {
+        swap(k.get_mut("id"), "ask")?;
+    }
+    Ok(())
+}
+
+/// A conversation's agent's id in the snapshot, by which the pages give a request its agent
+/// (`agentIds`, `to-work-model.ts:154`): its platform, a word of this file's in place of the
+/// agent's own name, which the raw hook takes as given, and the conversation's id or reference.
+/// The conversation's id, `c:`, its agent's name and its session, goes as it is only where the gate
+/// leaves it and each of these shapes as they are (`refer`); else its reference goes (#1089).
+fn agent_id(agent: &str, id: &str) -> String {
+    format!("{}:{id}", platform(agent))
+}
+
+/// A conversation's key, which the pages parse for its platform and id (`to-work-model.ts:88-92`).
+fn conversation_key(agent: &str, id: &str) -> String {
+    json!(["conversation", platform(agent), id]).to_string()
+}
+
+/// The keys of the snapshot's strings that its walk through the gate leaves as they are (#1089):
+/// the selectors the pages match on (an id, a key, an agent's), whose mask would move or join what
+/// they name, and the code's own words and times, which hold none of the owner's.
+const OWN: &[&str] = &[
+    "id",
+    "agentIds",
+    "conversationKeys",
+    "contentSessionId",
+    "contentFingerprint",
+    "focusAreaId",
+    "listId",
+    // A list's name: `goals`, or a finished month, which the pages take as its id.
+    "listName",
+    "platformSource",
+    "label",
+    "kind",
+    "status",
+    "state",
+    "source",
+    "decidedBy",
+    "titleSource",
+    "tier",
+    "mode",
+    "scope",
+    "url",
+    "revision",
+    "generatedAt",
+    "lastCheckedAt",
+    "updatedAt",
+    "checkedAt",
+    "observedAt",
+    "at",
+    "shippedAt",
+    "latestAt",
+    "periodStart",
+    "periodEnd",
+    "writtenAt",
+];
+
+/// `v` with each string under a key not in `OWN` through the gate as it is sent (#1089), and no
+/// key gated: each is this file's. The Build story went through it whole as it was made.
+fn leaving(v: Value, key: &str, gate: &Gate) -> Value {
+    match v {
+        Value::String(s) if !OWN.contains(&key) => Value::String(gate.out(&s)),
+        Value::Array(xs) => Value::Array(xs.into_iter().map(|x| leaving(x, key, gate)).collect()),
+        Value::Object(m) => Value::Object(
+            (m.into_iter())
+                .map(|(k, x)| {
+                    let x = if k == "story" {
+                        x
+                    } else {
+                        leaving(x, &k, gate)
+                    };
+                    (k, x)
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// The Build story: the recap, then each week's chapter under its week. The mapper splits the
@@ -57,58 +273,196 @@ where
 /// recap of headings alone gives their text as its paragraphs, as the pages show a heading's. A
 /// story with no paragraph at all, which the pages would not show, gives the text of its first
 /// heading of its own, not a week's, as one.
-fn build_story(story: &Value) -> Value {
-    let recap = story["recap"].as_str().map(blocks).unwrap_or_default();
-    let mut out: Vec<String> = match recap.iter().any(|b| !b.starts_with('#')) {
-        true => recap,
-        false => (recap.iter())
-            .filter_map(|h| prose(h.trim_start_matches('#')))
-            .collect(),
-    };
-    let mut weeks = Vec::new();
+///
+/// `story` holds the texts as they were kept (`my_work::listed_kept`): the gate of their writing
+/// read them text by text. The story made of them goes through the gate once, as it leaves
+/// (#1089). What the gate hides is found before any of it is masked: in each kept text as it was
+/// kept, in the story joined with none of the adapter's marks but its blank lines, in each block
+/// as the pages split it, whole and with a heading's `#` marks off, and in the story as it is
+/// sent. So no mask takes the context a rule needs elsewhere, and no word joiner of the adapter's
+/// stands inside a match. Then the rules read each of those views again as the masks leave it,
+/// until they find nothing new (`Narrative::leave`). Its own marks stay: the blank lines between
+/// its blocks, a week heading's `## ` and a paragraph's word joiner.
+fn build_story(story: &Value, gate: &Gate) -> Value {
+    let recap = story["recap"].as_str().unwrap_or_default();
+    let mut texts = vec![recap];
+    let mut out = blocks(recap, 0);
+    if !out.iter().any(|b| !b.heading) {
+        out = out.iter().filter_map(|h| h.as_prose(recap)).collect();
+    }
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
-            weeks.push(out.len());
-            out.push(format!("## {}", gate(week)));
-            out.extend(blocks(text));
+            out.push(Block::week(week, texts.len()));
+            texts.push(week);
+            out.extend(blocks(text, texts.len()));
+            texts.push(text);
         }
     }
-    if out.iter().all(|b| b.starts_with('#')) {
-        let first = (0..out.len())
-            .filter(|i| !weeks.contains(i))
-            .find_map(|i| Some((i, prose(out[i].trim_start_matches('#'))?)));
-        if let Some((i, text)) = first {
-            out[i] = text;
+    if out.iter().all(|b| b.heading) {
+        let first = (0..out.len()).filter(|&i| !out[i].week).find_map(|i| {
+            let shown = out[i].as_prose(texts[out[i].from])?;
+            Some((i, shown))
+        });
+        if let Some((i, block)) = first {
+            out[i] = block;
         }
     }
     if out.is_empty() {
         return Value::Null;
     }
-    // The story they make goes through the gate as one text, as it leaves: a rule can find across a
-    // recap and a chapter what it finds in neither (Codex on #1087). Its own marks stay as they
-    // are: the blank lines between its blocks, a week heading's `## ` and a paragraph's word joiner.
-    let (mut narrative, mut kept) = (String::new(), Vec::new());
-    for (i, block) in out.iter().enumerate() {
-        let start = narrative.len();
-        if i > 0 {
-            narrative.push_str("\n\n");
-        }
-        let own = match (weeks.contains(&i), block.starts_with('\u{2060}')) {
-            (true, _) => "## ".len(),
-            (false, true) => '\u{2060}'.len_utf8(),
-            (false, false) => 0,
-        };
-        kept.push((start, narrative.len() + own));
-        narrative.push_str(block);
+    let mut n = Narrative::new(&texts);
+    for (i, b) in out.iter().enumerate() {
+        n.block(b, i > 0);
     }
-    kept.retain(|(from, to)| from < to);
-    let narrative = crate::redact::outbound_but(&narrative, &kept);
-    json!({"story": {"narrative": narrative, "writtenAt": null}})
+    json!({"story": {"narrative": n.leave(&texts, gate), "writtenAt": null}})
+}
+
+/// The rules of one answer (`redact::rules_now`): none while their table is wrong, which masks
+/// every text whole, as `redact::outbound` does.
+pub(crate) struct Gate(Option<std::sync::Arc<crate::redact::Rules>>);
+
+impl Gate {
+    pub(crate) fn now() -> Gate {
+        Gate(crate::redact::rules_now())
+    }
+
+    /// The version of its rules (`Rules::version`), which a change of a rule or a kept value
+    /// changes; none while their table is wrong.
+    fn version(&self) -> Option<&str> {
+        self.0.as_deref().map(crate::redact::Rules::version)
+    }
+
+    /// `text` through the gate, as `redact::outbound` sends it.
+    fn out(&self, text: &str) -> String {
+        match &self.0 {
+            Some(rules) => crate::redact::outbound_with(text, rules),
+            None => crate::redact::MASK.to_owned(),
+        }
+    }
+
+    /// What the gate hides in `text`, a stored text as it is stored, as oboete's own page reads it;
+    /// none when it masks the whole of it.
+    fn hidden(&self, text: &str) -> Option<Vec<(usize, usize)>> {
+        crate::redact::hidden(text, self.0.as_ref()?)
+    }
+
+    /// What the gate hides in `text` read with its edges as they are (`redact::hidden_exact`),
+    /// where the pages keep a character the gate's own reading trims (U+0085); none when it masks
+    /// the whole of it.
+    fn hidden_exact(&self, text: &str) -> Option<Vec<(usize, usize)>> {
+        crate::redact::hidden_exact(text, self.0.as_ref()?)
+    }
+}
+
+/// A block of a kept text as the pages read it: a heading line or a paragraph, trimmed as the
+/// pages trim, each piece of it at its place in the kept text it is of (`from`: the recap, a week
+/// or a chapter's text).
+struct Block {
+    pieces: Vec<Piece>,
+    heading: bool,
+    week: bool,
+    joiner: bool,
+    from: usize,
+}
+
+/// Words of a kept text at `at` in it; or the line break between two lines of a paragraph, which
+/// stands for the kept text's own `\n` at `at`.
+struct Piece {
+    text: String,
+    at: usize,
+}
+
+/// Where `part`, a slice of `text`, starts in it.
+fn offset(text: &str, part: &str) -> usize {
+    part.as_ptr() as usize - text.as_ptr() as usize
+}
+
+impl Block {
+    fn heading(text: &str, line: &str, from: usize) -> Block {
+        let line = line.trim_matches(edge);
+        let pieces = vec![Piece {
+            text: line.to_owned(),
+            at: offset(text, line),
+        }];
+        Block {
+            pieces,
+            heading: true,
+            week: false,
+            joiner: false,
+            from,
+        }
+    }
+
+    /// A chapter's heading: its week, with `## ` before it.
+    fn week(week: &str, from: usize) -> Block {
+        let pieces = vec![Piece {
+            text: week.to_owned(),
+            at: 0,
+        }];
+        Block {
+            pieces,
+            heading: true,
+            week: true,
+            joiner: false,
+            from,
+        }
+    }
+
+    /// A paragraph of `lines` (slices of `text`) as the pages read it, or none when they would
+    /// show it as nothing. The pages take a block for a heading when it opens with `#` once its
+    /// bold and code marks are off, so a paragraph that would (an issue's number: `#1087`,
+    /// `**#1087**`) opens with a word joiner, and the pages read it as the prose it is.
+    fn prose(text: &str, lines: &[&str], from: usize) -> Option<Block> {
+        static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+        static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+        let last = lines.len().checked_sub(1)?;
+        let mut pieces = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                let at = offset(text, line) - 1;
+                pieces.push(Piece {
+                    text: "\n".to_owned(),
+                    at,
+                });
+            }
+            let mut words: &str = line;
+            if i == 0 {
+                words = words.trim_start_matches(edge);
+            }
+            if i == last {
+                words = words.trim_end_matches(edge);
+            }
+            pieces.push(Piece {
+                text: words.to_owned(),
+                at: offset(text, words),
+            });
+        }
+        let shown: String = pieces.iter().map(|p| p.text.as_str()).collect();
+        let shown = BOLD.replace_all(&shown, "$1");
+        let shown = CODE.replace_all(&shown, "$1");
+        let first = shown.split(space).find(|w| !w.is_empty())?;
+        let joiner = first.starts_with('#');
+        Some(Block {
+            pieces,
+            heading: false,
+            week: false,
+            joiner,
+            from,
+        })
+    }
+
+    /// A heading as a paragraph of its text, its marks off, as the pages show a recap of headings
+    /// alone; `text` is the kept text it is of.
+    fn as_prose(&self, text: &str) -> Option<Block> {
+        let p = self.pieces.first()?;
+        let line = &text[p.at..p.at + p.text.len()];
+        Block::prose(text, &[line.trim_start_matches('#')], self.from)
+    }
 }
 
 /// A text's blocks as the pages read a narrative (`to-work-model.ts:433-442`): a Markdown heading
 /// line is a block of its own, and the lines between headings and blank lines are a paragraph.
-fn blocks(text: &str) -> Vec<String> {
+fn blocks(text: &str, from: usize) -> Vec<Block> {
     fn heading(line: &str) -> bool {
         let t = line.trim_start_matches(space);
         let n = t.bytes().take_while(|&b| b == b'#').count();
@@ -118,46 +472,250 @@ fn blocks(text: &str) -> Vec<String> {
     for line in text.lines() {
         let blank = line.chars().all(space);
         if blank || heading(line) {
-            out.extend(prose(&lines.join("\n")));
+            out.extend(Block::prose(text, &lines, from));
             lines.clear();
         }
         if heading(line) {
-            out.push(gate(line.trim_matches(space)));
+            out.push(Block::heading(text, line, from));
         } else if !blank {
             lines.push(line);
         }
     }
-    out.extend(prose(&lines.join("\n")));
+    out.extend(Block::prose(text, &lines, from));
     out
 }
 
-/// A paragraph as the pages read it, or none when they would show it as nothing. The pages take a
-/// block for a heading when it opens with `#` once its bold and code marks are off, so a paragraph
-/// that would (an issue's number: `#1087`, `**#1087**`) opens with a word joiner, and the pages
-/// read it as the prose it is. It goes through the gate as it leaves (`gate`).
-fn prose(block: &str) -> Option<String> {
-    static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
-    static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
-    let block = gate(block.trim_matches(space));
-    let shown = BOLD.replace_all(&block, "$1");
-    let shown = CODE.replace_all(&shown, "$1");
-    let first = shown.split(space).find(|w| !w.is_empty())?;
-    Some(match first.starts_with('#') {
-        true => format!("\u{2060}{block}"),
-        false => block.clone(),
-    })
+/// The Build story as it is made (#1089): `sent`, the narrative as it leaves, and which of its
+/// bytes are the adapter's own marks (`mark`); for each kept text, where each of its bytes went in
+/// `sent`, if it went (`went`); and `plain`, the story's words joined with none of the adapter's
+/// marks but its blank lines, each of its bytes at `at` in `sent`.
+struct Narrative {
+    sent: String,
+    mark: Vec<bool>,
+    went: Vec<Vec<Option<usize>>>,
+    plain: String,
+    at: Vec<Option<usize>>,
 }
 
-/// A text the adapter made of the gated answers' texts, through the gate again as it leaves: a rule
-/// can find in a heading's text, standing by itself, what it found in neither (Codex on #1087). The
-/// rules read it as it is, with no private block taken out, as the answers' texts are past that.
-fn gate(text: &str) -> String {
-    crate::redact::outbound_but(text, &[])
+/// The most times the story is read again for what its masks left: as many as the gate reads one
+/// text (`redact`'s own bound). Still finding then, every word of it is masked.
+const PASSES: usize = 64;
+
+impl Narrative {
+    fn new(texts: &[&str]) -> Narrative {
+        Narrative {
+            sent: String::new(),
+            mark: Vec::new(),
+            went: texts.iter().map(|t| vec![None; t.len()]).collect(),
+            plain: String::new(),
+            at: Vec::new(),
+        }
+    }
+
+    /// `b`, after a blank line when it is not the first block.
+    fn block(&mut self, b: &Block, after: bool) {
+        if after {
+            self.mark("\n\n", true);
+        }
+        if b.week {
+            self.mark("## ", false);
+        }
+        if b.joiner {
+            self.mark("\u{2060}", false);
+        }
+        for p in &b.pieces {
+            let at = self.sent.len();
+            let went = &mut self.went[b.from][p.at..p.at + p.text.len()];
+            for (i, slot) in went.iter_mut().enumerate() {
+                *slot = Some(at + i);
+            }
+            self.words(&p.text);
+        }
+    }
+
+    /// One of the adapter's own marks in `sent`, and in `plain` too when it is the blank line
+    /// between two blocks, so that no two blocks run together there.
+    fn mark(&mut self, mark: &str, plain: bool) {
+        let at = self.sent.len();
+        self.sent.push_str(mark);
+        self.mark.resize(self.sent.len(), true);
+        if plain {
+            self.plain.push_str(mark);
+            self.at.extend((at..self.sent.len()).map(Some));
+        }
+    }
+
+    /// A kept text's words, in both.
+    fn words(&mut self, text: &str) {
+        let at = self.sent.len();
+        self.sent.push_str(text);
+        self.mark.resize(self.sent.len(), false);
+        self.plain.push_str(text);
+        self.at.extend((at..self.sent.len()).map(Some));
+    }
+
+    /// `sent` with what the gate hides masked, found before any mask and then read again until it
+    /// finds nothing new, as the gate reads one text (#1089). Each pass reads the views of the story
+    /// as its masks so far leave it: the story as sent; its words joined with no mark of the
+    /// adapter's but its blank lines; and each block of both as the pages split it, whole and, as
+    /// the pages show every block, with a heading's leading `#` marks off, so that a paragraph is
+    /// read with its word joiner and without it. The first pass, before
+    /// any mask, reads each kept text as it was kept too. A pass reads all its views before it
+    /// masks what they found, so that no mask of one takes the context a rule needs in another. The
+    /// adapter's marks stay as they are: a mask that runs over one is cut on each side of it. Still
+    /// finding after `PASSES`, every word is masked.
+    fn leave(self, texts: &[&str], gate: &Gate) -> String {
+        let mut masked = vec![false; self.sent.len()];
+        let sent_at: Vec<Option<usize>> = (0..self.sent.len()).map(Some).collect();
+        for pass in 0..=PASSES {
+            let sent = shown(&self.sent, &sent_at, &masked);
+            let plain = shown(&self.plain, &self.at, &masked);
+            let blocks = [
+                (&sent, page_blocks(&sent.0)),
+                (&plain, page_blocks(&plain.0)),
+            ];
+            let mut found = Vec::new();
+            // Each view is read where it is, none copied: a kept text as the gate reads a stored
+            // one, and a view of the story as the pages receive or show it so too and with its
+            // edges as they are, as a heading's text after its marks may open with a U+0085 the
+            // pages keep and the gate's own reading trims (Codex on #1093).
+            let mut read = |text: &str, at: &[Option<usize>], stored: bool| {
+                let whole = || vec![(0, text.len())];
+                let mut hidden = gate.hidden(text).unwrap_or_else(whole);
+                if !stored {
+                    hidden.extend(gate.hidden_exact(text).unwrap_or_else(whole));
+                }
+                for (s, e) in hidden {
+                    let words = at[s..e].iter().flatten().copied();
+                    found.extend(words.filter(|&p| !self.mark[p] && !masked[p]));
+                }
+            };
+            for ((text, at), ranges) in &blocks {
+                for r in ranges {
+                    read(&text[r.clone()], &at[r.clone()], false);
+                }
+            }
+            if pass == 0 {
+                for (text, went) in texts.iter().zip(&self.went) {
+                    read(text, went, true);
+                }
+            }
+            read(&plain.0, &plain.1, false);
+            read(&sent.0, &sent.1, false);
+            if found.is_empty() {
+                break;
+            }
+            if pass == PASSES {
+                masked = self.mark.iter().map(|m| !m).collect();
+                break;
+            }
+            for p in found {
+                masked[p] = true;
+            }
+        }
+        shown(&self.sent, &sent_at, &masked).0
+    }
+}
+
+/// `text` with each run of its bytes that stand for a masked byte of the story as sent (`at`)
+/// shown as one mask, and, for each byte of what comes back, the byte of the story it stands for:
+/// none for a mask, which is masked already, or for what the story does not send.
+fn shown(text: &str, at: &[Option<usize>], masked: &[bool]) -> (String, Vec<Option<usize>>) {
+    let hidden = |i: usize| at[i].is_some_and(|p| masked[p]);
+    let (mut out, mut from) = (
+        String::with_capacity(text.len()),
+        Vec::with_capacity(text.len()),
+    );
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if hidden(i) {
+            while chars.next_if(|&(j, _)| hidden(j)).is_some() {}
+            out.push_str(crate::redact::MASK);
+            from.resize(out.len(), None);
+        } else {
+            out.push(c);
+            from.extend_from_slice(&at[i..i + c.len_utf8()]);
+        }
+    }
+    (out, from)
+}
+
+/// Where the blocks of a narrative are as the pages split it (`to-work-model.ts:435`: at a line of
+/// nothing but whitespace), each trimmed, and each that opens with `#` once more with those marks
+/// and the whitespace after them off, as the pages show every block (`to-work-model.ts:439`).
+fn page_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+    // Where each blank line is: from a line break to the last line break of the whitespace after it.
+    let mut cuts = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '\n' {
+            continue;
+        }
+        let mut last = None;
+        while let Some((j, w)) = chars.next_if(|&(_, w)| space(w)) {
+            if w == '\n' {
+                last = Some(j);
+            }
+        }
+        if let Some(last) = last {
+            cuts.push((i, last + 1));
+        }
+    }
+    let starts = std::iter::once(0).chain(cuts.iter().map(|c| c.1));
+    let ends = cuts.iter().map(|c| c.0).chain(std::iter::once(text.len()));
+    let mut out = Vec::new();
+    for (start, end) in starts.zip(ends) {
+        let block = text[start..end].trim_matches(space);
+        if block.is_empty() {
+            continue;
+        }
+        let from = offset(text, block);
+        out.push(from..from + block.len());
+        let shown = block.trim_start_matches('#').trim_start_matches(space);
+        if shown.len() < block.len() && !shown.is_empty() {
+            let from = offset(text, shown);
+            out.push(from..from + shown.len());
+        }
+    }
+    out
+}
+
+/// A work item's status as the pages read it (`status-normalization.ts:22-47`), as one of the
+/// words they read or as none: another spelling is text, which a rule may find as it is sent and
+/// not as it was kept, and the pages read nothing of it (#1089).
+fn item_status(status: &str) -> &'static str {
+    const READ: [&str; 15] = [
+        "needs-you",
+        "needs-review",
+        "blocked",
+        "failed",
+        "done",
+        "completed",
+        "dropped",
+        "doing",
+        "in-progress",
+        "active",
+        "running",
+        "open",
+        "todo",
+        "planned",
+        "queued",
+    ];
+    let status = crate::my_work::normalized(status);
+    READ.into_iter().find(|w| *w == status).unwrap_or("")
 }
 
 /// JavaScript's `\s`, by which the pages split and trim: Rust's whitespace but U+0085, and U+FEFF.
 fn space(c: char) -> bool {
     (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}'
+}
+
+/// What a block is trimmed of at its edges: JavaScript's whitespace, which the pages trim, and
+/// Rust's, which the gate trims before it reads a text (`redact::hidden`). So no block of the
+/// story opens or ends with a character the pages keep and the gate's reading drops (U+0085), and
+/// a rule anchored at a block's edge reads the block as the pages show it (#1089).
+fn edge(c: char) -> bool {
+    space(c) || c.is_whitespace()
 }
 
 /// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.
@@ -212,13 +770,20 @@ fn arr(v: &Value) -> &[Value] {
     v.as_array().map_or(&[][..], Vec::as_slice)
 }
 
-/// claude-mem's platform for an oboete agent. The same name goes in the conversation keys, which
-/// find their agent by it (`to-work-model.ts:226`); a name claude-mem does not know shows as the
-/// tool "other".
-fn platform(agent: &str) -> &str {
+/// claude-mem's platform for an oboete agent. The same word goes in the agents' ids and the
+/// conversation keys, which find their agent by it (`to-work-model.ts:226`): one of oboete's own
+/// agents' names, or `other` for any other, so that a name the raw hook took as given goes in no
+/// selector. claude-mem shows a platform it does not know as the tool "other".
+fn platform(agent: &str) -> &'static str {
     match agent {
-        "agy" => "gemini",
-        a => a,
+        "agy" | "gemini" => "gemini",
+        "claude" => "claude",
+        "codex" => "codex",
+        "grok" => "grok",
+        "cursor" => "cursor",
+        "opencode" => "opencode",
+        "pi" => "pi",
+        _ => "other",
     }
 }
 
@@ -259,15 +824,22 @@ fn request<Tz: TimeZone>(
     tz: &Tz,
 ) -> Value {
     let status = r["status"].as_str().unwrap_or("unknown");
-    let mut own = r["id"].clone();
+    // A request whose id goes by a reference goes by it (`refer`).
+    let mut own = if r["ref"].is_string() {
+        r["ref"].clone()
+    } else {
+        r["id"].clone()
+    };
     let mut agent_ids = Vec::new();
     let mut keys = Vec::new();
     for c in arr(&r["sessions"]) {
-        let (agent, id) = (
+        let (agent, held) = (
             c["agent"].as_str().unwrap_or(""),
             c["id"].as_str().unwrap_or(""),
         );
-        let key = format!("{agent}:{id}");
+        // A conversation whose id goes by a reference goes by it in each shape below (`refer`).
+        let id = c["ref"].as_str().unwrap_or(held);
+        let key = agent_id(agent, id);
         let at = *seen.entry(key.clone()).or_insert_with(|| {
             agents.push(json!({
                 "id": key, "label": label(agent), "platformSource": platform(agent),
@@ -277,11 +849,12 @@ fn request<Tz: TimeZone>(
             }));
             agents.len() - 1
         });
-        let conversation = json!(["conversation", platform(agent), id]).to_string();
+        let conversation = conversation_key(agent, id);
         // A conversation's own request is known by the conversation's key, as claude-mem's is:
         // its drawer gives that conversation the ask's time (`to-work-model.ts:228`). A write
-        // that names it takes oboete's id back from the key's last part.
-        if r["id"] == id {
+        // that names it takes oboete's id back from the key's last part, or from the reference
+        // there, whose print is the id's.
+        if r["id"] == held {
             own = json!(conversation);
             // Its title and project are the conversation's, whichever request named it first.
             agents[at]["sessionTitle"] = s(&r["title"]);
@@ -292,7 +865,8 @@ fn request<Tz: TimeZone>(
     }
     // A list-level update has no task: the list's name stands for it, as on oboete's own page. A
     // status is read as My Work reads it: the pages take a task as done by its word alone
-    // (`to-work-model.ts:216`), so `Done` is `done` here too.
+    // (`to-work-model.ts:216`), so `Done` is `done` here too, and goes as one of the words they
+    // read, or as none (`item_status`).
     let items: Vec<Value> = (arr(&r["work"]).iter().enumerate())
         .map(|(i, w)| {
             let title = if w["task"].is_string() {
@@ -301,7 +875,7 @@ fn request<Tz: TimeZone>(
                 &w["list"]
             };
             json!({"id": format!("w{i}"), "kind": "work-state", "title": s(title),
-                "status": w["status"].as_str().map(crate::my_work::normalized).unwrap_or_default(), "nextStep": null,
+                "status": item_status(w["status"].as_str().unwrap_or("")), "nextStep": null,
                 "lastUpdateEpoch": w["updated"], "sourceRefs": [], "url": ""})
         })
         .collect();

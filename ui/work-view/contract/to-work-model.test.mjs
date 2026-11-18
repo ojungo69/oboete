@@ -173,3 +173,94 @@ test('each Build story the adapter writes reads, through the pinned mapper, as i
     assert.deepEqual(read && [shown(read.recap), read.paragraphs.map(shown)], want[name], name)
   }
 })
+
+// The gate home's answer (#1089): `home()` read under rules on the keys the snapshot reads its
+// counts, days and times by, on a status as the pages would read it, and on an Antigravity
+// conversation's id beside `gemini` (`work_view::tests::the_contract_gated_snapshot_is_a_gate_homes_answer`).
+const gated = JSON.parse(readFileSync(new URL('./gated.json', import.meta.url), 'utf8'))
+const gatedModel = toWorkModel(gated, Number(gated.revision))
+const gatedById = (id) => gatedModel.requests.find((r) => r.id === id)
+
+test('under rules on the keys it reads, the snapshot keeps the goals, their asks, Past focus and each completion', () => {
+  assert.equal(gatedModel.goalsReadError, null)
+  assert.deepEqual(gatedModel.focusAreas.map((a) => [a.name, a.asks.map((k) => k.title)]), [
+    ['Parser', ['A header test']],
+    ['Docs', ['Write docs']],
+  ])
+  assert.deepEqual(gatedModel.otherAsks.map((k) => k.title), ['Fail fast'])
+  assert.equal(gatedModel.currentPeriod.windowDays, 31)
+  assert.equal(gatedModel.pastPeriods.length, 1)
+  assert.ok(!gatedById(key('claude', 'c:claude:s3')).runningLive, 'a done request does not count on')
+  const shipped = gatedById(key('claude', 'c:claude:s6'))
+  assert.equal(shipped.state, 'shipped')
+  assert.equal(shipped.progress.completedAt, 'Nov 17, 12:00 pm')
+})
+
+test('a conversation the gate would mask in its key goes by one reference, with its agent and its time', () => {
+  const masked = gatedModel.requests.filter((r) => r.id.startsWith('["conversation","gemini",'))
+  assert.equal(masked.length, 1)
+  const [request] = masked
+  assert.ok(request.id.includes('"m:'), request.id)
+  assert.notEqual(request.agentId, 'agent-not-recorded')
+  const [conversation] = request.conversations
+  assert.equal(conversation.platform, 'gemini')
+  assert.notEqual(conversation.at, 'Time not recorded')
+  assert.ok(!conversation.title.startsWith('Conversation '), conversation.title)
+  const text = JSON.stringify(gated)
+  assert.ok(!text.includes('6f1c2a3b-4d5e'), 'the id goes nowhere')
+  assert.ok(!text.includes('release-4827'), 'nor the status as the pages would read it')
+})
+
+// The Build stories `work_view::tests::a_story_is_read_whole_before_any_mask` writes under its
+// rules (#1089): each with the value a rule finds in the story as the pages read it.
+const gatedStories = JSON.parse(readFileSync(new URL('./gated-stories.json', import.meta.url), 'utf8'))
+
+test('each Build story a rule finds a value in reads, through the pinned mapper, with its blocks and without the value', () => {
+  // The recap, then the paragraphs, a heading as its text, word joiners aside.
+  const want = {
+    "a heading masked whole, which another rule needs in the story": ['[REDACTED]', ['[REDACTED]', '[REDACTED]', '[REDACTED] is in the drawer.']],
+    "an issue's number after a recap that ends on a rule's keyword": ['Ask for the [REDACTED]', ['Ask for the [REDACTED]', '[REDACTED]', '[REDACTED] went out.']],
+    'a heading followed by prose, as the pages show it': ['The rest is prose.', ['[REDACTED]', 'The rest is prose.', '2026-11-16', 'Nothing here.']],
+    'a value a rule finds beside what a mask left': ['[REDACTED]', ['[REDACTED]', '[REDACTED] is the code.', '2026-11-16', 'Nothing here.']],
+    'a heading and a line of prose under it, as they were kept': ['[REDACTED]', ['[REDACTED]', '[REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a recap of a heading alone, as it was kept': ['[REDACTED]', ['[REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a heading masked in part, read again as the pages show it': ['[REDACTED] [REDACTED]', ['[REDACTED] [REDACTED]', '2026-11-16', 'Nothing here.']],
+    'a paragraph masked in part by a rule that needs the next, read again alone': ['[REDACTED] [REDACTED] Beta', ['[REDACTED] [REDACTED] Beta', 'Gamma', '2026-11-16', 'Nothing here.']],
+    "a paragraph that opens with an issue's number, read without its word joiner": ['#1087 [REDACTED]', ['#1087 [REDACTED]', 'Other.', '2026-11-16', 'Nothing here.']],
+    "a block that would open with a character the gate's reading drops": ['Orchid', ['Orchid', '2026-11-16', 'Nothing here.']],
+    // The heading's text as the pages show it: its marks off, the U+0085 after them kept.
+    "a heading over prose whose text opens with a character the gate's reading drops": ['Ordinary prose.', ['\u0085[REDACTED]', 'Ordinary prose.', '2026-11-16', 'Nothing here.']],
+    "a heading over prose whose text a rule finds once the gate's reading trims it": ['Ordinary prose.', ['\u0085[REDACTED]', 'Ordinary prose.', '2026-11-16', 'Nothing here.']],
+  }
+  assert.deepEqual(gatedStories.map((s) => s.name).sort(), Object.keys(want).sort())
+  const shown = (text) => text.replace(/⁠/g, '')
+  for (const { name, hidden, story } of gatedStories) {
+    const read = toWorkModel({ ...snapshot, story }, Number(snapshot.revision)).buildStory
+    const got = [shown(read.recap), read.paragraphs.map(shown)]
+    assert.ok(!JSON.stringify(got).includes(hidden), name)
+    assert.deepEqual(got, want[name], name)
+  }
+})
+
+test('a request a rule masks a part of the id of, and one whose own id is what the first one\'s was, are each their own', () => {
+  const [first, second] = ['Plan the first one', 'Plan the second one'].map((title) => {
+    const found = gatedModel.requests.filter((r) => r.title === title)
+    assert.equal(found.length, 1, title)
+    return found[0]
+  })
+  assert.notEqual(first.id, second.id)
+  assert.ok(!JSON.stringify(gated).includes('Orchid'), 'no part of either id goes')
+  assert.equal(gatedById(first.id), first)
+  assert.equal(gatedById(second.id), second)
+})
+
+test('a conversation of an agent the raw hook named goes under the platform other, and keeps its agent', () => {
+  const found = gatedModel.requests.filter((r) => r.title === 'Plan the raw one.')
+  assert.equal(found.length, 1)
+  const [conversation] = found[0].conversations
+  assert.equal(conversation.platform, 'other')
+  assert.equal(conversation.title, 'Plan the raw one.')
+  // The rule on its name, `^(tenant-orchid):`, finds no string of the snapshot.
+  const strings = (v) => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
+  assert.ok(!strings(gated).some((s) => s.startsWith('tenant-orchid:')), 'no string opens with its name')
+})
