@@ -1,0 +1,31 @@
+ui/work-view/README.md
+  s_52c3955e48bff4::t_743b4e518fa8a2 13,18,22,33,50-52,62,65
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_54ff7c90a6809c 8-12,69-88,99-109,111-113
+ui/work-view/fetch.sh
+  s_52c3955e48bff4::t_9825753f02bf92 6-10,94-113
+ui/work-view/notices.mjs
+  s_52c3955e48bff4::t_711305169fedb3 109-112,123-125,127-129,132-141
+ui/work-view/notices.test.mjs
+  s_52c3955e48bff4::t_a4df1f5e7724a6 5,125-126,129-178
+ui/work-view/patches/0005-fonts-as-files.patch
+  s_52c3955e48bff4::t_e906bb342501d4 1-19
+ui/work-view/scripts.test.mjs
+  s_52c3955e48bff4::t_dc311809db6673 1-205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "110016af61003e54dd0570db6b01bb80bca43282",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
