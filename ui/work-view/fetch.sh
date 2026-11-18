@@ -5,7 +5,13 @@
 set -euo pipefail
 src=${1:?a claude-mem checkout}
 tag=${2:?a tag, e.g. v15.19.0}
-here=$(cd "$(dirname "$0")" && pwd)
+
+# The folder this script is in, with links resolved: it replaces its own upstream/ and nothing else.
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+case $here in
+  */ui/work-view) ;;
+  *) echo "fetch.sh: $here is not ui/work-view" >&2; exit 1 ;;
+esac
 
 # The work-view and every file outside src/ui/my-work it imports, with claude-mem's src/ layout
 # (its relative imports climb to src/). The root package.json is there for its "type": "module".
@@ -21,12 +27,21 @@ paths=(
 )
 
 commit=$(git -C "$src" rev-parse --verify "$tag^{commit}")
-staged=$(mktemp -d)
+# Staged beside upstream/, so that each move below is a rename on one file system. Until the new
+# tree is in place, the old one is kept, and put back if the move fails.
+staged=$(mktemp -d "$here/.upstream.XXXXXX")
+old="$staged.old"
 trap 'rm -rf "$staged"' EXIT
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$staged"
-rm -rf "${here:?}/upstream"
-mv "$staged" "$here/upstream"
+chmod 755 "$staged"
+if [ -e "$here/upstream" ]; then
+  mv "$here/upstream" "$old"
+fi
+if ! mv "$staged" "$here/upstream"; then
+  if [ -e "$old" ]; then mv "$old" "$here/upstream"; fi
+  exit 1
+fi
 trap - EXIT
-chmod 755 "$here/upstream"
+rm -rf "$old"
 printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$here/UPSTREAM"
 echo "upstream/ is claude-mem $tag ($commit): $(find "$here/upstream" -type f | wc -l) files"
