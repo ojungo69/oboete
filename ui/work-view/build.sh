@@ -19,24 +19,38 @@ if [ -L "$assets" ] || [ ! -d "$assets" ] || [ -L "$assets/work-view" ]; then
   exit 1
 fi
 
-work=$(mktemp -d)
+# One build or fetch at a time in a checkout: a second one would move its tree into the first
+# one's. The lock is a folder, made or refused in one step; a run that was killed leaves it behind.
+lock="$here/.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "build.sh: another build or fetch holds $lock; remove it if none is running" >&2
+  exit 1
+fi
+
+work=
 swap=
 # However the script ends (an error, Ctrl-C, a kill), an unfinished swap puts the old bundle back,
 # and a bundle that cannot be put back is kept in its reserved folder rather than removed.
 cleanup() {
-  rm -rf "$work"
-  [ -n "$swap" ] || return 0
-  if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
-    echo "build.sh: the old bundle is kept in $swap/old" >&2
-    return 0
+  rm -rf ${work:+"$work"}
+  if [ -n "$swap" ]; then
+    if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
+      echo "build.sh: the old bundle is kept in $swap/old" >&2
+    else
+      rm -rf "$swap"
+    fi
   fi
-  rm -rf "$swap"
+  rmdir "$lock"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+work=$(mktemp -d)
 cp -a "$here/upstream/." "$work/"
+# GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
+# folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
+# skip each one, and succeed with nothing applied.
 for patch in "$here"/patches/*.patch; do
-  (cd "$work" && git apply "$patch")
+  (cd "$work" && GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply "$patch")
 done
 # The files outside src/ui/my-work import packages from claude-mem's root node_modules, which its
 # own root install provides. Here they resolve to the work-view's own packages.

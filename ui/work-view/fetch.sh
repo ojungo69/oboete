@@ -34,27 +34,40 @@ if [ -L "$here/upstream" ] || [ -L "$here/UPSTREAM" ] || [ -d "$here/UPSTREAM" ]
   exit 1
 fi
 
+# One build or fetch at a time in a checkout: a second one would move its tree into the first
+# one's. The lock is a folder, made or refused in one step; a run that was killed leaves it behind.
+lock="$here/.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "fetch.sh: another build or fetch holds $lock; remove it if none is running" >&2
+  exit 1
+fi
+
 # One reserved folder beside upstream/ holds the new tree, its UPSTREAM line and, while they move
-# in, the old tree. Each move is a rename on one file system. However the script ends (an error,
-# Ctrl-C, a kill), an unfinished swap puts the old tree back, so the tree on disk is always the one
-# UPSTREAM names, and a tree that cannot be put back is kept in the reserved folder.
-swap=$(mktemp -d "$here/.upstream.XXXXXX")
+# in, the old tree. Each move is a rename on one file system. The swap is done when the UPSTREAM
+# line has moved in. However the script ends before that (an error, Ctrl-C, a kill), the tree this
+# run put in goes and the old one comes back, so the tree on disk is always the one UPSTREAM names;
+# a tree that cannot be put back is kept in the reserved folder.
+swap=
+moving=
 cleanup() {
-  if [ -e "$swap/old" ] && { [ -e "$swap/new" ] || [ -e "$swap/UPSTREAM" ]; }; then
-    rm -rf "${here:?}/upstream"
-    if ! mv "$swap/old" "$here/upstream"; then
+  if [ -n "$moving" ] && [ -e "$swap/UPSTREAM" ]; then
+    if [ ! -e "$swap/new" ]; then rm -rf "${here:?}/upstream"; fi
+    if [ -e "$swap/old" ] && ! mv "$swap/old" "$here/upstream"; then
       echo "fetch.sh: the old tree is kept in $swap/old" >&2
-      return 0
+      swap=
     fi
   fi
-  rm -rf "$swap"
+  rm -rf ${swap:+"$swap"}
+  rmdir "$lock"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+swap=$(mktemp -d "$here/.upstream.XXXXXX")
 mkdir "$swap/new"
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"
 chmod 755 "$swap/new"
 printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$swap/UPSTREAM"
+moving=1
 if [ -e "$here/upstream" ]; then
   mv "$here/upstream" "$swap/old"
 fi
