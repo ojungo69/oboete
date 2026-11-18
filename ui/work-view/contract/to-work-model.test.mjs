@@ -125,3 +125,11 @@ test('a request a status shipped after a review at 30% reads as shipped at 100%,
   assert.equal(shipped.progress.history, undefined)
   assert.ok(shipped.progress.completedAt, 'it has its completion')
 })
+
+test('the Build story reads as written: a recap that opens with an issue number is the recap, a heading stays a heading', () => {
+  const story = model.buildStory
+  assert.ok(story, 'the story shows')
+  // A word joiner opens the recap, so that the pages read it as prose; it shows as nothing.
+  assert.equal(story.recap.replace(/\u2060/g, ''), '#1087 shipped the read adapter.')
+  assert.deepEqual(story.paragraphs.map((p) => p.replace(/\u2060/g, '')), ['#1087 shipped the read adapter.', 'Next', 'Serve the pages.'])
+})

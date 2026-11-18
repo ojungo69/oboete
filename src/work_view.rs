@@ -53,28 +53,51 @@ where
 /// narrative at blank lines and takes its first block that is not a heading as the recap
 /// (`to-work-model.ts:433-442`), so a story of chapters alone opens on its newest chapter.
 fn build_story(story: &Value) -> Value {
-    // A heading line of the recap is a block of its own: the pages take the first block that is
-    // not a heading as the recap, and a recap that opened on one would give way to a chapter.
-    let recap = story["recap"].as_str().map(|recap| {
-        (recap.lines())
-            .map(|l| match l.trim_start().starts_with('#') {
-                true => format!("\n{l}\n"),
-                false => l.to_owned(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-    let mut blocks: Vec<String> = recap.into_iter().collect();
+    let mut out: Vec<String> = story["recap"].as_str().map(blocks).unwrap_or_default();
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
-            blocks.push(format!("## {week}"));
-            blocks.push(text.to_owned());
+            out.push(format!("## {week}"));
+            out.extend(blocks(text));
         }
     }
-    match blocks.is_empty() {
+    match out.is_empty() {
         true => Value::Null,
-        false => json!({"story": {"narrative": blocks.join("\n\n"), "writtenAt": null}}),
+        false => json!({"story": {"narrative": out.join("\n\n"), "writtenAt": null}}),
     }
+}
+
+/// A text's blocks as the pages read a narrative, which take every block that opens with `#` for
+/// a heading (`to-work-model.ts:436-438`): a Markdown heading line is a block of its own, the
+/// lines between headings and blank lines are a paragraph, and a paragraph that opens with `#`
+/// (an issue's number, `#1087`) opens with a word joiner, so the pages read it as the prose it is.
+fn blocks(text: &str) -> Vec<String> {
+    fn heading(line: &str) -> bool {
+        let t = line.trim_start();
+        let n = t.bytes().take_while(|&b| b == b'#').count();
+        (1..=6).contains(&n) && t[n..].chars().next().is_none_or(char::is_whitespace)
+    }
+    let (mut out, mut lines) = (Vec::new(), Vec::new());
+    let close = |lines: &mut Vec<&str>, out: &mut Vec<String>| {
+        let block = lines.join("\n");
+        lines.clear();
+        match block.trim_start() {
+            "" => {}
+            prose if prose.starts_with('#') => out.push(format!("\u{2060}{prose}")),
+            prose => out.push(prose.to_owned()),
+        }
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() || heading(line) {
+            close(&mut lines, &mut out);
+        }
+        if heading(line) {
+            out.push(line.trim().to_owned());
+        } else if !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    close(&mut lines, &mut out);
+    out
 }
 
 /// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.

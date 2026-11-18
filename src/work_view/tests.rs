@@ -74,6 +74,23 @@ fn reviewed(h: &mut Store, about: &str, ts: i64, percent: i64) {
     h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
 }
 
+/// The Build story's recap at `ts`, as the story job appends it.
+fn storied(h: &mut Store, ts: i64, recap: &str) {
+    let op = MyWorkOp {
+        job: crate::my_work_story::NAME.into(),
+        about: crate::my_work_story::RECAP.into(),
+        entry: "fake".into(),
+        ts,
+        read: Read::default(),
+        removed: vec![],
+        fields: BTreeMap::from([("text".to_owned(), json!(recap))]),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
 /// A focus area the owner keeps.
 fn kept(h: &Store, id: &str, name: &str) {
     let area = json!({"kind": "area", "name": name, "status": "kept", "source": "owner",
@@ -137,6 +154,12 @@ fn home() -> (Store, i64) {
     for (at, percent) in [(t + 240_000, 20), (t + 480_000, 50)] {
         reviewed(&mut h, "c:claude:s4", at, percent);
     }
+    // The Build story's recap: it opens with an issue's number, and its heading sits above its body.
+    storied(
+        &mut h,
+        t + 360_000,
+        "#1087 shipped the read adapter.\n### Next\nServe the pages.",
+    );
     // A review at 30%, then a status that ships it: 100% by its status, its review its own.
     h.said("s5", R, t + 110_000, "Deploy the release.");
     reviewed(&mut h, "c:claude:s5", t + 300_000, 30);
@@ -499,6 +522,34 @@ fn a_recap_that_opens_on_a_heading_stays_the_recap() {
         .collect();
     let first = blocks.iter().find(|b| !b.starts_with('#'));
     assert_eq!(first, Some(&"Two weeks of it."), "{story}");
+}
+
+/// A story's prose stays prose and its headings headings: a recap that opens with an issue's
+/// number opens with a word joiner, as the pages take every block that opens with `#` for a
+/// heading, and a heading directly above its body is a block of its own (Codex on #1087).
+#[test]
+fn a_story_of_issue_numbers_and_headings_reads_as_written() {
+    let chapters = json!([{"week": "2026-11-16", "text": "### Parser\nThe parser reads lines."}]);
+    let work = json!({"story": {"recap": "#1087 shipped the adapter.", "chapters": chapters}});
+    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let want = "\u{2060}#1087 shipped the adapter.\n\n## 2026-11-16\n\n### Parser\n\nThe parser reads lines.";
+    assert_eq!(story, &json!(want));
+}
+
+/// A request's start, its ask and its last update go each from its own field: the contract's
+/// comparison writes every time as its kind, so it would not see one put in another's place
+/// (Codex on #1087).
+#[test]
+fn a_requests_times_go_each_from_its_own_field() {
+    let work = json!({"requests": [{"id": "r:t", "status": "working", "started": 1_000,
+        "updated": 2_000, "ask": {"text": "Ask.", "ts": 1_500}}]});
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let times = (
+        &request["startedAtEpoch"],
+        &request["updatedAtEpoch"],
+        &request["original"]["atEpoch"],
+    );
+    assert_eq!(times, (&json!(1_000), &json!(2_000), &json!(1_500)));
 }
 
 fn hex(t: &str, n: usize) -> bool {
