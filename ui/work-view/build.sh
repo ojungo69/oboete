@@ -32,7 +32,8 @@ swap=
 # However the script ends (an error, Ctrl-C, a kill other than SIGKILL), an unfinished swap puts the
 # old bundle back, and a bundle that cannot be put back is kept in its reserved folder rather than
 # removed. Each step runs whatever failed before it (set +e), and no signal stops the clean-up
-# halfway. A run whose clean-up left the lock or the old bundle aside fails, whatever came before.
+# halfway. A run whose clean-up left the lock, the old bundle or the reserved folder fails,
+# whatever came before.
 # A SIGKILL runs no handler: the README says how to recover.
 cleanup() {
   local status=$? failed=
@@ -42,8 +43,9 @@ cleanup() {
     if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
       echo "build.sh: the old bundle is kept in $swap/old" >&2
       failed=1
-    else
-      rm -rf "$swap"
+    elif ! rm -rf "$swap"; then
+      echo "build.sh: $swap is left" >&2
+      failed=1
     fi
   fi
   rm -rf ${work:+"$work"}

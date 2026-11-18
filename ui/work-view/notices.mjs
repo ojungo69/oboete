@@ -59,7 +59,9 @@ const out = [
 const section = (title, text, folders = []) => out.push(`## ${title}`, '',
   ...(folders.length ? [`Folders: ${folders.map((f) => `\`${f}\``).join(', ')}`, ''] : []),
   '```text', text.trimEnd(), '```', '')
-section('claude-mem (Apache-2.0): its NOTICE', readFileSync(join(work, 'NOTICE'), 'utf8'))
+// The checked-in texts are read with LF, whatever line ends a checkout gave them.
+const lf = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+section('claude-mem (Apache-2.0): its NOTICE', lf(join(work, 'NOTICE')))
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0) // code-point order: the same whatever the locale
 const copies = [...packages].map((rel) => {
   const dir = join(app, rel)
@@ -70,7 +72,7 @@ const copies = [...packages].map((rel) => {
 // blank line: a bump to another version stops the build until the licence is checked again.
 function given(path, pkg) {
   // A checkout may give the file CRLF line ends: the text is the same.
-  const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+  const text = lf(path)
   const head = /^versions: ([^\n]+)\n\n/.exec(text)
   if (!head) throw new Error(`${path}: no "versions:" line naming the versions it was checked for`)
   if (!head[1].split(/,\s*/).includes(pkg.version)) {
@@ -93,7 +95,7 @@ for (const { rel, dir, pkg } of copies) {
   // A tool's licence file also carries the licences of what it bundles for itself, none of which
   // reaches this bundle: its own licence is the part before that list.
   const bundled = text.search(/^#+ *Licenses? of bundled dependencies/im)
-  if (bundled > 0) text = text.slice(0, bundled)
+  if (bundled >= 0) text = text.slice(0, bundled)
   if (!text.trim()) throw new Error(`${name} ${pkg.version}: its licence text is blank`)
   for (const extra of files.filter((f) => WITH_IT.test(f))) text += `\n\n--- ${extra} ---\n\n${readFileSync(join(dir, extra), 'utf8')}`
   const entry = `${name} ${pkg.version} (${declared})`
@@ -106,12 +108,13 @@ for (const { entry, text, folders } of entries.values()) section(entry, text, fo
 // claude-mem's own Hanken Grotesk, with its licence below, byte for byte: Vite copies fonts as they
 // are. The emitted name is the file's with `-` and an 8-character hash before the extension.
 const FONT = /\.(woff2?|ttf|otf|eot)$/i
-const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-  e.name === 'node_modules' ? [] : e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)])
+// A package's own files, not its nested node_modules (packages of their own); every file of a folder.
+const walk = (dir, nested = true) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+  e.name === 'node_modules' && !nested ? [] : e.isDirectory() ? walk(join(dir, e.name), nested) : [join(dir, e.name)])
 const own = join(app, 'src/setup/assets')
-const hankenFiles = walk(own).filter((f) => basename(f).startsWith('HankenGrotesk') && FONT.test(f))
+const hankenFiles = (existsSync(own) ? walk(own) : []).filter((f) => basename(f).startsWith('HankenGrotesk') && FONT.test(f))
 const sources = new Map()
-for (const file of [...copies.flatMap(({ dir }) => walk(dir)), ...hankenFiles].filter((f) => FONT.test(f))) {
+for (const file of [...copies.flatMap(({ dir }) => walk(dir, false)), ...hankenFiles].filter((f) => FONT.test(f))) {
   sources.set(basename(file), [...(sources.get(basename(file)) ?? []), file])
 }
 let hanken = false
@@ -123,7 +126,7 @@ for (const font of walk(join(app, 'dist')).filter((f) => FONT.test(f)).sort()) {
   if (source.startsWith(own + sep)) hanken = true
 }
 if (hanken) {
-  const ofl = readFileSync(join(own, 'HankenGrotesk-OFL.txt'), 'utf8')
+  const ofl = lf(join(own, 'HankenGrotesk-OFL.txt'))
   if (!ofl.trim()) throw new Error('Hanken Grotesk: its licence text is blank')
   section('Hanken Grotesk (OFL-1.1), from claude-mem\'s src/setup/assets', ofl)
 }

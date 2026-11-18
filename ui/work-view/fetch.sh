@@ -48,8 +48,8 @@ fi
 # SIGKILL), the tree this run put in goes and the old one comes back, so the tree on disk is always
 # the one UPSTREAM names; a tree that cannot be put back is kept in the reserved folder. Each step
 # runs whatever failed before it (set +e), and no signal stops the clean-up halfway. A run whose
-# clean-up left the lock or the old tree aside fails, whatever came before. A SIGKILL runs no
-# handler: the README says how to recover.
+# clean-up left the lock, the old tree or the reserved folder fails, whatever came before. A
+# SIGKILL runs no handler: the README says how to recover.
 swap=
 moving=
 cleanup() {
@@ -65,7 +65,10 @@ cleanup() {
       failed=1
     fi
   fi
-  rm -rf ${swap:+"$swap"}
+  if [ -n "$swap" ] && ! rm -rf "$swap"; then
+    echo "fetch.sh: $swap is left" >&2
+    failed=1
+  fi
   if ! rmdir "$lock"; then
     echo "fetch.sh: $lock is left; remove it if no build or fetch is running" >&2
     failed=1

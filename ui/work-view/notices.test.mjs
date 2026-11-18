@@ -71,7 +71,7 @@ test('a blank licence text stops the build, as does one that is blank once a too
   const sources = ['../../node_modules/x/i.js']
   const { error } = notice(tree({ packages: [['node_modules/x', x('1.0.0'), '  \n']], sources }))
   assert.match(error, /x 1\.0\.0: its licence text is blank/)
-  const cut = notice(tree({ packages: [['node_modules/x', x('1.0.0'), '\n\n# Licenses of bundled dependencies\nMIT y\n']], sources }))
+  const cut = notice(tree({ packages: [['node_modules/x', x('1.0.0'), '# Licenses of bundled dependencies\nMIT y\n']], sources }))
   assert.match(cut.error, /x 1\.0\.0: its licence text is blank/)
 })
 
@@ -105,4 +105,22 @@ test('a font the bundle emits, in any folder, is a listed package\'s file byte f
   // A file of the same name with other bytes is not the package's.
   const unlike = notice(tree({ packages, sources, fonts: [['dist/assets/x-latin-wght-normal-AbCd1234.woff2', 'other bytes']] }))
   assert.match(unlike.error, /x-latin-wght-normal-AbCd1234\.woff2: a font no package listed here holds/)
+  // The bundle's own folders are all read, one named node_modules among them.
+  const inModules = notice(tree({ packages, sources, fonts: [['dist/node_modules/y-AbCd1234.woff2', 'font']] }))
+  assert.match(inModules.error, /dist\/node_modules\/y-AbCd1234\.woff2: a font no package listed here holds/)
+})
+
+test('claude-mem\'s NOTICE gives the same notices with CRLF line ends, and a tree with no setup assets and no Hanken font builds', () => {
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x']]
+  const sources = ['../../node_modules/x/i.js']
+  const lf = tree({ packages, sources })
+  writeFileSync(join(lf.work, 'NOTICE'), 'claude-mem\nline two\n')
+  const crlf = tree({ packages, sources })
+  writeFileSync(join(crlf.work, 'NOTICE'), 'claude-mem\r\nline two\r\n')
+  const bare = tree({ packages, sources })
+  rmSync(join(bare.work, 'src/ui/my-work/src/setup/assets'), { recursive: true })
+  const [a, b, c] = [notice(lf), notice(crlf), notice(bare)]
+  assert.equal(b.error, undefined)
+  assert.equal(b.out, a.out)
+  assert.equal(c.error, undefined)
 })
