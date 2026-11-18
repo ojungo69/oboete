@@ -53,9 +53,16 @@ where
 
 /// The Build story: the recap, then each week's chapter under its week. The mapper splits the
 /// narrative at blank lines and takes its first block that is not a heading as the recap
-/// (`to-work-model.ts:433-442`), so a story of chapters alone opens on its newest chapter.
+/// (`to-work-model.ts:433-442`), so a story of chapters alone opens on its newest chapter, and a
+/// recap of headings alone gives their text as its paragraphs, as the pages show a heading's.
 fn build_story(story: &Value) -> Value {
-    let mut out: Vec<String> = story["recap"].as_str().map(blocks).unwrap_or_default();
+    let recap = story["recap"].as_str().map(blocks).unwrap_or_default();
+    let mut out: Vec<String> = match recap.iter().any(|b| !b.starts_with('#')) {
+        true => recap,
+        false => (recap.iter())
+            .filter_map(|h| prose(h.trim_start_matches('#')))
+            .collect(),
+    };
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
             out.push(format!("## {week}"));
@@ -69,49 +76,19 @@ fn build_story(story: &Value) -> Value {
 }
 
 /// A text's blocks as the pages read a narrative (`to-work-model.ts:433-442`): a Markdown heading
-/// line is a block of its own, and the lines between headings and blank lines are a paragraph. The
-/// pages take a block for a heading when it opens with `#` once its bold and code marks are off, so
-/// a paragraph that would (an issue's number: `#1087`, `**#1087**`) opens with a word joiner, and the
-/// pages read it as the prose it is. A paragraph they would show as nothing goes.
+/// line is a block of its own, and the lines between headings and blank lines are a paragraph.
 fn blocks(text: &str) -> Vec<String> {
-    // JavaScript's `\s`, by which the pages split and trim, holds U+FEFF, which Rust's does not.
-    fn space(c: char) -> bool {
-        c.is_whitespace() || c == '\u{FEFF}'
-    }
     fn heading(line: &str) -> bool {
         let t = line.trim_start_matches(space);
         let n = t.bytes().take_while(|&b| b == b'#').count();
         (1..=6).contains(&n) && t[n..].chars().next().is_none_or(space)
     }
-    // A block as the pages show it: its bold and code marks off, its spaces as one.
-    fn shown(block: &str) -> String {
-        static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
-        static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
-        let block = BOLD.replace_all(block, "$1");
-        let block = CODE.replace_all(&block, "$1");
-        block
-            .split(space)
-            .filter(|w| !w.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
     let (mut out, mut lines) = (Vec::new(), Vec::new());
-    let close = |lines: &mut Vec<&str>, out: &mut Vec<String>| {
-        let block = lines.join("\n");
-        lines.clear();
-        let prose = block.trim_matches(space);
-        let seen = shown(prose);
-        if !seen.is_empty() {
-            out.push(match seen.starts_with('#') {
-                true => format!("\u{2060}{prose}"),
-                false => prose.to_owned(),
-            });
-        }
-    };
     for line in text.lines() {
         let blank = line.chars().all(space);
         if blank || heading(line) {
-            close(&mut lines, &mut out);
+            out.extend(prose(&lines.join("\n")));
+            lines.clear();
         }
         if heading(line) {
             out.push(line.trim_matches(space).to_owned());
@@ -119,8 +96,30 @@ fn blocks(text: &str) -> Vec<String> {
             lines.push(line);
         }
     }
-    close(&mut lines, &mut out);
+    out.extend(prose(&lines.join("\n")));
     out
+}
+
+/// A paragraph as the pages read it, or none when they would show it as nothing. The pages take a
+/// block for a heading when it opens with `#` once its bold and code marks are off, so a paragraph
+/// that would (an issue's number: `#1087`, `**#1087**`) opens with a word joiner, and the pages
+/// read it as the prose it is.
+fn prose(block: &str) -> Option<String> {
+    static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+    static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+    let block = block.trim_matches(space);
+    let shown = BOLD.replace_all(block, "$1");
+    let shown = CODE.replace_all(&shown, "$1");
+    let first = shown.split(space).find(|w| !w.is_empty())?;
+    Some(match first.starts_with('#') {
+        true => format!("\u{2060}{block}"),
+        false => block.to_owned(),
+    })
+}
+
+/// JavaScript's `\s`, by which the pages split and trim, holds U+FEFF, which Rust's does not.
+fn space(c: char) -> bool {
+    c.is_whitespace() || c == '\u{FEFF}'
 }
 
 /// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.

@@ -614,6 +614,102 @@ fn a_story_of_marked_issue_numbers_reads_as_written() {
     assert!(snapshot_at(&work, &json!({}), 0, &Utc)["story"].is_null());
 }
 
+/// A recap of headings alone gives their text as its paragraphs: the pages take the story's first
+/// paragraph for its recap, and would put a chapter's in its place, or show no story (Codex on
+/// #1087).
+#[test]
+fn a_recap_of_headings_alone_gives_their_text() {
+    let chapters = json!([{"week": "2026-11-16", "text": "Built the parser."}]);
+    for (chapters, want) in [
+        (json!([]), "Shipped the adapter"),
+        (
+            chapters,
+            "Shipped the adapter\n\n## 2026-11-16\n\nBuilt the parser.",
+        ),
+    ] {
+        let work = json!({"story": {"recap": "## Shipped the adapter", "chapters": chapters}});
+        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        assert_eq!(story, &json!(want));
+    }
+    let work = json!({"story": {"recap": "## #1087\n### ", "chapters": []}});
+    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    assert_eq!(story, &json!("\u{2060}#1087"));
+}
+
+/// A case of a stored Build story: its name, its recap, and its chapters as (week, text).
+type Story = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
+/// The cases whose stories the Node contract test reads through the pinned mapper
+/// (`stories.json`).
+const STORIES: &[Story] = &[
+    ("a recap of a heading alone", "## Shipped the adapter", &[]),
+    (
+        "a recap of a heading alone, and a chapter",
+        "## Shipped the adapter",
+        &[("2026-11-16", "Built the parser.")],
+    ),
+    (
+        "a recap that opens on a heading",
+        "## Plan\nShip the adapter.",
+        &[],
+    ),
+    (
+        "a recap that opens with an issue number, and a chapter whose heading sits above its body",
+        "#1087 shipped the adapter.",
+        &[("2026-11-16", "### Parser\nThe parser reads lines.")],
+    ),
+    (
+        "a recap that opens with an issue number in bold, alone",
+        "**#1087** shipped the adapter.",
+        &[],
+    ),
+    (
+        "a recap that opens with an issue number as code, alone",
+        "`#1088` fixed the gate.",
+        &[],
+    ),
+    (
+        "a recap after a byte-order mark, alone",
+        "\u{FEFF}#7 follows a byte-order mark.",
+        &[],
+    ),
+    ("chapters alone", "", &[("2026-11-16", "Built the parser.")]),
+];
+
+/// The contract's Build stories: `ui/work-view/contract/stories.json` holds the story this adapter
+/// writes for each case of `STORIES`, which the Node test reads through the pinned mapper. With
+/// OBOETE_CONTRACT_WRITE=1 it writes them.
+#[test]
+fn the_contract_stories_are_the_adapters_answer() {
+    let fresh: Vec<Value> = (STORIES.iter())
+        .map(|(name, recap, chapters)| {
+            let chapters: Vec<Value> = (chapters.iter())
+                .map(|(week, text)| json!({"week": week, "text": text}))
+                .collect();
+            let story = build_story(&json!({"recap": recap, "chapters": chapters}));
+            json!({"name": name, "story": story})
+        })
+        .collect();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/stories.json");
+    if std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
+        std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap() + "\n").unwrap();
+        return;
+    }
+    let kept: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        kept,
+        json!(fresh),
+        "the contract stories are not this adapter's"
+    );
+}
+
 fn hex(t: &str, n: usize) -> bool {
     t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit())
 }

@@ -9,6 +9,8 @@ import { test } from 'node:test'
 import { toWorkModel } from '../upstream/src/ui/my-work/src/live/to-work-model.ts'
 
 const snapshot = JSON.parse(readFileSync(new URL('./snapshot.json', import.meta.url), 'utf8'))
+// The Build story the adapter writes for each case of STORIES in src/work_view/tests.rs.
+const stories = JSON.parse(readFileSync(new URL('./stories.json', import.meta.url), 'utf8'))
 const model = toWorkModel(snapshot, Number(snapshot.revision))
 const key = (agent, id) => JSON.stringify(['conversation', agent, id])
 const byId = (id) => model.requests.find((r) => r.id === id)
@@ -144,4 +146,26 @@ test('a request its review shipped on a day of its own completes on that day, in
   const shipped = byId(key('claude', 'c:claude:s6'))
   assert.equal(shipped.state, 'shipped')
   assert.equal(shipped.progress.completedAt, 'Nov 17, 12:00 pm')
+})
+
+test('each Build story the adapter writes reads, through the pinned mapper, as its stored text means', () => {
+  // What the pages show for each case, word joiners aside: the recap, then the paragraphs, a
+  // heading as its text.
+  const want = {
+    'a recap of a heading alone': ['Shipped the adapter', ['Shipped the adapter']],
+    'a recap of a heading alone, and a chapter': ['Shipped the adapter', ['Shipped the adapter', '2026-11-16', 'Built the parser.']],
+    'a recap that opens on a heading': ['Ship the adapter.', ['Plan', 'Ship the adapter.']],
+    'a recap that opens with an issue number, and a chapter whose heading sits above its body': ['#1087 shipped the adapter.', ['#1087 shipped the adapter.', '2026-11-16', 'Parser', 'The parser reads lines.']],
+    'a recap that opens with an issue number in bold, alone': ['#1087 shipped the adapter.', ['#1087 shipped the adapter.']],
+    'a recap that opens with an issue number as code, alone': ['#1088 fixed the gate.', ['#1088 fixed the gate.']],
+    'a recap after a byte-order mark, alone': ['#7 follows a byte-order mark.', ['#7 follows a byte-order mark.']],
+    // A story of chapters alone opens on its newest chapter.
+    'chapters alone': ['Built the parser.', ['2026-11-16', 'Built the parser.']],
+  }
+  assert.deepEqual(stories.map((s) => s.name).sort(), Object.keys(want).sort())
+  const shown = (text) => text.replace(/\u2060/g, '')
+  for (const { name, story } of stories) {
+    const read = toWorkModel({ ...snapshot, story }, Number(snapshot.revision)).buildStory
+    assert.deepEqual(read && [shown(read.recap), read.paragraphs.map(shown)], want[name], name)
+  }
 })

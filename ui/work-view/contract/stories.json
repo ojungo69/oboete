@@ -1,0 +1,74 @@
+[
+  {
+    "name": "a recap of a heading alone",
+    "story": {
+      "story": {
+        "narrative": "Shipped the adapter",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap of a heading alone, and a chapter",
+    "story": {
+      "story": {
+        "narrative": "Shipped the adapter\n\n## 2026-11-16\n\nBuilt the parser.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap that opens on a heading",
+    "story": {
+      "story": {
+        "narrative": "## Plan\n\nShip the adapter.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap that opens with an issue number, and a chapter whose heading sits above its body",
+    "story": {
+      "story": {
+        "narrative": "⁠#1087 shipped the adapter.\n\n## 2026-11-16\n\n### Parser\n\nThe parser reads lines.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap that opens with an issue number in bold, alone",
+    "story": {
+      "story": {
+        "narrative": "⁠**#1087** shipped the adapter.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap that opens with an issue number as code, alone",
+    "story": {
+      "story": {
+        "narrative": "⁠`#1088` fixed the gate.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a recap after a byte-order mark, alone",
+    "story": {
+      "story": {
+        "narrative": "⁠#7 follows a byte-order mark.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "chapters alone",
+    "story": {
+      "story": {
+        "narrative": "## 2026-11-16\n\nBuilt the parser.",
+        "writtenAt": null
+      }
+    }
+  }
+]
