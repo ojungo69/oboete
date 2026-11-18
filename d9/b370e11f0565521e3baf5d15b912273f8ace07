@@ -1,0 +1,29 @@
+docs/page.md
+  s_52c3955e48bff4::t_70d93e7cac6793 249-253,258-259
+docs/spec.md
+  s_52c3955e48bff4::t_e612cac76af3c9 142
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_fcb944ff3c970c 235-237,955-956,974-975,1038-1044
+ui/work-view/contract/gated-stories.json
+  s_52c3955e48bff4::t_15e7882335abe6 81-90
+ui/work-view/contract/to-work-model.test.mjs
+  s_52c3955e48bff4::t_4d6ca9431b0428 229
+src/work_view.rs
+  s_52c3955e48bff4::t_cd0ac81eabce45 20-22,24,26,72-74,77,473-475,485-486,488-489,495-502,504-505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d9b370e11f0565521e3baf5d15b912273f8ace07",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
