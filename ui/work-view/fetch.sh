@@ -27,21 +27,24 @@ paths=(
 )
 
 commit=$(git -C "$src" rev-parse --verify "$tag^{commit}")
-# Staged beside upstream/, so that each move below is a rename on one file system. Until the new
-# tree is in place, the old one is kept, and put back if the move fails.
+# The new tree and its UPSTREAM line are staged beside upstream/, so that each move below is a
+# rename on one file system. The old tree is kept until both are in place, and put back if either
+# move fails: the tree on disk is always the one UPSTREAM names.
 staged=$(mktemp -d "$here/.upstream.XXXXXX")
 old="$staged.old"
-trap 'rm -rf "$staged"' EXIT
+record="$staged.UPSTREAM"
+trap 'rm -rf "$staged" "$record"' EXIT
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$staged"
 chmod 755 "$staged"
+printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$record"
 if [ -e "$here/upstream" ]; then
   mv "$here/upstream" "$old"
 fi
-if ! mv "$staged" "$here/upstream"; then
+if ! mv "$staged" "$here/upstream" || ! mv "$record" "$here/UPSTREAM"; then
+  rm -rf "${here:?}/upstream"
   if [ -e "$old" ]; then mv "$old" "$here/upstream"; fi
   exit 1
 fi
 trap - EXIT
 rm -rf "$old"
-printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$here/UPSTREAM"
 echo "upstream/ is claude-mem $tag ($commit): $(find "$here/upstream" -type f | wc -l) files"
