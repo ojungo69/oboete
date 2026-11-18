@@ -29,9 +29,9 @@ At each new release that is wanted:
 
 1. Read the contract diff first: `git diff <old> <new> -- src/ui/my-work/src/live/ src/ui/my-work/src/data.ts src/ui/my-work/src/data-rules.ts src/ui/my-work/test-fixtures/ src/services/worker/http/routes/WorkViewRoutes.ts src/services/work-view/` in the claude-mem checkout.
 2. Run `fetch.sh` with the new tag, then the contract test: the new mapper must read oboete's answer. A mapper that changed what it reads is answered in `src/work_view.rs`, and its Rust test writes the snapshot again (`OBOETE_CONTRACT_WRITE=1`).
-3. Run `build.sh`. When a patch no longer applies, port the patches onto the new tag: in a scratch git repository, commit the old tag's tree, then each patch as a commit of its own, in order, and rebase those commits onto a commit of the new tag's tree, resolving each conflict there. Write the patches again from the rebased commits (`git format-patch`, with their names kept), and run `build.sh` with them.
+3. Run `build.sh`. When a patch no longer applies, port the patches onto the new tag: in a scratch git repository, commit the old tag's tree (commit `old`), then each patch as a commit of its own, in order, on a branch; commit the new tag's tree on a branch of its own from `old` (commit `new`), and replay the patches with `git rebase --onto new old <the patches' branch>`, resolving each conflict there. Write the patches again from the rebased commits (`git format-patch`, with their names kept), and run `build.sh` with them.
 4. Read the diff of `assets/work-view/THIRD-PARTY-NOTICES.md`: for each package that is new or changed, check where it comes from and what it runs when installed. Then check the advisories against every package the bundle holds, changed or not: one that did not change can have a new advisory (decision 114). A text in `licences/` names the versions it was checked for, and the build stops at another: read that package's licence again and add the version.
-5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together, with `src/work_view.rs` and the snapshot written again when step 2 changed them, after the Node test has run over the new snapshot. `NOTICE` names `UPSTREAM`, so it does not change.
+5. Commit `upstream/`, `UPSTREAM`, the patches, the texts in `licences/` that changed and `assets/work-view/` together, with `src/work_view.rs` and the snapshot written again when step 2 changed them, after the Node test has run over the new snapshot. `NOTICE` names `UPSTREAM`, so it does not change.
 
 ## Advisories
 
@@ -46,10 +46,10 @@ The other eleven name six packages, none of which is in the bundle (`THIRD-PARTY
 
 ## A run that was killed
 
-`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind. With no build or fetch running:
+`build.sh` and `fetch.sh` put things back however they end, but a run killed with SIGKILL, or a machine that stopped, runs no handler and leaves `ui/work-view/.lock` behind. With no build or fetch running, the reserved folder the run left says how far it got:
 
-- `build.sh`: when `assets/work-view/` is missing, the old bundle is in `assets/.work-view.*/old`: move it back. Then remove `assets/.work-view.*`.
-- `fetch.sh`: when `ui/work-view/UPSTREAM` still names the old tag, the old tree is in `ui/work-view/.upstream.*/old`: remove `upstream/` if the new tree is there, and move the old one back. When `UPSTREAM` names the new tag, the new pair is in place. Then remove `ui/work-view/.upstream.*`.
-- Or put back what is committed, as both trees and the bundle are: `git checkout -- ui/work-view/upstream ui/work-view/UPSTREAM assets/work-view`, and remove the reserved folders.
+- `build.sh` (`assets/.work-view.*`): when it holds `old` and `assets/work-view/` is missing, the old bundle was moved aside and the new one never moved in: move `old` back to `assets/work-view`. Otherwise the bundle in place is whole. Then remove the reserved folder.
+- `fetch.sh` (`ui/work-view/.upstream.*`): while it still holds `UPSTREAM`, the swap is not done. When it also holds `old`, the old tree was moved aside: remove `ui/work-view/upstream/` if it is there (it is the new tree), and move `old` back to `ui/work-view/upstream`. With no `old`, the old tree never left. When the folder holds no `UPSTREAM`, the new tree and its `UPSTREAM` line are both in place. Then remove the reserved folder.
+- Or put back what is committed, as both trees and the bundle are: move `ui/work-view/upstream/`, `ui/work-view/UPSTREAM` and `assets/work-view/` aside, run `git restore --source=HEAD --staged --worktree -- ui/work-view/upstream ui/work-view/UPSTREAM assets/work-view`, and remove what was moved aside and the reserved folders. A plain checkout over the trees would leave the files a partial swap added.
 
 Only then remove `ui/work-view/.lock`.

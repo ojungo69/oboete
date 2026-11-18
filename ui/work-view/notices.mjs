@@ -6,7 +6,7 @@
 // font no notice covers.
 // Usage: node notices.mjs <the built work tree> <licences folder>
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join, relative, sep } from 'node:path'
 
 const [work, overrides] = process.argv.slice(2)
 const app = join(work, 'src/ui/my-work')
@@ -64,11 +64,13 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0) // code-point order: the same
 const copies = [...packages].map((rel) => {
   const dir = join(app, rel)
   return { rel, dir, pkg: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) }
-}).sort((a, b) => cmp(a.pkg.name, b.pkg.name) || cmp(a.pkg.version, b.pkg.version) || cmp(a.dir, b.dir))
+// The folder as the notices write it, with `/`, breaks a tie: a native path sorts otherwise on Windows.
+}).sort((a, b) => cmp(a.pkg.name, b.pkg.name) || cmp(a.pkg.version, b.pkg.version) || cmp(a.rel, b.rel))
 // A text given in licences/ opens with the versions it was checked for, `versions: 6.2.6` and a
 // blank line: a bump to another version stops the build until the licence is checked again.
 function given(path, pkg) {
-  const text = readFileSync(path, 'utf8')
+  // A checkout may give the file CRLF line ends: the text is the same.
+  const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
   const head = /^versions: ([^\n]+)\n\n/.exec(text)
   if (!head) throw new Error(`${path}: no "versions:" line naming the versions it was checked for`)
   if (!head[1].split(/,\s*/).includes(pkg.version)) {
@@ -88,11 +90,11 @@ for (const { rel, dir, pkg } of copies) {
   const path = join(overrides, `${name.replace('/', '__')}.txt`)
   let text = own ? readFileSync(join(dir, own), 'utf8') : existsSync(path) ? given(path, pkg) : null
   if (text === null) throw new Error(`${name} ${pkg.version}: no licence text, in the package or in ${path}`)
-  if (!text.trim()) throw new Error(`${name} ${pkg.version}: its licence text is blank`)
   // A tool's licence file also carries the licences of what it bundles for itself, none of which
   // reaches this bundle: its own licence is the part before that list.
   const bundled = text.search(/^#+ *Licenses? of bundled dependencies/im)
   if (bundled > 0) text = text.slice(0, bundled)
+  if (!text.trim()) throw new Error(`${name} ${pkg.version}: its licence text is blank`)
   for (const extra of files.filter((f) => WITH_IT.test(f))) text += `\n\n--- ${extra} ---\n\n${readFileSync(join(dir, extra), 'utf8')}`
   const entry = `${name} ${pkg.version} (${declared})`
   const key = `${entry}\n${text}`
@@ -100,18 +102,29 @@ for (const { rel, dir, pkg } of copies) {
   entries.get(key).folders.push(rel)
 }
 for (const { entry, text, folders } of entries.values()) section(entry, text, folders)
-// Every font the bundle emits is covered: claude-mem's own Hanken Grotesk, with its licence below,
-// or a file of a package listed above. The emitted name is the file's with `-` and an 8-character
-// hash before the extension.
+// Every font the bundle emits, in any of its folders, is a file of a package listed above or
+// claude-mem's own Hanken Grotesk, with its licence below, byte for byte: Vite copies fonts as they
+// are. The emitted name is the file's with `-` and an 8-character hash before the extension.
 const FONT = /\.(woff2?|ttf|otf|eot)$/i
-const filesIn = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-  e.name === 'node_modules' ? [] : e.isDirectory() ? filesIn(join(dir, e.name)) : [e.name])
-const packaged = new Set(copies.flatMap(({ dir }) => filesIn(dir)))
-let hanken = false
-for (const font of readdirSync(assets).filter((f) => FONT.test(f)).sort()) {
-  const name = font.replace(/-[\w-]{8}(\.[^.]+)$/, '$1')
-  if (name.startsWith('HankenGrotesk') && existsSync(join(app, 'src/setup/assets', name))) hanken = true
-  else if (!packaged.has(name)) throw new Error(`${font}: a font no package listed here holds, and no notice covers`)
+const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+  e.name === 'node_modules' ? [] : e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)])
+const own = join(app, 'src/setup/assets')
+const hankenFiles = walk(own).filter((f) => basename(f).startsWith('HankenGrotesk') && FONT.test(f))
+const sources = new Map()
+for (const file of [...copies.flatMap(({ dir }) => walk(dir)), ...hankenFiles].filter((f) => FONT.test(f))) {
+  sources.set(basename(file), [...(sources.get(basename(file)) ?? []), file])
 }
-if (hanken) section('Hanken Grotesk (OFL-1.1), from claude-mem\'s src/setup/assets', readFileSync(join(app, 'src/setup/assets/HankenGrotesk-OFL.txt'), 'utf8'))
+let hanken = false
+for (const font of walk(join(app, 'dist')).filter((f) => FONT.test(f)).sort()) {
+  const bytes = readFileSync(font)
+  const name = basename(font).replace(/-[\w-]{8}(\.[^.]+)$/, '$1')
+  const source = (sources.get(name) ?? []).find((f) => readFileSync(f).equals(bytes))
+  if (!source) throw new Error(`${relative(app, font).split(sep).join('/')}: a font no package listed here holds, and no notice covers`)
+  if (source.startsWith(own + sep)) hanken = true
+}
+if (hanken) {
+  const ofl = readFileSync(join(own, 'HankenGrotesk-OFL.txt'), 'utf8')
+  if (!ofl.trim()) throw new Error('Hanken Grotesk: its licence text is blank')
+  section('Hanken Grotesk (OFL-1.1), from claude-mem\'s src/setup/assets', ofl)
+}
 process.stdout.write(out.join('\n'))
