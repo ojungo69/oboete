@@ -1,0 +1,43 @@
+docs/page.md
+  s_52c3955e48bff4::t_9ee1e94bde56b8 246-253
+src/my_work.rs
+  s_52c3955e48bff4::t_81868397985f99 2234
+src/my_work_story.rs
+  s_52c3955e48bff4::t_95c56d31364d3e 525-549,554
+src/redact.rs
+  s_52c3955e48bff4::t_476a7f6d1a54e6 712-718
+src/redact/tests.rs
+  s_52c3955e48bff4::t_be9b505a6871c3 3367
+src/view.rs
+  s_52c3955e48bff4::t_d748ac9d080205 2675-2678,2681-2682,2692,3906
+src/view/tests.rs
+  s_52c3955e48bff4::t_d9dbd63a6f020f 4246
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_0d275f5468cb9d 233,235,897-1168
+ui/work-view/README.md
+  s_52c3955e48bff4::t_e14278d6d1a496 20
+ui/work-view/contract/gated-stories.json
+  s_52c3955e48bff4::t_eb8eba8026d3fa 1-32
+ui/work-view/contract/gated.json
+  s_52c3955e48bff4::t_62e8805c04e125 1-1038
+ui/work-view/contract/to-work-model.test.mjs
+  s_52c3955e48bff4::t_0bdf95c97cc03d 176-232
+src/work_view.rs
+  s_52c3955e48bff4::t_fa4867745b55fd 3-6,12,37,53-163,172-180,182-186,189,192,194-195,198-204,210-247,250-271,276,286,290,295,299-405,408-430,541,545-548,558,561-563,574-575,584
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "75d42e68bfda05ea1cd9f2ff900da8c439628ad7",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
