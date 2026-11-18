@@ -119,7 +119,10 @@ pub(crate) fn empty(now: i64) -> Value {
 /// (`my_work::shown_id`): the same from read to read and in every request that names it, and
 /// nothing of a guess at the id. No id My Work gives begins `m:` (its ids are `c:`, `r:` and
 /// `g:`), so no request's or conversation's own id is another's reference, and each reference is
-/// one stored id's (#1089). A group's id is its print alone already, and goes as it is.
+/// one stored id's (#1089). A group's id is its print alone already, and goes as it is. A focus
+/// area's id, which the snapshot writes whole (an area's, a request's area, an ask's area) and
+/// within a goals item's (`a:<id>`), and an open ask's id go so too, by the print of the id in a
+/// namespace of its kind (Codex on #1093).
 fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
     let mut key = None;
     let mut refer = |v: &mut Value, shapes: Vec<String>| -> anyhow::Result<()> {
@@ -148,6 +151,39 @@ fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
         }
         let id = r["id"].as_str().unwrap_or("").to_owned();
         refer(r, vec![id])?;
+    }
+    let mut swap = |v: Option<&mut Value>, kind: &str| -> anyhow::Result<()> {
+        let Some(v) = v else {
+            return Ok(());
+        };
+        let Some(id) = v.as_str().map(str::to_owned) else {
+            return Ok(());
+        };
+        let mut shapes = vec![id.clone()];
+        if kind == "area" {
+            shapes.push(format!("a:{id}"));
+        }
+        if shapes.iter().any(|s| gate.out(s) != *s) {
+            let print = crate::my_work::keyed_print(&format!("{kind}:{id}"), home, &mut key)?;
+            *v = json!(format!("m:{print}"));
+        }
+        Ok(())
+    };
+    let requests = work.get_mut("requests").and_then(Value::as_array_mut);
+    for r in requests.into_iter().flatten() {
+        swap(r.get_mut("focus"), "area")?;
+    }
+    let areas = work.get_mut("areas").and_then(Value::as_array_mut);
+    for a in areas.into_iter().flatten() {
+        swap(a.get_mut("id"), "area")?;
+        let asks = a.get_mut("asks").and_then(Value::as_array_mut);
+        for k in asks.into_iter().flatten() {
+            swap(k.get_mut("id"), "ask")?;
+        }
+    }
+    let others = work.get_mut("other_asks").and_then(Value::as_array_mut);
+    for k in others.into_iter().flatten() {
+        swap(k.get_mut("id"), "ask")?;
     }
     Ok(())
 }

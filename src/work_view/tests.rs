@@ -925,7 +925,8 @@ fn the_contract_snapshot_is_this_homes_answer() {
 /// marks off, its whitespace collapsed and trimmed, and with its leading `#` marks off.
 fn pages_views(narrative: &str) -> Vec<String> {
     let js = |c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}';
-    let blank = Regex::new(r"\n[\s\u{FEFF}]*\n").unwrap();
+    // JavaScript's whitespace, which U+0085 is not, as `js`.
+    let blank = Regex::new(r"\n[[\s\u{FEFF}]&&[^\u{85}]]*\n").unwrap();
     let bold = Regex::new(r"\*\*([^*]+)\*\*").unwrap();
     let code = Regex::new(r"`([^`]+)`").unwrap();
     let mut views = vec![narrative.to_owned()];
@@ -1232,10 +1233,10 @@ fn a_rule_saved_while_the_stores_are_read_is_in_force() {
     let sessions: Vec<&Value> = (arr(&work["requests"]).iter())
         .flat_map(|r| arr(&r["sessions"]))
         .collect();
-    let secret = (sessions.iter())
+    let codex = (sessions.iter())
         .find(|c| c["agent"] == "codex")
         .expect("the codex conversation");
-    assert!(secret["fingerprint"].is_string(), "{secret}");
+    assert!(codex["fingerprint"].is_string(), "{codex}");
     assert!(!goals.to_string().contains("Write docs"), "{goals}");
     // The gate reads an id whole: its rule finds the session inside it.
     let unanchored =
@@ -1263,6 +1264,104 @@ fn a_rule_saved_while_the_stores_are_read_is_in_force() {
         let text = snapshot.to_string();
         assert!(!text.contains("secret-session"), "{case}: {text}");
         assert!(text.contains("Plan the secret one."), "{case}: {text}");
+    }
+}
+
+/// A line holding a U+0085 alone parts no blocks: the pages' blank lines are of JavaScript's
+/// whitespace, which U+0085 is not, as the story's reading (`page_blocks`) and this file's model
+/// of the pages (`pages_views`) read them (Codex on #1093).
+#[test]
+fn a_line_of_a_u0085_alone_parts_no_blocks() {
+    let text = "A\n\u{0085}\nB";
+    assert_eq!(page_blocks(text), vec![0..text.len()]);
+    assert_eq!(pages_views(text).len(), 3, "{:?}", pages_views(text));
+}
+
+/// Each pair of strings at one place of `a` and `b` under a key the walk leaves as it is (`OWN`).
+fn paired(a: &Value, b: &Value, key: &str, out: &mut Vec<(String, String)>) {
+    match (a, b) {
+        (Value::String(x), Value::String(y)) if OWN.contains(&key) => {
+            out.push((x.clone(), y.clone()));
+        }
+        (Value::Array(xs), Value::Array(ys)) => {
+            assert_eq!(xs.len(), ys.len(), "{key}");
+            for (x, y) in xs.iter().zip(ys) {
+                paired(x, y, key, out);
+            }
+        }
+        (Value::Object(xs), Value::Object(ys)) => {
+            for (k, x) in xs {
+                paired(x, ys.get(k).unwrap_or(&Value::Null), k, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every stored id the snapshot writes in a selector, whole or within another, goes in none
+/// under a rule that finds it whole: a request's, a conversation's, a focus area's (a request's
+/// area too) and an open ask's. Each goes by one reference wherever it was written, and two by
+/// two (Codex on #1093).
+#[test]
+fn a_rule_on_a_stored_id_finds_it_in_no_selector() {
+    let name = "work_view::tests::a_rule_on_a_stored_id_finds_it_in_no_selector";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, now) = gate_home();
+    let home = h.home.path();
+    std::fs::write(home.join("config.toml"), "[redaction]\n").unwrap();
+    let plain = crate::redact::Rules::load(home).unwrap();
+    // A request the owner placed in the parser's area.
+    let (work, _) = read(home, now, &plain).unwrap();
+    let placed = (arr(&work["requests"]).iter())
+        .filter_map(|r| r["id"].as_str())
+        .find(|id| id.starts_with("c:claude:"))
+        .expect("a conversation's request")
+        .to_owned();
+    let body = json!({"action": "move-request", "request": placed, "area": PARSER});
+    let lock = std::sync::Mutex::new(());
+    crate::my_work_focus::act(home, &lock, &serde_json::to_vec(&body).unwrap()).unwrap();
+    // The stored ids as My Work gives them under no rule of the owner's.
+    let (work, _) = read(home, now, &plain).unwrap();
+    let mut held = Vec::new();
+    for r in arr(&work["requests"]) {
+        held.extend([&r["id"], &r["focus"]]);
+        held.extend(arr(&r["sessions"]).iter().map(|c| &c["id"]));
+    }
+    for a in arr(&work["areas"]) {
+        held.push(&a["id"]);
+        held.extend(arr(&a["asks"]).iter().map(|k| &k["id"]));
+    }
+    held.extend(arr(&work["other_asks"]).iter().map(|k| &k["id"]));
+    let mut ids: Vec<String> = (held.into_iter())
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    for id in ["g2", "g4", PARSER, placed.as_str()] {
+        assert!(ids.iter().any(|i| i == id), "{id}: {ids:?}");
+    }
+    let before = answered(home, now, Gate::now).unwrap();
+    let rules: Vec<String> = (ids.iter().enumerate())
+        .map(|(n, id)| format!("{{ id = \"id{n}\", regex = '^{}$' }}", regex::escape(id)))
+        .collect();
+    let config = format!("[redaction]\nextra_rules = [{}]\n", rules.join(", "));
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    let after = answered(home, now, Gate::now).unwrap();
+    for (key, value) in selectors(&after, "") {
+        for id in &ids {
+            assert!(!value.contains(id.as_str()), "{key}: {value} holds {id}");
+        }
+    }
+    // Place by place, one selector before goes as one after, and two as two.
+    let mut pairs = Vec::new();
+    paired(&before, &after, "", &mut pairs);
+    let (mut forth, mut back) = (HashMap::new(), HashMap::new());
+    for (b, a) in &pairs {
+        assert_eq!(forth.entry(b).or_insert(a), &a, "{b}");
+        assert_eq!(back.entry(a).or_insert(b), &b, "{a}");
     }
 }
 
