@@ -2676,7 +2676,8 @@ impl Viewer {
             // Each text in it is one of theirs (`work_view`), so it is not gated again. One readers'
             // hold from the first read to the snapshot (#439), as one page's read takes: a forget
             // registers before both answers or after it. raw.db first, then the hold, the order a
-            // restore takes them in; each reader takes its own hold within this one.
+            // restore takes them in. The goals' read takes no hold of its own, so this one is its
+            // hold; My Work's read takes one more within it.
             "work-view" => {
                 let now = crate::db::now_ms();
                 // No store yet: an empty home's snapshot, at once. A reader that opened a store

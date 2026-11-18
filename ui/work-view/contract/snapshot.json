@@ -1,14 +1,22 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-18T10:01:53.091Z",
-  "revision": "1794996113091",
+  "generatedAt": "2026-11-18T10:26:37.847Z",
+  "revision": "1794997597847",
   "source": {
     "kind": "oboete",
     "connected": true,
     "error": null,
-    "lastCheckedAt": "2026-11-18T10:01:53.091Z"
+    "lastCheckedAt": "2026-11-18T10:26:37.847Z"
   },
   "agents": [
+    {
+      "id": "claude:c:claude:s5",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Deploy the release.",
+      "project": "r",
+      "contentSessionId": "c:claude:s5"
+    },
     {
       "id": "claude:c:claude:s4",
       "label": "Claude Code",
@@ -53,7 +61,7 @@
   "humanRequests": [
     {
       "id": "r:rq1",
-      "contentFingerprint": "35ae7f267c79ee9eaea3462bd01d149daa5ab0d5d25a1302d5dd4090739be3f5",
+      "contentFingerprint": "77a5f2ce3b3f9ec3314e2289da856707d0e67c8aa54d5352726c9938039e04a2",
       "title": "Cut the release",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -73,7 +81,7 @@
       },
       "original": {
         "text": "Cut the release",
-        "atEpoch": 1794996112906
+        "atEpoch": 1794997597662
       },
       "scopeUpdates": [],
       "items": [
@@ -83,7 +91,7 @@
           "title": "Tag the release",
           "status": "doing",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112909,
+          "lastUpdateEpoch": 1794997597663,
           "sourceRefs": [],
           "url": ""
         },
@@ -93,7 +101,7 @@
           "title": "Bump the version",
           "status": "doing",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112906,
+          "lastUpdateEpoch": 1794997597662,
           "sourceRefs": [],
           "url": ""
         }
@@ -109,7 +117,7 @@
               "title": "Tag the release",
               "status": "doing",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112909,
+              "lastUpdateEpoch": 1794997597663,
               "sourceRefs": [],
               "url": ""
             }
@@ -125,7 +133,7 @@
               "title": "Bump the version",
               "status": "doing",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112906,
+              "lastUpdateEpoch": 1794997597662,
               "sourceRefs": [],
               "url": ""
             }
@@ -138,7 +146,7 @@
           "kind": "work-state",
           "title": "Tag the release",
           "detail": null,
-          "atEpoch": 1794996112909,
+          "atEpoch": 1794997597663,
           "url": ""
         },
         {
@@ -146,15 +154,15 @@
           "kind": "work-state",
           "title": "Bump the version",
           "detail": null,
-          "atEpoch": 1794996112906,
+          "atEpoch": 1794997597662,
           "url": ""
         }
       ],
       "agentIds": [],
       "conversationKeys": [],
       "requestedBy": null,
-      "startedAtEpoch": 1794996112906,
-      "updatedAtEpoch": 1794996112909,
+      "startedAtEpoch": 1794997597662,
+      "updatedAtEpoch": 1794997597663,
       "completedAtEpoch": null,
       "lifecycle": {
         "status": "in-progress",
@@ -171,8 +179,106 @@
       "anchorConversationKey": null
     },
     {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s5\"]",
+      "contentFingerprint": "58f5278a0fc15a390fd36d7f350c5b773280aa035479e150a445ec3a1552c2b9",
+      "title": "Deploy the release.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Deploy the release.",
+        "summary": "Deploy",
+        "workstreams": [
+          {
+            "id": "[\"github.com/o/r\",\"deploy\"]",
+            "title": "deploy"
+          }
+        ]
+      },
+      "original": {
+        "text": "Deploy the release.",
+        "atEpoch": 1794997107615
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Deploy",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1794997597658,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "[\"github.com/o/r\",\"deploy\"]",
+          "title": "deploy",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Deploy",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1794997597658,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Deploy",
+          "detail": null,
+          "atEpoch": 1794997597658,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s5"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s5\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1794997107615,
+      "updatedAtEpoch": 1794997597658,
+      "completedAtEpoch": 1794997597658,
+      "lifecycle": {
+        "status": "shipped",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": {
+        "state": "in-progress",
+        "percent": 30.0,
+        "checkedAt": "2026-11-18T10:21:37.615Z",
+        "shippedAt": "2026-11-18T10:26:37.658Z",
+        "readings": [
+          {
+            "at": "2026-11-18T10:21:37.615Z",
+            "percent": 30.0
+          }
+        ],
+        "narrative": "The migration came first.",
+        "milestones": []
+      },
+      "anchorConversationKey": null
+    },
+    {
       "id": "[\"conversation\",\"claude\",\"c:claude:s4\"]",
-      "contentFingerprint": "80a53dbc53b45ecc056264863c6ae943c5dfb4bb8851ea3a12cb7aa95df4e5ca",
+      "contentFingerprint": "c222c685d44be35cd2c2d7e4a54e9da170e455182e14f92d890ece45369af3a2",
       "title": "Write the migration.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -188,7 +294,7 @@
       },
       "original": {
         "text": "Write the migration.",
-        "atEpoch": 1794995612864
+        "atEpoch": 1794997097615
       },
       "scopeUpdates": [],
       "items": [
@@ -198,7 +304,7 @@
           "title": "Migration",
           "status": "doing",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112897,
+          "lastUpdateEpoch": 1794997597643,
           "sourceRefs": [],
           "url": ""
         }
@@ -214,7 +320,7 @@
               "title": "Migration",
               "status": "doing",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112897,
+              "lastUpdateEpoch": 1794997597643,
               "sourceRefs": [],
               "url": ""
             }
@@ -227,7 +333,7 @@
           "kind": "work-state",
           "title": "Migration",
           "detail": null,
-          "atEpoch": 1794996112897,
+          "atEpoch": 1794997597643,
           "url": ""
         }
       ],
@@ -238,8 +344,8 @@
         "[\"conversation\",\"claude\",\"c:claude:s4\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1794995612864,
-      "updatedAtEpoch": 1794996112897,
+      "startedAtEpoch": 1794997097615,
+      "updatedAtEpoch": 1794997597643,
       "completedAtEpoch": null,
       "lifecycle": {
         "status": "in-progress",
@@ -255,15 +361,15 @@
       "progress": {
         "state": "in-progress",
         "percent": 50.0,
-        "checkedAt": "2026-11-18T09:59:52.864Z",
+        "checkedAt": "2026-11-18T10:24:37.615Z",
         "shippedAt": null,
         "readings": [
           {
-            "at": "2026-11-18T09:55:52.864Z",
+            "at": "2026-11-18T10:20:37.615Z",
             "percent": 20.0
           },
           {
-            "at": "2026-11-18T09:59:52.864Z",
+            "at": "2026-11-18T10:24:37.615Z",
             "percent": 50.0
           }
         ],
@@ -274,7 +380,7 @@
     },
     {
       "id": "[\"conversation\",\"claude\",\"c:claude:s3\"]",
-      "contentFingerprint": "d0f89d078ef88554b2c1f5e320b99325a4e05383f0b20979eb37bc5f71bfaf44",
+      "contentFingerprint": "a6b2be2417de5b9fdcd283f9e774172360706da113046823acfe512851b348bf",
       "title": "Write the changelog.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -290,7 +396,7 @@
       },
       "original": {
         "text": "Write the changelog.",
-        "atEpoch": 1794995602864
+        "atEpoch": 1794997087615
       },
       "scopeUpdates": [],
       "items": [
@@ -300,7 +406,7 @@
           "title": "Changelog",
           "status": "doing",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112890,
+          "lastUpdateEpoch": 1794997597637,
           "sourceRefs": [],
           "url": ""
         }
@@ -316,7 +422,7 @@
               "title": "Changelog",
               "status": "doing",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112890,
+              "lastUpdateEpoch": 1794997597637,
               "sourceRefs": [],
               "url": ""
             }
@@ -329,7 +435,7 @@
           "kind": "work-state",
           "title": "Changelog",
           "detail": null,
-          "atEpoch": 1794996112890,
+          "atEpoch": 1794997597637,
           "url": ""
         }
       ],
@@ -340,9 +446,9 @@
         "[\"conversation\",\"claude\",\"c:claude:s3\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1794995602864,
-      "updatedAtEpoch": 1794996112890,
-      "completedAtEpoch": 1794996112890,
+      "startedAtEpoch": 1794997087615,
+      "updatedAtEpoch": 1794997597637,
+      "completedAtEpoch": 1794997597637,
       "lifecycle": {
         "status": "needs-review",
         "explicit": true,
@@ -359,7 +465,7 @@
     },
     {
       "id": "[\"conversation\",\"claude\",\"c:claude:s2\"]",
-      "contentFingerprint": "6dc90791a647b903235b1db85e3ab939d2b85345e65d1fd35a44a17b06bde143",
+      "contentFingerprint": "a4ff17cb4bfe73a7c8f940abf673fe3e12e35596765053f7f6c8e8d048324557",
       "title": "Ship the release notes.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -375,7 +481,7 @@
       },
       "original": {
         "text": "Ship the release notes.",
-        "atEpoch": 1794995572864
+        "atEpoch": 1794997057615
       },
       "scopeUpdates": [],
       "items": [
@@ -385,7 +491,7 @@
           "title": "Notes",
           "status": "doing",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112883,
+          "lastUpdateEpoch": 1794997597631,
           "sourceRefs": [],
           "url": ""
         }
@@ -401,7 +507,7 @@
               "title": "Notes",
               "status": "doing",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112883,
+              "lastUpdateEpoch": 1794997597631,
               "sourceRefs": [],
               "url": ""
             }
@@ -414,7 +520,7 @@
           "kind": "work-state",
           "title": "Notes",
           "detail": null,
-          "atEpoch": 1794996112883,
+          "atEpoch": 1794997597631,
           "url": ""
         }
       ],
@@ -425,9 +531,9 @@
         "[\"conversation\",\"claude\",\"c:claude:s2\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1794995572864,
-      "updatedAtEpoch": 1794996112883,
-      "completedAtEpoch": 1794996112883,
+      "startedAtEpoch": 1794997057615,
+      "updatedAtEpoch": 1794997597631,
+      "completedAtEpoch": 1794997597631,
       "lifecycle": {
         "status": "shipped",
         "explicit": true,
@@ -444,7 +550,7 @@
     },
     {
       "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
-      "contentFingerprint": "feaa55a874bfd98851b099b380622217930ea1dae0c0d92f9c75fbc18d23ef7a",
+      "contentFingerprint": "a3462b284bac1bf630bab7ba23e9546ace19f1f8ef90d6fa420dc61d3ab41163",
       "title": "Fix the parser's error messages, add a header test, write docs and fail fast.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -460,7 +566,7 @@
       },
       "original": {
         "text": "Fix the parser's error messages, add a header test, write docs and fail fast.",
-        "atEpoch": 1794995512864
+        "atEpoch": 1794996997615
       },
       "scopeUpdates": [],
       "items": [
@@ -470,7 +576,7 @@
           "title": "Report the line",
           "status": "needs-you",
           "nextStep": null,
-          "lastUpdateEpoch": 1794996112875,
+          "lastUpdateEpoch": 1794997597625,
           "sourceRefs": [],
           "url": ""
         }
@@ -486,7 +592,7 @@
               "title": "Report the line",
               "status": "needs-you",
               "nextStep": null,
-              "lastUpdateEpoch": 1794996112875,
+              "lastUpdateEpoch": 1794997597625,
               "sourceRefs": [],
               "url": ""
             }
@@ -499,7 +605,7 @@
           "kind": "work-state",
           "title": "Report the line",
           "detail": null,
-          "atEpoch": 1794996112875,
+          "atEpoch": 1794997597625,
           "url": ""
         }
       ],
@@ -510,8 +616,8 @@
         "[\"conversation\",\"claude\",\"c:claude:s1\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1794995512864,
-      "updatedAtEpoch": 1794996112875,
+      "startedAtEpoch": 1794996997615,
+      "updatedAtEpoch": 1794997597625,
       "completedAtEpoch": null,
       "lifecycle": {
         "status": "needs-you",
@@ -529,7 +635,7 @@
     },
     {
       "id": "[\"conversation\",\"codex\",\"c:codex:c1\"]",
-      "contentFingerprint": "7d6e1dc8932bd1adbc3b8d4d35bbb338f07f531bc752e438c45739057ddd0b5c",
+      "contentFingerprint": "6270cef0f0e1c1fbfb8ce1cb805c70b0458c681c8bebcff97e80a5b143837ef8",
       "title": "Rename the lexer.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -540,7 +646,7 @@
       },
       "original": {
         "text": "Rename the lexer.",
-        "atEpoch": 1794995632864
+        "atEpoch": 1794997117615
       },
       "scopeUpdates": [],
       "items": [],
@@ -553,8 +659,8 @@
         "[\"conversation\",\"codex\",\"c:codex:c1\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1794995632864,
-      "updatedAtEpoch": 1794995632864,
+      "startedAtEpoch": 1794997117615,
+      "updatedAtEpoch": 1794997117615,
       "completedAtEpoch": null,
       "lifecycle": {
         "status": "unknown",
@@ -607,11 +713,11 @@
     "listName": "goals",
     "history": false,
     "project": "",
-    "updatedAt": "2026-11-18T10:01:53.091Z",
-    "periodStart": null,
-    "periodEnd": null,
+    "updatedAt": "2026-11-18T10:26:37.847Z",
+    "periodStart": "2026-10-18",
+    "periodEnd": "2026-11-19",
     "summary": null,
-    "generatedAt": "2026-11-18T09:54:52.864+00:00",
+    "generatedAt": "2026-11-18T10:19:37.615+00:00",
     "windowDays": 31,
     "sourcePromptCount": 1,
     "mapPath": null,
@@ -627,11 +733,11 @@
         "focusArea": "Parser",
         "focusAreaId": "fa_aaaaaaaaaaaa",
         "product": null,
-        "latestAt": "2026-11-18 09:51",
+        "latestAt": "2026-11-18 10:16",
         "timesAsked": 1.0,
         "evidence": [
           {
-            "at": "2026-11-18 09:51",
+            "at": "2026-11-18 10:16",
             "quote": "the parser's error messages"
           }
         ]
@@ -649,11 +755,11 @@
         "focusArea": "Parser",
         "focusAreaId": "fa_aaaaaaaaaaaa",
         "product": null,
-        "latestAt": "2026-11-18 09:51",
+        "latestAt": "2026-11-18 10:16",
         "timesAsked": 1.0,
         "evidence": [
           {
-            "at": "2026-11-18 09:51",
+            "at": "2026-11-18 10:16",
             "quote": "a header test"
           }
         ]
@@ -669,11 +775,11 @@
         "focusArea": "Docs",
         "focusAreaId": "fa_bbbbbbbbbbbb",
         "product": null,
-        "latestAt": "2026-11-18 09:51",
+        "latestAt": "2026-11-18 10:16",
         "timesAsked": 1.0,
         "evidence": [
           {
-            "at": "2026-11-18 09:51",
+            "at": "2026-11-18 10:16",
             "quote": "write docs"
           }
         ]
@@ -689,11 +795,11 @@
         "focusArea": null,
         "focusAreaId": null,
         "product": null,
-        "latestAt": "2026-11-18 09:51",
+        "latestAt": "2026-11-18 10:16",
         "timesAsked": 1.0,
         "evidence": [
           {
-            "at": "2026-11-18 09:51",
+            "at": "2026-11-18 10:16",
             "quote": "fail fast"
           }
         ]
@@ -706,7 +812,7 @@
       "listName": "2026-10",
       "history": true,
       "project": "",
-      "updatedAt": "2026-11-18T10:01:53.091Z",
+      "updatedAt": "2026-11-18T10:26:37.847Z",
       "periodStart": "2026-10-01",
       "periodEnd": "2026-11-01",
       "summary": "Worked on the lexer.",
@@ -730,7 +836,7 @@
           "timesAsked": 1.0,
           "evidence": [
             {
-              "at": "2026-10-04 09:51",
+              "at": "2026-10-04 10:16",
               "quote": "the lexer's tokens"
             }
           ]
@@ -754,7 +860,7 @@
     "state": "unconfigured",
     "mode": "disabled",
     "checkedAt": null,
-    "observedAt": 1794996113091,
+    "observedAt": 1794997597847,
     "message": "oboete keeps your work on this computer only.",
     "download": null,
     "projection": {

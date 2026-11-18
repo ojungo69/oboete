@@ -27,6 +27,8 @@ test('every request is read, in the state its records give it', () => {
     [key('claude', 'c:claude:s3'), 'needs-check'],
     // Two reviews found it rising.
     [key('claude', 'c:claude:s4'), 'working'],
+    // A status shipped it after a review at 30%.
+    [key('claude', 'c:claude:s5'), 'shipped'],
     // A request of its own name, worked on in two repositories.
     ['r:rq1', 'working'],
     // Codex only asked, minutes ago: a request with no state of its own reads as being worked on
@@ -40,6 +42,7 @@ test('each request has its agent, its conversation at the time of its ask, and i
   assert.deepEqual(tools, {
     'claude:c:claude:s3': 'claude',
     'claude:c:claude:s4': 'claude',
+    'claude:c:claude:s5': 'claude',
     'claude:c:claude:s2': 'claude',
     'claude:c:claude:s1': 'claude',
     'codex:c:codex:c1': 'codex',
@@ -78,6 +81,8 @@ test('the focus screens read the areas, their open asks and Past focus', () => {
   ])
   assert.deepEqual(model.otherAsks.map((k) => k.title), ['Fail fast'])
   assert.equal(model.currentPeriod.windowDays, 31)
+  // The 31 days that end on the day of the read, as the goals page read them.
+  assert.match(model.currentPeriod.label, /^[A-Z][a-z]{2} \d{1,2}(, \d{4})? – [A-Z][a-z]{2} \d{1,2}(, \d{4})?$/)
   assert.equal(model.pastPeriods.length, 1)
   const [month] = model.pastPeriods
   // A whole month, from its first day.
@@ -94,4 +99,12 @@ test('a request two reviews found rising has its history and the estimate its pa
   assert.deepEqual(rising.progress.history, [20, 50])
   assert.equal(rising.progress.readings, 2)
   assert.match(rising.estimate ?? '', /^at this pace, about [A-Z][a-z]{2} \d{1,2}$/)
+})
+
+test('a request a status shipped after a review at 30% reads as shipped at 100%, its review its own', () => {
+  const shipped = byId(key('claude', 'c:claude:s5'))
+  assert.equal(shipped.state, 'shipped')
+  assert.equal(shipped.progress.percent, 100)
+  assert.equal(shipped.progress.history, undefined)
+  assert.ok(shipped.progress.completedAt, 'it has its completion')
 })

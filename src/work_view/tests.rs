@@ -108,8 +108,8 @@ fn goals_op(h: &mut Store, ts: i64, seq: i64, items: Value, summary: &str) {
     h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
 }
 
-/// A home of the last minutes: Claude's requests that need the owner, that shipped, that are done
-/// and that two reviews found rising, Codex's that only asked, and a request of its own name with a
+/// A home of the last minutes: Claude's requests that need the owner, that shipped, that are done,
+/// that two reviews found rising and that shipped after a review at 30%, Codex's that only asked, and a request of its own name with a
 /// list of one name in two repositories. Goals written over the first prompt ask for the parser (an area with an open
 /// ask), leave an open ask in an area nothing was asked for in (its `asked` is null), and one open
 /// ask under no area. Goals of 45 days ago make a finished month of Past focus.
@@ -137,6 +137,11 @@ fn home() -> (Store, i64) {
     for (at, percent) in [(t + 240_000, 20), (t + 480_000, 50)] {
         reviewed(&mut h, "c:claude:s4", at, percent);
     }
+    // A review at 30%, then a status that ships it: 100% by its status, its review its own.
+    h.said("s5", R, t + 110_000, "Deploy the release.");
+    reviewed(&mut h, "c:claude:s5", t + 300_000, 30);
+    let deployed = json!({"task": "Deploy", "status": "doing", "request_status": "shipped"});
+    wrote(&mut h, "claude", "s5", "deploy", deployed);
     for (repo, task) in [(R, "Bump the version"), (R2, "Tag the release")] {
         let fields = json!({"task": task, "status": "doing", "request_id": "rq1",
             "request": "Cut the release"});
@@ -433,6 +438,51 @@ fn a_conversation_is_titled_by_its_own_request() {
     assert_eq!(agents.as_array().unwrap().len(), 1, "{agents}");
     let shown = (&agents[0]["sessionTitle"], &agents[0]["project"]);
     assert_eq!(shown, (&json!("Its own"), &json!("b")));
+}
+
+/// The review the pages get is its newest reading, with its own percent: a request shipped by its
+/// status after a review at 50% is 100% by its status, and the pages check that the percent is
+/// the newest reading's (Codex on #1087).
+#[test]
+fn a_request_shipped_after_a_partial_review_keeps_the_reviews_percent() {
+    let work = json!({"requests": [{"id": "r:z", "status": "shipped", "title": "Deploy",
+        "updated": 1_795_100_000_000_i64, "completed_at": 1_795_090_000_000_i64,
+        "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-18",
+            "completed_at": 1_795_090_000_000_i64, "readings": [
+                {"ts": 1_795_040_000_000_i64, "percent": 20}, {"ts": 1_795_050_000_000_i64, "percent": 50}]}}]});
+    let progress = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["progress"];
+    assert_eq!(
+        (&progress["percent"], &progress["state"]),
+        (&json!(50.0), &json!("in-progress"))
+    );
+    assert_eq!(progress["readings"].as_array().map(Vec::len), Some(2));
+}
+
+/// A review's day completes a request shipped by that review alone only when the review goes
+/// with it: with no review time (a rule took its key), the last update completes it (Codex on
+/// #1087).
+#[test]
+fn a_shipped_request_whose_review_cannot_go_is_completed_at_its_last_update() {
+    let work = json!({"requests": [{"id": "r:w", "status": "shipped", "title": "Release",
+        "updated": 1_795_100_000_000_i64, "completed_at": null,
+        "progress": {"percent": 100, "completed": "2026-11-19", "completed_at": null}}]});
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    assert!(request["progress"].is_null(), "{request}");
+    assert_eq!(request["completedAtEpoch"], json!(1_795_100_000_000_i64));
+}
+
+/// The current goals' period is the window the goals page read, the 31 days that end now, in this
+/// machine's days: the run's time stays its own (Codex on #1087).
+#[test]
+fn the_current_goals_period_is_the_window_that_ends_now() {
+    let tokyo = FixedOffset::east_opt(9 * 3600).unwrap();
+    let page = json!({"current": {"written": 1_794_000_000_000_i64, "items": []},
+        "window": {"days": 31, "prompts": 4}});
+    // 2026-11-19 05:30 in Tokyo.
+    let goals = &snapshot_at(&json!({}), &page, 1_795_033_800_000, &tokyo)["goals"];
+    let period = (&goals["periodStart"], &goals["periodEnd"]);
+    assert_eq!(period, (&json!("2026-10-19"), &json!("2026-11-20")));
+    assert_eq!(goals["generatedAt"], zoned(1_794_000_000_000, &tokyo));
 }
 
 fn hex(t: &str, n: usize) -> bool {

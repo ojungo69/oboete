@@ -247,40 +247,51 @@ fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashMap<String, usize>
     let follow: Vec<Value> = (arr(&r["follow_ups"]).iter())
         .map(|f| json!({"text": s(&f["text"]), "atEpoch": f["ts"]}))
         .collect();
+    // The review the page shows is its newest reading: its own percent and state go, as
+    // claude-mem's review does. A request shipped by its status after a review below 100 is
+    // 100% by its status, not by its review (`to-work-model.ts:198-200`), and the pages check
+    // that the percent is the newest reading's (`data.ts:282`).
+    let progress = &r["progress"];
+    let readings: Vec<Value> = (arr(&progress["readings"]).iter())
+        .filter_map(|r| {
+            Some(json!({"at": iso(r["ts"].as_i64()?), "percent": r["percent"].as_f64()?}))
+        })
+        .collect();
+    let reviewed = (progress["reviewed"].as_i64()).zip(
+        readings
+            .last()
+            .map_or(progress["percent"].as_f64(), |r| r["percent"].as_f64()),
+    );
     // When the newest status recorded completed the request: a done one's clock stops by it. A
     // request shipped by its review alone has no such time, and the review's day
-    // (`progress.completed`) completes it. Its last update is the last resort: a shipped request
-    // needs a completion (`data.ts:276`).
-    let progress = &r["progress"];
+    // (`progress.completed`) completes it when the review goes. Its last update is the last
+    // resort: a shipped request needs a completion (`data.ts:276`).
     let shipped_on = noon(&progress["completed"]);
     let completed = match (r["completed_at"].as_i64(), status) {
         (Some(at), _) => json!(at),
-        (None, "shipped") if !shipped_on.is_null() => Value::Null,
+        (None, "shipped") if reviewed.is_some() && !shipped_on.is_null() => Value::Null,
         (None, "shipped") => r["updated"].clone(),
         _ => Value::Null,
     };
     // A review's progress, when a review was recorded: a request shipped by its status alone is
     // complete by definition (`to-work-model.ts:198-200`), with no reading of its own.
     let story = &r["story"];
-    let progress = match (progress["reviewed"].as_i64(), progress["percent"].as_f64()) {
-        (Some(reviewed), Some(percent)) => json!({
-            "state": if status == "shipped" { "shipped" } else { "in-progress" },
+    let progress = match reviewed {
+        Some((reviewed, percent)) => json!({
+            "state": if status == "shipped" && percent >= 100.0 { "shipped" } else { "in-progress" },
             "percent": percent,
             "checkedAt": iso(reviewed),
             "shippedAt": match progress["completed_at"].as_i64() {
                 Some(at) => iso(at),
                 None => shipped_on,
             },
-            "readings": (arr(&progress["readings"]).iter())
-                .filter_map(|r| Some(json!({"at": iso(r["ts"].as_i64()?),
-                    "percent": r["percent"].as_f64()?})))
-                .collect::<Vec<_>>(),
+            "readings": readings,
             "narrative": s(&story["narrative"]),
             "milestones": (arr(&story["milestones"]).iter())
                 .map(|m| json!({"at": noon(&m["date"]), "text": s(&m["text"])}))
                 .collect::<Vec<_>>(),
         }),
-        _ => Value::Null,
+        None => Value::Null,
     };
     let mut out = json!({
         "id": own, "contentFingerprint": r["version"],
@@ -374,9 +385,17 @@ where
                 "evidence": evidence(&k["quotes"], tz)}))
         })
         .collect();
+    // The page reads the window that ends now, its quotes and its prompts (`my_work_goals::page`),
+    // not the one that ended at the run: its days are the period's, the run's time its own.
+    let days = page["window"]["days"].as_i64();
+    let day = |ms: i64| tz.timestamp_millis_opt(ms).single().map(|t| t.date_naive());
+    let start = days
+        .and_then(|d| day(now - d * 86_400_000))
+        .map(|d| d.to_string());
+    let end = (day(now).and_then(|d| d.succ_opt())).map(|d| d.to_string());
     json!({
         "listId": "goals", "listName": "goals", "history": false, "project": "",
-        "updatedAt": iso(now), "periodStart": null, "periodEnd": null, "summary": null,
+        "updatedAt": iso(now), "periodStart": start, "periodEnd": end, "summary": null,
         "generatedAt": zoned(written, tz),
         "windowDays": page["window"]["days"], "sourcePromptCount": page["window"]["prompts"],
         "mapPath": null, "areas": areas, "asks": asks,
