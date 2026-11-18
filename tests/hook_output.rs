@@ -219,6 +219,48 @@ fn a_pi_hook_told_a_time_far_off_records_as_one_told_none() {
     assert_eq!(recorded, 1);
 }
 
+/// #955 (the local Codex review of #1073): an answer's time further off than an hour is read as
+/// none. With a kept file left, a prompt told a time two hours on writes it back, as a call told
+/// no time does.
+#[test]
+fn a_pi_hook_told_a_time_hours_off_writes_the_kept_files_back() {
+    let home = tempfile::tempdir().unwrap();
+    let made = hook_output(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"the store is made"}"#,
+    );
+    assert!(made.status.success());
+    let lock = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let past = (epoch_ms() - 1).to_string();
+    let kept = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"kept on a held store"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &past)],
+    );
+    assert!(kept.status.success());
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(kept_text(home.path()).contains("kept on a held store"));
+    let later = (epoch_ms() + 2 * 3_600_000).to_string();
+    let told = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"told a time hours on"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &later)],
+    );
+    assert!(told.status.success());
+    let left = kept_text(home.path());
+    assert!(
+        !left.contains("kept on a held store"),
+        "not written back: {left}"
+    );
+}
+
 /// #955: a hook Pi waits for writes no kept file back (docs/unwritten.md U3): it keeps its own
 /// events behind them, and the next call that waits as long as it likes writes them all back in
 /// their order.

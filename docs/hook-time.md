@@ -237,7 +237,8 @@ section).
   `a_pi_hook_pi_waits_for_keeps_its_event_behind_the_kept_files`,
   `raw::tests::a_bounded_store_waits_only_what_remains_of_its_time`,
   `hook::tests::a_bounded_record_waits_for_the_spool_once`,
-  `a_pi_hook_told_a_time_far_off_records_as_one_told_none` (an hour on at most),
+  `a_pi_hook_told_a_time_far_off_records_as_one_told_none` and
+  `a_pi_hook_told_a_time_hours_off_writes_the_kept_files_back` (an hour on at most),
   `setup::tests::a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write` (the
   keep's room in both languages), and the Pi harness (`src/testdata/pi/test.mjs`, under
   `setup::tests::pi_generated_extension_matches_event_and_tool_contract`): what Pi waits for and
