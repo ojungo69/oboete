@@ -255,7 +255,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   alone, on the review's day), a request's two newest reviews are its readings, from which the pages
   measure the pace oboete's page shows, and the goals' times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
   (oboete's own page shows them), the evidence links (X37), the subagents (a later pull request),
-  the rules (they come with My Rules), and continuing a conversation (X36).
+  the rules (they come with My Rules), a request's grouping suggestion (its Join and Not this come
+  with the pages' actions), and continuing a conversation (X36).
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow

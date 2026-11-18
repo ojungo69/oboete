@@ -805,6 +805,23 @@ fn a_workstream_goes_by_its_place() {
     assert_eq!(titled, ["w0", "w1", "w2"]);
 }
 
+/// A review's readings go each at its own time, in their order, the newest its time of review:
+/// the contract's comparison writes every time as its kind, so it would not see one put in
+/// another's place (Codex on #1087).
+#[test]
+fn a_reviews_readings_go_each_at_its_own_time() {
+    let readings = json!([{"ts": 1_795_040_000_000_i64, "percent": 20},
+        {"ts": 1_795_050_000_000_i64, "percent": 50}]);
+    let work = json!({"requests": [{"id": "r:p", "status": "working", "title": "Migrate",
+        "updated": 1_795_060_000_000_i64,
+        "progress": {"percent": 50, "reviewed": 1_795_050_000_000_i64, "readings": readings}}]});
+    let progress = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["progress"];
+    let want = json!([{"at": "2026-11-18T22:13:20.000Z", "percent": 20.0},
+        {"at": "2026-11-19T01:00:00.000Z", "percent": 50.0}]);
+    assert_eq!(progress["readings"], want, "{progress}");
+    assert_eq!(progress["checkedAt"], json!("2026-11-19T01:00:00.000Z"));
+}
+
 fn hex(t: &str, n: usize) -> bool {
     t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
