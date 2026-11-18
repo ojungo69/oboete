@@ -66,6 +66,10 @@ trap 'exit 130' INT TERM HUP
 # in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
 # run that was killed"). mktemp makes the folder its owner's alone: one this user cannot look in,
 # as when the build runs as another user than the fetch did, stops the run too.
+if [ ! -r "$here" ]; then
+  echo "build.sh: $(id -un) cannot list $here, so a fetch that did not finish there would go unseen; see ui/work-view/README.md, \"A run that was killed\"" >&2
+  exit 1
+fi
 for left in "$here"/.upstream.*; do
   [ -d "$left" ] || continue
   if [ ! -r "$left" ] || [ ! -x "$left" ]; then
@@ -87,6 +91,12 @@ cp -a "$here/upstream/." "$work/"
 # GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
 # folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
 # skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
+# oboete's patches carry its token, its transport and its name: a build without one is not the
+# work-view oboete serves, so an empty patches/ stops it.
+if ! compgen -G "$here/patches/*.patch" > /dev/null; then
+  echo "build.sh: $here/patches holds no patch" >&2
+  exit 1
+fi
 for patch in "$here"/patches/*.patch; do
   # LC_ALL=C: Git words its messages in the caller's language, and the skip is read in English.
   # --whitespace=nowarn: a warning prints the line it is about by itself, which a line of the patch

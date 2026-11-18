@@ -109,7 +109,7 @@ for (const { entry, text, folders } of entries.values()) section(entry, text, fo
 // are. The emitted name is the file's with `-` and an 8-character hash before the extension, or the
 // file's own when it is copied as it is; a font under Vite's `assetsInlineLimit` (4 KiB) is inlined
 // in a script or a style as a `data:` URL instead, and is read by its bytes alone.
-const FONT = /\.(woff2?|ttf|otf|eot)$/i
+const FONT = /\.(woff2?|ttf|otf|eot|ttc|otc)$/i
 // A package's own files, not its nested node_modules (packages of their own); every file of a folder.
 const walk = (dir, nested = true) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.name === 'node_modules' && !nested ? [] : e.isDirectory() ? walk(join(dir, e.name), nested) : [join(dir, e.name)])
@@ -135,20 +135,37 @@ for (const font of dist.filter((f) => FONT.test(f))) {
 // otherwise (escaped, or with other characters) stops the build, as this check cannot read them.
 const DATA_URL = /data:([^;,'"()\s]*)((?:;[^;,'"()\s]*)*),([^'"()\s]*)/gi
 const FONT_TYPE = /^(font\/[\w.+-]+|application\/(x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)$/i
-const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
-// woff2, woff, OpenType, TrueType (two signatures), a collection; an EOT has one of its three
-// versions at byte 8 and "LP" at byte 34.
-const isFont = (b) => ['wOF2', 'wOFF', 'OTTO', '\0\x01\0\0', 'true', 'ttcf'].some((m) => b.subarray(0, 4).equals(Buffer.from(m, 'latin1'))) ||
-  (b.length > 36 && [0x00010000, 0x00020001, 0x00020002].includes(b.readUInt32LE(8)) && b[34] === 0x4c && b[35] === 0x50)
+// Base64 as Vite writes it: whole groups of four, `=` only to pad the last.
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+// A font by its header, not by a few bytes alone: a woff or woff2 gives its own length at byte 8; an
+// sfnt (TrueType, OpenType) the number of its tables at byte 4, each 16 bytes after a 12-byte head;
+// a collection its version and the number of its fonts; an EOT one of its three versions at byte 8
+// and "LP" at byte 34.
+const tag = (b) => b.subarray(0, 4).toString('latin1')
+function isFont(b) {
+  if (b.length < 12) return false
+  if (['wOF2', 'wOFF'].includes(tag(b))) return b.readUInt32BE(8) === b.length
+  if (['\0\x01\0\0', 'true', 'OTTO'].includes(tag(b))) {
+    const tables = b.readUInt16BE(4)
+    return tables > 0 && b.length >= 12 + 16 * tables
+  }
+  if (tag(b) === 'ttcf') {
+    const fonts = b.length >= 16 ? b.readUInt32BE(8) : 0
+    return [0x00010000, 0x00020000].includes(b.readUInt32BE(4)) && fonts > 0 && b.length >= 12 + 4 * fonts
+  }
+  return b.length > 36 && [0x00010000, 0x00020001, 0x00020002].includes(b.readUInt32LE(8)) && b[34] === 0x4c && b[35] === 0x50
+}
 const known = [...sources.values()].flat()
 for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
   for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_URL)) {
-    const base64 = /;base64$/i.test(params) && BASE64.test(data)
-    const fontType = FONT_TYPE.test(type)
-    if (fontType && !base64) throw new Error(`${shown(file)}: a ${type} data: URL not in plain base64, which this check cannot read`)
-    if (!base64) continue
-    const bytes = Buffer.from(data, 'base64')
-    if (!fontType && !isFont(bytes)) continue
+    // The bytes as the browser reads them, escapes undone, to tell a font by; a font goes in
+    // plain base64 alone, the form this check compares.
+    let text = data
+    try { text = decodeURIComponent(data) } catch { /* a stray %: read as it is */ }
+    const base64 = /;base64$/i.test(params)
+    const bytes = Buffer.from(text, base64 ? 'base64' : 'latin1')
+    if (!FONT_TYPE.test(type) && !isFont(bytes)) continue
+    if (!base64 || !BASE64.test(data)) throw new Error(`${shown(file)}: a font in a data: URL (${type || 'no type'}) not in plain base64, which this check cannot read`)
     const source = known.find((f) => readFileSync(f).equals(bytes))
     if (!source) throw new Error(`${shown(file)}: a font inlined as a data: URL (${type || 'no type'}) that no package listed here holds, and no notice covers`)
     if (source.startsWith(own + sep)) hanken = true

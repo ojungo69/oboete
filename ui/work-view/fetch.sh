@@ -91,6 +91,10 @@ trap 'exit 130' INT TERM HUP
 # in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
 # run that was killed"). mktemp makes the folder its owner's alone: one this user cannot look in,
 # as when the build runs as another user than the fetch did, stops the run too.
+if [ ! -r "$here" ]; then
+  echo "fetch.sh: $(id -un) cannot list $here, so a fetch that did not finish there would go unseen; see ui/work-view/README.md, \"A run that was killed\"" >&2
+  exit 1
+fi
 for left in "$here"/.upstream.*; do
   [ -d "$left" ] || continue
   if [ ! -r "$left" ] || [ ! -x "$left" ]; then

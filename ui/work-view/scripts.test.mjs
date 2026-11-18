@@ -9,8 +9,11 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-// Git as it comes, whatever this machine's settings say (`apply.whitespace` among them).
-const env = { ...process.env, LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+// Only what the runs need, so that no GIT_DIR, GIT_INDEX_FILE or GIT_WORK_TREE of the caller's (a
+// Git hook's, say) sends a fixture's Git to another repository; and Git as it comes, whatever this
+// machine's settings say (`apply.whitespace` among them).
+const kept = Object.fromEntries(['PATH', 'HOME', 'TMPDIR'].filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]))
+const env = { ...kept, LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
 
 // A checkout with ui/work-view/ (the two scripts and `files`, each a path under it and its text)
 // and an empty assets/ beside it; it is removed after `use`.
@@ -105,6 +108,33 @@ test('a reserved folder this user cannot look in stops both scripts', { skip: pr
     } finally {
       chmodSync(join(view, '.upstream.AbCdEf'), 0o700)
     }
+  })
+})
+
+test('a work-view folder this user cannot list stops both scripts', { skip: process.getuid?.() === 0 && 'root lists any folder' }, () => {
+  checkout({ 'upstream/f.txt': 'a\n' }, ({ root, view }) => {
+    const src = claudeMem(root)
+    chmodSync(view, 0o300)
+    try {
+      for (const [script, args] of [['fetch.sh', [src, 'v1']], ['build.sh', []]]) {
+        const { status, stderr } = run(view, script, args)
+        assert.equal(status, 1, `${script}: ${stderr}`)
+        assert.match(stderr, /cannot list .*ui\/work-view, so a fetch that did not finish there would go unseen/, script)
+      }
+    } finally {
+      chmodSync(view, 0o755)
+    }
+    assert.equal(existsSync(join(view, '.lock')), false)
+    assert.equal(existsSync(join(view, 'UPSTREAM')), false)
+  })
+})
+
+test('a build with no patch in patches/ stops, and names the folder', () => {
+  checkout({ 'upstream/f.txt': 'a\n', 'patches/README': 'none\n' }, ({ view }) => {
+    const { status, stderr } = run(view, 'build.sh')
+    assert.equal(status, 1, stderr)
+    assert.match(stderr, /patches holds no patch/)
+    assert.equal(existsSync(join(view, '.lock')), false)
   })
 })
 
