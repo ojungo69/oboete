@@ -3,6 +3,11 @@
 # records the tag and its commit in ui/work-view/UPSTREAM (docs/spike/work-view.md, "Next").
 # Usage: ui/work-view/fetch.sh <a claude-mem checkout> <tag>
 set -euo pipefail
+# The scripts' own globbing, whatever a caller's exported SHELLOPTS, BASHOPTS or GLOBIGNORE say: the
+# guard and the patch list below read their folders through globs.
+set +f
+shopt -u failglob nullglob nocaseglob
+unset GLOBIGNORE
 src=${1:?a claude-mem checkout}
 tag=${2:?a tag, e.g. v15.19.0}
 
@@ -86,6 +91,26 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# A reserved folder of fetch.sh's that holds an UPSTREAM line is a fetch that did not finish: its
+# UPSTREAM is what says so, as a folder left only because its removal failed holds none. The trees
+# in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
+# run that was killed"). mktemp makes the folder its owner's alone: one this user cannot look in,
+# as when the build runs as another user than the fetch did, stops the run too.
+if [ ! -r "$here" ]; then
+  echo "fetch.sh: $(id -un) cannot list $here, so a fetch that did not finish there would go unseen; see ui/work-view/README.md, \"A run that was killed\"" >&2
+  exit 1
+fi
+for left in "$here"/.upstream.*; do
+  [ -d "$left" ] || continue
+  if [ ! -r "$left" ] || [ ! -x "$left" ]; then
+    echo "fetch.sh: $(id -un) cannot look in $left, which may be a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+  if [ -e "$left/UPSTREAM" ]; then
+    echo "fetch.sh: $left is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+done
 swap=$(mktemp -d "$here/.upstream.XXXXXX")
 mkdir "$swap/new"
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"

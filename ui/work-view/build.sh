@@ -5,6 +5,11 @@
 # The bundle is committed; CI builds it again and fails when the two differ.
 # Usage: ui/work-view/build.sh
 set -euo pipefail
+# The scripts' own globbing, whatever a caller's exported SHELLOPTS, BASHOPTS or GLOBIGNORE say: the
+# guard and the patch list below read their folders through globs.
+set +f
+shopt -u failglob nullglob nocaseglob
+unset GLOBIGNORE
 
 # The folder this script is in, with links resolved, and the checkout's own assets/ beside it: a
 # link there would make the moves below act on another folder, so it stops instead.
@@ -61,6 +66,26 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# A reserved folder of fetch.sh's that holds an UPSTREAM line is a fetch that did not finish: its
+# UPSTREAM is what says so, as a folder left only because its removal failed holds none. The trees
+# in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
+# run that was killed"). mktemp makes the folder its owner's alone: one this user cannot look in,
+# as when the build runs as another user than the fetch did, stops the run too.
+if [ ! -r "$here" ]; then
+  echo "build.sh: $(id -un) cannot list $here, so a fetch that did not finish there would go unseen; see ui/work-view/README.md, \"A run that was killed\"" >&2
+  exit 1
+fi
+for left in "$here"/.upstream.*; do
+  [ -d "$left" ] || continue
+  if [ ! -r "$left" ] || [ ! -x "$left" ]; then
+    echo "build.sh: $(id -un) cannot look in $left, which may be a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+  if [ -e "$left/UPSTREAM" ]; then
+    echo "build.sh: $left is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+done
 work=$(mktemp -d)
 # An absolute path: Git ignores a relative entry of GIT_CEILING_DIRECTORIES, as a relative TMPDIR
 # would give. CDPATH is cleared, as a cd it resolved would print the folder too, and mktemp's path
@@ -71,9 +96,21 @@ cp -a "$here/upstream/." "$work/"
 # GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
 # folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
 # skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
-for patch in "$here"/patches/*.patch; do
+# oboete's patches carry its token, its transport and its name: a build without one is not the
+# work-view oboete serves, so an empty patches/ stops it. The list is made once, the checkout's
+# own path taken as it is, whatever characters it holds.
+shopt -s nullglob
+patches=("$here"/patches/*.patch)
+shopt -u nullglob
+if [ "${#patches[@]}" -eq 0 ]; then
+  echo "build.sh: $here/patches holds no patch" >&2
+  exit 1
+fi
+for patch in "${patches[@]}"; do
   # LC_ALL=C: Git words its messages in the caller's language, and the skip is read in English.
-  if ! out=$(cd "$work" && LC_ALL=C GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose "$patch" 2>&1); then
+  # --whitespace=nowarn: a warning prints the line it is about by itself, which a line of the patch
+  # that opens with "Skipped patch" would make read as a skip. The patch applies as it is either way.
+  if ! out=$(cd "$work" && LC_ALL=C GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose --whitespace=nowarn "$patch" 2>&1); then
     printf '%s\n' "$out" >&2
     exit 1
   fi

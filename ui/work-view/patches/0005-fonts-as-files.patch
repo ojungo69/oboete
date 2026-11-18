@@ -1,0 +1,19 @@
+diff --git a/src/ui/my-work/vite.config.ts b/src/ui/my-work/vite.config.ts
+index 671564f26b3f9ca5d048cb703568a4b85f2b424f..fd0555c59d26e4512c2baf77f3db2714e8949dfd 100644
+--- a/src/ui/my-work/vite.config.ts
++++ b/src/ui/my-work/vite.config.ts
+@@ -9,7 +9,13 @@ export default defineConfig({
+   // The worker serves index.html at / but the assets under /work-view/, so relative paths would break.
+   base: '/work-view/',
+   // Modified by oboete: the build stays inside this copy; ui/work-view/build.sh takes it from here.
+-  build: { outDir: 'dist', emptyOutDir: true },
++  // Fonts go as files, never inlined as data: URLs (Vite types a .otc as application/octet-stream),
++  // so that ui/work-view/notices.mjs reads each one against the package it comes from.
++  build: {
++    outDir: 'dist',
++    emptyOutDir: true,
++    assetsInlineLimit: (file: string) => (/\.(woff2?|ttf|otf|eot|ttc|otc)$/i.test(file) ? false : undefined),
++  },
+   plugins: [react(), tailwindcss()],
+   // Shared UI localization lives outside this Vite package. Resolve React from
+   // this app for both it and the app, so hooks never cross React instances.
