@@ -1,0 +1,440 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-18T08:16:34.674Z",
+  "revision": "1794989794674",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-18T08:16:34.674Z"
+  },
+  "agents": [
+    {
+      "id": "claude:c:claude:s2",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Ship the release notes.",
+      "project": "r",
+      "contentSessionId": "c:claude:s2"
+    },
+    {
+      "id": "claude:c:claude:s1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1"
+    },
+    {
+      "id": "codex:c:codex:c1",
+      "label": "Codex",
+      "platformSource": "codex",
+      "sessionTitle": "Rename the lexer.",
+      "project": "r",
+      "contentSessionId": "c:codex:c1"
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s2\"]",
+      "contentFingerprint": "6acfe689ec60f4a01c63d2aeb6dfd493a2ac9cd55d7968fc0e1437e14ea735e6",
+      "title": "Ship the release notes.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Ship the release notes.",
+        "summary": "Notes",
+        "workstreams": [
+          {
+            "id": "release",
+            "title": "release"
+          }
+        ]
+      },
+      "original": {
+        "text": "Ship the release notes.",
+        "atEpoch": 1794989254400
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Notes",
+          "status": "doing",
+          "nextStep": null,
+          "lastUpdateEpoch": 1794989794417,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "release",
+          "title": "release",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Notes",
+              "status": "doing",
+              "nextStep": null,
+              "lastUpdateEpoch": 1794989794417,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Notes",
+          "detail": null,
+          "atEpoch": 1794989794417,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s2"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s2\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1794989254400,
+      "updatedAtEpoch": 1794989794417,
+      "completedAtEpoch": 1794989794417,
+      "lifecycle": {
+        "status": "shipped",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": {
+        "state": "shipped",
+        "percent": 100.0,
+        "checkedAt": null,
+        "shippedAt": "2026-11-18T08:16:34.417Z",
+        "readings": [],
+        "narrative": null,
+        "milestones": []
+      },
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
+      "contentFingerprint": "d7f5e1031451cd31b4c03ce1e2e33af67e5ce013c59fd968bf21e7682e680f72",
+      "title": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+        "summary": "Report the line",
+        "workstreams": [
+          {
+            "id": "parser",
+            "title": "parser"
+          }
+        ]
+      },
+      "original": {
+        "text": "Fix the parser's error messages, add a header test, write docs and fail fast.",
+        "atEpoch": 1794989194400
+      },
+      "scopeUpdates": [],
+      "items": [
+        {
+          "id": "w0",
+          "kind": "work-state",
+          "title": "Report the line",
+          "status": "Needs_Input",
+          "nextStep": null,
+          "lastUpdateEpoch": 1794989794409,
+          "sourceRefs": [],
+          "url": ""
+        }
+      ],
+      "workstreams": [
+        {
+          "id": "parser",
+          "title": "parser",
+          "items": [
+            {
+              "id": "w0",
+              "kind": "work-state",
+              "title": "Report the line",
+              "status": "Needs_Input",
+              "nextStep": null,
+              "lastUpdateEpoch": 1794989794409,
+              "sourceRefs": [],
+              "url": ""
+            }
+          ]
+        }
+      ],
+      "activity": [
+        {
+          "id": "u0",
+          "kind": "work-state",
+          "title": "Report the line",
+          "detail": null,
+          "atEpoch": 1794989794409,
+          "url": ""
+        }
+      ],
+      "agentIds": [
+        "claude:c:claude:s1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1794989194400,
+      "updatedAtEpoch": 1794989794409,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "needs-you",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    },
+    {
+      "id": "[\"conversation\",\"codex\",\"c:codex:c1\"]",
+      "contentFingerprint": "951d4554069d6e6191c52eb06aca883364c7d102ea5b92ea91a0123eab0a83e9",
+      "title": "Rename the lexer.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Rename the lexer.",
+        "summary": "Rename the lexer.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Rename the lexer.",
+        "atEpoch": 1794989314400
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "codex:c:codex:c1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"codex\",\"c:codex:c1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1794989314400,
+      "updatedAtEpoch": 1794989314400,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [
+    {
+      "focusAreaId": "fa_aaaaaaaaaaaa",
+      "name": "Parser",
+      "goal": null,
+      "about": null,
+      "status": "kept",
+      "priorityRank": 1,
+      "ownerRank": null,
+      "source": "owner",
+      "mergedInto": null,
+      "evidence": null,
+      "decidedBy": "owner",
+      "savedAt": null
+    },
+    {
+      "focusAreaId": "fa_bbbbbbbbbbbb",
+      "name": "Docs",
+      "goal": null,
+      "about": null,
+      "status": "kept",
+      "priorityRank": null,
+      "ownerRank": null,
+      "source": "owner",
+      "mergedInto": null,
+      "evidence": null,
+      "decidedBy": "owner",
+      "savedAt": null
+    }
+  ],
+  "goals": {
+    "listId": "goals",
+    "listName": "goals",
+    "history": false,
+    "project": "",
+    "updatedAt": "2026-11-18T08:16:34.674Z",
+    "periodStart": null,
+    "periodEnd": null,
+    "summary": null,
+    "generatedAt": "2026-11-18T08:09:34.400+00:00",
+    "windowDays": 31,
+    "sourcePromptCount": 1,
+    "mapPath": null,
+    "areas": [
+      {
+        "id": "a:fa_aaaaaaaaaaaa",
+        "kind": "focus-area",
+        "rank": 1,
+        "title": "Parser",
+        "focusArea": "Parser",
+        "focusAreaId": "fa_aaaaaaaaaaaa",
+        "product": null,
+        "latestAt": "2026-11-18 08:06",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 08:06",
+            "quote": "the parser's error messages"
+          }
+        ]
+      }
+    ],
+    "asks": [
+      {
+        "id": "g2",
+        "kind": "ask",
+        "rank": 1,
+        "title": "A header test",
+        "focusArea": "Parser",
+        "focusAreaId": "fa_aaaaaaaaaaaa",
+        "product": null,
+        "latestAt": "2026-11-18 08:06",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 08:06",
+            "quote": "a header test"
+          }
+        ]
+      },
+      {
+        "id": "g3",
+        "kind": "ask",
+        "rank": 2,
+        "title": "Write docs",
+        "focusArea": "Docs",
+        "focusAreaId": "fa_bbbbbbbbbbbb",
+        "product": null,
+        "latestAt": "2026-11-18 08:06",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 08:06",
+            "quote": "write docs"
+          }
+        ]
+      },
+      {
+        "id": "g4",
+        "kind": "ask",
+        "rank": 3,
+        "title": "Fail fast",
+        "focusArea": null,
+        "focusAreaId": null,
+        "product": null,
+        "latestAt": "2026-11-18 08:06",
+        "timesAsked": 1.0,
+        "evidence": [
+          {
+            "at": "2026-11-18 08:06",
+            "quote": "fail fast"
+          }
+        ]
+      }
+    ]
+  },
+  "goalHistory": [
+    {
+      "listId": "goals:2026-10",
+      "listName": "2026-10",
+      "history": true,
+      "project": "",
+      "periodStart": "2026-10-01",
+      "periodEnd": "2026-11-01",
+      "summary": "Worked on the lexer.",
+      "generatedAt": null,
+      "windowDays": null,
+      "sourcePromptCount": 1,
+      "mapPath": null,
+      "areas": [
+        {
+          "id": "p:2026-10:1",
+          "kind": "focus-area",
+          "rank": 1,
+          "title": "Lexer",
+          "focusArea": null,
+          "focusAreaId": null,
+          "product": null,
+          "latestAt": null,
+          "timesAsked": 1.0,
+          "evidence": [
+            {
+              "at": "2026-10-04 08:06",
+              "quote": "the lexer's tokens"
+            }
+          ]
+        }
+      ],
+      "asks": []
+    }
+  ],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    }
+  ],
+  "rules": [],
+  "story": null,
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1794989794674,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}

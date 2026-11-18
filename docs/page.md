@@ -241,6 +241,15 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   before it ships and again at each update: where it comes from, what it runs when installed (the
   bundle is built with install scripts off), and the advisories against it. The page may reach no
   address but oboete's own.
+- The pages read `GET /api/work-view`, claude-mem's snapshot of the work (`src/work_view.rs`). It is
+  made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
+  they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not. The
+  pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
+  moves. Until the pages have their address, both answer at the main page's, with its token. What
+  oboete keeps in other shapes is mapped: a work list is a workstream, a finished month of goals is a
+  period of Past focus, a conversation's own request is known by the conversation's key, and the
+  goals' times are this machine's. What oboete lacks yet is left empty: the deliverables and
+  evidence links (X37), the rules (they come with My Rules), and continuing a conversation (X36).
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow

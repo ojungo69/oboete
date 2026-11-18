@@ -2671,6 +2671,22 @@ impl Viewer {
                 answer["status"] = crate::my_work_run::status(&self.home, &goals, now)?;
                 answer
             }
+            // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
+            // from the two answers above as they leave the gate, the requests of the last 7 days.
+            // Each text in it is one of theirs (`work_view`), so it is not gated again.
+            "work-view" => {
+                // The work-view shows no deliverables yet: their links are not made.
+                let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
+                let now = crate::db::now_ms();
+                let week = crate::my_work::Range::Week;
+                let work = crate::my_work::listed(&self.home, week, now, &tag)?;
+                let goals = crate::my_work_goals::page(&self.home, now)?;
+                let (work, goals) = (answered("my-work", work), answered("my-goals", goals));
+                let snapshot = crate::work_view::snapshot(&work, &goals, now);
+                return Ok(Response::json(&snapshot));
+            }
+            // What the work-view's transport polls (ui/work-view/patches/0001): the page's version.
+            "work-view/version" => return self.api("version", q),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
                 let now = crate::db::now_ms();

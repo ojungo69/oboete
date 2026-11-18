@@ -2058,6 +2058,23 @@ fn the_my_goals_and_status_routes_take_the_token() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Decision 114: the work-view's snapshot and its version take the token. Over an empty home the
+/// snapshot has no request and no goals, and its source is connected; its version is the page's.
+#[test]
+fn the_work_view_routes_take_the_token() {
+    let (dir, v) = viewer("work-view");
+    for target in ["/api/work-view", "/api/work-view/version"] {
+        assert_eq!(v.route("GET", target, &[HOST]).status, 401, "{target}");
+    }
+    let snapshot = get(&v, "/api/work-view");
+    assert_eq!(snapshot["humanRequests"], json!([]));
+    assert_eq!(snapshot["source"]["connected"], json!(true));
+    assert!(snapshot["goals"].is_null(), "{snapshot}");
+    let version = get(&v, "/api/work-view/version");
+    assert_eq!(version["v"], get(&v, "/api/version")["v"], "{version}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// V3: the My Rules route and its action take the token; over an empty home the page answers
 /// nothing waiting and no rules, the action no such suggestion.
 #[test]

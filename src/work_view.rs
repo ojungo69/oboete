@@ -1,0 +1,357 @@
+//! claude-mem 15.19.0's work-view snapshot (decision 114, docs/page.md): the answer of
+//! `GET /api/work-view`, which the vendored pages read in claude-mem's legacy mode
+//! (`ui/work-view/`). It is made from oboete's My Work and goals answers after the outbound gate
+//! (`view::answered`), and reads nothing else: each text in it is one of theirs or a word of this
+//! file's. The names follow claude-mem's `live/work-view-api-types.ts`. The contract test runs
+//! claude-mem's own mapper, `live/to-work-model.ts`, over the answer of a synthetic home
+//! (`ui/work-view/contract/`).
+
+use std::collections::HashSet;
+use std::fmt::Display;
+
+use chrono::{Local, Months, NaiveDate, SecondsFormat, TimeZone, Utc};
+use serde_json::{Map, Value, json};
+
+/// The snapshot, its goals' times in this machine's zone: the pages show those as written.
+pub(crate) fn snapshot(work: &Value, goals: &Value, now: i64) -> Value {
+    snapshot_at(work, goals, now, &Local)
+}
+
+/// `snapshot`, its goals' times in `tz`.
+pub(crate) fn snapshot_at<Tz: TimeZone>(work: &Value, goals: &Value, now: i64, tz: &Tz) -> Value
+where
+    Tz::Offset: Display,
+{
+    let mut agents = Vec::new();
+    let mut seen = HashSet::new();
+    let requests: Vec<Value> = (arr(&work["requests"]).iter())
+        .map(|r| request(r, &mut agents, &mut seen))
+        .collect();
+    let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
+    let story = match work["story"]["recap"].as_str() {
+        Some(recap) => json!({"story": {"narrative": recap, "writtenAt": null}}),
+        None => Value::Null,
+    };
+    // The pages count unlinked work and read nothing of it.
+    let unlinked = usize::try_from(work["unlinked"].as_u64().unwrap_or(0)).unwrap_or(0);
+    json!({
+        "version": 1, "generatedAt": iso(now), "revision": now.to_string(),
+        "source": {"kind": "oboete", "connected": true, "error": null, "lastCheckedAt": iso(now)},
+        "agents": agents, "humanRequests": requests, "unlinkedWork": vec![json!({}); unlinked],
+        "focusAreas": areas, "goals": goals_list(work, goals, now, tz),
+        "goalHistory": history(goals, tz),
+        "ruleScopes": [{"id": "everywhere", "tier": "everywhere", "name": "Everywhere"}],
+        "rules": [], "story": story, "refresh": null,
+        // oboete has no cloud sync: a valid "unconfigured" block (`sync-presentation.ts:23-36`)
+        // shows "Cloud sync off" where a missing one shows "Cloud freshness unknown".
+        "sync": {"configured": false, "state": "unconfigured", "mode": "disabled",
+            "checkedAt": null, "observedAt": now,
+            "message": "oboete keeps your work on this computer only.", "download": null,
+            "projection": {"remaining": null},
+            "completeness": {"pushQuarantine": 0, "pullQuarantine": 0, "excludedNative": null,
+                "scope": "unknown"}},
+    })
+}
+
+/// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.
+fn iso(ms: i64) -> Value {
+    (Utc.timestamp_millis_opt(ms).single()).map_or(Value::Null, |t| {
+        json!(t.to_rfc3339_opts(SecondsFormat::Millis, true))
+    })
+}
+
+/// Unix ms as ISO time in `tz`, with its offset: the goals list's, whose day the pages show as
+/// written (`to-work-model.ts:321-325`).
+fn zoned<Tz: TimeZone>(ms: i64, tz: &Tz) -> Value
+where
+    Tz::Offset: Display,
+{
+    (tz.timestamp_millis_opt(ms).single()).map_or(Value::Null, |t| {
+        json!(t.to_rfc3339_opts(SecondsFormat::Millis, false))
+    })
+}
+
+/// Unix ms as `YYYY-MM-DD HH:MM` in `tz`: how the mapper reads a goal's times
+/// (`to-work-model.ts:259`), showing the digits as written.
+fn stamp<Tz: TimeZone>(ms: &Value, tz: &Tz) -> Value {
+    (ms.as_i64()
+        .and_then(|ms| tz.timestamp_millis_opt(ms).single()))
+    .map_or(Value::Null, |t| {
+        json!(t.naive_local().format("%Y-%m-%d %H:%M").to_string())
+    })
+}
+
+fn s(v: &Value) -> Value {
+    match v {
+        Value::String(_) => v.clone(),
+        _ => Value::Null,
+    }
+}
+
+fn arr(v: &Value) -> &[Value] {
+    v.as_array().map_or(&[][..], Vec::as_slice)
+}
+
+/// claude-mem's platform for an oboete agent. The same name goes in the conversation keys, which
+/// find their agent by it (`to-work-model.ts:226`); a name claude-mem does not know shows as the
+/// tool "other".
+fn platform(agent: &str) -> &str {
+    match agent {
+        "agy" => "gemini",
+        a => a,
+    }
+}
+
+fn label(agent: &str) -> &'static str {
+    match agent {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "grok" => "Grok",
+        "cursor" => "Cursor",
+        "opencode" => "OpenCode",
+        "pi" => "Pi",
+        "agy" => "Antigravity",
+        _ => "Agent",
+    }
+}
+
+/// oboete's status as claude-mem's explicit lifecycle (`status-normalization.ts:94-107`).
+fn lifecycle(status: &str) -> &'static str {
+    match status {
+        "needs" => "needs-you",
+        "ready" => "needs-review",
+        "working" => "in-progress",
+        "blocked" => "blocked",
+        "quiet" => "quiet",
+        "todo" => "todo",
+        "closed" => "closed",
+        "shipped" => "shipped",
+        _ => "unknown",
+    }
+}
+
+/// One My Work request as claude-mem's human request; each conversation's agent goes in `agents`
+/// once.
+fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashSet<String>) -> Value {
+    let status = r["status"].as_str().unwrap_or("unknown");
+    let mut own = r["id"].clone();
+    let mut agent_ids = Vec::new();
+    let mut keys = Vec::new();
+    for c in arr(&r["sessions"]) {
+        let (agent, id) = (
+            c["agent"].as_str().unwrap_or(""),
+            c["id"].as_str().unwrap_or(""),
+        );
+        let key = format!("{agent}:{id}");
+        if seen.insert(key.clone()) {
+            agents.push(json!({
+                "id": key, "label": label(agent), "platformSource": platform(agent),
+                "sessionTitle": s(&r["title"]),
+                "project": arr(&r["projects"]).first().cloned().unwrap_or(Value::Null),
+                "contentSessionId": id,
+            }));
+        }
+        let conversation = json!(["conversation", platform(agent), id]).to_string();
+        // A conversation's own request is known by the conversation's key, as claude-mem's is:
+        // its drawer gives that conversation the ask's time (`to-work-model.ts:228`). A write
+        // that names it takes oboete's id back from the key's last part.
+        if r["id"] == id {
+            own = json!(conversation);
+        }
+        keys.push(json!(conversation));
+        agent_ids.push(json!(key));
+    }
+    let items: Vec<Value> = (arr(&r["work"]).iter().enumerate())
+        .map(|(i, w)| {
+            json!({"id": format!("w{i}"), "kind": "work-state", "title": s(&w["task"]),
+                "status": s(&w["status"]), "nextStep": null, "lastUpdateEpoch": w["updated"],
+                "sourceRefs": [], "url": ""})
+        })
+        .collect();
+    // Each work list is a workstream, as claude-mem's drawer shows a request's tasks by stream
+    // (`to-work-model.ts:214-217`); a masked list is known by its fingerprint.
+    let mut streams: Vec<(Value, Value, Vec<Value>)> = Vec::new();
+    for (w, item) in arr(&r["work"]).iter().zip(&items) {
+        let id = if w["stream"].is_string() {
+            &w["stream"]
+        } else {
+            &w["list"]
+        };
+        match streams.iter_mut().find(|(known, ..)| known == id) {
+            Some((.., of)) => of.push(item.clone()),
+            None => streams.push((id.clone(), s(&w["list"]), vec![item.clone()])),
+        }
+    }
+    let mut copy = Map::new();
+    copy.insert("state".into(), json!("current"));
+    for field in ["title", "summary", "next"] {
+        if r[field].is_string() {
+            copy.insert(field.into(), r[field].clone());
+        }
+    }
+    let titles: Vec<Value> = (streams.iter())
+        .map(|(id, title, _)| json!({"id": id, "title": title}))
+        .collect();
+    copy.insert("workstreams".into(), json!(titles));
+    let workstreams: Vec<Value> = (streams.into_iter())
+        .map(|(id, title, items)| json!({"id": id, "title": title, "items": items}))
+        .collect();
+    let activity: Vec<Value> = (arr(&r["updates"]).iter().enumerate())
+        .map(|(i, u)| {
+            json!({"id": format!("u{i}"), "kind": "work-state", "title": s(&u["text"]),
+                "detail": null, "atEpoch": u["ts"], "url": ""})
+        })
+        .collect();
+    let follow: Vec<Value> = (arr(&r["follow_ups"]).iter())
+        .map(|f| json!({"text": s(&f["text"]), "atEpoch": f["ts"]}))
+        .collect();
+    let progress = &r["progress"];
+    let completed = match (progress["completed_at"].as_i64(), status) {
+        (Some(at), _) => json!(at),
+        (None, "shipped") => r["updated"].clone(),
+        _ => Value::Null,
+    };
+    let story = &r["story"];
+    let progress = match progress["percent"].as_f64() {
+        Some(percent) => json!({
+            "state": if status == "shipped" { "shipped" } else { "in-progress" },
+            "percent": percent,
+            "checkedAt": progress["reviewed"].as_i64().map_or(Value::Null, iso),
+            "shippedAt": progress["completed_at"].as_i64().map_or(Value::Null, iso),
+            "readings": [],
+            "narrative": s(&story["narrative"]),
+            "milestones": (arr(&story["milestones"]).iter())
+                .map(|m| json!({"at": s(&m["date"]), "text": s(&m["text"])}))
+                .collect::<Vec<_>>(),
+        }),
+        None => Value::Null,
+    };
+    let mut out = json!({
+        "id": own, "contentFingerprint": r["version"],
+        "title": s(&r["title"]),
+        "titleSource": if r["title"].is_string() { json!("title-cache") } else { Value::Null },
+        "humanCopy": Value::Object(copy),
+        "original": {"text": s(&r["ask"]["text"]), "atEpoch": r["ask"]["ts"]},
+        "scopeUpdates": follow, "items": items, "workstreams": workstreams, "activity": activity,
+        "agentIds": agent_ids, "conversationKeys": keys, "requestedBy": null,
+        "startedAtEpoch": r["started"], "updatedAtEpoch": r["updated"],
+        "completedAtEpoch": completed,
+        "lifecycle": {"status": lifecycle(status), "explicit": true, "complete": null,
+            "atEpoch": null},
+        "review": {"checked": !r["checked"].is_null(), "checkedAtEpoch": r["checked"],
+            "available": status == "ready"},
+        "progress": progress, "anchorConversationKey": null,
+    });
+    if r["focus"].is_string() {
+        out["focusAreaId"] = r["focus"].clone();
+    }
+    out
+}
+
+/// A focus area as claude-mem lists them. A nameless area sorts by an empty name: the pages
+/// compare names whole (`to-focus-model.ts:23`), and a null would stop every screen.
+fn focus_area(a: &Value) -> Value {
+    json!({
+        "focusAreaId": a["id"], "name": a["name"].as_str().unwrap_or(""), "goal": s(&a["goal"]),
+        "about": s(&a["about"]), "status": a["status"], "priorityRank": a["priority_rank"],
+        "ownerRank": a["owner_rank"], "source": a["source"], "mergedInto": null,
+        "evidence": s(&a["evidence"]), "decidedBy": a["decided_by"], "savedAt": null,
+    })
+}
+
+fn evidence<Tz: TimeZone>(quotes: &Value, tz: &Tz) -> Vec<Value> {
+    (arr(quotes).iter())
+        .map(|q| json!({"at": stamp(&q["ts"], tz), "quote": s(&q["text"])}))
+        .collect()
+}
+
+/// The goals list the focus screens read (`to-work-model.ts:338-357`), from the newest goals the
+/// page shows: an item per area that was asked for, and one per open ask, under its area or under
+/// none. oboete's `areas[]` already fold its priorities in. None when no goals were written.
+fn goals_list<Tz: TimeZone>(work: &Value, page: &Value, now: i64, tz: &Tz) -> Value
+where
+    Tz::Offset: Display,
+{
+    let Some(written) = page["current"]["written"].as_i64() else {
+        return Value::Null;
+    };
+    let mut areas = Vec::new();
+    let mut asks = Vec::new();
+    for a in arr(&work["areas"]) {
+        // An area with open asks and no priority under it has no count of its own (`asked` is
+        // null): it has no item of its own, and its asks stay under it.
+        if let Some(asked) = a["asked"].as_f64() {
+            areas.push(json!({
+                "id": format!("a:{}", a["id"].as_str().unwrap_or("")), "kind": "focus-area",
+                "rank": areas.len() + 1, "title": s(&a["name"]), "focusArea": s(&a["name"]),
+                "focusAreaId": a["id"], "product": null, "latestAt": stamp(&a["latest"], tz),
+                "timesAsked": asked, "evidence": evidence(&a["quotes"], tz),
+            }));
+        }
+        asks.extend(
+            arr(&a["asks"])
+                .iter()
+                .map(|k| (k, s(&a["name"]), a["id"].clone())),
+        );
+    }
+    asks.extend(
+        arr(&work["other_asks"])
+            .iter()
+            .map(|k| (k, Value::Null, Value::Null)),
+    );
+    let asks: Vec<Value> = (asks.into_iter().enumerate())
+        .map(|(i, (k, area, id))| {
+            json!({"id": s(&k["id"]), "kind": "ask", "rank": i + 1, "title": s(&k["title"]),
+                "focusArea": area, "focusAreaId": id, "product": null,
+                "latestAt": stamp(&k["latest"], tz),
+                "timesAsked": k["asked"].as_f64().unwrap_or(0.0),
+                "evidence": evidence(&k["quotes"], tz)})
+        })
+        .collect();
+    json!({
+        "listId": "goals", "listName": "goals", "history": false, "project": "",
+        "updatedAt": iso(now), "periodStart": null, "periodEnd": null, "summary": null,
+        "generatedAt": zoned(written, tz),
+        "windowDays": page["window"]["days"], "sourcePromptCount": page["window"]["prompts"],
+        "mapPath": null, "areas": areas, "asks": asks,
+    })
+}
+
+/// Past focus (`to-work-model.ts:309-318`): each finished month of goals as a list of its own,
+/// from its first day to the next month's first, its priorities as its areas.
+fn history<Tz: TimeZone>(page: &Value, tz: &Tz) -> Vec<Value> {
+    (arr(&page["months"]).iter())
+        .filter_map(|m| {
+            let month = m["month"].as_str()?;
+            let start = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").ok()?;
+            let end = start.checked_add_months(Months::new(1))?;
+            let areas: Vec<Value> = (arr(&m["priorities"]).iter().enumerate())
+                .map(|(i, p)| {
+                    let quote = &p["quote"];
+                    let evidence: Vec<Value> = (quote.is_object())
+                        .then(|| json!({"at": stamp(&quote["ts"], tz), "quote": s(&quote["text"])}))
+                        .into_iter()
+                        .collect();
+                    // A priority's product names it where no area does; an empty one, none.
+                    let product = s(&p["product"])
+                        .as_str()
+                        .filter(|t| !t.is_empty())
+                        .map(String::from);
+                    json!({"id": format!("p:{month}:{}", i + 1), "kind": "focus-area",
+                        "rank": i + 1, "title": s(&p["title"]), "focusArea": null,
+                        "focusAreaId": null, "product": product, "latestAt": null,
+                        "timesAsked": p["asked"].as_f64().unwrap_or(0.0), "evidence": evidence})
+                })
+                .collect();
+            Some(json!({
+                "listId": format!("goals:{month}"), "listName": month, "history": true,
+                "project": "", "periodStart": start.to_string(), "periodEnd": end.to_string(),
+                "summary": s(&m["summary"]), "generatedAt": null, "windowDays": null,
+                "sourcePromptCount": m["prompts"], "mapPath": null, "areas": areas, "asks": [],
+            }))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;
