@@ -62,10 +62,12 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     let clock = Clock::of_process();
     // #955: Pi's plugin says when it stops waiting for the answer of a call it waits for. A value
     // that is no number is none.
+    // An hour on at most: Pi waits 2 s, and a time past that is none.
+    let soon = crate::db::now_ms().saturating_add(3_600_000);
     if let Some(at) = std::env::var(crate::hook_time::ANSWER_BY)
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|&at| at > 0)
+        .filter(|&at| at > 0 && at <= soon)
     {
         clock.answer_by(at);
     }
@@ -1577,16 +1579,19 @@ pub(crate) fn record_if(
     // behind them, so the seqs follow the events' order (Codex on #440). A spool that cannot be
     // listed takes no file either (U1 names each file from the list): the events are appended,
     // and doctor says the spool cannot be listed.
-    if !built.is_empty()
-        && crate::unwritten::counts(home).is_ok_and(|(kept, _)| kept > 0)
-        && keep(home, agent, &built, settings, false)
-    {
+    let behind =
+        !built.is_empty() && crate::unwritten::counts(home).is_ok_and(|(kept, _)| kept > 0);
+    if behind && keep(home, agent, &built, settings, false) {
         return Ok(Recorded {
             events: Vec::new(),
             prompt,
             kept: true,
         });
     }
+    // #955: a record whose waits end at a time waits for the spool once at most: after a keep
+    // behind the kept files that failed, an append that fails marks the failure at once, before
+    // the agent kills the hook.
+    let spool_waited = behind && raw.bounded();
     let mut appended = Vec::new();
     for (n, b) in built.iter().enumerate() {
         let read = (b.read.0.as_str(), b.read.1.as_deref());
@@ -1596,7 +1601,9 @@ pub(crate) fn record_if(
             Ok(None) => {}
             Err(e) => {
                 *failed = crate::failure::now();
-                keep(home, agent, &built[n..], settings, true);
+                if !spool_waited {
+                    keep(home, agent, &built[n..], settings, true);
+                }
                 return Err(e);
             }
         }

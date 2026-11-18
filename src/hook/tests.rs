@@ -3394,6 +3394,63 @@ fn a_pi_prompt_whose_answer_is_no_longer_wanted_is_recorded_and_given_nothing() 
     );
 }
 
+/// #955 (the local Codex review of #1073): a record whose waits end at a time waits for the spool
+/// once at most. Kept files left, the spool's lock held and the store's write lock held: the keep
+/// behind the kept files waits its 500 ms, and the append that fails after it marks the failure
+/// with no second wait, before Pi kills the hook.
+#[test]
+fn a_bounded_record_waits_for_the_spool_once() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let settings = crate::capture::Settings::load(p).unwrap();
+    let mut raw = crate::raw::open(p).unwrap();
+    raw.append(&crate::raw::test_event("made")).unwrap();
+    raw.wait_until(std::time::Instant::now()).unwrap();
+    let held = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let ask = |prompt: &str| json!({"session_id": "s", "cwd": p, "prompt": prompt});
+    let (mut failed, mut back) = (0, 0);
+    let first = record(
+        p,
+        &mut raw,
+        "pi",
+        "UserPromptSubmit",
+        &ask("kept on a held store"),
+        crate::db::now_ms(),
+        &settings,
+        &mut failed,
+        &mut back,
+    );
+    assert!(first.is_err());
+    assert!(
+        crate::unwritten::counts(p).unwrap().0 > 0,
+        "the first is kept"
+    );
+    let spool = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(p.join("unwritten").join("keep.lock"))
+        .unwrap();
+    spool.lock().unwrap();
+    let started = std::time::Instant::now();
+    let second = record(
+        p,
+        &mut raw,
+        "pi",
+        "UserPromptSubmit",
+        &ask("the spool and the store held"),
+        crate::db::now_ms(),
+        &settings,
+        &mut failed,
+        &mut back,
+    );
+    let took = started.elapsed();
+    spool.unlock().unwrap();
+    held.execute_batch("ROLLBACK").unwrap();
+    assert!(second.is_err());
+    assert!(took < Duration::from_millis(800), "{took:?}");
+}
+
 /// docs/hook-time.md: the read fence is waited for no longer than the hook's time lasts. A
 /// forget's write holds it; the hook has 150 ms left, and returns well inside `READ_WAIT`.
 #[test]

@@ -236,7 +236,9 @@ impl Clock {
     pub(crate) fn record_until(&self) -> Option<Instant> {
         match self.record_by.load(Ordering::Relaxed) {
             i64::MAX => None,
-            end => Some(self.start + Duration::from_millis(u64::try_from(end).unwrap_or(0))),
+            end => self
+                .start
+                .checked_add(Duration::from_millis(u64::try_from(end).unwrap_or(0))),
         }
     }
 

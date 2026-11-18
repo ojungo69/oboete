@@ -1921,8 +1921,9 @@ impl Raw {
     /// when they end at a time (`wait_until`).
     pub(crate) fn wait_left(&self) -> Result<()> {
         if let Some(at) = self.record_by {
-            self.conn
-                .busy_timeout(at.saturating_duration_since(std::time::Instant::now()))?;
+            // No longer than a hook's store wait: a time far off is no longer wait.
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            self.conn.busy_timeout(left.min(crate::hook::STORE_WAIT))?;
         }
         Ok(())
     }

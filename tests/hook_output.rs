@@ -187,6 +187,38 @@ fn a_pi_hook_on_a_held_store_keeps_its_event_before_pi_kills_it() {
     assert!(kept.contains("\"t\""), "the start of session t: {kept}");
 }
 
+/// #955: an answer's time further off than an hour is none: the hook records as one given no
+/// time, with no overflow of its clock.
+#[test]
+fn a_pi_hook_told_a_time_far_off_records_as_one_told_none() {
+    let home = tempfile::tempdir().unwrap();
+    let out = hook_output_with(
+        home.path(),
+        "pi",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"a prompt with a time far off"}"#,
+        &[("OBOETE_ANSWER_BY_MS", &i64::MAX.to_string())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let raw = rusqlite::Connection::open_with_flags(
+        home.path().join("raw.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let recorded: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE body LIKE '%a prompt with a time far off%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(recorded, 1);
+}
+
 /// #955: a hook Pi waits for writes no kept file back (docs/unwritten.md U3): it keeps its own
 /// events behind them, and the next call that waits as long as it likes writes them all back in
 /// their order.

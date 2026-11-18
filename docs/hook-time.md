@@ -58,7 +58,9 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   - their waits for the store, its open and the record's statements together, end `KEEP_ROOM`
     (1 s) before then (`Raw::wait_until`), so a hook whose store is held keeps its events
     before the kill (docs/unwritten.md U2). Such a hook writes no kept file back (U3): it keeps
-    its own events behind them. Recording is not cut short: what is not written is kept.
+    its own events behind them. It waits for the spool's lock once at most: after a keep behind
+    the kept files that failed, an append that fails marks the failure at once. Recording is not
+    cut short: what is not written is kept, or marked as lost before the kill.
 
   A call with less than `KEEP_ROOM` of Pi's wait left, or none, is started to record only. Its
   hook is told that the wait is over, so it waits for no store and injects nothing, and it gets
@@ -234,6 +236,8 @@ section).
   prompt and a session's start, killed at Pi's 2 s) and
   `a_pi_hook_pi_waits_for_keeps_its_event_behind_the_kept_files`,
   `raw::tests::a_bounded_store_waits_only_what_remains_of_its_time`,
+  `hook::tests::a_bounded_record_waits_for_the_spool_once`,
+  `a_pi_hook_told_a_time_far_off_records_as_one_told_none` (an hour on at most),
   `setup::tests::a_plugin_kills_no_capture_hook_before_it_can_keep_what_it_could_not_write` (the
   keep's room in both languages), and the Pi harness (`src/testdata/pi/test.mjs`, under
   `setup::tests::pi_generated_extension_matches_event_and_tool_contract`): what Pi waits for and
