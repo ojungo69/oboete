@@ -1,0 +1,59 @@
+.github/workflows/work-view.yml
+  s_52c3955e48bff4::t_8e7bbda6688767 28,30-31
+assets/work-view/THIRD-PARTY-NOTICES.md
+  s_52c3955e48bff4::t_4bd5e946b7a921 2876-2905,3093-3121
+assets/work-view/assets/index-BSqXr08p.js
+  s_52c3955e48bff4::t_60e13c3a133ea7 1-2,39
+assets/work-view/assets/my-rules-De1liEXU.js
+  s_52c3955e48bff4::t_46ff28d6ab01d6 1
+assets/work-view/assets/past-focus-DwkGfZMc.js
+  s_52c3955e48bff4::t_5142d0423f89a2 1
+assets/work-view/assets/request-detail-Bv4yMNwx.js
+  s_52c3955e48bff4::t_3e2e010de56245 1
+assets/work-view/assets/setup-page-COlfhMDf.js
+  s_52c3955e48bff4::t_4f8047db8bf022 2
+assets/work-view/assets/suggested-areas-CBECwG46.js
+  s_52c3955e48bff4::t_533d376cf0e378 1
+assets/work-view/assets/swipe-to-decide-BZGWsFZZ.js
+  s_52c3955e48bff4::t_467d3aeef31169 1
+assets/work-view/favicon.svg
+  s_52c3955e48bff4::t_c1d7c359d5132f 1
+assets/work-view/index.html
+  s_52c3955e48bff4::t_3fda1c0cd93ce2 9
+ui/work-view/README.md
+  s_52c3955e48bff4::t_8ccb14071cd2fb 7
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_88b35754c2b35a 9-10,16-20,23-24,33-37,41-46,48,50-54
+ui/work-view/fetch.sh
+  s_52c3955e48bff4::t_30474ad23d8cdb 30-39,41,43-50
+ui/work-view/notices.mjs
+  s_915ac6f557639e::t_41438364e1c334 24-27,43-44,49,51-54
+ui/work-view/patches/0001-token-and-transport.patch
+  s_52c3955e48bff4::t_4a7e323f0a921f 2,5,133-134,136-137,211-212,228,236
+ui/work-view/patches/0004-oboete-brand.patch
+  s_52c3955e48bff4::t_059a66d9ffa618 16,19,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "77a372c973622a10e4c41379955f02842356f748",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_915ac6f557639e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "81c2d7e1-5c31-46e2-b576-161ecf8c3681",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
