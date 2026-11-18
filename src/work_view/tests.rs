@@ -232,7 +232,8 @@ fn home() -> (Store, i64) {
 
 /// What the route reads (`read`): the two answers as their readers give them, and the story's kept texts.
 fn answers(h: &Store, now: i64) -> (Value, Value) {
-    let (mut work, goals) = read(h.home.path(), now).unwrap();
+    let rules = crate::redact::Rules::load(h.home.path()).unwrap();
+    let (mut work, goals) = read(h.home.path(), now, &rules).unwrap();
     refer(h.home.path(), &mut work, &Gate::now()).unwrap();
     (work, goals)
 }
@@ -973,7 +974,8 @@ fn a_story_is_read_whole_before_any_mask() {
                  { id = \"context\", regex = '(Alpha) 42 Beta\\s+Gamma' }, \
                  { id = \"paragraph\", regex = '^\\[REDACTED\\] (\\d+) Beta$' }, \
                  { id = \"issue\", regex = '^#1087 (zebravalue)$' }, \
-                 { id = \"nel\", regex = '^(?u:\\x{0085})(Orchid)' }]\n";
+                 { id = \"nel\", regex = '^(?u:\\x{0085})(Orchid)' }, \
+                 { id = \"trimmed\", regex = '^(Zinnia)$' }]\n";
     std::fs::write(gate.path().join("config.toml"), rules).unwrap();
     crate::redact::set_home(gate.path()).unwrap();
     let mut written = Vec::new();
@@ -1050,6 +1052,20 @@ fn a_story_is_read_whole_before_any_mask() {
             "\u{0085}",
             true,
         ),
+        (
+            "a heading over prose whose text opens with a character the gate's reading drops",
+            "## \u{0085}Orchid\nOrdinary prose.",
+            "Nothing here.",
+            "Orchid",
+            true,
+        ),
+        (
+            "a heading over prose whose text a rule finds once the gate's reading trims it",
+            "## \u{0085}Zinnia\nOrdinary prose.",
+            "Nothing here.",
+            "Zinnia",
+            true,
+        ),
     ] {
         assert_eq!(
             [recap, text]
@@ -1064,9 +1080,14 @@ fn a_story_is_read_whole_before_any_mask() {
             .unwrap()
             .to_owned();
         assert!(!narrative.contains(hidden), "{name}: {narrative}");
-        // Read as the pages read it, nothing of it is what a rule finds.
+        // Read as the pages read it, nothing of it is what a rule finds, as the gate reads a
+        // stored text or with its edges as they are.
+        let rules = crate::redact::rules_now().unwrap();
         for view in pages_views(&narrative) {
-            assert_eq!(crate::redact::outbound(&view), view, "{name}: {narrative}");
+            let stored = crate::redact::hidden(&view, &rules);
+            assert_eq!(remasked(&view, stored), view, "{name}: {narrative}");
+            let exact = crate::redact::hidden_exact(&view, &rules);
+            assert_eq!(remasked(&view, exact), view, "{name}: {narrative}");
         }
         assert!(narrative.contains("\n\n## "), "{name}: {narrative}");
         let blocks = if recap.contains('\n') { 4 } else { 3 };
@@ -1163,6 +1184,86 @@ fn gate_home() -> (Store, i64) {
     std::fs::write(h.home.path().join("config.toml"), GATED).unwrap();
     crate::redact::set_home(h.home.path()).unwrap();
     (h, crate::db::now_ms())
+}
+
+/// `text` with each run of `hidden` (`redact::hidden`'s) one mask: `text` itself when the gate
+/// finds nothing in it but its own masks.
+fn remasked(text: &str, hidden: Option<Vec<(usize, usize)>>) -> String {
+    let Some(runs) = hidden else {
+        return crate::redact::MASK.to_owned();
+    };
+    let (mut out, mut pos) = (String::new(), 0);
+    for (s, e) in runs {
+        out.push_str(&text[pos..s]);
+        out.push_str(crate::redact::MASK);
+        pos = e;
+    }
+    out + &text[pos..]
+}
+
+/// A rule saved while the stores are read is in force in the answer, in the shapes My Work gates
+/// at its source too: here a conversation's session, which no shape of its id the walk reads
+/// finds. The stores are read again under it (Codex on #1093), whether it is saved in the one file
+/// the viewer's home and its gate share, in the home's alone, whose rules My Work reads under, or
+/// in the gate's alone. And My Work and the goals read under the rules they are given, whatever
+/// the file says meanwhile.
+#[test]
+fn a_rule_saved_while_the_stores_are_read_is_in_force() {
+    let name = "work_view::tests::a_rule_saved_while_the_stores_are_read_is_in_force";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (mut h, _) = home();
+    let t = crate::db::now_ms() - 5 * 60_000;
+    let prompt = json!({"prompt": "Plan the secret one."});
+    event(&mut h, "prompt", "codex", "secret-session", t, prompt);
+    h.run();
+    let home = h.home.path();
+    let none = "[redaction]\n";
+    let anchored = "[redaction]\nextra_rules = [{ id = \"session\", regex = '^secret-session$' }, \
+                    { id = \"goal\", regex = '^Write docs$' }]\n";
+    let now = crate::db::now_ms();
+    std::fs::write(home.join("config.toml"), none).unwrap();
+    crate::redact::set_home(home).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("config.toml"), anchored).unwrap();
+    let ruled = crate::redact::Rules::load(other.path()).unwrap();
+    let (work, goals) = read(home, now, &ruled).unwrap();
+    let sessions: Vec<&Value> = (arr(&work["requests"]).iter())
+        .flat_map(|r| arr(&r["sessions"]))
+        .collect();
+    let secret = (sessions.iter())
+        .find(|c| c["agent"] == "codex")
+        .expect("the codex conversation");
+    assert!(secret["fingerprint"].is_string(), "{secret}");
+    assert!(!goals.to_string().contains("Write docs"), "{goals}");
+    // The gate reads an id whole: its rule finds the session inside it.
+    let unanchored =
+        "[redaction]\nextra_rules = [{ id = \"session\", regex = 'secret-session' }]\n";
+    let gate = tempfile::tempdir().unwrap();
+    for (case, gate_home, saved_in, rule) in [
+        ("one file", home, home, anchored),
+        ("the home's", gate.path(), home, anchored),
+        ("the gate's", gate.path(), gate.path(), unanchored),
+    ] {
+        std::fs::write(home.join("config.toml"), none).unwrap();
+        std::fs::write(gate.path().join("config.toml"), none).unwrap();
+        crate::redact::set_home(gate_home).unwrap();
+        // The rule saved once the first rules were read, as the stores are read under them.
+        let mut reads = 0;
+        let snapshot = answered(home, now, || {
+            reads += 1;
+            if reads == 2 {
+                std::fs::write(saved_in.join("config.toml"), rule).unwrap();
+            }
+            Gate::now()
+        })
+        .unwrap();
+        assert_eq!(reads, 3, "{case}");
+        let text = snapshot.to_string();
+        assert!(!text.contains("secret-session"), "{case}: {text}");
+        assert!(text.contains("Plan the secret one."), "{case}: {text}");
+    }
 }
 
 /// Every string of `v`.

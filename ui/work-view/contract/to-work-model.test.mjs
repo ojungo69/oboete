@@ -228,6 +228,9 @@ test('each Build story a rule finds a value in reads, through the pinned mapper,
     'a paragraph masked in part by a rule that needs the next, read again alone': ['[REDACTED] [REDACTED] Beta', ['[REDACTED] [REDACTED] Beta', 'Gamma', '2026-11-16', 'Nothing here.']],
     "a paragraph that opens with an issue's number, read without its word joiner": ['#1087 [REDACTED]', ['#1087 [REDACTED]', 'Other.', '2026-11-16', 'Nothing here.']],
     "a block that would open with a character the gate's reading drops": ['Orchid', ['Orchid', '2026-11-16', 'Nothing here.']],
+    // The heading's text as the pages show it: its marks off, the U+0085 after them kept.
+    "a heading over prose whose text opens with a character the gate's reading drops": ['Ordinary prose.', ['\u0085[REDACTED]', 'Ordinary prose.', '2026-11-16', 'Nothing here.']],
+    "a heading over prose whose text a rule finds once the gate's reading trims it": ['Ordinary prose.', ['\u0085[REDACTED]', 'Ordinary prose.', '2026-11-16', 'Nothing here.']],
   }
   assert.deepEqual(gatedStories.map((s) => s.name).sort(), Object.keys(want).sort())
   const shown = (text) => text.replace(/⁠/g, '')

@@ -98,5 +98,25 @@
         "writtenAt": null
       }
     }
+  },
+  {
+    "name": "a heading over prose whose text opens with a character the gate's reading drops",
+    "hidden": "Orchid",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nOrdinary prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading over prose whose text a rule finds once the gate's reading trims it",
+    "hidden": "Zinnia",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nOrdinary prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
   }
 ]

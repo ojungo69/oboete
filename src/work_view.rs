@@ -17,14 +17,36 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 /// `GET /api/work-view`'s answer: what `read` reads, made into the snapshot, its goals' times in
-/// this machine's zone, which the pages show as written. The rules are read once both reads are
-/// done, so a rule added meanwhile is in force, and that one read serves the references of what
-/// the gate would mask (`refer`) and the walk and the story of the snapshot (#1089).
+/// this machine's zone, which the pages show as written.
 pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
-    let (mut work, goals) = read(home, now)?;
-    let gate = Gate::now();
-    refer(home, &mut work, &gate)?;
-    Ok(snapshot_at(&work, &goals, now, &Local, &gate))
+    answered(home, now, Gate::now)
+}
+
+/// How many times `answered` reads the stores before it gives up on rules that keep changing.
+const READS: usize = 3;
+
+/// `answer`, the rules it leaves through as `rules_now` reads them: two sets of rules for the
+/// whole answer, read before the stores are read and again once they are, the home's, which My
+/// Work and its goals gate their texts under at their source (`read`), and those the references of
+/// what the gate would mask (`refer`) and the walk and the story of the snapshot read with (the
+/// same file's in the viewer). When either changed while the stores were read, they are read again
+/// under the new sets, so that a rule saved meanwhile is in force in the shapes My Work gates at
+/// its source and the walk does not read again too (an id's parts, a work item's text beside its
+/// key: Codex on #1093).
+fn answered(home: &Path, now: i64, mut rules_now: impl FnMut() -> Gate) -> anyhow::Result<Value> {
+    let mut gate = rules_now();
+    let mut source = crate::redact::Rules::load(home)?;
+    for _ in 0..READS {
+        let (mut work, goals) = read(home, now, &source)?;
+        let after = rules_now();
+        let after_source = crate::redact::Rules::load(home)?;
+        if after.version() == gate.version() && after_source.version() == source.version() {
+            refer(home, &mut work, &gate)?;
+            return Ok(snapshot_at(&work, &goals, now, &Local, &gate));
+        }
+        (gate, source) = (after, after_source);
+    }
+    anyhow::bail!("the redaction rules changed while each of {READS} reads of the work view ran")
 }
 
 /// The snapshot of `work` and `goals`, its goals' times in `tz`, through `gate`.
@@ -70,12 +92,18 @@ where
 /// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
 /// text gated at its source and none of their keys, so that the counts, days and times the pages
 /// need are read by the keys this file names whatever a rule finds in a key; and the Build story's
-/// texts as they were kept (`build_story` gates the story it makes of them).
-pub(crate) fn read(home: &Path, now: i64) -> anyhow::Result<(Value, Value)> {
+/// texts as they were kept (`build_story` gates the story it makes of them). Both gate their texts
+/// under `rules`, the home's as the answer read them.
+pub(crate) fn read(
+    home: &Path,
+    now: i64,
+    rules: &crate::redact::Rules,
+) -> anyhow::Result<(Value, Value)> {
     // The work-view shows no deliverables yet: their links are not made.
     let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
-    let work = crate::my_work::listed_kept(home, crate::my_work::Range::Week, now, &tag)?;
-    let goals = crate::my_work_goals::page(home, now)?;
+    let week = crate::my_work::Range::Week;
+    let work = crate::my_work::listed_kept(home, week, now, &tag, rules)?;
+    let goals = crate::my_work_goals::page_with(home, now, rules)?;
     Ok((work, goals))
 }
 
@@ -125,9 +153,10 @@ fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
 }
 
 /// A conversation's agent's id in the snapshot, by which the pages give a request its agent
-/// (`agentIds`, `to-work-model.ts:154`): its platform, a word of this file's, and the
-/// conversation's id or reference. An agent's own name, which the raw hook takes as given, goes in
-/// no selector (#1089).
+/// (`agentIds`, `to-work-model.ts:154`): its platform, a word of this file's in place of the
+/// agent's own name, which the raw hook takes as given, and the conversation's id or reference.
+/// The conversation's id, `c:`, its agent's name and its session, goes as it is only where the gate
+/// leaves it and each of these shapes as they are (`refer`); else its reference goes (#1089).
 fn agent_id(agent: &str, id: &str) -> String {
     format!("{}:{id}", platform(agent))
 }
@@ -246,13 +275,19 @@ fn build_story(story: &Value, gate: &Gate) -> Value {
     json!({"story": {"narrative": n.leave(&texts, gate), "writtenAt": null}})
 }
 
-/// The rules of one answer, read once (`redact::rules_now`): none while their table is wrong,
-/// which masks every text whole, as `redact::outbound` does.
+/// The rules of one answer (`redact::rules_now`): none while their table is wrong, which masks
+/// every text whole, as `redact::outbound` does.
 pub(crate) struct Gate(Option<std::sync::Arc<crate::redact::Rules>>);
 
 impl Gate {
     pub(crate) fn now() -> Gate {
         Gate(crate::redact::rules_now())
+    }
+
+    /// The version of its rules (`Rules::version`), which a change of a rule or a kept value
+    /// changes; none while their table is wrong.
+    fn version(&self) -> Option<&str> {
+        self.0.as_deref().map(crate::redact::Rules::version)
     }
 
     /// `text` through the gate, as `redact::outbound` sends it.
@@ -263,9 +298,17 @@ impl Gate {
         }
     }
 
-    /// What the gate hides in `text`; none when it masks the whole of it.
+    /// What the gate hides in `text`, a stored text as it is stored, as oboete's own page reads it;
+    /// none when it masks the whole of it.
     fn hidden(&self, text: &str) -> Option<Vec<(usize, usize)>> {
         crate::redact::hidden(text, self.0.as_ref()?)
+    }
+
+    /// What the gate hides in `text` read with its edges as they are (`redact::hidden_exact`),
+    /// where the pages keep a character the gate's own reading trims (U+0085); none when it masks
+    /// the whole of it.
+    fn hidden_exact(&self, text: &str) -> Option<Vec<(usize, usize)>> {
+        crate::redact::hidden_exact(text, self.0.as_ref()?)
     }
 }
 
@@ -490,9 +533,16 @@ impl Narrative {
                 (&plain, page_blocks(&plain.0)),
             ];
             let mut found = Vec::new();
-            // Each view is read where it is, none copied.
-            let mut read = |text: &str, at: &[Option<usize>]| {
-                let hidden = gate.hidden(text).unwrap_or_else(|| vec![(0, text.len())]);
+            // Each view is read where it is, none copied: a kept text as the gate reads a stored
+            // one, and a view of the story as the pages receive or show it so too and with its
+            // edges as they are, as a heading's text after its marks may open with a U+0085 the
+            // pages keep and the gate's own reading trims (Codex on #1093).
+            let mut read = |text: &str, at: &[Option<usize>], stored: bool| {
+                let whole = || vec![(0, text.len())];
+                let mut hidden = gate.hidden(text).unwrap_or_else(whole);
+                if !stored {
+                    hidden.extend(gate.hidden_exact(text).unwrap_or_else(whole));
+                }
                 for (s, e) in hidden {
                     let words = at[s..e].iter().flatten().copied();
                     found.extend(words.filter(|&p| !self.mark[p] && !masked[p]));
@@ -500,16 +550,16 @@ impl Narrative {
             };
             for ((text, at), ranges) in &blocks {
                 for r in ranges {
-                    read(&text[r.clone()], &at[r.clone()]);
+                    read(&text[r.clone()], &at[r.clone()], false);
                 }
             }
             if pass == 0 {
                 for (text, went) in texts.iter().zip(&self.went) {
-                    read(text, went);
+                    read(text, went, true);
                 }
             }
-            read(&plain.0, &plain.1);
-            read(&sent.0, &sent.1);
+            read(&plain.0, &plain.1, false);
+            read(&sent.0, &sent.1, false);
             if found.is_empty() {
                 break;
             }

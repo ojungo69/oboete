@@ -709,6 +709,13 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
     Some(merged_runs([g.blocks, g.masks].concat()))
 }
 
+/// `hidden`, the rules reading `text` as it is, its edges untrimmed: for a text a reader shows as
+/// it is, whose edges a rule anchored there may name (the work-view's story, #1089).
+pub fn hidden_exact(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
+    let g = gated_as(text, rules, false)?;
+    Some(merged_runs([g.blocks, g.masks].concat()))
+}
+
 /// The rules as they are now, which `outbound` reads with: none while the table is wrong, which
 /// masks every text whole. For a reader that gates many texts of one answer with one read of them.
 pub fn rules_now() -> Option<std::sync::Arc<Rules>> {
@@ -727,6 +734,11 @@ struct Gated {
 }
 
 fn gated(text: &str, rules: &Rules) -> Option<Gated> {
+    gated_as(text, rules, true)
+}
+
+/// `gated`, the text trimmed before the scan when `trim`.
+fn gated_as(text: &str, rules: &Rules, trim: bool) -> Option<Gated> {
     // The text as the gate sees it, and for each of its bytes the range of `text` it stands for.
     let mut work = text.to_owned();
     let mut from: Vec<(usize, usize)> = (0..text.len()).map(|i| (i, i + 1)).collect();
@@ -753,8 +765,13 @@ fn gated(text: &str, rules: &Rules) -> Option<Gated> {
         next_from.extend_from_slice(&from[pos..]);
         (work, from) = (next, next_from);
     }
-    let start = work.len() - work.trim_start().len();
-    let end = work.trim_end().len().max(start);
+    let (start, end) = match trim {
+        true => {
+            let start = work.len() - work.trim_start().len();
+            (start, work.trim_end().len().max(start))
+        }
+        false => (0, work.len()),
+    };
     let plain = (work[start..end].to_owned(), from[start..end].to_vec());
     let (mut work, mut from) = plain.clone();
     let (mut masks, mut found) = (Vec::new(), 0);
