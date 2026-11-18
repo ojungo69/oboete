@@ -29,10 +29,12 @@ fi
 
 work=
 swap=
-# However the script ends (an error, Ctrl-C, a kill), an unfinished swap puts the old bundle back,
-# and a bundle that cannot be put back is kept in its reserved folder rather than removed.
+# However the script ends (an error, Ctrl-C, a kill other than SIGKILL), an unfinished swap puts the
+# old bundle back, and a bundle that cannot be put back is kept in its reserved folder rather than
+# removed. Each step runs whatever failed before it (set +e): a failed removal under set -e would
+# skip the rest. A SIGKILL runs no handler: the README says how to recover.
 cleanup() {
-  rm -rf ${work:+"$work"}
+  set +e
   if [ -n "$swap" ]; then
     if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
       echo "build.sh: the old bundle is kept in $swap/old" >&2
@@ -40,17 +42,27 @@ cleanup() {
       rm -rf "$swap"
     fi
   fi
-  rmdir "$lock"
+  rm -rf ${work:+"$work"}
+  rmdir "$lock" || echo "build.sh: $lock is left; remove it if no build or fetch is running" >&2
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 work=$(mktemp -d)
+# An absolute path: Git ignores a relative entry of GIT_CEILING_DIRECTORIES, as a relative TMPDIR
+# would give.
+work=$(cd "$work" && pwd -P)
 cp -a "$here/upstream/." "$work/"
 # GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
 # folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
-# skip each one, and succeed with nothing applied.
+# skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
 for patch in "$here"/patches/*.patch; do
-  (cd "$work" && GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply "$patch")
+  if ! out=$(cd "$work" && GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose "$patch" 2>&1); then
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+  case $out in
+    *"Skipped patch"*) printf 'build.sh: %s skipped a file:\n%s\n' "$patch" "$out" >&2; exit 1 ;;
+  esac
 done
 # The files outside src/ui/my-work import packages from claude-mem's root node_modules, which its
 # own root install provides. Here they resolve to the work-view's own packages.

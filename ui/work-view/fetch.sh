@@ -44,21 +44,24 @@ fi
 
 # One reserved folder beside upstream/ holds the new tree, its UPSTREAM line and, while they move
 # in, the old tree. Each move is a rename on one file system. The swap is done when the UPSTREAM
-# line has moved in. However the script ends before that (an error, Ctrl-C, a kill), the tree this
-# run put in goes and the old one comes back, so the tree on disk is always the one UPSTREAM names;
-# a tree that cannot be put back is kept in the reserved folder.
+# line has moved in. However the script ends before that (an error, Ctrl-C, a kill other than
+# SIGKILL), the tree this run put in goes and the old one comes back, so the tree on disk is always
+# the one UPSTREAM names; a tree that cannot be put back is kept in the reserved folder. Each step
+# runs whatever failed before it (set +e). A SIGKILL runs no handler: the README says how to recover.
 swap=
 moving=
 cleanup() {
+  set +e
   if [ -n "$moving" ] && [ -e "$swap/UPSTREAM" ]; then
     if [ ! -e "$swap/new" ]; then rm -rf "${here:?}/upstream"; fi
-    if [ -e "$swap/old" ] && ! mv "$swap/old" "$here/upstream"; then
+    # A tree left in its place (its removal failed) would take the old one in as a folder of its own.
+    if [ -e "$swap/old" ] && { [ -e "$here/upstream" ] || ! mv "$swap/old" "$here/upstream"; }; then
       echo "fetch.sh: the old tree is kept in $swap/old" >&2
       swap=
     fi
   fi
   rm -rf ${swap:+"$swap"}
-  rmdir "$lock"
+  rmdir "$lock" || echo "fetch.sh: $lock is left; remove it if no build or fetch is running" >&2
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP

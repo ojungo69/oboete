@@ -19,6 +19,8 @@ If other attributions are required by dependencies or included code, add them he
 
 ## @floating-ui/core 1.8.0 (MIT)
 
+Folders: `node_modules/@floating-ui/core`
+
 ```text
 MIT License
 
@@ -43,6 +45,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## @floating-ui/dom 1.8.0 (MIT)
+
+Folders: `node_modules/@floating-ui/dom`
 
 ```text
 MIT License
@@ -69,6 +73,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## @floating-ui/react-dom 2.1.9 (MIT)
 
+Folders: `node_modules/@floating-ui/react-dom`
+
 ```text
 MIT License
 
@@ -94,6 +100,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## @floating-ui/utils 0.2.12 (MIT)
 
+Folders: `node_modules/@floating-ui/utils`
+
 ```text
 MIT License
 
@@ -118,6 +126,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## @fontsource-variable/geist 5.3.0 (OFL-1.1)
+
+Folders: `node_modules/@fontsource-variable/geist`
 
 ```text
 Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font) Geist-Italic[wght].ttf: Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font)
@@ -217,6 +227,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ## @radix-ui/number 1.1.3 (MIT)
 
+Folders: `node_modules/@radix-ui/number`
+
 ```text
 MIT License
 
@@ -242,6 +254,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/primitive 1.2.0 (MIT)
+
+Folders: `node_modules/@radix-ui/primitive`
 
 ```text
 MIT License
@@ -269,6 +283,8 @@ SOFTWARE.
 
 ## @radix-ui/react-accordion 1.3.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-accordion`
+
 ```text
 MIT License
 
@@ -294,6 +310,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-arrow 1.1.17 (MIT)
+
+Folders: `node_modules/@radix-ui/react-arrow`
 
 ```text
 MIT License
@@ -321,6 +339,8 @@ SOFTWARE.
 
 ## @radix-ui/react-collapsible 1.2.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-collapsible`
+
 ```text
 MIT License
 
@@ -346,6 +366,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-collection 1.2.0 (MIT)
+
+Folders: `node_modules/@radix-ui/react-collection`
 
 ```text
 MIT License
@@ -373,6 +395,8 @@ SOFTWARE.
 
 ## @radix-ui/react-compose-refs 1.1.5 (MIT)
 
+Folders: `node_modules/@radix-ui/react-compose-refs`
+
 ```text
 MIT License
 
@@ -398,6 +422,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-context 1.3.0 (MIT)
+
+Folders: `node_modules/@radix-ui/react-context`
 
 ```text
 MIT License
@@ -425,6 +451,8 @@ SOFTWARE.
 
 ## @radix-ui/react-dialog 1.3.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-dialog`
+
 ```text
 MIT License
 
@@ -450,6 +478,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-direction 1.2.0 (MIT)
+
+Folders: `node_modules/@radix-ui/react-direction`
 
 ```text
 MIT License
@@ -477,6 +507,8 @@ SOFTWARE.
 
 ## @radix-ui/react-dismissable-layer 1.2.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-dismissable-layer`
+
 ```text
 MIT License
 
@@ -502,6 +534,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-dropdown-menu 2.2.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-dropdown-menu`
 
 ```text
 MIT License
@@ -529,6 +563,8 @@ SOFTWARE.
 
 ## @radix-ui/react-focus-guards 1.2.0 (MIT)
 
+Folders: `node_modules/@radix-ui/react-focus-guards`
+
 ```text
 MIT License
 
@@ -554,6 +590,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-focus-scope 1.3.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-focus-scope`
 
 ```text
 MIT License
@@ -581,6 +619,8 @@ SOFTWARE.
 
 ## @radix-ui/react-hover-card 1.2.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-hover-card`
+
 ```text
 MIT License
 
@@ -606,6 +646,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-id 1.1.4 (MIT)
+
+Folders: `node_modules/@radix-ui/react-id`
 
 ```text
 MIT License
@@ -633,6 +675,8 @@ SOFTWARE.
 
 ## @radix-ui/react-label 2.1.17 (MIT)
 
+Folders: `node_modules/@radix-ui/react-label`
+
 ```text
 MIT License
 
@@ -658,6 +702,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-menu 2.2.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-menu`
 
 ```text
 MIT License
@@ -685,6 +731,8 @@ SOFTWARE.
 
 ## @radix-ui/react-popper 1.4.0 (MIT)
 
+Folders: `node_modules/@radix-ui/react-popper`
+
 ```text
 MIT License
 
@@ -710,6 +758,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-portal 1.2.0 (MIT)
+
+Folders: `node_modules/@radix-ui/react-portal`
 
 ```text
 MIT License
@@ -737,6 +787,8 @@ SOFTWARE.
 
 ## @radix-ui/react-presence 1.1.11 (MIT)
 
+Folders: `node_modules/@radix-ui/react-presence`
+
 ```text
 MIT License
 
@@ -762,6 +814,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-primitive 2.2.0 (MIT)
+
+Folders: `node_modules/@radix-ui/react-primitive`
 
 ```text
 MIT License
@@ -789,6 +843,8 @@ SOFTWARE.
 
 ## @radix-ui/react-progress 1.2.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-progress`
+
 ```text
 MIT License
 
@@ -814,6 +870,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-roving-focus 1.2.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-roving-focus`
 
 ```text
 MIT License
@@ -841,6 +899,8 @@ SOFTWARE.
 
 ## @radix-ui/react-scroll-area 1.4.0 (MIT)
 
+Folders: `node_modules/@radix-ui/react-scroll-area`
+
 ```text
 MIT License
 
@@ -866,6 +926,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-select 2.4.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-select`
 
 ```text
 MIT License
@@ -893,6 +955,8 @@ SOFTWARE.
 
 ## @radix-ui/react-slot 1.5.0 (MIT)
 
+Folders: `node_modules/@radix-ui/react-slot`
+
 ```text
 MIT License
 
@@ -918,6 +982,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-switch 1.4.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-switch`
 
 ```text
 MIT License
@@ -945,6 +1011,8 @@ SOFTWARE.
 
 ## @radix-ui/react-toggle 1.2.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-toggle`
+
 ```text
 MIT License
 
@@ -970,6 +1038,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-toggle-group 1.2.1 (MIT)
+
+Folders: `node_modules/@radix-ui/react-toggle-group`
 
 ```text
 MIT License
@@ -997,6 +1067,8 @@ SOFTWARE.
 
 ## @radix-ui/react-tooltip 1.4.1 (MIT)
 
+Folders: `node_modules/@radix-ui/react-tooltip`
+
 ```text
 MIT License
 
@@ -1022,6 +1094,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-use-callback-ref 1.1.5 (MIT)
+
+Folders: `node_modules/@radix-ui/react-use-callback-ref`
 
 ```text
 MIT License
@@ -1049,6 +1123,8 @@ SOFTWARE.
 
 ## @radix-ui/react-use-controllable-state 1.3.0 (MIT)
 
+Folders: `node_modules/@radix-ui/react-use-controllable-state`
+
 ```text
 MIT License
 
@@ -1074,6 +1150,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-use-effect-event 0.0.5 (MIT)
+
+Folders: `node_modules/@radix-ui/react-use-effect-event`
 
 ```text
 MIT License
@@ -1101,6 +1179,8 @@ SOFTWARE.
 
 ## @radix-ui/react-use-is-hydrated 0.1.3 (MIT)
 
+Folders: `node_modules/@radix-ui/react-use-is-hydrated`
+
 ```text
 MIT License
 
@@ -1126,6 +1206,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-use-layout-effect 1.1.4 (MIT)
+
+Folders: `node_modules/@radix-ui/react-use-layout-effect`
 
 ```text
 MIT License
@@ -1153,6 +1235,8 @@ SOFTWARE.
 
 ## @radix-ui/react-use-size 1.1.5 (MIT)
 
+Folders: `node_modules/@radix-ui/react-use-size`
+
 ```text
 MIT License
 
@@ -1178,6 +1262,8 @@ SOFTWARE.
 ```
 
 ## @radix-ui/react-visually-hidden 1.2.13 (MIT)
+
+Folders: `node_modules/@radix-ui/react-visually-hidden`
 
 ```text
 MIT License
@@ -1205,6 +1291,8 @@ SOFTWARE.
 
 ## @tsparticles/basic 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/basic`
+
 ```text
 MIT License
 
@@ -1230,6 +1318,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/engine 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/engine`
 
 ```text
 MIT License
@@ -1257,6 +1347,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-external-attract 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-external-attract`
+
 ```text
 MIT License
 
@@ -1282,6 +1374,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-external-bounce 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-external-bounce`
 
 ```text
 MIT License
@@ -1309,6 +1403,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-external-bubble 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-external-bubble`
+
 ```text
 MIT License
 
@@ -1334,6 +1430,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-external-connect 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-external-connect`
 
 ```text
 MIT License
@@ -1361,6 +1459,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-external-grab 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-external-grab`
+
 ```text
 MIT License
 
@@ -1386,6 +1486,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-external-pause 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-external-pause`
 
 ```text
 MIT License
@@ -1413,6 +1515,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-external-push 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-external-push`
+
 ```text
 MIT License
 
@@ -1438,6 +1542,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-external-remove 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-external-remove`
 
 ```text
 MIT License
@@ -1465,6 +1571,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-external-repulse 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-external-repulse`
+
 ```text
 MIT License
 
@@ -1490,6 +1598,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-external-slow 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-external-slow`
 
 ```text
 MIT License
@@ -1517,6 +1627,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-particles-attract 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-particles-attract`
+
 ```text
 MIT License
 
@@ -1542,6 +1654,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/interaction-particles-collisions 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/interaction-particles-collisions`
 
 ```text
 MIT License
@@ -1569,6 +1683,8 @@ SOFTWARE.
 
 ## @tsparticles/interaction-particles-links 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/interaction-particles-links`
+
 ```text
 MIT License
 
@@ -1594,6 +1710,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/move-base 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/move-base`
 
 ```text
 MIT License
@@ -1621,6 +1739,8 @@ SOFTWARE.
 
 ## @tsparticles/move-parallax 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/move-parallax`
+
 ```text
 MIT License
 
@@ -1646,6 +1766,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/plugin-easing-quad 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/plugin-easing-quad`
 
 ```text
 MIT License
@@ -1673,6 +1795,8 @@ SOFTWARE.
 
 ## @tsparticles/plugin-hex-color 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/plugin-hex-color`
+
 ```text
 MIT License
 
@@ -1698,6 +1822,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/plugin-hsl-color 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/plugin-hsl-color`
 
 ```text
 MIT License
@@ -1725,6 +1851,8 @@ SOFTWARE.
 
 ## @tsparticles/plugin-rgb-color 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/plugin-rgb-color`
+
 ```text
 MIT License
 
@@ -1750,6 +1878,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/react 3.0.0 (not declared)
+
+Folders: `node_modules/@tsparticles/react`
 
 ```text
 MIT License
@@ -1777,6 +1907,8 @@ SOFTWARE.
 
 ## @tsparticles/shape-circle 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/shape-circle`
+
 ```text
 MIT License
 
@@ -1802,6 +1934,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/shape-emoji 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/shape-emoji`
 
 ```text
 MIT License
@@ -1829,6 +1963,8 @@ SOFTWARE.
 
 ## @tsparticles/shape-image 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/shape-image`
+
 ```text
 MIT License
 
@@ -1854,6 +1990,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/shape-line 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/shape-line`
 
 ```text
 MIT License
@@ -1881,6 +2019,8 @@ SOFTWARE.
 
 ## @tsparticles/shape-polygon 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/shape-polygon`
+
 ```text
 MIT License
 
@@ -1906,6 +2046,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/shape-square 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/shape-square`
 
 ```text
 MIT License
@@ -1933,6 +2075,8 @@ SOFTWARE.
 
 ## @tsparticles/shape-star 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/shape-star`
+
 ```text
 MIT License
 
@@ -1958,6 +2102,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/slim 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/slim`
 
 ```text
 MIT License
@@ -1985,6 +2131,8 @@ SOFTWARE.
 
 ## @tsparticles/updater-color 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/updater-color`
+
 ```text
 MIT License
 
@@ -2010,6 +2158,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/updater-life 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/updater-life`
 
 ```text
 MIT License
@@ -2037,6 +2187,8 @@ SOFTWARE.
 
 ## @tsparticles/updater-opacity 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/updater-opacity`
+
 ```text
 MIT License
 
@@ -2062,6 +2214,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/updater-out-modes 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/updater-out-modes`
 
 ```text
 MIT License
@@ -2089,6 +2243,8 @@ SOFTWARE.
 
 ## @tsparticles/updater-rotate 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/updater-rotate`
+
 ```text
 MIT License
 
@@ -2114,6 +2270,8 @@ SOFTWARE.
 ```
 
 ## @tsparticles/updater-size 3.9.1 (MIT)
+
+Folders: `node_modules/@tsparticles/updater-size`
 
 ```text
 MIT License
@@ -2141,6 +2299,8 @@ SOFTWARE.
 
 ## @tsparticles/updater-stroke-color 3.9.1 (MIT)
 
+Folders: `node_modules/@tsparticles/updater-stroke-color`
+
 ```text
 MIT License
 
@@ -2166,6 +2326,8 @@ SOFTWARE.
 ```
 
 ## anser 2.3.5 (MIT)
+
+Folders: `node_modules/anser`
 
 ```text
 The MIT License (MIT)
@@ -2193,12 +2355,15 @@ SOFTWARE.
 
 ## ansi-to-react 6.2.6 (BSD-3-Clause)
 
+Folders: `node_modules/ansi-to-react`
+
 ```text
 ansi-to-react ships no licence text, in its package or in its repository (nteract/ansi-to-react).
-Its package.json declares BSD-3-Clause and names Kyle Kelley <rgbkrk@gmail.com> as its author.
-This is the BSD-3-Clause licence with that holder.
+Its package.json (6.2.6) declares BSD-3-Clause, names Kyle Kelley <rgbkrk@gmail.com> as its
+author and lists no contributors. What follows is the BSD-3-Clause text with a copyright line made
+from that metadata: the project publishes no holder line of its own.
 
-Copyright (c) Kyle Kelley and the nteract contributors
+Copyright (c) Kyle Kelley
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted
@@ -2227,6 +2392,8 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## aria-hidden 1.2.6 (MIT)
 
+Folders: `node_modules/aria-hidden`
+
 ```text
 MIT License
 
@@ -2252,6 +2419,8 @@ SOFTWARE.
 ```
 
 ## class-variance-authority 0.7.1 (Apache-2.0)
+
+Folders: `node_modules/class-variance-authority`
 
 ```text
                                  Apache License
@@ -2448,6 +2617,8 @@ SOFTWARE.
 
 ## clsx 2.1.1 (MIT)
 
+Folders: `node_modules/clsx`
+
 ```text
 MIT License
 
@@ -2461,6 +2632,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ```
 
 ## cn 0.5.0 (MIT)
+
+Folders: `node_modules/cn`
 
 ```text
 MIT License
@@ -2488,6 +2661,8 @@ SOFTWARE.
 
 ## escape-carriage 1.3.1 (MIT)
 
+Folders: `node_modules/escape-carriage`
+
 ```text
 MIT License
 
@@ -2513,6 +2688,8 @@ SOFTWARE.
 ```
 
 ## framer-motion 14.4.0 (MIT)
+
+Folders: `node_modules/framer-motion`
 
 ```text
 The MIT License (MIT)
@@ -2540,6 +2717,8 @@ SOFTWARE.
 
 ## get-nonce 1.0.1 (MIT)
 
+Folders: `node_modules/get-nonce`
+
 ```text
 MIT License
 
@@ -2565,6 +2744,8 @@ SOFTWARE.
 ```
 
 ## immer 10.2.0 (MIT)
+
+Folders: `node_modules/immer`
 
 ```text
 MIT License
@@ -2592,6 +2773,8 @@ SOFTWARE.
 
 ## linkify-it 3.0.3 (MIT)
 
+Folders: `node_modules/linkify-it`
+
 ```text
 Copyright (c) 2015 Vitaly Puzrin.
 
@@ -2618,6 +2801,8 @@ OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## lucide-react 1.60.0 (ISC)
+
+Folders: `node_modules/lucide-react`
 
 ```text
 ISC License
@@ -2667,6 +2852,8 @@ SOFTWARE.
 
 ## motion 14.4.0 (MIT)
 
+Folders: `node_modules/motion`
+
 ```text
 The MIT License (MIT)
 
@@ -2692,6 +2879,8 @@ SOFTWARE.
 ```
 
 ## motion-dom 14.4.0 (MIT)
+
+Folders: `node_modules/motion-dom`
 
 ```text
 The MIT License (MIT)
@@ -2719,6 +2908,8 @@ SOFTWARE.
 
 ## motion-utils 14.1.1 (MIT)
 
+Folders: `node_modules/motion-utils`
+
 ```text
 The MIT License (MIT)
 
@@ -2744,6 +2935,8 @@ SOFTWARE.
 ```
 
 ## react 19.3.1 (MIT)
+
+Folders: `node_modules/react`
 
 ```text
 MIT License
@@ -2771,6 +2964,8 @@ SOFTWARE.
 
 ## react-dom 19.3.1 (MIT)
 
+Folders: `node_modules/react-dom`
+
 ```text
 MIT License
 
@@ -2796,6 +2991,8 @@ SOFTWARE.
 ```
 
 ## react-remove-scroll 2.7.2 (MIT)
+
+Folders: `node_modules/react-remove-scroll`
 
 ```text
 MIT License
@@ -2823,6 +3020,8 @@ SOFTWARE.
 
 ## react-remove-scroll-bar 2.3.8 (MIT)
 
+Folders: `node_modules/react-remove-scroll-bar`
+
 ```text
 MIT License
 
@@ -2849,6 +3048,8 @@ SOFTWARE.
 
 ## react-style-singleton 2.2.3 (MIT)
 
+Folders: `node_modules/react-style-singleton`
+
 ```text
 MIT License
 
@@ -2874,6 +3075,8 @@ SOFTWARE.
 ```
 
 ## rolldown 1.2.14 (MIT)
+
+Folders: `node_modules/rolldown`
 
 ```text
 MIT License
@@ -2942,6 +3145,8 @@ SOFTWARE.
 
 ## scheduler 0.28.0 (MIT)
 
+Folders: `node_modules/scheduler`
+
 ```text
 MIT License
 
@@ -2967,6 +3172,8 @@ SOFTWARE.
 ```
 
 ## shadcn 4.22.1 (MIT)
+
+Folders: `node_modules/shadcn`
 
 ```text
 MIT License
@@ -2994,6 +3201,8 @@ SOFTWARE.
 
 ## tailwindcss 4.3.3 (MIT)
 
+Folders: `node_modules/tailwindcss`
+
 ```text
 MIT License
 
@@ -3020,6 +3229,8 @@ SOFTWARE.
 
 ## tslib 2.8.1 (0BSD)
 
+Folders: `node_modules/tslib`
+
 ```text
 Copyright (c) Microsoft Corporation.
 
@@ -3036,6 +3247,8 @@ PERFORMANCE OF THIS SOFTWARE.
 ```
 
 ## tw-animate-css 1.4.0 (MIT)
+
+Folders: `node_modules/tw-animate-css`
 
 ```text
 MIT License
@@ -3063,6 +3276,8 @@ SOFTWARE.
 
 ## uc.micro 1.0.6 (MIT)
 
+Folders: `node_modules/uc.micro`
+
 ```text
 Copyright Mathias Bynens <https://mathiasbynens.be/>
 
@@ -3087,6 +3302,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## use-callback-ref 1.3.3 (MIT)
+
+Folders: `node_modules/use-callback-ref`
 
 ```text
 MIT License
@@ -3114,6 +3331,8 @@ SOFTWARE.
 
 ## use-sidecar 1.1.3 (MIT)
 
+Folders: `node_modules/use-sidecar`
+
 ```text
 MIT License
 
@@ -3139,6 +3358,8 @@ SOFTWARE.
 ```
 
 ## vite 8.3.4 (MIT)
+
+Folders: `node_modules/vite`
 
 ```text
 # Vite core license
@@ -3168,6 +3389,8 @@ SOFTWARE.
 ```
 
 ## zustand 5.0.16 (MIT)
+
+Folders: `node_modules/zustand`
 
 ```text
 MIT License
