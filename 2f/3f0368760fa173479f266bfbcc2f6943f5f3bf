@@ -1,0 +1,27 @@
+src/work_view.rs
+  s_52c3955e48bff4::t_360379a9cd89fb 57-59,68,71,76-83,132,134,329-332,335-336,339-342,356
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_a5952e2d68bde3 375-376,455-456,526-527,531-543,656-683,726-731
+ui/work-view/contract/snapshot.json
+  s_52c3955e48bff4::t_35830c0d6c7717 3-4,9,72,92,102,112,128,144,157,165,172-173,191,207,217,233,246,257-259,274-275,278,289,305,315,331,344,355-356,372,376,380,391,407,417,433,446,457-459,476,492,502,518,531,542-544,561,577,587,603,616,627-628,646,657,670-671,689,700,713-714,730,734,780,784,800,804,822,826,842,846,862,866,879,903,932
+ui/work-view/contract/stories.json
+  s_52c3955e48bff4::t_83e5c6a0b4b9f7 73-90
+ui/work-view/contract/to-work-model.test.mjs
+  s_52c3955e48bff4::t_d716b19af032ce 164-167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2f3f0368760fa173479f266bfbcc2f6943f5f3bf",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
