@@ -44,7 +44,7 @@ It passes only if all seven items under "Results" hold. Any one of these is a fa
   - `compare.py` checks a snapshot against `/api/my-work`.
   - `spike-check.ts` runs claude-mem's own `toWorkModel` in Node over a snapshot.
   - `timing.sh` times the three answers.
-  - `licences.mjs` lists the packages in the bundle from its source maps.
+  - `licences.mjs` lists the packages in the bundle from the source maps of a second build, made with `npx vite build --sourcemap --outDir dist-map`.
   - `synth.py` writes the small home's events.
 - **The inputs.**
   - `contract-min.json` is a minimal snapshot written by hand from the mapper's code.
@@ -108,11 +108,12 @@ How each oboete status shows. The adapter sends it as an explicit lifecycle, whi
   - The focus illustrations came in with claude-mem's commit `45a0dec2` (2026-11-09), by the repository's owner, and no other commit touched them. So the repository's Apache-2.0 covers them.
   - `favicon.svg` is claude-mem's mark, which the brand patch replaces.
   - What decision 114 asks before each release is still to come: where each package comes from and its advisories, such as `linkify-it` 3.0.3 through `ansi-to-react`.
+- **The adapter drops an area's asks when the area has no priorities.** oboete's `/api/my-work` gives such an area `asked: null` but still lists its asks (`my_work_focus.rs:336-340`). The spike's adapter skipped the whole area. The read adapter takes an area's asks whatever its count, and its contract check covers an area with asks and no priorities.
 - **Two comments in `src/view.rs` are out of date.** The route's "Reads only" (lines 2472-2473) is one: the viewer takes writes. The review's doc comment (2219-2222) is the other: it sits above `my_work_refresh`, not `my_work_review`. The pull request that changes the routes fixes both.
 
 ## What the pass does not cover
 
-- **The address and token of their own.** Every call the page makes is already under `/api/work-view/`, so this is a change on the server, plus P1's storage key. It is a pull request of its own, in security scope.
+- **The address and token of their own.** The page's calls go to `/api/work-view` and the paths under `/api/work-view/`, with one exception: claude-mem's setup probe, `GET /api/setup/state`. It must keep answering 404, which keeps the setup page shut. A token that reaches only the work-view's paths would answer it 401, and P1 stops the whole page at a 401. So the scoped token needs three changes: the server's, P1's storage key, and P1 answering the probe itself. It is a pull request of its own, in security scope.
 - **Writes** (review, mark finished, refresh, focus actions, suggestions), **My Rules' rules**, **Japanese**, and the **adapter fields left out** (subagents, work products, goal history, sources, continuation).
 - **Focus data made by oboete's own engine.** The focus screens were fed only the fixture and the hand-written answer. They are checked on the real screen when the read adapter lands.
 

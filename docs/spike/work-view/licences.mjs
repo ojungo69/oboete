@@ -1,5 +1,8 @@
 // Work-view spike: the licence of each file in the bundle. JS: the packages its source map names,
 // each with the licence its package.json declares. Other files: by where vite took them from.
+// It reads <root>/dist-map/assets, a second build of the same sources with source maps, made in
+// <root> (src/ui/my-work) with: npx vite build --sourcemap --outDir dist-map --emptyOutDir
+// Usage: node licences.mjs <root>
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 const root = process.argv[2]
