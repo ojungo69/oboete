@@ -24,9 +24,12 @@ jobs:
         with:
           node-version: 24.22.3
       # claude-mem's mapper, unchanged, reads oboete's answer (src/work_view.rs): the snapshot a Rust
-      # test keeps current. No package is installed for it.
+      # test keeps current. No package is installed for it. Twice: the pages run in the browser's
+      # zone, which need not be the one the answer was written in.
       - name: The pinned mapper reads oboete's work-view answer
-        run: node --test 'ui/work-view/contract/*.test.mjs'
+        run: |
+          node --test 'ui/work-view/contract/*.test.mjs'
+          TZ=America/Los_Angeles node --test 'ui/work-view/contract/*.test.mjs'
       - name: Build the bundle again from the pinned tree and the patches
         run: ui/work-view/build.sh
       - name: The committed bundle is the one built

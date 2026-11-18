@@ -29,6 +29,8 @@ test('every request is read, in the state its records give it', () => {
     [key('claude', 'c:claude:s4'), 'working'],
     // A status shipped it after a review at 30%.
     [key('claude', 'c:claude:s5'), 'shipped'],
+    // Its review shipped it, on a day of its own.
+    [key('claude', 'c:claude:s6'), 'shipped'],
     // A request of its own name, worked on in two repositories.
     ['r:rq1', 'working'],
     // Codex only asked, minutes ago: a request with no state of its own reads as being worked on
@@ -43,6 +45,7 @@ test('each request has its agent, its conversation at the time of its ask, and i
     'claude:c:claude:s3': 'claude',
     'claude:c:claude:s4': 'claude',
     'claude:c:claude:s5': 'claude',
+    'claude:c:claude:s6': 'claude',
     'claude:c:claude:s2': 'claude',
     'claude:c:claude:s1': 'claude',
     'codex:c:codex:c1': 'codex',
@@ -53,7 +56,7 @@ test('each request has its agent, its conversation at the time of its ask, and i
   // the mapper's own.
   const agentOf = model.requests.map((r) => [r.id, r.agentId]).sort(byKey)
   const expected = [
-    ...['s1', 's2', 's3', 's4', 's5'].map((s) => [key('claude', `c:claude:${s}`), `claude:c:claude:${s}`]),
+    ...['s1', 's2', 's3', 's4', 's5', 's6'].map((s) => [key('claude', `c:claude:${s}`), `claude:c:claude:${s}`]),
     [key('codex', 'c:codex:c1'), 'codex:c:codex:c1'],
     ['r:rq1', 'agent-not-recorded'],
   ].sort(byKey)
@@ -128,10 +131,17 @@ test('a request a status shipped after a review at 30% reads as shipped at 100%,
   assert.ok(shipped.progress.completedAt, 'it has its completion')
 })
 
-test('the Build story reads as written: a recap that opens with an issue number is the recap, a heading stays a heading', () => {
+test('the Build story reads as written: paragraphs that open with an issue number, bold or as code, are prose, and a heading stays a heading', () => {
   const story = model.buildStory
   assert.ok(story, 'the story shows')
-  // A word joiner opens the recap, so that the pages read it as prose; it shows as nothing.
-  assert.equal(story.recap.replace(/\u2060/g, ''), '#1087 shipped the read adapter.')
-  assert.deepEqual(story.paragraphs.map((p) => p.replace(/\u2060/g, '')), ['#1087 shipped the read adapter.', 'Next', 'Serve the pages.'])
+  // A word joiner opens such a paragraph, so that the pages read it as prose; it shows as nothing.
+  const shown = (text) => text.replace(/\u2060/g, '')
+  assert.equal(shown(story.recap), '#1087 shipped the read adapter.')
+  assert.deepEqual(story.paragraphs.map(shown), ['#1087 shipped the read adapter.', '#1088 fixed the gate.', 'Next', 'Serve the pages.'])
+})
+
+test('a request its review shipped on a day of its own completes on that day, in the zone of the browser', () => {
+  const shipped = byId(key('claude', 'c:claude:s6'))
+  assert.equal(shipped.state, 'shipped')
+  assert.equal(shipped.progress.completedAt, 'Nov 17, 12:00 pm')
 })

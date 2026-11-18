@@ -59,6 +59,18 @@ fn noted(h: &mut Store, repo: &str, list: &str, fields: Value) {
 fn reviewed(h: &mut Store, about: &str, ts: i64, percent: i64) {
     let fields = json!({"state": "in-progress", "percent": percent, "shipped": "",
         "narrative": "The migration came first.", "milestones": []});
+    review(h, about, ts, fields);
+}
+
+/// A review at `ts` that found the request shipped on `day`, at 100%.
+fn shipped_review(h: &mut Store, about: &str, ts: i64, day: &str) {
+    let fields = json!({"state": "shipped", "percent": 100, "shipped": day,
+        "narrative": "The docs went out.", "milestones": []});
+    review(h, about, ts, fields);
+}
+
+/// A review of the request `about` at `ts`, as the progress job appends it.
+fn review(h: &mut Store, about: &str, ts: i64, fields: Value) {
     let op = MyWorkOp {
         job: crate::my_work_progress::NAME.into(),
         about: about.into(),
@@ -154,17 +166,18 @@ fn home() -> (Store, i64) {
     for (at, percent) in [(t + 240_000, 20), (t + 480_000, 50)] {
         reviewed(&mut h, "c:claude:s4", at, percent);
     }
-    // The Build story's recap: it opens with an issue's number, and its heading sits above its body.
-    storied(
-        &mut h,
-        t + 360_000,
-        "#1087 shipped the read adapter.\n### Next\nServe the pages.",
-    );
+    // The Build story's recap: its paragraphs open with an issue's number, in bold and as code,
+    // and its heading sits above its body.
+    let recap = "**#1087** shipped the read adapter.\n\n`#1088` fixed the gate.\n### Next\nServe the pages.";
+    storied(&mut h, t + 360_000, recap);
     // A review at 30%, then a status that ships it: 100% by its status, its review its own.
     h.said("s5", R, t + 110_000, "Deploy the release.");
     reviewed(&mut h, "c:claude:s5", t + 300_000, 30);
     let deployed = json!({"task": "Deploy", "status": "doing", "request_status": "shipped"});
     wrote(&mut h, "claude", "s5", "deploy", deployed);
+    // A review that shipped the request on a day of its own, with no status to complete it.
+    h.said("s6", R, t + 115_000, "Publish the docs.");
+    shipped_review(&mut h, "c:claude:s6", t + 320_000, "2026-11-17");
     for (repo, task) in [(R, "Bump the version"), (R2, "Tag the release")] {
         let fields = json!({"task": task, "status": "doing", "request_id": "rq1",
             "request": "Cut the release"});
@@ -351,8 +364,8 @@ fn a_list_of_one_name_in_two_repositories_is_two_workstreams() {
 }
 
 /// A request shipped by its review alone has no completing status: the review's day completes
-/// it, at noon (with no zone in the review's own day, so the browser shows that day), and a later
-/// update moves nothing.
+/// it, at noon with no zone, which each browser reads as that day where it is, and a later update
+/// moves nothing (Codex on #1087).
 #[test]
 fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
     let work = json!({"requests": [{"id": "r:x", "status": "shipped", "title": "Release",
@@ -363,8 +376,7 @@ fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
         "story": {"narrative": "Shipped.", "milestones": [{"date": "2026-11-18", "text": "Built"}]}}]});
     let snapshot = snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc);
     let request = &snapshot["humanRequests"][0];
-    let noon = Utc.with_ymd_and_hms(2026, 11, 19, 12, 0, 0).unwrap();
-    assert_eq!(request["completedAtEpoch"], json!(noon.timestamp_millis()));
+    assert!(request["completedAtEpoch"].is_null(), "{request}");
     let progress = &request["progress"];
     assert_eq!(progress["shippedAt"], json!("2026-11-19T12:00:00"));
     assert_eq!(
@@ -483,8 +495,8 @@ fn a_request_shipped_after_a_partial_review_keeps_the_reviews_percent() {
     assert_eq!(progress["readings"].as_array().map(Vec::len), Some(2));
 }
 
-/// A review's day completes a request shipped by that review alone, whether the review goes or
-/// not (a rule took its time's key), and whatever its percent: a review that shipped the request
+/// A review that cannot carry its day, as it does not go (a rule took its time's key) or as it is
+/// below 100%, leaves the request its review shipped to the day at noon on this machine: a review
 /// at 30% goes as a review at 30%, which the pages do not take as a shipment of its own (CodeRabbit
 /// and Codex on #1087).
 #[test]
@@ -568,6 +580,38 @@ fn a_requests_times_go_each_from_its_own_field() {
         &request["original"]["atEpoch"],
     );
     assert_eq!(times, (&json!(1_000), &json!(2_000), &json!(1_500)));
+}
+
+/// The pages take a block for a heading when it opens with `#` once its bold and code marks are
+/// off, so a paragraph that opens with a marked issue number opens with a word joiner too, in a
+/// story of that paragraph alone; one the pages show as nothing goes (Codex on #1087).
+#[test]
+fn a_story_of_marked_issue_numbers_reads_as_written() {
+    for (recap, want) in [
+        (
+            "**#1087** shipped the adapter.",
+            "\u{2060}**#1087** shipped the adapter.",
+        ),
+        ("`#1088` fixed the gate.", "\u{2060}`#1088` fixed the gate."),
+        (
+            "** #7** has a space in its bold.",
+            "\u{2060}** #7** has a space in its bold.",
+        ),
+        (
+            "\u{FEFF}#7 follows a byte-order mark.",
+            "\u{2060}#7 follows a byte-order mark.",
+        ),
+        (
+            "**Bold** prose stays as it is.",
+            "**Bold** prose stays as it is.",
+        ),
+    ] {
+        let work = json!({"story": {"recap": recap, "chapters": []}});
+        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        assert_eq!(story, &json!(want), "{recap:?}");
+    }
+    let work = json!({"story": {"recap": "** **", "chapters": []}});
+    assert!(snapshot_at(&work, &json!({}), 0, &Utc)["story"].is_null());
 }
 
 fn hex(t: &str, n: usize) -> bool {

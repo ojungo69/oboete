@@ -8,8 +8,10 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::LazyLock;
 
 use chrono::{Local, Months, NaiveDate, SecondsFormat, TimeZone, Utc};
+use regex::Regex;
 use serde_json::{Map, Value, json};
 
 /// The snapshot, its goals' times in this machine's zone: the pages show those as written.
@@ -66,33 +68,54 @@ fn build_story(story: &Value) -> Value {
     }
 }
 
-/// A text's blocks as the pages read a narrative, which take every block that opens with `#` for
-/// a heading (`to-work-model.ts:436-438`): a Markdown heading line is a block of its own, the
-/// lines between headings and blank lines are a paragraph, and a paragraph that opens with `#`
-/// (an issue's number, `#1087`) opens with a word joiner, so the pages read it as the prose it is.
+/// A text's blocks as the pages read a narrative (`to-work-model.ts:433-442`): a Markdown heading
+/// line is a block of its own, and the lines between headings and blank lines are a paragraph. The
+/// pages take a block for a heading when it opens with `#` once its bold and code marks are off, so
+/// a paragraph that would (an issue's number: `#1087`, `**#1087**`) opens with a word joiner, and the
+/// pages read it as the prose it is. A paragraph they would show as nothing goes.
 fn blocks(text: &str) -> Vec<String> {
+    // JavaScript's `\s`, by which the pages split and trim, holds U+FEFF, which Rust's does not.
+    fn space(c: char) -> bool {
+        c.is_whitespace() || c == '\u{FEFF}'
+    }
     fn heading(line: &str) -> bool {
-        let t = line.trim_start();
+        let t = line.trim_start_matches(space);
         let n = t.bytes().take_while(|&b| b == b'#').count();
-        (1..=6).contains(&n) && t[n..].chars().next().is_none_or(char::is_whitespace)
+        (1..=6).contains(&n) && t[n..].chars().next().is_none_or(space)
+    }
+    // A block as the pages show it: its bold and code marks off, its spaces as one.
+    fn shown(block: &str) -> String {
+        static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+        static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+        let block = BOLD.replace_all(block, "$1");
+        let block = CODE.replace_all(&block, "$1");
+        block
+            .split(space)
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
     let (mut out, mut lines) = (Vec::new(), Vec::new());
     let close = |lines: &mut Vec<&str>, out: &mut Vec<String>| {
         let block = lines.join("\n");
         lines.clear();
-        match block.trim_start() {
-            "" => {}
-            prose if prose.starts_with('#') => out.push(format!("\u{2060}{prose}")),
-            prose => out.push(prose.to_owned()),
+        let prose = block.trim_matches(space);
+        let seen = shown(prose);
+        if !seen.is_empty() {
+            out.push(match seen.starts_with('#') {
+                true => format!("\u{2060}{prose}"),
+                false => prose.to_owned(),
+            });
         }
     };
     for line in text.lines() {
-        if line.trim().is_empty() || heading(line) {
+        let blank = line.chars().all(space);
+        if blank || heading(line) {
             close(&mut lines, &mut out);
         }
         if heading(line) {
-            out.push(line.trim().to_owned());
-        } else if !line.trim().is_empty() {
+            out.push(line.trim_matches(space).to_owned());
+        } else if !blank {
             lines.push(line);
         }
     }
@@ -297,19 +320,29 @@ fn request<Tz: TimeZone>(
             .last()
             .map_or(progress["percent"].as_f64(), |r| r["percent"].as_f64()),
     );
+    // A review at 100% of a shipped request goes as a shipped review, with the day or time it
+    // shipped: the pages take that day for the request's completion when no status gave one
+    // (`to-work-model.ts:148-149`), in the browser's zone, as the day is written with none.
+    let shipped_review =
+        reviewed.is_some_and(|(_, percent)| status == "shipped" && percent >= 100.0);
+    let shipped_at = match progress["completed_at"].as_i64() {
+        Some(at) => iso(at),
+        None => noon(&progress["completed"]),
+    };
     // When the newest status recorded completed the request: a done one's clock stops by it. A
-    // request shipped by its review alone has no such time: the review's day, at noon on this
-    // machine, completes it, whatever the review's percent and whether the review goes. Its last
-    // update is the last resort: a shipped request needs a completion (`data.ts:276`).
-    let shipped_on = noon(&progress["completed"]);
-    let shipped_at = (progress["completed"].as_str())
+    // request shipped by its review alone has no such time: its shipped review's day completes it.
+    // When the review cannot carry that day (it is below 100% or does not go, or its day is not
+    // one), the day at noon on this machine does, and the request's last update is the last
+    // resort: a shipped request needs a completion (`data.ts:276`).
+    let noon_here = (progress["completed"].as_str())
         .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
         .and_then(|d| d.and_hms_opt(12, 0, 0))
         .and_then(|t| tz.from_local_datetime(&t).earliest())
         .map(|t| t.timestamp_millis());
     let completed = match (r["completed_at"].as_i64(), status) {
         (Some(at), _) => json!(at),
-        (None, "shipped") => shipped_at.map_or_else(|| r["updated"].clone(), |at| json!(at)),
+        (None, "shipped") if shipped_review && !shipped_at.is_null() => Value::Null,
+        (None, "shipped") => noon_here.map_or_else(|| r["updated"].clone(), |at| json!(at)),
         _ => Value::Null,
     };
     // A review's progress, when a review was recorded: a request shipped by its status alone is
@@ -317,13 +350,10 @@ fn request<Tz: TimeZone>(
     let story = &r["story"];
     let progress = match reviewed {
         Some((reviewed, percent)) => json!({
-            "state": if status == "shipped" && percent >= 100.0 { "shipped" } else { "in-progress" },
+            "state": if shipped_review { "shipped" } else { "in-progress" },
             "percent": percent,
             "checkedAt": iso(reviewed),
-            "shippedAt": match progress["completed_at"].as_i64() {
-                Some(at) => iso(at),
-                None => shipped_on,
-            },
+            "shippedAt": shipped_at,
             "readings": readings,
             "narrative": s(&story["narrative"]),
             "milestones": (arr(&story["milestones"]).iter())
