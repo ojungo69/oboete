@@ -1,4 +1,5 @@
 # Claude-Mem's work-view as published, unchanged (ui/work-view/README.md): not counted as oboete's code.
 ui/work-view/upstream/** linguist-vendored
 # The work-view bundle, built from ui/work-view by build.sh and checked by CI: generated, not written.
-assets/work-view/** linguist-generated
+# -text: no line-ending conversion stands between the committed bytes and the built ones.
+assets/work-view/** linguist-generated -text

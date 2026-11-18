@@ -1,8 +1,11 @@
-ansi-to-react ships no licence text, in its package or in its repository (nteract/ansi-to-react).
-Its package.json declares BSD-3-Clause and names Kyle Kelley <rgbkrk@gmail.com> as its author.
-This is the BSD-3-Clause licence with that holder.
+versions: 6.2.6
 
-Copyright (c) Kyle Kelley and the nteract contributors
+ansi-to-react ships no licence text, in its package or in its repository (nteract/ansi-to-react).
+Its package.json (6.2.6) declares BSD-3-Clause, names Kyle Kelley <rgbkrk@gmail.com> as its
+author and lists no contributors. What follows is the BSD-3-Clause text with a copyright line made
+from that metadata: the project publishes no holder line of its own.
+
+Copyright (c) Kyle Kelley
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted

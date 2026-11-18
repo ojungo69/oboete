@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build runs vendored tools: no token of the checkout's stays for them.
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.3
@@ -30,6 +33,9 @@ jobs:
         run: |
           node --test 'ui/work-view/contract/*.test.mjs'
           TZ=America/Los_Angeles node --test 'ui/work-view/contract/*.test.mjs'
+      # notices.mjs over small built trees the test makes: what it writes and where it stops.
+      - name: The notices script's own tests
+        run: node --test 'ui/work-view/*.test.mjs'
       - name: Build the bundle again from the pinned tree and the patches
         run: ui/work-view/build.sh
       - name: The committed bundle is the one built

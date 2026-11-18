@@ -29,28 +29,57 @@ fi
 
 work=
 swap=
-# However the script ends (an error, Ctrl-C, a kill), an unfinished swap puts the old bundle back,
-# and a bundle that cannot be put back is kept in its reserved folder rather than removed.
+# However the script ends (an error, Ctrl-C, a kill other than SIGKILL), an unfinished swap puts the
+# old bundle back, and a bundle that cannot be put back is kept in its reserved folder rather than
+# removed. Each step runs whatever failed before it (set +e), and no signal stops the clean-up
+# halfway. A run whose clean-up left the lock, the old bundle, the reserved folder or the scratch
+# tree fails, whatever came before.
+# A SIGKILL runs no handler: the README says how to recover.
 cleanup() {
-  rm -rf ${work:+"$work"}
+  local status=$? failed=
+  trap '' INT TERM HUP
+  set +e
   if [ -n "$swap" ]; then
     if [ -e "$swap/old" ] && [ ! -e "$assets/work-view" ] && ! mv "$swap/old" "$assets/work-view"; then
       echo "build.sh: the old bundle is kept in $swap/old" >&2
-    else
-      rm -rf "$swap"
+      failed=1
+    elif ! rm -rf "$swap"; then
+      echo "build.sh: $swap is left" >&2
+      failed=1
     fi
   fi
-  rmdir "$lock"
+  if [ -n "$work" ] && ! rm -rf "$work"; then
+    echo "build.sh: $work is left" >&2
+    failed=1
+  fi
+  if ! rmdir "$lock"; then
+    echo "build.sh: $lock is left; remove it if no build or fetch is running" >&2
+    failed=1
+  fi
+  [ "$status" -ne 0 ] || [ -z "$failed" ] || status=1
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 work=$(mktemp -d)
+# An absolute path: Git ignores a relative entry of GIT_CEILING_DIRECTORIES, as a relative TMPDIR
+# would give. CDPATH is cleared, as a cd it resolved would print the folder too, and mktemp's path
+# stays for the clean-up until this one is made.
+abs=$(CDPATH='' cd -- "$work" && pwd -P)
+work=$abs
 cp -a "$here/upstream/." "$work/"
 # GIT_CEILING_DIRECTORIES: git apply patches the copy as plain files even when the temporary
 # folder lies inside a checkout. There it would read the patch's paths from the checkout's top,
-# skip each one, and succeed with nothing applied.
+# skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
 for patch in "$here"/patches/*.patch; do
-  (cd "$work" && GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply "$patch")
+  # LC_ALL=C: Git words its messages in the caller's language, and the skip is read in English.
+  if ! out=$(cd "$work" && LC_ALL=C GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose "$patch" 2>&1); then
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+  case $'\n'$out in
+    *$'\nSkipped patch'*) printf 'build.sh: %s skipped a file:\n%s\n' "$patch" "$out" >&2; exit 1 ;;
+  esac
 done
 # The files outside src/ui/my-work import packages from claude-mem's root node_modules, which its
 # own root install provides. Here they resolve to the work-view's own packages.
