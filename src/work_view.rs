@@ -159,6 +159,10 @@ fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
         let Some(id) = v.as_str().map(str::to_owned) else {
             return Ok(());
         };
+        // Other is a placement of the code's, not an area's id: the pages read it by its word.
+        if kind == "area" && id == crate::my_work_focus::OTHER {
+            return Ok(());
+        }
         let mut shapes = vec![id.clone()];
         if kind == "area" {
             shapes.push(format!("a:{id}"));
@@ -213,6 +217,8 @@ const OWN: &[&str] = &[
     "contentFingerprint",
     "focusAreaId",
     "listId",
+    // A list's name: `goals`, or a finished month, which the pages take as its id.
+    "listName",
     "platformSource",
     "label",
     "kind",

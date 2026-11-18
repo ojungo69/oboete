@@ -1301,7 +1301,8 @@ fn paired(a: &Value, b: &Value, key: &str, out: &mut Vec<(String, String)>) {
 /// Every stored id the snapshot writes in a selector, whole or within another, goes in none
 /// under a rule that finds it whole: a request's, a conversation's, a focus area's (a request's
 /// area too) and an open ask's. Each goes by one reference wherever it was written, and two by
-/// two (Codex on #1093).
+/// two (Codex on #1093). A request in Other stays there, and a finished month keeps its name,
+/// under rules that find them, as the code's own words and times.
 #[test]
 fn a_rule_on_a_stored_id_finds_it_in_no_selector() {
     let name = "work_view::tests::a_rule_on_a_stored_id_finds_it_in_no_selector";
@@ -1322,6 +1323,14 @@ fn a_rule_on_a_stored_id_finds_it_in_no_selector() {
     let body = json!({"action": "move-request", "request": placed, "area": PARSER});
     let lock = std::sync::Mutex::new(());
     crate::my_work_focus::act(home, &lock, &serde_json::to_vec(&body).unwrap()).unwrap();
+    // And one the owner placed in Other.
+    let other = (arr(&work["requests"]).iter())
+        .filter_map(|r| r["id"].as_str())
+        .find(|id| id.starts_with("c:") && *id != placed)
+        .expect("a second conversation's request")
+        .to_owned();
+    let body = json!({"action": "move-request", "request": other, "area": "other"});
+    crate::my_work_focus::act(home, &lock, &serde_json::to_vec(&body).unwrap()).unwrap();
     // The stored ids as My Work gives them under no rule of the owner's.
     let (work, _) = read(home, now, &plain).unwrap();
     let mut held = Vec::new();
@@ -1340,6 +1349,7 @@ fn a_rule_on_a_stored_id_finds_it_in_no_selector() {
         .collect();
     ids.sort();
     ids.dedup();
+    ids.retain(|id| id != crate::my_work_focus::OTHER);
     for id in ["g2", "g4", PARSER, placed.as_str()] {
         assert!(ids.iter().any(|i| i == id), "{id}: {ids:?}");
     }
@@ -1347,9 +1357,28 @@ fn a_rule_on_a_stored_id_finds_it_in_no_selector() {
     let rules: Vec<String> = (ids.iter().enumerate())
         .map(|(n, id)| format!("{{ id = \"id{n}\", regex = '^{}$' }}", regex::escape(id)))
         .collect();
+    let words = [
+        "{ id = \"other\", regex = '^a:other$' }",
+        "{ id = \"month\", regex = '^\\d{4}-\\d{2}$' }",
+    ];
+    let rules = [rules, words.map(str::to_owned).to_vec()].concat();
     let config = format!("[redaction]\nextra_rules = [{}]\n", rules.join(", "));
     std::fs::write(home.join("config.toml"), config).unwrap();
     let after = answered(home, now, Gate::now).unwrap();
+    let in_other = (arr(&after["humanRequests"]).iter())
+        .filter(|r| r["focusAreaId"] == crate::my_work_focus::OTHER)
+        .count();
+    assert_eq!(in_other, 1, "{after}");
+    let months: Vec<&Value> = (arr(&after["goalHistory"]).iter())
+        .map(|g| &g["listName"])
+        .collect();
+    assert!(
+        !months.is_empty()
+            && months
+                .iter()
+                .all(|m| m.as_str().is_some_and(|m| m.len() == 7)),
+        "{months:?}"
+    );
     for (key, value) in selectors(&after, "") {
         for id in &ids {
             assert!(!value.contains(id.as_str()), "{key}: {value} holds {id}");
