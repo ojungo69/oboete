@@ -94,7 +94,8 @@ fn pause_mark_back(p: &Path, ms: i64) {
 
 /// #1063: on a store whose hooks never stop for half an hour, the pause's indexes are built once
 /// they have waited their hour, at an idle time and in a round alike. The first look marks the
-/// wait, a look within the hour marks nothing, and a store that has them all drops its mark.
+/// wait, a look within the hour marks nothing, and the build that makes the last of them drops the
+/// mark at once, for a worker that exits before its next look (the local Codex review of #1069).
 #[test]
 fn the_pause_indexes_are_built_once_they_have_waited_their_hour() {
     use crate::raw::index::{self, Builder::Pause};
@@ -116,10 +117,10 @@ fn the_pause_indexes_are_built_once_they_have_waited_their_hour() {
         assert!(!pause_upkeep(p, &raw, false, false, at));
         assert_eq!(pause_mark(p), Some(first), "a look within the hour: {at:?}");
         pause_mark_back(p, index::PAUSE_WAIT_MS);
-        assert!(!pause_upkeep(p, &raw, false, false, at));
+        assert!(pause_upkeep(p, &raw, false, false, at), "{at:?}");
         assert_eq!(index::made(&raw, Pause), index::keeps(Pause), "{at:?}");
+        assert_eq!(pause_mark(p), None, "the build that made the last: {at:?}");
         assert!(pause_upkeep(p, &raw, false, false, at));
-        assert_eq!(pause_mark(p), None, "a store that has them all: {at:?}");
     }
 }
 
@@ -149,7 +150,7 @@ fn a_look_with_a_call_out_starts_the_hour() {
     assert!(!pause_upkeep(p, &raw, false, true, Upkeep::Idle));
     assert_eq!(pause_mark(p), Some(first), "a held look moved the mark");
     pause_mark_back(p, index::PAUSE_WAIT_MS);
-    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
     assert_eq!(index::made(&raw, Pause), index::keeps(Pause));
 }
 
@@ -184,11 +185,11 @@ fn a_build_its_hour_started_that_fails_waits_another_hour() {
     assert_eq!(pause_mark(p), Some(again), "no other build within the hour");
     block.execute_batch("DROP TABLE records_expired").unwrap();
     pause_mark_back(p, index::PAUSE_WAIT_MS);
-    assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
     let mut last = others.clone();
     last.push("records_expired");
     assert_eq!(index::made(&raw, Pause), last);
-    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert_eq!(pause_mark(p), None);
 }
 
 /// #1063: a store that has every index the pause keeps pays nothing new for it, at an idle time or
@@ -212,6 +213,114 @@ fn a_store_that_has_every_pause_index_writes_nothing_for_them() {
     }
     maintain(p, &raw, false, false);
     assert_eq!(version(&other), before, "a write for indexes already built");
+    assert_eq!(pause_mark(p), None);
+}
+
+/// The local Codex review of #1069: a mark left beside every pause index stays while the worker
+/// leaves or a command asks it aside, at an idle time or in a round: nothing is written then. The
+/// next look deletes it.
+#[test]
+fn a_mark_left_beside_every_pause_index_stays_while_leaving_or_asked_aside() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    raw.append(&crate::raw::test_event("a step")).unwrap();
+    index::build(&raw, Pause).unwrap();
+    let other = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    other
+        .execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, '1')",
+            [index::WAITING],
+        )
+        .unwrap();
+    let version = |c: &rusqlite::Connection| -> i64 {
+        c.query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = version(&other);
+    let asked = yield_request(p);
+    for at in [Upkeep::Idle, Upkeep::Round] {
+        assert!(!pause_upkeep(p, &raw, true, false, at), "leaving: {at:?}");
+        std::fs::write(&asked, "").unwrap();
+        assert!(!pause_upkeep(p, &raw, false, false, at), "asked: {at:?}");
+        std::fs::remove_file(&asked).unwrap();
+    }
+    assert_eq!(
+        version(&other),
+        before,
+        "a write while leaving or asked aside"
+    );
+    assert_eq!(pause_mark(p), Some(1));
+    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
+    assert_eq!(pause_mark(p), None);
+}
+
+/// The local Codex review of #1069: a mark no build writes (past `now`, before the store's time,
+/// the least number, no number) starts the wait again at the look, and builds nothing.
+#[test]
+fn a_mark_no_build_writes_starts_the_wait_again() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    let e = crate::raw::Event {
+        ts: crate::db::now_ms() - 1_000,
+        ..crate::raw::test_event("a step")
+    };
+    raw.append(&e).unwrap();
+    let ahead = (crate::db::now_ms() + 10 * index::PAUSE_WAIT_MS).to_string();
+    let least = i64::MIN.to_string();
+    for bad in [ahead.as_str(), "-5", least.as_str(), "soon"] {
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                rusqlite::params![index::WAITING, bad],
+            )
+            .unwrap();
+        let start = crate::db::now_ms();
+        assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round), "{bad}");
+        let mark = pause_mark(p).expect(bad);
+        assert!(
+            (start..=crate::db::now_ms()).contains(&mark),
+            "{bad}: {mark}"
+        );
+        assert!(index::made(&raw, Pause).is_empty(), "{bad}");
+    }
+}
+
+/// The local Codex review of #1069: a mark whose delete fails is not taken for gone, and the next
+/// look deletes it.
+#[test]
+fn a_mark_whose_delete_failed_goes_at_the_next_look() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = crate::raw::open(p).unwrap();
+    raw.append(&crate::raw::test_event("a step")).unwrap();
+    index::build(&raw, Pause).unwrap();
+    let other = rusqlite::Connection::open(p.join("raw.db")).unwrap();
+    other
+        .execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, '1')",
+            [index::WAITING],
+        )
+        .unwrap();
+    other
+        .execute_batch(&format!(
+            "CREATE TRIGGER keep_mark BEFORE DELETE ON meta WHEN OLD.key = '{}'
+             BEGIN SELECT RAISE(ABORT, 'held'); END",
+            index::WAITING
+        ))
+        .unwrap();
+    assert!(
+        !pause_upkeep(p, &raw, false, false, Upkeep::Round),
+        "a failed delete taken for gone"
+    );
+    assert_eq!(pause_mark(p), Some(1));
+    other.execute_batch("DROP TRIGGER keep_mark").unwrap();
+    assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
     assert_eq!(pause_mark(p), None);
 }
 
@@ -2322,6 +2431,83 @@ fn a_worker_stops_when_a_newer_oboete_stamps_its_raw_db() {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(stamped, raw::FORMAT + 1);
+}
+
+/// The local Codex review of #1069: a round whose raw.db a newer oboete stamps during its phases
+/// writes no pause mark through its old handle: the round's checks for a replaced store come
+/// before its upkeep.
+#[test]
+fn a_round_whose_store_a_newer_oboete_stamped_writes_no_pause_mark() {
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let e = raw::Event {
+        ts: crate::db::now_ms() - 1_000,
+        ..raw::test_event("first")
+    };
+    raw::open(p).unwrap().append(&e).unwrap();
+    let mut first = true;
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
+        if std::mem::take(&mut first) {
+            Connection::open(p.join("raw.db"))
+                .unwrap()
+                .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
+                .unwrap();
+        }
+        Ok(Phase::Idle)
+    };
+    let held = lock(p).unwrap();
+    let phases = Phases {
+        yields: true,
+        curation: Some(&mut phase),
+        ..Phases::default()
+    };
+    let why = run_holding(p, 0, vec![Box::new(Seen)], || {}, held, phases).unwrap_err();
+    assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+    assert_eq!(
+        pause_mark(p),
+        None,
+        "a mark through the stamped store's handle"
+    );
+}
+
+/// The local Codex review of #1069: an idle time's upkeep, too, builds nothing through the old
+/// handle of a raw.db a newer oboete stamped after the round's checks.
+#[test]
+fn an_idle_upkeep_whose_store_a_newer_oboete_stamped_builds_nothing() {
+    use crate::raw::index::{self, Builder::Pause};
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let e = raw::Event {
+        ts: crate::db::now_ms() - INDEX_PAUSE_MS - 60_000,
+        ..raw::test_event("first")
+    };
+    raw::open(p).unwrap().append(&e).unwrap();
+    fn stamp(p: &Path) {
+        Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT + 1))
+            .unwrap();
+    }
+    BEFORE_IDLE_UPKEEP.set(Some(stamp));
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> { Ok(Phase::Idle) };
+    let held = lock(p).unwrap();
+    let phases = Phases {
+        yields: true,
+        curation: Some(&mut phase),
+        ..Phases::default()
+    };
+    let why = run_holding(p, 0, vec![Box::new(Seen)], || {}, held, phases).unwrap_err();
+    assert!(why.is::<raw::NewerFormat>(), "{why:#}");
+    Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute_batch(&format!("PRAGMA user_version = {}", raw::FORMAT))
+        .unwrap();
+    let raw = raw::open(p).unwrap();
+    assert_eq!(
+        index::made(&raw, Pause),
+        Vec::<&str>::new(),
+        "built through the stamped store's handle"
+    );
 }
 
 /// A replacement during a batch cannot be exported through that batch's old connection

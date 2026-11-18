@@ -525,6 +525,8 @@ thread_local! {
     static AFTER_KNOWLEDGE_OPEN: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A one-shot test seam: the pathname changes between the last check and the next round.
     static BEFORE_ROUND: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// A one-shot test seam: the store changes after an idle time's last look, before its upkeep.
+    static BEFORE_IDLE_UPKEEP: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
     /// A synchronous one-shot fixture action after a rebuild meets a shared status probe.
     static REBUILD_STATUS_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_CARRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -1350,15 +1352,16 @@ fn serve(
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
         }
-        // #1063: a round looks after the pause's indexes too, for a worker whose hooks never stop
-        // for its idle time: only their hour of waiting builds them here.
-        if yields && !pause_kept {
-            pause_kept = pause_upkeep(home, &raw, departing, calling(phases), Upkeep::Round);
-        }
         // Every phase can start another round. A progressed embed or shortlist must not keep
         // the old raw handle while curation is idle or waiting (M5 F2).
         if crate::backup::restore_requested(home) || replaced(&raw) {
             return Ok(true);
+        }
+        // #1063: a round looks after the pause's indexes too, for a worker whose hooks never stop
+        // for its idle time: only their hour of waiting builds them here. After the checks above,
+        // so a replaced raw.db's old handle is never written to.
+        if yields && !pause_kept {
+            pause_kept = pause_upkeep(home, &raw, departing, calling(phases), Upkeep::Round);
         }
         if again {
             continue;
@@ -1443,6 +1446,15 @@ fn serve(
             // The worker's own: a command that borrows the loop (a restore, a rebuild) ends
             // without it, and the worker's next pause builds it.
             if yields {
+                #[cfg(test)]
+                if let Some(before) = BEFORE_IDLE_UPKEEP.take() {
+                    before(home);
+                }
+                // As a round checks before its upkeep: a raw.db a restore or a newer oboete has
+                // replaced is not written through this handle (the local Codex review of #1069).
+                if crate::backup::restore_requested(home) || replaced(&raw) {
+                    return Ok(true);
+                }
                 maintain(home, &raw, departing, calling(phases));
                 // The copies forget's denials cover, and files no row names (docs/deliverables.md).
                 if let Err(e) = crate::deliverables::sweep(home, &raw, true) {
@@ -1783,16 +1795,18 @@ enum Upkeep {
 /// `sqlite_master` and one of meta, and writes nothing.
 fn pause_upkeep(home: &Path, raw: &Raw, leaving: bool, calling: bool, at: Upkeep) -> bool {
     use crate::raw::index::{self, Builder};
+    // Nothing is written while the worker is leaving or a command asks it aside (R12): such a
+    // command may be replacing raw.db (the local Codex review of #1069).
+    if leaving || asked_aside(home) {
+        return false;
+    }
     // Built (or unreadable) first: the newest hook record's time may walk a history of imports.
     let Ok(missing) = index::missing(raw, Builder::Pause) else {
         return false;
     };
     if !missing {
-        let _ = index::settled(raw);
-        return true;
-    }
-    if leaving || asked_aside(home) {
-        return false;
+        // Kept for the run once the mark is gone: one a failed delete left goes at the next look.
+        return index::settled(raw).is_ok();
     }
     let now = crate::db::now_ms();
     if calling {
@@ -1808,6 +1822,10 @@ fn pause_upkeep(home: &Path, raw: &Raw, leaving: bool, calling: bool, at: Upkeep
             .is_ok_and(|ts| ts.is_none_or(|ts| now - ts >= INDEX_PAUSE_MS));
     if waited || paused {
         let _ = index::build(raw, Builder::Pause);
+        // The mark goes with the last index built, for a worker that exits before its next look.
+        if index::missing(raw, Builder::Pause).is_ok_and(|missing| !missing) {
+            return index::settled(raw).is_ok();
+        }
     }
     false
 }

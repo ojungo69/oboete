@@ -377,9 +377,11 @@ pub(crate) mod index {
             })
             .optional()?
             .and_then(|v| v.parse().ok());
+        // A mark from before the store's time or past `now` (a clock set back, a value no build
+        // writes) starts the wait again (the local Codex review of #1069).
         match since {
-            Some(since) => Ok(since),
-            None => {
+            Some(since) if (0..=now).contains(&since) => Ok(since),
+            _ => {
                 mark(raw, Some(now))?;
                 Ok(now)
             }
@@ -391,7 +393,7 @@ pub(crate) mod index {
     /// that fails waits another hour before the next one no pause starts. A store that has them
     /// all drops its mark (`settled`).
     pub(crate) fn waited(raw: &Raw, now: i64) -> Result<bool> {
-        let waited = now - noticed(raw, now)? >= PAUSE_WAIT_MS;
+        let waited = now.saturating_sub(noticed(raw, now)?) >= PAUSE_WAIT_MS;
         if waited {
             mark(raw, Some(now))?;
         }
