@@ -2,7 +2,7 @@
 // build. node --test 'ui/work-view/*.test.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -122,5 +122,57 @@ test('claude-mem\'s NOTICE gives the same notices with CRLF line ends, and a tre
   const [a, b, c] = [notice(lf), notice(crlf), notice(bare)]
   assert.equal(b.error, undefined)
   assert.equal(b.out, a.out)
+  // The NOTICE whole, its second line too, whichever line ends it has.
+  assert.match(b.out, /^claude-mem\nline two\n```$/m)
   assert.equal(c.error, undefined)
+})
+
+test('a font collection the bundle emits is a listed package\'s file too, or it stops the build', () => {
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/x.ttc']]]
+  const sources = ['../../node_modules/x/i.js']
+  const listed = notice(tree({ packages, sources, fonts: [['dist/assets/x-AbCd1234.ttc', 'font']] }))
+  assert.equal(listed.error, undefined)
+  const stray = notice(tree({ packages, sources, fonts: [['dist/assets/y-AbCd1234.otc', 'font']] }))
+  assert.match(stray.error, /y-AbCd1234\.otc: a font no package listed here holds/)
+})
+
+test('a font copied under its own name, with no hash, is a listed package\'s file by that name', () => {
+  // `-variable` looks like a hash of 8 characters: the name with it taken off is not the font's.
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/inter-variable.woff2']]]
+  const sources = ['../../node_modules/x/i.js']
+  const { error } = notice(tree({ packages, sources, fonts: [['dist/assets/inter-variable.woff2', 'font']] }))
+  assert.equal(error, undefined)
+  const hashed = notice(tree({ packages, sources, fonts: [['dist/assets/inter-variable-AbCd1234.woff2', 'font']] }))
+  assert.equal(hashed.error, undefined)
+})
+
+test('a font the build inlines as a data: URL stops the build, listed or not; other data: URLs do not', () => {
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/x-latin-wght-normal.woff2']]]
+  const sources = ['../../node_modules/x/i.js']
+  const b64 = (bytes) => Buffer.from(bytes).toString('base64')
+  const file = (path, text) => notice(tree({ packages, sources, fonts: [[path, text]] }))
+  for (const [path, text] of [
+    ['dist/assets/index-AbCd1234.css', `@font-face{src:url(data:font/woff2;base64,${b64('font')})}`],
+    ['dist/assets/index-AbCd1234.css', `@font-face{src:url( "data: font/woff2 ; base64,${b64('font')}" )}`],
+    ['dist/assets/index-AbCd1234.js', `const f = \`DATA:Font/WOFF;base64,${b64('other bytes')}\``],
+    ['dist/index.html', `<link rel=preload href=data:application/x-font-ttf,%00%01%00%00>`],
+    ['dist/assets/index-AbCd1234.css', `src:url(data:application/vnd.ms-fontobject;base64,${b64('eot')})`],
+  ]) {
+    const { error } = file(path, text)
+    assert.match(error, /a font inlined as a data: URL .*set Vite's assetsInlineLimit so that fonts go as files/, text)
+  }
+  for (const text of [`url(data:image/png;base64,${b64('png')})`, `"data:application/json;base64,${b64('true')}"`, 'see data: below']) {
+    assert.equal(file('dist/assets/index-AbCd1234.css', text).error, undefined, text)
+  }
+})
+
+// Vite inlines an asset under 4 KiB as a data: URL typed by its extension, a .otc as
+// application/octet-stream; patch 0005 sends a file of each extension notices.mjs reads as a font
+// as a file instead, so that it is read against the package it comes from. Both name the same.
+test('every extension notices.mjs reads as a font is one the build sends as a file', () => {
+  const font = /^const FONT = \/(.+)\/i$/m.exec(readFileSync(notices, 'utf8'))?.[1]
+  const patch = readFileSync(fileURLToPath(new URL('./patches/0005-fonts-as-files.patch', import.meta.url)), 'utf8')
+  const inline = /^\+ +assetsInlineLimit: \(file: string\) => \(\/(.+)\/i\.test\(file\) \? false : undefined\),$/m.exec(patch)?.[1]
+  assert.ok(font, 'notices.mjs names its font extensions')
+  assert.equal(inline, font)
 })

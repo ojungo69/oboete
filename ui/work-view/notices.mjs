@@ -106,8 +106,10 @@ for (const { rel, dir, pkg } of copies) {
 for (const { entry, text, folders } of entries.values()) section(entry, text, folders)
 // Every font the bundle emits, in any of its folders, is a file of a package listed above or
 // claude-mem's own Hanken Grotesk, with its licence below, byte for byte: Vite copies fonts as they
-// are. The emitted name is the file's with `-` and an 8-character hash before the extension.
-const FONT = /\.(woff2?|ttf|otf|eot)$/i
+// are. The emitted name is the file's with `-` and an 8-character hash before the extension, or the
+// file's own when it is copied as it is. Patch 0005 keeps Vite from inlining any font as a `data:`
+// URL, so every font is such a file; one inlined all the same stops the build (below).
+const FONT = /\.(woff2?|ttf|otf|eot|ttc|otc)$/i
 // A package's own files, not its nested node_modules (packages of their own); every file of a folder.
 const walk = (dir, nested = true) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.name === 'node_modules' && !nested ? [] : e.isDirectory() ? walk(join(dir, e.name), nested) : [join(dir, e.name)])
@@ -118,12 +120,24 @@ for (const file of [...copies.flatMap(({ dir }) => walk(dir, false)), ...hankenF
   sources.set(basename(file), [...(sources.get(basename(file)) ?? []), file])
 }
 let hanken = false
-for (const font of walk(join(app, 'dist')).filter((f) => FONT.test(f)).sort()) {
+const shown = (path) => relative(app, path).split(sep).join('/')
+const dist = walk(join(app, 'dist')).sort()
+for (const font of dist.filter((f) => FONT.test(f))) {
   const bytes = readFileSync(font)
-  const name = basename(font).replace(/-[\w-]{8}(\.[^.]+)$/, '$1')
-  const source = (sources.get(name) ?? []).find((f) => readFileSync(f).equals(bytes))
-  if (!source) throw new Error(`${relative(app, font).split(sep).join('/')}: a font no package listed here holds, and no notice covers`)
+  const names = new Set([basename(font), basename(font).replace(/-[\w-]{8}(\.[^.]+)$/, '$1')])
+  const source = [...names].flatMap((name) => sources.get(name) ?? []).find((f) => readFileSync(f).equals(bytes))
+  if (!source) throw new Error(`${shown(font)}: a font no package listed here holds, and no notice covers`)
   if (source.startsWith(own + sep)) hanken = true
+}
+// Vite inlines an asset under 4 KiB (its `assetsInlineLimit`) in a script, a style or a page as a
+// `data:` URL of the type its extension gives (font/woff2 and the like). A font so inlined has no
+// file of its own to read against a package's, so the build takes none: such a font stops it, and
+// the fix is a limit that sends fonts as files. Read in the text as it is, with no URL taken apart:
+// `data:`, any whitespace, a font type.
+const INLINED_FONT = /data:\s*(?:font\/|application\/(?:x-)?font-|application\/vnd\.ms-fontobject)/i
+for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
+  const found = INLINED_FONT.exec(readFileSync(file, 'utf8'))
+  if (found) throw new Error(`${shown(file)}: a font inlined as a data: URL (${found[0]}), which no file of a package listed here stands for: set Vite's assetsInlineLimit so that fonts go as files`)
 }
 if (hanken) {
   const ofl = lf(join(own, 'HankenGrotesk-OFL.txt'))
