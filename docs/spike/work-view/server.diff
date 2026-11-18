@@ -1,0 +1,369 @@
+diff --git a/src/main.rs b/src/main.rs
+index 429e2658..8be2416c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -72,6 +72,7 @@ mod turns;
+ mod typed;
+ mod unwritten;
+ mod view;
++mod work_view;
+ mod watchdog;
+ mod work_product;
+ mod work_state;
+diff --git a/src/view.rs b/src/view.rs
+index c89d21b5..2a3bf932 100644
+--- a/src/view.rs
++++ b/src/view.rs
+@@ -54,6 +54,12 @@ const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; scr
+     style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
+     frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
+     Cache-Control: no-store\r\n";
++/// Spike: the work-view bundle's fonts and data: images (index.css grain, glare-card.tsx:44).
++/// OBOETE_WORK_VIEW_STRICT keeps the strict policy, to see what it breaks.
++const WORK_VIEW_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
++    style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; \
++    form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\n\
++    Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
+ 
+ struct Viewer {
+     home: PathBuf,
+@@ -335,6 +341,7 @@ struct Response {
+     status: u16,
+     ctype: &'static str,
+     body: Vec<u8>,
++    headers: &'static str,
+ }
+ 
+ impl Response {
+@@ -343,6 +350,7 @@ impl Response {
+             status,
+             ctype,
+             body: body.into(),
++            headers: SECURITY_HEADERS,
+         }
+     }
+     fn text(status: u16, msg: &str) -> Self {
+@@ -371,10 +379,11 @@ impl Response {
+             _ => "Internal Server Error",
+         };
+         let mut out = format!(
+-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
++            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+             self.status,
+             self.ctype,
+-            self.body.len()
++            self.body.len(),
++            self.headers
+         )
+         .into_bytes();
+         if !head_only {
+@@ -2489,6 +2498,7 @@ impl Viewer {
+             "/favicon.ico" => return Response::new(200, "image/x-icon", FAVICON_ICO),
+             "/favicon.svg" => return Response::new(200, "image/svg+xml", FAVICON_SVG),
+             "/apple-touch-icon.png" => return Response::new(200, "image/png", TOUCH_ICON),
++            p if p.starts_with("/work-view/") => return work_view_file(p),
+             p if !p.starts_with("/api/") => return Response::text(404, "not found"),
+             _ => {}
+         }
+@@ -2760,6 +2770,26 @@ impl Viewer {
+                 answer
+             }
+             "stats" => stats(&self.home)?,
++            // Spike: the same answer under /api/work-view/, so a later scoped token covers the page.
++            "work-view/version" => return self.api("version", q),
++            "work-view" => {
++                if let Some(fixture) = std::env::var_os("OBOETE_WORK_VIEW_FIXTURE") {
++                    return Ok(Response::new(200, "application/json", std::fs::read(fixture)?));
++                }
++                // Spike step 9: the adapter run on a hand-written {work, goals, now}.
++                if let Some(input) = std::env::var_os("OBOETE_WORK_VIEW_INPUT") {
++                    let v: Value = serde_json::from_slice(&std::fs::read(input)?)?;
++                    let now = v["now"].as_i64().unwrap_or_else(crate::db::now_ms);
++                    return Ok(Response::json(&crate::work_view::snapshot(&v["work"], &v["goals"], now)));
++                }
++                let now = crate::db::now_ms();
++                let tag = |row: &crate::deliverables::Row| self.file_tag(row);
++                let range = crate::my_work::Range::of(q.get("range").map(String::as_str))
++                    .unwrap_or(crate::my_work::Range::Week);
++                let work = answered("my-work", crate::my_work::listed(&self.home, range, now, &tag)?);
++                let goals = answered("my-goals", crate::my_work_goals::page(&self.home, now)?);
++                return Ok(Response::json(&crate::work_view::snapshot(&work, &goals, now)));
++            }
+             _ => return Ok(Response::text(404, "not found")),
+         };
+         Ok(Response::json(&answered(name, answer)))
+@@ -3881,3 +3911,42 @@ fn params(query: &str) -> HashMap<String, String> {
+ 
+ #[cfg(test)]
+ mod tests;
++
++/// Spike only: the work-view bundle, read from OBOETE_WORK_VIEW_DIR at each request.
++fn work_view_file(path: &str) -> Response {
++    let Some(dir) = std::env::var_os("OBOETE_WORK_VIEW_DIR") else {
++        return Response::text(404, "not found");
++    };
++    let rel = match path.strip_prefix("/work-view/").unwrap_or("") {
++        "" => "index.html",
++        r => r,
++    };
++    if rel.split('/').any(|s| s.is_empty() || s == "." || s == "..") || rel.contains('\\') {
++        return Response::text(404, "not found");
++    }
++    let ctype = match rel.rsplit('.').next() {
++        Some("html") => "text/html; charset=utf-8",
++        Some("js") => "text/javascript; charset=utf-8",
++        Some("css") => "text/css; charset=utf-8",
++        Some("woff2") => "font/woff2",
++        Some("woff") => "font/woff",
++        Some("webp") => "image/webp",
++        Some("svg") => "image/svg+xml",
++        Some("png") => "image/png",
++        Some("ico") => "image/x-icon",
++        _ => return Response::text(404, "not found"),
++    };
++    let headers = if std::env::var_os("OBOETE_WORK_VIEW_STRICT").is_some() {
++        SECURITY_HEADERS
++    } else {
++        WORK_VIEW_HEADERS
++    };
++    match std::fs::read(std::path::Path::new(&dir).join(rel)) {
++        Ok(body) => Response {
++            headers,
++            ..Response::new(200, ctype, body)
++        },
++        Err(_) => Response::text(404, "not found"),
++    }
++}
++
+diff --git a/src/work_view.rs b/src/work_view.rs
+new file mode 100644
+index 00000000..74b0c308
+--- /dev/null
++++ b/src/work_view.rs
+@@ -0,0 +1,226 @@
++//! Spike only (decision 114): claude-mem 15.19.0's work-view snapshot (`GET /api/work-view`,
++//! legacy mode) built from oboete's already-gated My Work and My Goals answers. It reads no store
++//! text of its own: every value here is one `answered("my-work" | "my-goals", …)` returned.
++//! The field names follow claude-mem's `live/work-view-api-types.ts` and the mapper in
++//! `live/to-work-model.ts`; the plan's table 5 says where each comes from.
++
++use chrono::{Local, SecondsFormat, TimeZone, Utc};
++use serde_json::{Map, Value, json};
++
++/// ISO time with 3 fraction digits, as the mapper's freshness rules read it.
++fn iso(ms: i64) -> Value {
++    Utc.timestamp_millis_opt(ms)
++        .single()
++        .map_or(Value::Null, |t| json!(t.to_rfc3339_opts(SecondsFormat::Millis, true)))
++}
++
++/// `YYYY-MM-DD HH:MM` in this machine's time, as oboete's goals page stamps a time.
++fn stamp(ms: &Value) -> Value {
++    ms.as_i64()
++        .and_then(|ms| Local.timestamp_millis_opt(ms).single())
++        .map_or(Value::Null, |t| json!(t.naive_local().format("%Y-%m-%d %H:%M").to_string()))
++}
++
++fn s(v: &Value) -> Value {
++    match v {
++        Value::String(_) => v.clone(),
++        _ => Value::Null,
++    }
++}
++
++fn arr(v: &Value) -> &[Value] {
++    v.as_array().map_or(&[][..], Vec::as_slice)
++}
++
++/// claude-mem's platform for an oboete agent. The same name goes in the conversation keys, which
++/// find their agent by it (`to-work-model.ts:226`); a name claude-mem does not know shows as "Agent".
++fn platform(agent: &str) -> &str {
++    match agent {
++        "agy" => "gemini",
++        a => a,
++    }
++}
++
++fn label(agent: &str) -> &'static str {
++    match agent {
++        "claude" => "Claude Code",
++        "codex" => "Codex",
++        "grok" => "Grok",
++        "cursor" => "Cursor",
++        "opencode" => "OpenCode",
++        "pi" => "Pi",
++        "agy" => "Antigravity",
++        _ => "Agent",
++    }
++}
++
++/// oboete's status to claude-mem's explicit lifecycle (`status-normalization.ts:94-107`).
++fn lifecycle(status: &str) -> &'static str {
++    match status {
++        "needs" => "needs-you",
++        "ready" => "needs-review",
++        "working" => "in-progress",
++        "blocked" => "blocked",
++        "quiet" => "quiet",
++        "todo" => "todo",
++        "closed" => "closed",
++        "shipped" => "shipped",
++        _ => "unknown",
++    }
++}
++
++fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut Vec<String>) -> Value {
++    let status = r["status"].as_str().unwrap_or("unknown");
++    let sessions = arr(&r["sessions"]);
++    let mut agent_ids = Vec::new();
++    let mut keys = Vec::new();
++    for c in sessions {
++        let (agent, id) = (c["agent"].as_str().unwrap_or(""), c["id"].as_str().unwrap_or(""));
++        if id.is_empty() {
++            continue;
++        }
++        let key = format!("{agent}:{id}");
++        if !seen.contains(&key) {
++            seen.push(key.clone());
++            agents.push(json!({
++                "id": key, "label": label(agent), "platformSource": platform(agent),
++                "sessionTitle": s(&r["title"]), "project": arr(&r["projects"]).first().cloned().unwrap_or(Value::Null),
++                "contentSessionId": id,
++            }));
++        }
++        keys.push(json!(json!(["conversation", platform(agent), id]).to_string()));
++        agent_ids.push(json!(key));
++    }
++    let mut copy = Map::new();
++    copy.insert("state".into(), json!("current"));
++    for (k, from) in [("title", "title"), ("summary", "summary"), ("next", "next")] {
++        if r[from].is_string() {
++            copy.insert(k.into(), r[from].clone());
++        }
++    }
++    let original = match r["ask"].as_object() {
++        Some(a) => json!({"text": s(&a.get("text").cloned().unwrap_or(Value::Null)), "atEpoch": a.get("ts").cloned().unwrap_or(Value::Null)}),
++        None => json!({}),
++    };
++    let items: Vec<Value> = arr(&r["work"]).iter().enumerate()
++        .map(|(i, w)| json!({"id": format!("w{i}"), "kind": "work-state", "title": s(&w["task"]),
++            "status": s(&w["status"]), "nextStep": null, "lastUpdateEpoch": w["updated"], "sourceRefs": [], "url": ""}))
++        .collect();
++    let activity: Vec<Value> = arr(&r["updates"]).iter().enumerate()
++        .map(|(i, u)| json!({"id": format!("u{i}"), "kind": "work-state", "title": s(&u["text"]),
++            "detail": null, "atEpoch": u["ts"], "url": ""}))
++        .collect();
++    let follow: Vec<Value> = arr(&r["follow_ups"]).iter()
++        .map(|f| json!({"text": s(&f["text"]), "atEpoch": f["ts"]}))
++        .collect();
++    let progress = &r["progress"];
++    let completed = match (progress["completed_at"].as_i64(), status) {
++        (Some(at), _) => json!(at),
++        (None, "shipped") => r["updated"].clone(),
++        _ => Value::Null,
++    };
++    let story = &r["story"];
++    let progress_out = match progress["percent"].as_f64() {
++        Some(percent) => json!({
++            "state": if status == "shipped" { "shipped" } else { "in-progress" },
++            "percent": percent,
++            "checkedAt": progress["reviewed"].as_i64().map_or(Value::Null, iso),
++            "shippedAt": progress["completed_at"].as_i64().map_or(Value::Null, iso),
++            "readings": [],
++            "narrative": s(&story["narrative"]),
++            "milestones": arr(&story["milestones"]).iter().map(|m| json!({"at": s(&m["date"]), "text": s(&m["text"])})).collect::<Vec<_>>(),
++        }),
++        None => Value::Null,
++    };
++    let mut out = json!({
++        "id": r["id"], "contentFingerprint": r["version"],
++        "title": s(&r["title"]), "titleSource": if r["title"].is_string() { json!("title-cache") } else { Value::Null },
++        "humanCopy": Value::Object(copy), "original": original, "scopeUpdates": follow,
++        "items": items, "workstreams": [], "activity": activity,
++        "agentIds": agent_ids, "conversationKeys": keys, "requestedBy": null,
++        "startedAtEpoch": r["started"], "updatedAtEpoch": r["updated"], "completedAtEpoch": completed,
++        "lifecycle": {"status": lifecycle(status), "explicit": true, "complete": null, "atEpoch": null},
++        "review": {"checked": !r["checked"].is_null(), "checkedAtEpoch": r["checked"], "available": status == "ready"},
++        "progress": progress_out, "anchorConversationKey": null,
++    });
++    if r["focus"].is_string() {
++        out["focusAreaId"] = r["focus"].clone();
++    }
++    out
++}
++
++fn evidence(quotes: &Value) -> Vec<Value> {
++    arr(quotes).iter().map(|q| json!({"at": stamp(&q["ts"]), "quote": s(&q["text"])})).collect()
++}
++
++/// The goals block the focus screens read (`to-work-model.ts:259-357`), one item per area that was
++/// asked for, and one per open ask: oboete's `areas[]` already fold its priorities in.
++fn goals(work: &Value, page: &Value, now: i64) -> Value {
++    let areas = arr(&work["areas"]);
++    let others = arr(&work["other_asks"]);
++    if areas.is_empty() && others.is_empty() {
++        return Value::Null;
++    }
++    let mut area_items = Vec::new();
++    let mut asks = Vec::new();
++    for a in areas {
++        let Some(asked) = a["asked"].as_f64() else { continue };
++        area_items.push(json!({
++            "id": format!("a:{}", a["id"].as_str().unwrap_or("")), "task": "", "kind": "focus-area",
++            "rank": area_items.len() + 1, "title": s(&a["name"]), "goal": s(&a["goal"]),
++            "focusArea": s(&a["name"]), "focusAreaId": a["id"], "product": null,
++            "latestAt": stamp(&a["latest"]), "timesAsked": asked, "status": "todo",
++            "evidence": evidence(&a["quotes"]),
++        }));
++        for k in arr(&a["asks"]) {
++            asks.push((k, s(&a["name"]), a["id"].clone()));
++        }
++    }
++    for k in others {
++        asks.push((k, Value::Null, Value::Null));
++    }
++    let asks: Vec<Value> = asks.into_iter().enumerate().map(|(i, (k, area, id))| json!({
++        "id": s(&k["id"]), "kind": "ask", "rank": i + 1, "title": s(&k["title"]), "goal": null,
++        "focusArea": area, "focusAreaId": id, "product": null, "latestAt": stamp(&k["latest"]),
++        "timesAsked": k["asked"].as_f64().unwrap_or(0.0), "status": "todo", "evidence": evidence(&k["quotes"]),
++    })).collect();
++    let written = page["current"]["written"].as_i64().unwrap_or(now);
++    json!({
++        "listId": "goals", "listName": "goals", "history": false, "project": "",
++        "updatedAt": iso(now), "periodStart": null, "periodEnd": null, "summary": null,
++        "generatedAt": iso(written), "windowDays": page["window"]["days"].as_f64().unwrap_or(30.0),
++        "sourcePromptCount": page["window"]["prompts"].as_f64().unwrap_or(0.0), "mapPath": null,
++        "areas": area_items, "asks": asks,
++    })
++}
++
++pub(crate) fn snapshot(work: &Value, page: &Value, now: i64) -> Value {
++    let mut agents = Vec::new();
++    let mut seen = Vec::new();
++    let requests: Vec<Value> = arr(&work["requests"]).iter().map(|r| request(r, &mut agents, &mut seen)).collect();
++    let areas: Vec<Value> = arr(&work["areas"]).iter().map(|a| json!({
++        "focusAreaId": a["id"], "name": s(&a["name"]), "goal": s(&a["goal"]), "about": s(&a["about"]),
++        "status": a["status"], "priorityRank": a["priority_rank"], "ownerRank": a["owner_rank"],
++        "source": a["source"], "mergedInto": null, "evidence": s(&a["evidence"]),
++        "decidedBy": a["decided_by"], "savedAt": null,
++    })).collect();
++    let unlinked = work["unlinked"].as_u64().unwrap_or(0) as usize;
++    let story = match work["story"]["recap"].as_str() {
++        Some(recap) => json!({"story": {"narrative": recap, "writtenAt": null}}),
++        None => Value::Null,
++    };
++    json!({
++        "version": 1, "generatedAt": iso(now), "revision": now.to_string(),
++        "source": {"kind": "oboete", "connected": true, "error": null, "lastCheckedAt": iso(now)},
++        "agents": agents, "humanRequests": requests, "unlinkedWork": vec![json!({}); unlinked],
++        "focusAreas": areas, "goals": goals(work, page, now), "goalHistory": [],
++        "ruleScopes": [{"id": "everywhere", "tier": "everywhere", "name": "Everywhere"}],
++        "rules": [], "story": story, "refresh": null,
++        // oboete has no cloud sync: a valid "unconfigured" block (`sync-presentation.ts:23-36`) shows
++        // "Cloud sync off" where a missing one shows "Cloud freshness unknown".
++        "sync": {"configured": false, "state": "unconfigured", "mode": "disabled", "checkedAt": null,
++            "observedAt": now, "message": "oboete keeps your work on this computer only.", "download": null,
++            "projection": {"remaining": null},
++            "completeness": {"pushQuarantine": 0, "pullQuarantine": 0, "excludedNative": null, "scope": "unknown"}},
++    })
++}
