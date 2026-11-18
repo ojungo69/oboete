@@ -53,11 +53,18 @@ where
 /// narrative at blank lines and takes its first block that is not a heading as the recap
 /// (`to-work-model.ts:433-442`), so a story of chapters alone opens on its newest chapter.
 fn build_story(story: &Value) -> Value {
-    let mut blocks: Vec<String> = story["recap"]
-        .as_str()
-        .map(String::from)
-        .into_iter()
-        .collect();
+    // A heading line of the recap is a block of its own: the pages take the first block that is
+    // not a heading as the recap, and a recap that opened on one would give way to a chapter.
+    let recap = story["recap"].as_str().map(|recap| {
+        (recap.lines())
+            .map(|l| match l.trim_start().starts_with('#') {
+                true => format!("\n{l}\n"),
+                false => l.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let mut blocks: Vec<String> = recap.into_iter().collect();
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
             blocks.push(format!("## {week}"));

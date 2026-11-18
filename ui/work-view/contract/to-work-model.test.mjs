@@ -12,11 +12,11 @@ const snapshot = JSON.parse(readFileSync(new URL('./snapshot.json', import.meta.
 const model = toWorkModel(snapshot, Number(snapshot.revision))
 const key = (agent, id) => JSON.stringify(['conversation', agent, id])
 const byId = (id) => model.requests.find((r) => r.id === id)
+const byKey = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
 
 test('every request is read, in the state its records give it', () => {
   assert.deepEqual(model.requestReadErrors, [])
   // Pairs, not a map: a request read twice, or one more than the home made, fails too.
-  const byKey = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
   const states = model.requests.map((r) => [r.id, r.state]).sort(byKey)
   assert.deepEqual(states, [
     // Its work state shipped the request.
@@ -49,9 +49,20 @@ test('each request has its agent, its conversation at the time of its ask, and i
     // The mapper's own, for the request no conversation recorded.
     'agent-not-recorded': 'other',
   })
+  // Each request's own agent, from its conversation; the request no conversation recorded has
+  // the mapper's own.
+  const agentOf = model.requests.map((r) => [r.id, r.agentId]).sort(byKey)
+  const expected = [
+    ...['s1', 's2', 's3', 's4', 's5'].map((s) => [key('claude', `c:claude:${s}`), `claude:c:claude:${s}`]),
+    [key('codex', 'c:codex:c1'), 'codex:c:codex:c1'],
+    ['r:rq1', 'agent-not-recorded'],
+  ].sort(byKey)
+  assert.deepEqual(agentOf, expected)
+  // A conversation's own request gives it the time of its ask, which is also when the request
+  // started: two fields of the answer, one time.
   for (const request of model.requests.filter((r) => r.id !== 'r:rq1')) {
     assert.equal(request.conversations.length, 1, request.id)
-    assert.notEqual(request.conversations[0].at, 'Time not recorded', request.id)
+    assert.equal(request.conversations[0].at, request.startedAt, request.id)
   }
   assert.deepEqual(byId('r:rq1').conversations, [])
   assert.deepEqual(byId(key('claude', 'c:claude:s1')).workstreams, [
@@ -67,6 +78,7 @@ test('a request done or shipped is complete: its clock stops, and a shipment by 
   assert.ok(!done.runningLive, 'a done request does not count on')
   const shipped = byId(key('claude', 'c:claude:s2'))
   assert.ok(shipped.progress.completedAt, 'a shipped request has its completion')
+  assert.ok(!shipped.runningLive, 'a shipped request does not count on')
   assert.equal(shipped.progress.readings, 0)
   assert.ok(byId(key('claude', 'c:claude:s1')).runningLive, 'an open request counts on')
 })
@@ -98,7 +110,12 @@ test('a request two reviews found rising has its history and the estimate its pa
   const rising = byId(key('claude', 'c:claude:s4'))
   assert.deepEqual(rising.progress.history, [20, 50])
   assert.equal(rising.progress.readings, 2)
-  assert.match(rising.estimate ?? '', /^at this pace, about [A-Z][a-z]{2} \d{1,2}$/)
+  // 30 points in the 4 minutes between the reviews leave 50 for less than 7 more: the day of the
+  // newer review, or the next one when it fell just before midnight.
+  const reviewed = snapshot.humanRequests.find((r) => r.id === key('claude', 'c:claude:s4')).progress.readings
+  const newer = Date.parse(reviewed.at(-1).at)
+  const days = [0, 1].map((d) => new Date(newer + d * 86_400_000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))
+  assert.ok(days.map((d) => `at this pace, about ${d}`).includes(rising.estimate), rising.estimate)
 })
 
 test('a request a status shipped after a review at 30% reads as shipped at 100%, its review its own', () => {

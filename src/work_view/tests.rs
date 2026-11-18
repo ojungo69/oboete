@@ -485,6 +485,22 @@ fn the_current_goals_period_is_the_window_that_ends_now() {
     assert_eq!(goals["generatedAt"], zoned(1_794_000_000_000, &tokyo));
 }
 
+/// A recap that opens on a heading keeps its body as the recap: the heading is a block of its own,
+/// as the pages take the first block that is not a heading (CodeRabbit on #1087).
+#[test]
+fn a_recap_that_opens_on_a_heading_stays_the_recap() {
+    let chapters = json!([{"week": "2026-11-16", "text": "Built the adapter."}]);
+    let work =
+        json!({"story": {"recap": "# The work-view\nTwo weeks of it.", "chapters": chapters}});
+    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    let blocks: Vec<&str> = (story.as_str().unwrap().split("\n\n"))
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .collect();
+    let first = blocks.iter().find(|b| !b.starts_with('#'));
+    assert_eq!(first, Some(&"Two weeks of it."), "{story}");
+}
+
 fn hex(t: &str, n: usize) -> bool {
     t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
