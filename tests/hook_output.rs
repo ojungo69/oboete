@@ -120,6 +120,8 @@ fn epoch_ms() -> u128 {
 /// `oboete hook pi <event>` with `input`, told that Pi waits 2 s for its answer, and killed as that
 /// wait ends, as Pi's plugin kills it.
 fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input: &str) {
+    // The kill and the answer's time from one moment, before the spawn (CodeRabbit on #1073).
+    let kill_at = Instant::now() + Duration::from_millis(2_000);
     let by = epoch_ms() + 2_000;
     let mut hook = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
@@ -137,7 +139,6 @@ fn pi_hook_killed_at_its_answers_time(home: &std::path::Path, event: &str, input
         .unwrap()
         .write_all(input.as_bytes())
         .unwrap();
-    let kill_at = Instant::now() + Duration::from_millis(2_000);
     while hook.try_wait().unwrap().is_none() && Instant::now() < kill_at {
         std::thread::sleep(Duration::from_millis(10));
     }

@@ -401,6 +401,32 @@ for (const [reason, started] of [["quit", false], ["new", true]]) {
   );
 }
 
+// A record-only call already running as Pi quits is killed as its wait ends, as the old plugin
+// killed it, and the session's end starts within Pi's wait for the queue (#955).
+const runningQuit = await load({}, true);
+runningQuit.stallNextHook = true;
+runningQuit.handlers.get("tool_result")(toolEvent, ctx);
+await Promise.resolve();
+const behindQuit = runningQuit.emit("input", { source: "interactive", text: "record-only at a quit" }, ctx);
+await Promise.resolve();
+runningQuit.advance(1500);
+runningQuit.stallNextHook = true;
+runningQuit.fireFirstTimer();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(runningQuit.hooks.map(h => h.payload.hook_event_name), ["PostToolUse", "UserPromptSubmit"]);
+runningQuit.tick(500);
+await behindQuit;
+const quitWait = runningQuit.emit("session_shutdown", { reason: "quit" }, ctx);
+await Promise.resolve();
+runningQuit.tick(0);
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(runningQuit.kills, [1500, 2000], "killed as its wait ends");
+assert.deepEqual(
+  runningQuit.hooks.map(h => h.payload.hook_event_name),
+  ["PostToolUse", "UserPromptSubmit", "SessionEnd"],
+);
+await quitWait;
+
 // A hook Pi waits for dies with the wait: what it prints later must not come to count as shown.
 // It is told when (#955), and keeps what it could not write before then.
 const waited = await load({}, true);

@@ -27,10 +27,12 @@ export default function (pi) {
   // for no store and injects nothing, and it gets the capture's 3 s; what it prints joins
   // nothing. As Pi quits, a call gets what is left of its wait and no more, and one with none
   // left is not started, as before: Pi exits once its 2 s wait for the queue ends, and the
-  // session's end must not wait behind it.
+  // session's end must not wait behind it. A record-only call already running then is killed
+  // as its wait ends (`running`), as the old plugin killed it.
   const CAPTURE_KILL_MS = 3000;
   const KEEP_ROOM_MS = 1000;
   let quitting = false;
+  let running = null;
   const call = (event, cwd, payload, deadline) => new Promise((resolve) => {
     const left = deadline === undefined ? undefined : Math.min(2000, deadline - Date.now());
     if (quitting && left !== undefined && left <= 0) { resolve(""); return; }
@@ -42,8 +44,20 @@ export default function (pi) {
       cwd, env, stdio: ["pipe", "pipe", "ignore"],
     });
     let out = "";
-    const finish = (text) => { clearTimeout(timer); resolve(text); };
-    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(""); }, waited ? left : CAPTURE_KILL_MS);
+    let timer;
+    const kill = () => { child.kill("SIGKILL"); finish(""); };
+    const finish = (text) => {
+      clearTimeout(timer);
+      if (running?.child === child) running = null;
+      resolve(text);
+    };
+    timer = setTimeout(kill, waited ? left : CAPTURE_KILL_MS);
+    if (left !== undefined && !waited) {
+      running = {
+        child,
+        cut: () => { clearTimeout(timer); timer = setTimeout(kill, Math.max(0, deadline - Date.now())); },
+      };
+    }
     child.on("error", () => finish(""));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (data) => { out += data; });
@@ -127,7 +141,10 @@ export default function (pi) {
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "reload") return;
     // Pi exits after a quit; a session replaced by another leaves the process, and its queue, on.
-    if (event.reason === "quit") quitting = true;
+    if (event.reason === "quit") {
+      quitting = true;
+      running?.cut();
+    }
     void send("SessionEnd", ctx, { reason: event.reason });
     await wait(chain);
   });

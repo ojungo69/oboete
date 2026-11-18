@@ -46,7 +46,8 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   - a read's hook (the note on a file, a memory lookup) gives nothing once its time is over, and
     its lookup's wait, its store's wait and its fence's wait take what remains.
 - An agent whose hook oboete writes no timeout for (OpenCode's and Pi's plugins, an agent with no
-  adapter) has no such deadline: its waits are as they were. The plugins kill the hooks they
+  adapter) has no such deadline unless its plugin passes the answer's time (Pi's, below): the
+  waits of a call it passes none for are as they were. The plugins kill the hooks they
   start themselves: OpenCode's each after 3 s; Pi's after 3 s where nothing waits for the hook's
   answer, and as its own 2 s wait ends where it waits for one. Pi's wait for its queue at a
   session's end, 2 s at most, kills nothing (docs/unwritten.md U2).
@@ -66,7 +67,8 @@ hooks in three days (attachments of type `hook_cancelled`): six prompts (2026-11
   hook is told that the wait is over, so it waits for no store and injects nothing, and it gets
   3 s; what it prints joins nothing. As Pi quits, a call is given what is left of its wait and
   no more, and one with none left is not started: Pi exits once its 2 s wait for the queue ends,
-  and the session's end must not wait behind it.
+  and the session's end must not wait behind it. A record-only call already running then is
+  killed as its wait ends.
 
   Before #955 the plugin gave each such call what was left of the wait and did not start one
   with none left, and a hook whose store was held waited its 2 s past the kill: the prompt was
