@@ -1,0 +1,8 @@
+---
+# Codacy reads this file from the default branch. With it, the paths ignored in Codacy's web
+# settings no longer apply; on 2026-11-18 that list was empty (its API, ignored-files).
+exclude_paths:
+  # claude-mem's work-view, vendored unchanged (ui/work-view/README.md).
+  - "ui/work-view/upstream/**"
+  # The bundle build.sh makes from it, which CI builds again and compares.
+  - "assets/work-view/**"
