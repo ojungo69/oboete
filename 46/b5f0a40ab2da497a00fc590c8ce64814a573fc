@@ -1,0 +1,87 @@
+ui/work-view/README.md
+  s_52c3955e48bff4::t_2b66cae39168f4 6,8-17,19-22,30-32
+.gitattributes
+  s_52c3955e48bff4::t_e4320cdf338cf1 3-4
+.github/workflows/work-view.yml
+  s_52c3955e48bff4::t_93c8d3992b1972 1-30
+NOTICE
+  s_52c3955e48bff4::t_dc4bbb348a1d0d 31-36
+assets/work-view/THIRD-PARTY-NOTICES.md
+  s_52c3955e48bff4::t_b98678bf49b761 1-3197
+assets/work-view/assets/animate-DcL0WwVp.js
+  s_52c3955e48bff4::t_59d968c6f77676 1
+assets/work-view/assets/data-goals-OEak7sSc.js
+  s_52c3955e48bff4::t_eabd1050a4fe8f 1
+assets/work-view/assets/data-lcZTvPaL.js
+  s_52c3955e48bff4::t_2129423cd1fc52 1
+assets/work-view/assets/glare-card-C7g9yTa9.js
+  s_52c3955e48bff4::t_34d2dc58e8b74a 1
+assets/work-view/assets/index-B67kPZPa.css
+  s_52c3955e48bff4::t_e3185986602cd8 1-2
+assets/work-view/assets/index-CuqFI_0c.js
+  s_52c3955e48bff4::t_163de2057e40ad 1-39
+assets/work-view/assets/my-rules-BI9fPJTs.js
+  s_52c3955e48bff4::t_096ddfb3fa29a3 1-2
+assets/work-view/assets/parse-sse-frame-RQ5Ec6Uw.js
+  s_52c3955e48bff4::t_7fbdf704c8cfeb 1
+assets/work-view/assets/past-focus-A4yszERC.js
+  s_52c3955e48bff4::t_373ec0914ab01c 1
+assets/work-view/assets/request-detail-C6mxCxyF.js
+  s_52c3955e48bff4::t_f4e789d9b823fb 1
+assets/work-view/assets/setup-data-B-mQFvVr.js
+  s_52c3955e48bff4::t_b754ac35181dd8 1-2
+assets/work-view/assets/setup-page-B8sQmQI5.css
+  s_52c3955e48bff4::t_06ca0ddabb300a 1
+assets/work-view/assets/setup-page-CirBQ5QW.js
+  s_52c3955e48bff4::t_2f59542470d6f3 1-8
+assets/work-view/assets/setup-sample-B4bL9lOM.js
+  s_52c3955e48bff4::t_c76268250d9c0c 1
+assets/work-view/assets/sparkles-cIwuCLke.js
+  s_52c3955e48bff4::t_c8975f1e991729 1
+assets/work-view/assets/suggested-areas-COB488Vy.js
+  s_52c3955e48bff4::t_94766487b31ca0 1
+assets/work-view/assets/swipe-to-decide-m-VXgpP3.js
+  s_52c3955e48bff4::t_8997fb211945c4 1
+assets/work-view/assets/textarea-f-rWmCHz.js
+  s_52c3955e48bff4::t_9ed15e69c8e89c 1-51
+assets/work-view/assets/ui-message-DZaehoq1.js
+  s_52c3955e48bff4::t_4cabedb6cc4a3a 1
+assets/work-view/assets/use-animation-DQN7w6OE.js
+  s_52c3955e48bff4::t_376b18b41cf29c 1
+assets/work-view/favicon.svg
+  s_52c3955e48bff4::t_92de6844bc0ea2 1
+assets/work-view/index.html
+  s_52c3955e48bff4::t_81bde14f74a01f 1-21
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_4febeeeffe2add 1-47
+ui/work-view/licences/ansi-to-react.txt
+  s_52c3955e48bff4::t_ca2308f5b0d9d7 1-29
+ui/work-view/licences/react-remove-scroll-bar.txt
+  s_52c3955e48bff4::t_a7805c702b239d 1-21
+ui/work-view/notices.mjs
+  s_52c3955e48bff4::t_05bef58679de69 1-50
+ui/work-view/patches/0001-token-and-transport.patch
+  s_52c3955e48bff4::t_8fe879793c18b5 1-274
+ui/work-view/patches/0002-build-output.patch
+  s_52c3955e48bff4::t_1549f8ef444386 1-14
+ui/work-view/patches/0003-hide-what-oboete-lacks.patch
+  s_52c3955e48bff4::t_9ee98bf9520ba3 1-70
+ui/work-view/patches/0004-oboete-brand.patch
+  s_52c3955e48bff4::t_2e3964517b1a3f 1-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46b5f0a40ab2da497a00fc590c8ce64814a573fc",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
