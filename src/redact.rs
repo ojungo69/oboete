@@ -709,6 +709,13 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
     Some(merged_runs([g.blocks, g.masks].concat()))
 }
 
+/// `hidden` with the rules as they are now, which `outbound` reads with: `None` when the gate masks
+/// the whole text, as it masks all of one when its table went wrong.
+pub fn hidden_now(text: &str) -> Option<Vec<(usize, usize)>> {
+    let rules = egress()?;
+    hidden(text, &rules)
+}
+
 /// A text as the gate sees it: `plain` is what it scans (blocks removed tag by tag, trimmed,
 /// nothing masked yet) and `shown` what it shows (`plain` masked pass by pass), each with, for each
 /// of its bytes, the range of the text it stands for; `blocks` and `masks` are the ranges of the

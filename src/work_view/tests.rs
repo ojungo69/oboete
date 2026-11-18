@@ -230,16 +230,9 @@ fn home() -> (Store, i64) {
     (h, crate::db::now_ms())
 }
 
-/// The two answers the route reads, through the gate as it sends them.
+/// What the route reads (`read`): the two answers as their readers give them, and the story's kept texts.
 fn answers(h: &Store, now: i64) -> (Value, Value) {
-    let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
-    let week = crate::my_work::Range::Week;
-    let work = crate::my_work::listed(h.home.path(), week, now, &tag).unwrap();
-    let goals = crate::my_work_goals::page(h.home.path(), now).unwrap();
-    (
-        crate::view::answered("my-work", work),
-        crate::view::answered("my-goals", goals),
-    )
+    read(h.home.path(), now).unwrap()
 }
 
 /// The one item of `list` whose `key` is `value`.
@@ -900,4 +893,276 @@ fn the_contract_snapshot_is_this_homes_answer() {
         steady(&fresh),
         "the contract snapshot is not this home's answer"
     );
+}
+
+/// The Build story is read whole before any mask (#1089), and keeps its blocks: a rule that needs,
+/// in the story the recap and a chapter make, a heading another rule masks first; a rule that runs
+/// past where the adapter puts a word joiner and a week's `## `; and a heading followed by prose,
+/// read as the pages show it, its marks off. `ui/work-view/contract/gated-stories.json` is what it
+/// writes of each, which the Node test reads through the mapper; written again as the other
+/// contract files are (OBOETE_CONTRACT_WRITE=1).
+#[test]
+fn a_story_is_read_whole_before_any_mask() {
+    if !crate::view::tests::in_child("work_view::tests::a_story_is_read_whole_before_any_mask") {
+        return;
+    }
+    let gate = tempfile::tempdir().unwrap();
+    let rules = "[redaction]\nextra_rules = [{ id = \"whole\", regex = '^Project Phoenix$' }, \
+                 { id = \"after\", regex = 'Phoenix\\s+[\\d-]+\\s+\\w{14}' }, \
+                 { id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }]\n";
+    std::fs::write(gate.path().join("config.toml"), rules).unwrap();
+    crate::redact::set_home(gate.path()).unwrap();
+    let mut written = Vec::new();
+    for (name, recap, text, hidden) in [
+        (
+            "a heading masked whole, which another rule needs in the story",
+            "## Project Phoenix",
+            "qwertyuiopasdf is in the drawer.",
+            "qwertyuiopasdf",
+        ),
+        (
+            "an issue's number after a recap that ends on a rule's keyword",
+            "Ask for the zebracode",
+            "#1087 asdfghjklzxcvb went out.",
+            "asdfghjklzxcvb",
+        ),
+        (
+            "a heading followed by prose, as the pages show it",
+            "## Project Phoenix\nThe rest is prose.",
+            "Nothing here.",
+            "Project Phoenix",
+        ),
+    ] {
+        // Each kept text, read alone, holds nothing the rules find.
+        for kept in [recap, text] {
+            assert_eq!(crate::redact::outbound(kept), kept);
+        }
+        let story = json!({"recap": recap, "chapters": [{"week": "2026-11-16", "text": text}]});
+        let narrative = build_story(&story)["story"]["narrative"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!narrative.contains(hidden), "{narrative}");
+        assert!(narrative.contains("\n\n## "), "{narrative}");
+        let blocks = if recap.contains('\n') { 4 } else { 3 };
+        assert_eq!(narrative.split("\n\n").count(), blocks, "{narrative}");
+        let story = json!({"story": {"narrative": narrative, "writtenAt": null}});
+        written.push(json!({"name": name, "hidden": hidden, "story": story}));
+    }
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/gated-stories.json");
+    let fresh = Value::Array(written);
+    let kept: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    if kept != fresh && std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
+        let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
+        std::fs::write(&path, text).unwrap();
+        return;
+    }
+    assert_eq!(
+        kept, fresh,
+        "the gated stories are not the adapter's answer"
+    );
+}
+
+/// A work item's status goes as one of the words the pages read, or as none (#1089): a status of
+/// another spelling is text, which a rule may find as it would be sent.
+#[test]
+fn an_items_status_goes_as_a_word_the_pages_read_or_as_none() {
+    let work = json!({"requests": [{"id": "r:s", "status": "working", "work": [
+        {"list": "l", "repo": "r", "task": "a", "status": "release_4827", "updated": 1},
+        {"list": "l", "repo": "r", "task": "b", "status": "In Progress", "updated": 1},
+        {"list": "l", "repo": "r", "task": "c", "status": "wip", "updated": 1}]}]});
+    let items = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0]["items"];
+    let statuses: Vec<&Value> = arr(items).iter().map(|i| &i["status"]).collect();
+    assert_eq!(statuses, [&json!(""), &json!("in-progress"), &json!("")]);
+}
+
+/// The gate home's rules (#1089): one on each key the snapshot reads its counts, days and times
+/// by, one on a work item's status as the pages would read it, and one that finds an Antigravity
+/// conversation's id only beside `gemini`, which the adapter writes in its key.
+const GATED: &str = "[redaction]\nextra_rules = [{ id = \"prompts\", regex = '^prompts$' }, \
+    { id = \"days\", regex = '^days$' }, { id = \"reviewed\", regex = '^reviewed$' }, \
+    { id = \"completed\", regex = '^completed_at$' }, { id = \"spelling\", regex = 'release-4827' }, \
+    { id = \"gemini\", regex = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', \
+    keywords = [\"gemini\"] }]\n";
+
+/// The Antigravity conversation's id in the gate home.
+const AGY: &str = "6f1c2a3b-4d5e-4f60-8a1b-2c3d4e5f6a7b";
+
+/// `home()` read under `GATED`, with an Antigravity conversation and a work item whose status
+/// the rules find as the pages would read it.
+fn gate_home() -> (Store, i64) {
+    let (mut h, _) = home();
+    let t = crate::db::now_ms() - 5 * 60_000;
+    event(
+        &mut h,
+        "prompt",
+        "agy",
+        AGY,
+        t,
+        json!({"prompt": "Plan the parser."}),
+    );
+    let spelled = json!({"task": "Cut it", "status": "release_4827"});
+    wrote(&mut h, "agy", AGY, "plan", spelled);
+    h.run();
+    std::fs::write(h.home.path().join("config.toml"), GATED).unwrap();
+    crate::redact::set_home(h.home.path()).unwrap();
+    (h, crate::db::now_ms())
+}
+
+/// The contract under rules (#1089): `ui/work-view/contract/gated.json` is the gate home's
+/// answer, which the Node test runs claude-mem's mapper over in two zones. No rule on a key takes
+/// the goals, Past focus or a request's completion; the Antigravity conversation goes by one
+/// reference in every place the pages match it; and no value a rule finds goes. Written again as
+/// the other contract is (OBOETE_CONTRACT_WRITE=1).
+#[test]
+fn the_contract_gated_snapshot_is_a_gate_homes_answer() {
+    let name = "work_view::tests::the_contract_gated_snapshot_is_a_gate_homes_answer";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, now) = gate_home();
+    let (work, goals) = answers(&h, now);
+    let fresh = snapshot_at(&work, &goals, now, &Utc);
+    let text = fresh.to_string();
+    assert!(
+        !text.contains(AGY) && !text.contains("release-4827"),
+        "{text}"
+    );
+    // The counts and days, read by their keys.
+    assert!(
+        fresh["goals"]["sourcePromptCount"].is_i64(),
+        "{}",
+        fresh["goals"]
+    );
+    assert!(fresh["goals"]["windowDays"].is_i64(), "{}", fresh["goals"]);
+    assert!(
+        fresh["goalHistory"][0]["sourcePromptCount"].is_i64(),
+        "{}",
+        fresh["goalHistory"]
+    );
+    // A request its status completed is complete at that status's time, and one its review
+    // shipped carries the review's day.
+    let request = |id: &str| -> Value {
+        let key = conversation_key("claude", id);
+        one(&fresh["humanRequests"], "id", &key).clone()
+    };
+    let completed_at = &one(&work["requests"], "id", "c:claude:s3")["completed_at"];
+    assert!(completed_at.is_i64(), "{completed_at}");
+    assert_eq!(&request("c:claude:s3")["completedAtEpoch"], completed_at);
+    let shipped = request("c:claude:s6");
+    assert_eq!(shipped["progress"]["state"], "shipped");
+    assert_eq!(shipped["progress"]["shippedAt"], "2026-11-17T12:00:00");
+    // The Antigravity conversation by one reference: its request's id, its key, its agent's.
+    let agy = one(&work["requests"], "id", &format!("c:agy:{AGY}"));
+    assert!(
+        agy["sessions"].as_array().is_some_and(|s| !s.is_empty()),
+        "{agy}"
+    );
+    let refs: Vec<&Value> = arr(&fresh["humanRequests"])
+        .iter()
+        .filter(|r| r["id"].as_str().is_some_and(|id| id.contains("gemini")))
+        .collect();
+    assert_eq!(refs.len(), 1, "{}", fresh["humanRequests"]);
+    let reference = format!("c:{}#", crate::redact::MASK);
+    let key: Vec<String> = serde_json::from_str(refs[0]["id"].as_str().unwrap()).unwrap();
+    assert!(key[2].starts_with(&reference), "{key:?}");
+    assert_eq!(refs[0]["conversationKeys"], json!([refs[0]["id"]]));
+    let agent = format!("agy:{}", key[2]);
+    assert_eq!(refs[0]["agentIds"], json!([agent]));
+    let agents: Vec<&Value> = arr(&fresh["agents"])
+        .iter()
+        .filter(|a| a["id"] == agent)
+        .collect();
+    assert_eq!(agents.len(), 1, "{}", fresh["agents"]);
+    assert_eq!(agents[0]["contentSessionId"], key[2]);
+    assert_eq!(agents[0]["platformSource"], "gemini");
+    // The same from read to read.
+    let (work, goals) = answers(&h, now);
+    assert_eq!(
+        snapshot_at(&work, &goals, now, &Utc)["agents"],
+        fresh["agents"]
+    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/gated.json");
+    let kept: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    if steady(&kept) == steady(&fresh) {
+        return;
+    }
+    if std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
+        let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
+        std::fs::write(&path, text).unwrap();
+        return;
+    }
+    let (kept, fresh) = (steady(&kept), steady(&fresh));
+    assert_eq!(
+        kept, fresh,
+        "the gated contract snapshot is not the gate home's answer"
+    );
+}
+
+/// The finished snapshot goes through the gate in one walk as it leaves (#1089): each text as it
+/// is sent, and none of what the pages match on, which a mask would move or join: a request's id,
+/// its conversations' keys, its agent's, and the code's own words and times.
+#[test]
+fn the_snapshot_leaves_through_the_gate_in_one_walk() {
+    let name = "work_view::tests::the_snapshot_leaves_through_the_gate_in_one_walk";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let gate = tempfile::tempdir().unwrap();
+    let rules = "[redaction]\nextra_rules = [{ id = \"zebra\", regex = 'zebra\\w+' }]\n";
+    std::fs::write(gate.path().join("config.toml"), rules).unwrap();
+    crate::redact::set_home(gate.path()).unwrap();
+    let work = json!({"requests": [{"id": "c:claude:zebra1", "status": "working",
+        "title": "Feed the zebrafish", "ask": {"text": "Feed the zebrafish", "ts": 1},
+        "sessions": [{"agent": "claude", "id": "c:claude:zebra1"}],
+        "work": [{"list": "zebras", "repo": "r", "task": "Count the zebras", "status": "doing",
+            "updated": 1}]}]});
+    let snapshot = snapshot_at(&work, &json!({}), 0, &Utc);
+    let request = &snapshot["humanRequests"][0];
+    let key = conversation_key("claude", "c:claude:zebra1");
+    assert_eq!(request["id"], key);
+    assert_eq!(request["conversationKeys"], json!([key]));
+    assert_eq!(request["agentIds"], json!(["claude:c:claude:zebra1"]));
+    assert_eq!(snapshot["agents"][0]["contentSessionId"], "c:claude:zebra1");
+    assert_eq!(request["items"][0]["status"], "doing");
+    for text in [
+        &request["title"],
+        &request["original"]["text"],
+        &request["items"][0]["title"],
+    ] {
+        assert_eq!(text.as_str().unwrap().matches("zebra").count(), 0, "{text}");
+    }
+}
+
+/// The route reads the Build story's texts as they were kept (#1089), not as My Work's read
+/// gates them, so that `build_story` finds what the gate hides in the story it joins before any
+/// mask; what leaves is gated all the same.
+#[test]
+fn the_route_reads_the_story_as_it_was_kept() {
+    let name = "work_view::tests::the_route_reads_the_story_as_it_was_kept";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let mut h = Store::new();
+    storied(&mut h, crate::db::now_ms() - 60_000, "Project Phoenix");
+    h.run();
+    let rules = "[redaction]\nextra_rules = [{ id = \"whole\", regex = '^Project Phoenix$' }]\n";
+    std::fs::write(h.home.path().join("config.toml"), rules).unwrap();
+    crate::redact::set_home(h.home.path()).unwrap();
+    let now = crate::db::now_ms();
+    let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
+    let week = crate::my_work::Range::Week;
+    let listed = crate::my_work::listed(h.home.path(), week, now, &tag).unwrap();
+    assert_eq!(listed["story"]["recap"], crate::redact::MASK);
+    let (work, goals) = answers(&h, now);
+    assert_eq!(work["story"]["recap"], "Project Phoenix");
+    let snapshot = snapshot_at(&work, &goals, now, &Utc);
+    assert_eq!(snapshot["story"]["story"]["narrative"], crate::redact::MASK);
 }

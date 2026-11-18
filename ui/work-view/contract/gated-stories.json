@@ -1,0 +1,32 @@
+[
+  {
+    "name": "a heading masked whole, which another rule needs in the story",
+    "hidden": "qwertyuiopasdf",
+    "story": {
+      "story": {
+        "narrative": "[REDACTED]\n\n## [REDACTED]\n\n[REDACTED] is in the drawer.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "an issue's number after a recap that ends on a rule's keyword",
+    "hidden": "asdfghjklzxcvb",
+    "story": {
+      "story": {
+        "narrative": "Ask for the [REDACTED]\n\n## [REDACTED]\n\n⁠[REDACTED] went out.",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "a heading followed by prose, as the pages show it",
+    "hidden": "Project Phoenix",
+    "story": {
+      "story": {
+        "narrative": "## [REDACTED]\n\nThe rest is prose.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
+  }
+]

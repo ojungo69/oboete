@@ -4243,7 +4243,7 @@ fn the_page_forgets_a_session_and_its_reads_show_it_gone() {
 /// Egress is process-wide: a test that exercises its real configuration runs alone in a child
 /// process, without changing the rules seen by unrelated tests running in this process. True
 /// in the child; here, false once the child passed.
-fn in_child(test: &str) -> bool {
+pub(crate) fn in_child(test: &str) -> bool {
     // The test's own name, so that a value this process inherited runs nothing here
     // (Sourcery on #576).
     const CHILD: &str = "OBOETE_EGRESS_TEST_CHILD";

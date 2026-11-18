@@ -243,8 +243,14 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   address but oboete's own.
 - The pages read `GET /api/work-view`, claude-mem's snapshot of the work (`src/work_view.rs`). It is
   made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
-  they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not; the
-  text it makes of them, the Build story, goes through the gate again as it leaves. The
+  their readers give them, each text gated at its source, and from the Build story's kept texts,
+  and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
+  it is sent, and the Build story whole, read before any mask as its kept texts joined, each kept
+  text, each block, each heading as the pages show it and the story as sent. No rule on a key
+  takes what the pages read by it: the counts, days and times are read by the keys the code names.
+  A conversation the gate would mask in its key or its agent's id goes by a keyed reference, the
+  same in every place the pages match it, and a work item's status goes as one of the words the
+  pages read, or as none. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its

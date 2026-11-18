@@ -2231,7 +2231,7 @@ fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
 }
 
 /// `keyed`'s first 12 hex digits: the fingerprint of a stored text the gate masks.
-fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+pub(crate) fn keyed_print(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     Ok(keyed(held, home, key)?[..12].to_owned())
 }
 

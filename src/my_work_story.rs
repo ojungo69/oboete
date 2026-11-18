@@ -523,11 +523,35 @@ pub(crate) fn page(
     hidden: &Hidden,
     rules: &Rules,
 ) -> Result<Value> {
+    read_with(k, device, hidden, |text| {
+        crate::redact::outbound_with(text, rules)
+    })
+}
+
+/// The story `page` reads, its texts as they were kept: the gate of their writing read them text
+/// by text (`keep`), and no read's gate has yet. For the work-view (#1089), which finds what the
+/// gate hides in the story it joins before any mask, and gates what it sends. None while none was
+/// written.
+pub(crate) fn kept(home: &std::path::Path) -> Result<Value> {
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(Value::Null);
+    };
+    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
+    read_with(&k, raw.device(), &hidden, str::to_owned)
+}
+
+/// `page`, each text as `gate` gives it.
+fn read_with(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &Hidden,
+    gate: impl Fn(&str) -> String,
+) -> Result<Value> {
     let all = crate::my_work_ops::shown(k, (NAME, None), Some(device), hidden, true, usize::MAX)?;
     // #733: a week whose facts are gone has no chapter.
     let (current, _) = facts_by_week(k, device, hidden, &chrono::Local)?;
-    let gate = |text: &str| crate::redact::outbound_with(text, rules);
-    let text = |k: &Kept| k.op.fields.get("text").and_then(Value::as_str).map(gate);
+    let text = |k: &Kept| k.op.fields.get("text").and_then(Value::as_str).map(&gate);
     let (mut recap, mut weeks) = (None, BTreeMap::new());
     for kept in &all {
         if kept.op.about == RECAP {
