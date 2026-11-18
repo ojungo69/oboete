@@ -69,7 +69,7 @@ fn build_story(story: &Value) -> Value {
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
             weeks.push(out.len());
-            out.push(format!("## {week}"));
+            out.push(format!("## {}", gate(week)));
             out.extend(blocks(text));
         }
     }
@@ -81,10 +81,29 @@ fn build_story(story: &Value) -> Value {
             out[i] = text;
         }
     }
-    match out.is_empty() {
-        true => Value::Null,
-        false => json!({"story": {"narrative": out.join("\n\n"), "writtenAt": null}}),
+    if out.is_empty() {
+        return Value::Null;
     }
+    // The story they make goes through the gate as one text, as it leaves: a rule can find across a
+    // recap and a chapter what it finds in neither (Codex on #1087). Its own marks stay as they
+    // are: the blank lines between its blocks, a week heading's `## ` and a paragraph's word joiner.
+    let (mut narrative, mut kept) = (String::new(), Vec::new());
+    for (i, block) in out.iter().enumerate() {
+        let start = narrative.len();
+        if i > 0 {
+            narrative.push_str("\n\n");
+        }
+        let own = match (weeks.contains(&i), block.starts_with('\u{2060}')) {
+            (true, _) => "## ".len(),
+            (false, true) => '\u{2060}'.len_utf8(),
+            (false, false) => 0,
+        };
+        kept.push((start, narrative.len() + own));
+        narrative.push_str(block);
+    }
+    kept.retain(|(from, to)| from < to);
+    let narrative = crate::redact::outbound_but(&narrative, &kept);
+    json!({"story": {"narrative": narrative, "writtenAt": null}})
 }
 
 /// A text's blocks as the pages read a narrative (`to-work-model.ts:433-442`): a Markdown heading
@@ -103,7 +122,7 @@ fn blocks(text: &str) -> Vec<String> {
             lines.clear();
         }
         if heading(line) {
-            out.push(line.trim_matches(space).to_owned());
+            out.push(gate(line.trim_matches(space)));
         } else if !blank {
             lines.push(line);
         }
@@ -115,18 +134,25 @@ fn blocks(text: &str) -> Vec<String> {
 /// A paragraph as the pages read it, or none when they would show it as nothing. The pages take a
 /// block for a heading when it opens with `#` once its bold and code marks are off, so a paragraph
 /// that would (an issue's number: `#1087`, `**#1087**`) opens with a word joiner, and the pages
-/// read it as the prose it is.
+/// read it as the prose it is. It goes through the gate as it leaves (`gate`).
 fn prose(block: &str) -> Option<String> {
     static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*]+)\*\*").unwrap());
     static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
-    let block = block.trim_matches(space);
-    let shown = BOLD.replace_all(block, "$1");
+    let block = gate(block.trim_matches(space));
+    let shown = BOLD.replace_all(&block, "$1");
     let shown = CODE.replace_all(&shown, "$1");
     let first = shown.split(space).find(|w| !w.is_empty())?;
     Some(match first.starts_with('#') {
         true => format!("\u{2060}{block}"),
-        false => block.to_owned(),
+        false => block.clone(),
     })
+}
+
+/// A text the adapter made of the gated answers' texts, through the gate again as it leaves: a rule
+/// can find in a heading's text, standing by itself, what it found in neither (Codex on #1087). The
+/// rules read it as it is, with no private block taken out, as the answers' texts are past that.
+fn gate(text: &str) -> String {
+    crate::redact::outbound_but(text, &[])
 }
 
 /// JavaScript's `\s`, by which the pages split and trim: Rust's whitespace but U+0085, and U+FEFF.
@@ -281,7 +307,10 @@ fn request<Tz: TimeZone>(
         .collect();
     // Each work list is a workstream, as claude-mem's drawer shows a request's tasks by stream
     // (`to-work-model.ts:214-217`). A list is one per repository, as oboete keeps it; a masked
-    // one is known by its fingerprint, in a namespace of its own.
+    // one is known by its fingerprint, in a namespace of its own. The pages use a workstream's id
+    // only to find its title in the request's copy, so it goes by its place among the request's,
+    // which carries no name: a rule can find in a repository's name and a list's, joined, what it
+    // finds in neither (Codex on #1087).
     let mut streams: Vec<(String, Value, Vec<Value>)> = Vec::new();
     for (w, item) in arr(&r["work"]).iter().zip(&items) {
         let id = match w["stream"].as_str() {
@@ -300,12 +329,14 @@ fn request<Tz: TimeZone>(
             copy.insert(field.into(), r[field].clone());
         }
     }
-    let titles: Vec<Value> = (streams.iter())
-        .map(|(id, title, _)| json!({"id": id, "title": title}))
+    let titles: Vec<Value> = (streams.iter().enumerate())
+        .map(|(i, (_, title, _))| json!({"id": format!("w{i}"), "title": title}))
         .collect();
     copy.insert("workstreams".into(), json!(titles));
-    let workstreams: Vec<Value> = (streams.into_iter())
-        .map(|(id, title, items)| json!({"id": id, "title": title, "items": items}))
+    let workstreams: Vec<Value> = (streams.into_iter().enumerate())
+        .map(
+            |(i, (_, title, items))| json!({"id": format!("w{i}"), "title": title, "items": items}),
+        )
         .collect();
     let activity: Vec<Value> = (arr(&r["updates"]).iter().enumerate())
         .map(|(i, u)| {

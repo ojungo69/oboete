@@ -2123,16 +2123,47 @@ fn the_work_view_route_answers_through_the_gate() {
     let two: Vec<&Vec<String>> = read_streams.iter().filter(|w| w.len() == 2).collect();
     assert_eq!(two.len(), 1, "{read_streams:?}");
     assert_ne!(two[0][0], two[0][1]);
-    assert!(
-        read_streams
-            .iter()
-            .flatten()
-            .all(|w| w.starts_with("masked:")),
-        "{read_streams:?}"
-    );
+    // Each goes by its place in its request, which carries no name of its list.
+    let place = |w: &String| {
+        w.strip_prefix('w')
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+    };
+    assert!(read_streams.iter().flatten().all(place), "{read_streams:?}");
     let again = read();
     assert_eq!((ids(&again), streams(&again)), (read_ids, read_streams));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// What the work-view makes of its answers' texts leaves through the gate: a heading's text that
+/// becomes the recap, by itself, and the story the recap and its chapters make, where a rule finds
+/// across them what it finds in neither stored text. The story keeps its blocks (Codex on #1087).
+#[test]
+fn the_work_views_story_leaves_through_the_gate() {
+    if !in_child("view::tests::the_work_views_story_leaves_through_the_gate") {
+        return;
+    }
+    let gate = tempfile::tempdir().unwrap();
+    let rules = "[redaction]\nextra_rules = [{ id = \"across\", regex = 'zebracode[\\s#0-9-]+\\w{12,}' }, \
+                 { id = \"whole\", regex = '^Project Phoenix$' }]\n";
+    std::fs::write(gate.path().join("config.toml"), rules).unwrap();
+    redact::set_home(gate.path()).unwrap();
+    let (recap, chapter) = ("Ask for the zebracode", "qwertyuiopasdf is in the drawer.");
+    // Each stored text, as My Work's answer gives it, holds nothing the rules find.
+    for text in [recap, chapter, "## Project Phoenix"] {
+        assert_eq!(redact::outbound(text), text);
+    }
+    let chapters = json!([{"week": "2026-11-16", "text": chapter}]);
+    for (recap, hidden) in [
+        (recap, "qwertyuiopasdf"),
+        ("## Project Phoenix", "Project Phoenix"),
+    ] {
+        let work = json!({"story": {"recap": recap, "chapters": chapters}});
+        let snapshot = crate::work_view::snapshot(&work, &json!({}), 0);
+        let narrative = snapshot["story"]["story"]["narrative"].as_str().unwrap();
+        assert!(!narrative.contains(hidden), "{narrative}");
+        assert_eq!(narrative.split("\n\n").count(), 3, "{narrative}");
+        assert!(narrative.contains("\n\n## "), "{narrative}");
+    }
 }
 
 /// Decision 114: the work-view's snapshot and its version take the token. Over an empty home the

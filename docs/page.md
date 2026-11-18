@@ -243,10 +243,12 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   address but oboete's own.
 - The pages read `GET /api/work-view`, claude-mem's snapshot of the work (`src/work_view.rs`). It is
   made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
-  they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not. The
+  they leave the gate, and reads nothing else, so it shows nothing the rest of oboete would not; the
+  text it makes of them, the Build story, goes through the gate again as it leaves. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
-  oboete keeps in other shapes is mapped: a work list is a workstream (one per repository), the
+  oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its
+  place in its request), the
   weekly chapters of the Build story follow its recap, a finished month of goals is a period of Past
   focus, a conversation's own request is known by the conversation's key and titles the
   conversation, a request is complete when its newest status completed it (or, shipped by a review

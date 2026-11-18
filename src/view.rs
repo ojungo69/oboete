@@ -2673,7 +2673,8 @@ impl Viewer {
             }
             // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
             // from the two answers above as they leave the gate, the requests of the last 7 days.
-            // Each text in it is one of theirs (`work_view`), so it is not gated again. One readers'
+            // Each text in it is one of theirs, and the text it makes of them, its Build story, goes
+            // through the gate again as it leaves (`work_view::gate`). One readers'
             // hold from the first read to the snapshot (#439), as one page's read takes: a forget
             // registers before both answers or after it. raw.db first, then the hold, the order a
             // restore takes them in. The goals' read takes no hold of its own, so this one is its

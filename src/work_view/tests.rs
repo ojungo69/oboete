@@ -9,7 +9,6 @@ use std::path::Path;
 const R: &str = "github.com/o/r";
 /// A second repository, with a work list of the same name as one in `R`.
 const R2: &str = "github.com/o/other";
-const DAY: i64 = 86_400_000;
 /// The home's two focus areas: one its goals ask for, and one of an open ask alone.
 const PARSER: &str = "fa_aaaaaaaaaaaa";
 const DOCS: &str = "fa_bbbbbbbbbbbb";
@@ -145,7 +144,18 @@ fn goals_op(h: &mut Store, ts: i64, seq: i64, items: Value, summary: &str) {
 fn home() -> (Store, i64) {
     let mut h = Store::new();
     let t = crate::db::now_ms() - 10 * 60_000;
-    let old = t - 45 * DAY;
+    // Its archived month's prompt and goals write: noon on the 15th, two months back (UTC, the
+    // contract's zone), so the two share a month and are past the goals' 31 days, whatever the day.
+    let month = (Utc
+        .timestamp_millis_opt(t)
+        .unwrap()
+        .date_naive()
+        .with_day(1)
+        .unwrap())
+        - Months::new(2);
+    let old = (month.with_day(15).unwrap().and_hms_opt(12, 0, 0).unwrap())
+        .and_utc()
+        .timestamp_millis();
     let s0 = h.said("s0", R, old, "Rename the lexer's tokens.");
     let lexer = json!([{"id": "o1", "kind": "priority", "rank": 1, "title": "Lexer",
         "product": "", "asked": 1, "quotes": [{"seq": s0, "ts": old, "text": "the lexer's tokens"}]}]);
@@ -759,6 +769,40 @@ fn the_contract_stories_are_the_adapters_answer() {
         json!(fresh),
         "the contract stories are not this adapter's"
     );
+}
+
+/// A workstream goes by its place among its request's, the only use the pages make of its id
+/// (`to-work-model.ts:215`): no name of its repository or list is in it, joined or not, and two
+/// lists the gate masks alike stay two (Codex on #1087).
+#[test]
+fn a_workstream_goes_by_its_place() {
+    let item = |list: &str, stream: Option<&str>, task: &str| {
+        let mut w = json!({"repo": R, "list": list, "task": task, "status": "doing"});
+        if let Some(print) = stream {
+            w["stream"] = json!(print);
+        }
+        w
+    };
+    let work = json!({"requests": [{"id": "r:w", "status": "working", "title": "Release",
+        "work": [item("notes", None, "Write"), item("[REDACTED]", Some("aaaaaaaaaaaa"), "A"),
+            item("[REDACTED]", Some("bbbbbbbbbbbb"), "B"), item("notes", None, "Read")]}]});
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    let streams: Vec<(&str, usize)> = (request["workstreams"].as_array().unwrap().iter())
+        .map(|w| {
+            (
+                w["id"].as_str().unwrap(),
+                w["items"].as_array().unwrap().len(),
+            )
+        })
+        .collect();
+    assert_eq!(streams, [("w0", 2), ("w1", 1), ("w2", 1)]);
+    let titled: Vec<&str> = (request["humanCopy"]["workstreams"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .map(|w| w["id"].as_str().unwrap())
+    .collect();
+    assert_eq!(titled, ["w0", "w1", "w2"]);
 }
 
 fn hex(t: &str, n: usize) -> bool {

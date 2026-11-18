@@ -103,7 +103,7 @@ test('the focus screens read the areas, their open asks and Past focus', () => {
   assert.equal(model.pastPeriods.length, 1)
   const [month] = model.pastPeriods
   // A whole month, from its first day.
-  // The month 45 days back is in the year before in January and February: its label names the year.
+  // The month two months back is in the year before in January and February: its label names the year.
   assert.match(month.label, /^[A-Z][a-z]{2} 1 – [A-Z][a-z]{2} \d{2}(, \d{4})?$/)
   assert.equal(month.headline, 'Worked on the lexer.')
   assert.deepEqual(month.areas.map((a) => [a.title, a.timesAsked, a.quote?.quote]), [
