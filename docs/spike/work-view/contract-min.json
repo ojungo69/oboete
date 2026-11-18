@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-18T03:00:00.000Z",
+  "revision": "1",
+  "source": { "kind": "oboete", "connected": true, "error": null, "lastCheckedAt": "2026-11-18T03:00:00.000Z" },
+  "agents": [
+    {
+      "id": "agent-claude-1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Serve the work view",
+      "project": "/home/dev/demo",
+      "contentSessionId": "11111111-1111-4111-8111-111111111111"
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "[\"conversation\",\"claude\",\"11111111-1111-4111-8111-111111111111\"]",
+      "contentFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "title": "Serve the work view from oboete",
+      "titleSource": "title-cache",
+      "original": { "text": "Serve the claude-mem work view from oboete", "atEpoch": 1794963600000, "url": "/api/work-view/evidence/prompt/1" },
+      "scopeUpdates": [],
+      "humanCopy": null,
+      "lifecycle": null,
+      "items": [
+        {
+          "id": "work-state:1",
+          "kind": "work-state",
+          "title": "Write the snapshot adapter",
+          "status": "doing",
+          "nextStep": { "text": "Map the my-work answers onto the snapshot", "source": "work-state", "sourceId": 1 },
+          "lastUpdateEpoch": 1794970800000,
+          "sourceRefs": [{ "kind": "work-state", "id": 1 }],
+          "url": "/api/work-view/evidence/work-state/1"
+        }
+      ],
+      "workstreams": [],
+      "activity": [
+        { "id": "observation:7", "kind": "observation", "title": "Read the mapper", "detail": "to-work-model.ts", "atEpoch": 1794970800000, "url": "/api/work-view/evidence/observation/7" }
+      ],
+      "agentIds": ["agent-claude-1"],
+      "conversationKeys": ["[\"conversation\",\"claude\",\"11111111-1111-4111-8111-111111111111\"]"],
+      "requestedBy": null,
+      "startedAtEpoch": 1794963600000,
+      "completedAtEpoch": null,
+      "updatedAtEpoch": 1794970800000,
+      "review": { "checked": false, "checkedAtEpoch": null, "available": true },
+      "anchorConversationKey": "[\"conversation\",\"claude\",\"11111111-1111-4111-8111-111111111111\"]",
+      "focusAreaId": "area-viewer"
+    },
+    {
+      "id": "[\"conversation\",\"claude\",\"22222222-2222-4222-8222-222222222222\"]",
+      "contentFingerprint": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "title": "Check the oboete adapter output",
+      "titleSource": "title-cache",
+      "original": { "text": "Check that the adapter output renders", "atEpoch": 1794952800000, "url": "/api/work-view/evidence/prompt/2" },
+      "scopeUpdates": [],
+      "humanCopy": null,
+      "lifecycle": null,
+      "items": [
+        {
+          "id": "session-request:2",
+          "kind": "session-request",
+          "title": "Adapter output ready",
+          "status": "needs-review",
+          "nextStep": { "text": "Open My Work and compare the cards", "source": "session-summary", "sourceId": 2 },
+          "lastUpdateEpoch": 1794967200000,
+          "sourceRefs": [{ "kind": "observation", "id": 2 }],
+          "url": "/api/work-view/evidence/observation/2"
+        }
+      ],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": ["agent-claude-1"],
+      "conversationKeys": ["[\"conversation\",\"claude\",\"22222222-2222-4222-8222-222222222222\"]"],
+      "requestedBy": null,
+      "startedAtEpoch": 1794952800000,
+      "completedAtEpoch": null,
+      "updatedAtEpoch": 1794967200000,
+      "review": { "checked": false, "checkedAtEpoch": null, "available": true },
+      "anchorConversationKey": "[\"conversation\",\"claude\",\"22222222-2222-4222-8222-222222222222\"]",
+      "focusAreaId": "other"
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [
+    {
+      "focusAreaId": "area-viewer",
+      "name": "Work view on oboete",
+      "goal": "Show claude-mem's My Work pages on oboete's engine.",
+      "about": null,
+      "status": "kept",
+      "priorityRank": 1,
+      "ownerRank": 1,
+      "source": "owner",
+      "mergedInto": null,
+      "evidence": null,
+      "decidedBy": "owner",
+      "savedAt": "2026-11-17T12:00:00.000Z"
+    }
+  ],
+  "ruleScopes": [
+    { "id": "everywhere", "tier": "everywhere", "name": "Everywhere" }
+  ],
+  "rules": [
+    {
+      "ruleId": "rule-1",
+      "scopeId": "everywhere",
+      "scopeTier": "everywhere",
+      "scopeName": "Everywhere",
+      "when": "you report results",
+      "then": "Lead with what I need to decide.",
+      "setBy": "owner",
+      "status": "on",
+      "kind": "directive",
+      "source": "you",
+      "timesSeen": 3,
+      "latestAt": "2026-11-17T10:00:00.000Z",
+      "quotes": [{ "at": "2026-11-17T10:00:00.000Z", "quote": "tell me what I need to decide first", "kind": "directive" }],
+      "replacedBy": null,
+      "replacedAt": null,
+      "savedAt": "2026-11-17T10:00:00.000Z"
+    }
+  ]
+}

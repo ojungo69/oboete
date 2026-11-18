@@ -234,7 +234,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   page already has those screens (Claude; overrulable).
 - A throwaway spike in the isolated user comes first. If it fails, oboete's own page is extended by
   hand to claude-mem's pages instead (Claude; overrulable). The spike runs beside the remaining speed
-  work of the page (Claude; overrulable).
+  work of the page (Claude; overrulable). It passed on 2026-11-18, and each file its bundle holds had
+  a confirmed licence, so none is replaced ([spike/work-view.md](spike/work-view.md)).
 - The new pages open at an address of their own, with a token that reaches `/api/work-view/` alone.
   Every action on them works there, as in claude-mem. Every package their bundle holds is checked
   before it ships and again at each update: where it comes from, what it runs when installed (the
