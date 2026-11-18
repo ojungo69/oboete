@@ -25,6 +25,8 @@ test('every request is read, in the state its records give it', () => {
     [key('claude', 'c:claude:s1'), 'your-move'],
     // Its work state said done: it waits for the owner's check.
     [key('claude', 'c:claude:s3'), 'needs-check'],
+    // Two reviews found it rising.
+    [key('claude', 'c:claude:s4'), 'working'],
     // A request of its own name, worked on in two repositories.
     ['r:rq1', 'working'],
     // Codex only asked, minutes ago: a request with no state of its own reads as being worked on
@@ -37,6 +39,7 @@ test('each request has its agent, its conversation at the time of its ask, and i
   const tools = Object.fromEntries(model.agents.map((a) => [a.id, a.tool]))
   assert.deepEqual(tools, {
     'claude:c:claude:s3': 'claude',
+    'claude:c:claude:s4': 'claude',
     'claude:c:claude:s2': 'claude',
     'claude:c:claude:s1': 'claude',
     'codex:c:codex:c1': 'codex',
@@ -84,4 +87,11 @@ test('the focus screens read the areas, their open asks and Past focus', () => {
   assert.deepEqual(month.areas.map((a) => [a.title, a.timesAsked, a.quote?.quote]), [
     ['Lexer', 1, "the lexer's tokens"],
   ])
+})
+
+test('a request two reviews found rising has its history and the estimate its pace gives', () => {
+  const rising = byId(key('claude', 'c:claude:s4'))
+  assert.deepEqual(rising.progress.history, [20, 50])
+  assert.equal(rising.progress.readings, 2)
+  assert.match(rising.estimate ?? '', /^at this pace, about [A-Z][a-z]{2} \d{1,2}$/)
 })

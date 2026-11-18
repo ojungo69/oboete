@@ -2058,36 +2058,80 @@ fn the_my_goals_and_status_routes_take_the_token() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Decision 114: the work-view's route reads My Work through the gate, as `/api/my-work` does.
-/// A value a rule masks is in none of its answer, and two requests whose ids a rule masks alike
-/// stay two, each with its own id (Codex on #1087).
+/// Decision 114: the work-view's route sends My Work through the outbound gate, as `/api/my-work`
+/// does (Codex on #1087). The gate's own rules live apart from the store's, as a read the route's
+/// gate outlives would have them: a codename only the gate's rules match is in none of the answer,
+/// as is a value My Work's reading masks. Two requests whose ids a rule masks alike stay two, and
+/// two lists of one request that a rule masks alike stay two workstreams, each the same from read
+/// to read.
 #[test]
 fn the_work_view_route_answers_through_the_gate() {
+    if !in_child("view::tests::the_work_view_route_answers_through_the_gate") {
+        return;
+    }
     let (dir, v) = viewer("work-view-gate");
     let value = format!("q9Zx8mL2vB4nR7tY1wK3{}", "pS6dJ0aF5hU2cE8g");
     let mut raw = crate::raw::open(&dir).unwrap();
-    for (id, plan) in [("sess-7", "Plan A"), ("sess-8", "Plan B")] {
-        let fields = json!({"task": format!("{plan}: auth = \"{value}\""), "request_id": id,
-            "request": "Fix the release notes", "status": "doing"});
-        raw.work_state(R, "plan", fields.as_object().unwrap(), None)
+    for (id, plan, list) in [
+        ("sess-7", "Plan A", "plan-1"),
+        ("sess-7", "Plan B", "plan-2"),
+        ("sess-8", "Plan C", "plan-1"),
+    ] {
+        let task = format!("{plan}: auth = \"{value}\", codename ZEPHYR-4417");
+        let fields = json!({"task": task, "request_id": id, "request": "Fix the release notes",
+            "status": "doing"});
+        raw.work_state(R, list, fields.as_object().unwrap(), None)
             .unwrap();
     }
     drop(raw);
     crate::worker::run_once(&dir).unwrap();
-    let rule = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n";
-    std::fs::write(dir.join("config.toml"), rule).unwrap();
-    let snapshot = get(&v, "/api/work-view");
-    let text = snapshot.to_string();
-    assert!(!text.contains(&value) && !text.contains("sess-"), "{text}");
-    let ids: Vec<&str> = (snapshot["humanRequests"].as_array().unwrap().iter())
-        .filter_map(|r| r["id"].as_str())
-        .collect();
-    assert_eq!(ids.len(), 2, "{text}");
-    assert_ne!(ids[0], ids[1]);
+    let rules = "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }, \
+                 { id = \"list\", regex = '^plan-[0-9]$' }]\n";
+    std::fs::write(dir.join("config.toml"), rules).unwrap();
+    let gate = dir.join("gate-home");
+    std::fs::create_dir_all(&gate).unwrap();
+    let code = "[redaction]\nextra_rules = [{ id = \"code\", regex = 'ZEPHYR-[0-9]{4}' }]\n";
+    std::fs::write(gate.join("config.toml"), code).unwrap();
+    redact::set_home(&gate).unwrap();
+    let read = || get(&v, "/api/work-view");
+    let first = read();
+    let text = first.to_string();
+    for shown in [value.as_str(), "ZEPHYR-4417", "sess-", "plan-"] {
+        assert!(!text.contains(shown), "{shown}: {text}");
+    }
+    let ids = |s: &Value| -> Vec<String> {
+        (s["humanRequests"].as_array().unwrap().iter())
+            .filter_map(|r| r["id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let streams = |s: &Value| -> Vec<Vec<String>> {
+        (s["humanRequests"].as_array().unwrap().iter())
+            .map(|r| {
+                (r["workstreams"].as_array().unwrap().iter())
+                    .filter_map(|w| w["id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .collect()
+    };
+    let (read_ids, read_streams) = (ids(&first), streams(&first));
+    assert_eq!(read_ids.len(), 2, "{text}");
+    assert_ne!(read_ids[0], read_ids[1]);
     assert!(
-        ids.iter().all(|id| id.starts_with("r:[REDACTED]#")),
-        "{ids:?}"
+        read_ids.iter().all(|id| id.starts_with("r:[REDACTED]#")),
+        "{read_ids:?}"
     );
+    let two: Vec<&Vec<String>> = read_streams.iter().filter(|w| w.len() == 2).collect();
+    assert_eq!(two.len(), 1, "{read_streams:?}");
+    assert_ne!(two[0][0], two[0][1]);
+    assert!(
+        read_streams
+            .iter()
+            .flatten()
+            .all(|w| w.starts_with("masked:")),
+        "{read_streams:?}"
+    );
+    let again = read();
+    assert_eq!((ids(&again), streams(&again)), (read_ids, read_streams));
     std::fs::remove_dir_all(&dir).ok();
 }
 

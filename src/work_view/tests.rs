@@ -55,6 +55,25 @@ fn noted(h: &mut Store, repo: &str, list: &str, fields: Value) {
         .unwrap();
 }
 
+/// A progress review of the request `about` at `ts`, as the review job appends it.
+fn reviewed(h: &mut Store, about: &str, ts: i64, percent: i64) {
+    let fields = json!({"state": "in-progress", "percent": percent, "shipped": "",
+        "narrative": "The migration came first.", "milestones": []});
+    let op = MyWorkOp {
+        job: crate::my_work_progress::NAME.into(),
+        about: about.into(),
+        entry: "fake".into(),
+        ts,
+        read: Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
 /// A focus area the owner keeps.
 fn kept(h: &Store, id: &str, name: &str) {
     let area = json!({"kind": "area", "name": name, "status": "kept", "source": "owner",
@@ -89,9 +108,9 @@ fn goals_op(h: &mut Store, ts: i64, seq: i64, items: Value, summary: &str) {
     h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
 }
 
-/// A home of the last minutes: Claude's requests that need the owner, that shipped and that are
-/// done, Codex's that only asked, and a request of its own name with a list of one name in two
-/// repositories. Goals written over the first prompt ask for the parser (an area with an open
+/// A home of the last minutes: Claude's requests that need the owner, that shipped, that are done
+/// and that two reviews found rising, Codex's that only asked, and a request of its own name with a
+/// list of one name in two repositories. Goals written over the first prompt ask for the parser (an area with an open
 /// ask), leave an open ask in an area nothing was asked for in (its `asked` is null), and one open
 /// ask under no area. Goals of 45 days ago make a finished month of Past focus.
 fn home() -> (Store, i64) {
@@ -112,6 +131,12 @@ fn home() -> (Store, i64) {
     h.said("s3", R, t + 90_000, "Write the changelog.");
     let done = json!({"task": "Changelog", "status": "doing", "request_status": "done"});
     wrote(&mut h, "claude", "s3", "changelog", done);
+    h.said("s4", R, t + 100_000, "Write the migration.");
+    let migration = json!({"task": "Migration", "status": "doing"});
+    wrote(&mut h, "claude", "s4", "migration", migration);
+    for (at, percent) in [(t + 240_000, 20), (t + 480_000, 50)] {
+        reviewed(&mut h, "c:claude:s4", at, percent);
+    }
     for (repo, task) in [(R, "Bump the version"), (R2, "Tag the release")] {
         let fields = json!({"task": task, "status": "doing", "request_id": "rq1",
             "request": "Cut the release"});
@@ -375,13 +400,52 @@ fn an_items_status_is_read_as_my_work_reads_it() {
     );
 }
 
+/// A review's day the gate masked is no day: a request shipped by that review alone stays
+/// readable, completed at its last update, and a milestone of a masked day has none (Codex on
+/// #1087).
+#[test]
+fn a_masked_review_day_leaves_the_request_readable() {
+    let work = json!({"requests": [{"id": "r:x", "status": "shipped", "title": "Release",
+        "updated": 1_795_100_000_000_i64, "completed_at": null,
+        "ask": {"text": "Release it.", "ts": 1_795_000_000_000_i64},
+        "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64,
+            "completed": "[REDACTED]", "completed_at": null},
+        "story": {"narrative": "Shipped.", "milestones": [{"date": "[REDACTED]", "text": "Built"}]}}]});
+    let request = &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc)["humanRequests"][0];
+    assert_eq!(request["completedAtEpoch"], json!(1_795_100_000_000_i64));
+    assert!(request["progress"]["shippedAt"].is_null(), "{request}");
+    assert!(
+        request["progress"]["milestones"][0]["at"].is_null(),
+        "{request}"
+    );
+}
+
+/// A conversation is titled by its own request, whichever request names it first: an explicit
+/// request that names it too does not relabel it in the other's drawer (Codex on #1087).
+#[test]
+fn a_conversation_is_titled_by_its_own_request() {
+    let c = json!({"agent": "claude", "id": "c:claude:c1"});
+    let work = json!({"requests": [
+        {"id": "r:x", "status": "working", "title": "Explicit", "projects": ["a"], "sessions": [c]},
+        {"id": "c:claude:c1", "status": "working", "title": "Its own", "projects": ["b"],
+            "sessions": [c]}]});
+    let agents = &snapshot_at(&work, &json!({}), 0, &Utc)["agents"];
+    assert_eq!(agents.as_array().unwrap().len(), 1, "{agents}");
+    let shown = (&agents[0]["sessionTitle"], &agents[0]["project"]);
+    assert_eq!(shown, (&json!("Its own"), &json!("b")));
+}
+
+fn hex(t: &str, n: usize) -> bool {
+    t.len() == n && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// What changes from home to home and run to run, written as its kind: the times, days and
 /// months, the keyed fingerprints and the masks' prints. What is left is what the answer says.
 fn steady(v: &Value) -> Value {
     match v {
         Value::Number(n) if n.as_i64().is_some_and(|n| n > 1_000_000_000_000) => json!("<ms>"),
         Value::String(s) => {
-            let iso = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T[0-9:.]+(Z|[+-]\d{2}:\d{2})").unwrap();
+            let iso = regex::Regex::new(r"\d{4}-\d{2}-\d{2}T[0-9:.]+(Z|[+-]\d{2}:\d{2})?").unwrap();
             let stamp = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$").unwrap();
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
@@ -393,8 +457,13 @@ fn steady(v: &Value) -> Value {
         Value::Array(a) => Value::Array(a.iter().map(steady).collect()),
         Value::Object(o) => Value::Object(
             (o.iter())
-                .map(|(k, v)| match k.as_str() {
-                    "contentFingerprint" | "revision" if v.is_string() => {
+                .map(|(k, v)| match (k.as_str(), v.as_str()) {
+                    // A version's keyed hash and the snapshot's time, each in its own shape: an
+                    // empty or malformed one stays as it is and differs.
+                    ("contentFingerprint", Some(t)) if hex(t, 64) => (k.clone(), json!("<kept>")),
+                    ("revision", Some(t))
+                        if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
                         (k.clone(), json!("<kept>"))
                     }
                     _ => (k.clone(), steady(v)),
@@ -416,14 +485,20 @@ fn the_contract_snapshot_is_this_homes_answer() {
     // in the month before and make a second month of Past focus, so the comparison waits for a
     // later run; upgrade if the home's clock can be set.
     let local = Local::now();
-    if local.day() == 1 && local.hour() == 0 && local.minute() < 15 {
+    let first_minutes = local.day() == 1 && local.hour() == 0 && local.minute() < 15;
+    let write = std::env::var_os("OBOETE_CONTRACT_WRITE").is_some();
+    assert!(
+        !(first_minutes && write),
+        "no contract snapshot is written in a month's first 15 minutes: wait for them to pass"
+    );
+    if first_minutes {
         return;
     }
     let (h, now) = home();
     let (work, goals) = answers(&h, now);
     let fresh = snapshot_at(&work, &goals, now, &Utc);
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/snapshot.json");
-    if std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
+    if write {
         let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
         std::fs::write(&path, text).unwrap();
         return;

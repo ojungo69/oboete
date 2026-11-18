@@ -6,7 +6,7 @@
 //! claude-mem's own mapper, `live/to-work-model.ts`, over the answer of a synthetic home
 //! (`ui/work-view/contract/`).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use chrono::{Local, Months, NaiveDate, SecondsFormat, TimeZone, Utc};
@@ -23,7 +23,7 @@ where
     Tz::Offset: Display,
 {
     let mut agents = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let requests: Vec<Value> = (arr(&work["requests"]).iter())
         .map(|r| request(r, &mut agents, &mut seen))
         .collect();
@@ -99,11 +99,15 @@ fn stamp<Tz: TimeZone>(ms: &Value, tz: &Tz) -> Value {
 }
 
 /// A civil day (`YYYY-MM-DD`) at noon with no zone: the browser reads it in its own zone, so the
-/// day shown is the one written, wherever it is shown.
+/// day shown is the one written, wherever it is shown. None for anything else, a day the gate
+/// masked among them: the pages would take it for a date they cannot read.
 fn noon(day: &Value) -> Value {
-    match day.as_str() {
-        Some(d) if !d.is_empty() => json!(format!("{d}T12:00:00")),
-        _ => Value::Null,
+    match day
+        .as_str()
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    {
+        Some(d) => json!(format!("{d}T12:00:00")),
+        None => Value::Null,
     }
 }
 
@@ -157,8 +161,8 @@ fn lifecycle(status: &str) -> &'static str {
 }
 
 /// One My Work request as claude-mem's human request; each conversation's agent goes in `agents`
-/// once.
-fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashSet<String>) -> Value {
+/// once, titled by the conversation's own request, else by the first request that names it.
+fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashMap<String, usize>) -> Value {
     let status = r["status"].as_str().unwrap_or("unknown");
     let mut own = r["id"].clone();
     let mut agent_ids = Vec::new();
@@ -169,20 +173,24 @@ fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashSet<String>) -> Va
             c["id"].as_str().unwrap_or(""),
         );
         let key = format!("{agent}:{id}");
-        if seen.insert(key.clone()) {
+        let at = *seen.entry(key.clone()).or_insert_with(|| {
             agents.push(json!({
                 "id": key, "label": label(agent), "platformSource": platform(agent),
                 "sessionTitle": s(&r["title"]),
                 "project": arr(&r["projects"]).first().cloned().unwrap_or(Value::Null),
                 "contentSessionId": id,
             }));
-        }
+            agents.len() - 1
+        });
         let conversation = json!(["conversation", platform(agent), id]).to_string();
         // A conversation's own request is known by the conversation's key, as claude-mem's is:
         // its drawer gives that conversation the ask's time (`to-work-model.ts:228`). A write
         // that names it takes oboete's id back from the key's last part.
         if r["id"] == id {
             own = json!(conversation);
+            // Its title and project are the conversation's, whichever request named it first.
+            agents[at]["sessionTitle"] = s(&r["title"]);
+            agents[at]["project"] = arr(&r["projects"]).first().cloned().unwrap_or(Value::Null);
         }
         keys.push(json!(conversation));
         agent_ids.push(json!(key));
@@ -263,7 +271,10 @@ fn request(r: &Value, agents: &mut Vec<Value>, seen: &mut HashSet<String>) -> Va
                 Some(at) => iso(at),
                 None => shipped_on,
             },
-            "readings": [],
+            "readings": (arr(&progress["readings"]).iter())
+                .filter_map(|r| Some(json!({"at": iso(r["ts"].as_i64()?),
+                    "percent": r["percent"].as_f64()?})))
+                .collect::<Vec<_>>(),
             "narrative": s(&story["narrative"]),
             "milestones": (arr(&story["milestones"]).iter())
                 .map(|m| json!({"at": noon(&m["date"]), "text": s(&m["text"])}))

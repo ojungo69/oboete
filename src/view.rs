@@ -2678,17 +2678,16 @@ impl Viewer {
             // registers before both answers or after it. raw.db first, then the hold, the order a
             // restore takes them in; each reader takes its own hold within this one.
             "work-view" => {
-                let stores = crate::search::b::stores(&self.home)?;
-                let _read = match stores {
-                    Some(_) => Some(crate::dispatch::reading(
-                        &self.home,
-                        crate::db::OPEN_WRITE_WAIT,
-                    )?),
-                    None => None,
+                let now = crate::db::now_ms();
+                // No store yet: an empty home's snapshot, at once. A reader that opened a store
+                // made meanwhile would read outside the hold below (Codex on #1087).
+                let Some(_stores) = crate::search::b::stores(&self.home)? else {
+                    let empty = crate::work_view::snapshot(&json!({}), &json!({}), now);
+                    return Ok(Response::json(&empty));
                 };
+                let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
                 // The work-view shows no deliverables yet: their links are not made.
                 let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
-                let now = crate::db::now_ms();
                 let week = crate::my_work::Range::Week;
                 let work = crate::my_work::listed(&self.home, week, now, &tag)?;
                 let goals = crate::my_work_goals::page(&self.home, now)?;
@@ -2696,7 +2695,6 @@ impl Viewer {
                 let snapshot = crate::work_view::snapshot(&work, &goals, now);
                 return Ok(Response::json(&snapshot));
             }
-            // What the work-view's transport polls (ui/work-view/patches/0001): the page's version.
             "work-view/version" => return self.api("version", q),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {

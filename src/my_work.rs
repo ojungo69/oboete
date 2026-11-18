@@ -2733,6 +2733,11 @@ fn progress(
         // gives staying for "Asked again after ship" (#731).
         "completed_at": completed_at.filter(|_| shipped),
         "estimate": (!shipped).then(|| crate::my_work_progress::estimate(readings)).flatten(),
+        // The readings it was measured from (the newest two), oldest first, as claude-mem's
+        // progress has its history: its pages measure their estimate from them as `estimate` does.
+        "readings": (readings.iter().rev())
+            .map(|r| json!({"ts": r.ts, "percent": r.percent}))
+            .collect::<Vec<_>>(),
     })
 }
 

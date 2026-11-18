@@ -248,9 +248,10 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository), the
   weekly chapters of the Build story follow its recap, a finished month of goals is a period of Past
-  focus, a conversation's own request is known by the conversation's key, a request is complete when
-  its newest status completed it (or, shipped by a review alone, on the review's day), and the goals'
-  times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
+  focus, a conversation's own request is known by the conversation's key and titles the
+  conversation, a request is complete when its newest status completed it (or, shipped by a review
+  alone, on the review's day), a request's two newest reviews are its readings, from which the pages
+  measure the pace oboete's page shows, and the goals' times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
   (oboete's own page shows them), the evidence links (X37), the subagents (a later pull request),
   the rules (they come with My Rules), and continuing a conversation (X36).
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
