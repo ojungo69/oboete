@@ -25,6 +25,7 @@ jobs:
       - name: Build the bundle again from the pinned tree and the patches
         run: ui/work-view/build.sh
       - name: The committed bundle is the one built
+        # --ignored and --untracked-files=all: a built file that .gitignore matches is a difference too.
         run: |
-          git status --porcelain -- assets/work-view
-          test -z "$(git status --porcelain -- assets/work-view)"
+          git status --porcelain --ignored --untracked-files=all -- assets/work-view
+          test -z "$(git status --porcelain --ignored --untracked-files=all -- assets/work-view)"

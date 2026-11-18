@@ -21,6 +21,10 @@ for (const file of readdirSync(assets).filter((f) => f.endsWith('.map')).sort())
 }
 const cssFiles = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? cssFiles(join(dir, e.name)) : e.name.endsWith('.css') ? [join(dir, e.name)] : [])
+// The build tools add code of their own that no source map lists: Vite's module preload helper and
+// Rolldown's runtime helpers.
+add('vite')
+add('rolldown')
 for (const file of cssFiles(join(app, 'src'))) {
   for (const [, spec] of readFileSync(file, 'utf8').matchAll(/@import\s+(?:url\()?["']([^"'.][^"']*)["']/g)) add(nameOf(spec))
 }
@@ -36,13 +40,18 @@ const out = [
 ]
 const section = (title, text) => out.push(`## ${title}`, '', '```text', text.trimEnd(), '```', '')
 section('claude-mem (Apache-2.0): its NOTICE', readFileSync(join(work, 'NOTICE'), 'utf8'))
-for (const [name, dir] of [...packages].sort(([a], [b]) => a.localeCompare(b))) {
+// Code-point order: the same on every machine, whatever its locale.
+for (const [name, dir] of [...packages].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
   const declared = typeof pkg.license === 'string' ? pkg.license : pkg.license?.type ?? 'not declared'
   const own = readdirSync(dir).find((f) => LICENCE_FILE.test(f))
   const given = join(overrides, `${name.replace('/', '__')}.txt`)
-  const text = own ? readFileSync(join(dir, own), 'utf8') : existsSync(given) ? readFileSync(given, 'utf8') : null
+  let text = own ? readFileSync(join(dir, own), 'utf8') : existsSync(given) ? readFileSync(given, 'utf8') : null
   if (text === null) throw new Error(`${name} ${pkg.version}: no licence text, in the package or in ${given}`)
+  // A tool's licence file also carries the licences of what it bundles for itself, none of which
+  // reaches this bundle: its own licence is the part before that list.
+  const bundled = text.search(/^#+ *Licenses? of bundled dependencies/im)
+  if (bundled > 0) text = text.slice(0, bundled)
   section(`${name} ${pkg.version} (${declared})`, text)
 }
 const hanken = readdirSync(assets).some((f) => f.startsWith('HankenGrotesk'))

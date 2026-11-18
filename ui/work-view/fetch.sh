@@ -27,24 +27,27 @@ paths=(
 )
 
 commit=$(git -C "$src" rev-parse --verify "$tag^{commit}")
-# The new tree and its UPSTREAM line are staged beside upstream/, so that each move below is a
-# rename on one file system. The old tree is kept until both are in place, and put back if either
-# move fails: the tree on disk is always the one UPSTREAM names.
-staged=$(mktemp -d "$here/.upstream.XXXXXX")
-old="$staged.old"
-record="$staged.UPSTREAM"
-trap 'rm -rf "$staged" "$record"' EXIT
-git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$staged"
-chmod 755 "$staged"
-printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$record"
+# One reserved folder beside upstream/ holds the new tree, its UPSTREAM line and, while they move
+# in, the old tree: each move is a rename on one file system, the old tree is put back if either
+# move fails (the tree on disk is always the one UPSTREAM names), and nothing outside the reserved
+# folder is removed.
+swap=$(mktemp -d "$here/.upstream.XXXXXX")
+trap 'rm -rf ${swap:+"$swap"}' EXIT
+mkdir "$swap/new"
+git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"
+chmod 755 "$swap/new"
+printf 'claude-mem %s, commit %s\n' "$tag" "$commit" > "$swap/UPSTREAM"
 if [ -e "$here/upstream" ]; then
-  mv "$here/upstream" "$old"
+  mv "$here/upstream" "$swap/old"
 fi
-if ! mv "$staged" "$here/upstream" || ! mv "$record" "$here/UPSTREAM"; then
-  rm -rf "${here:?}/upstream"
-  if [ -e "$old" ]; then mv "$old" "$here/upstream"; fi
+if ! mv "$swap/new" "$here/upstream" || ! mv "$swap/UPSTREAM" "$here/UPSTREAM"; then
+  if [ -e "$swap/old" ]; then
+    rm -rf "${here:?}/upstream"
+    if ! mv "$swap/old" "$here/upstream"; then
+      echo "fetch.sh: the old tree is kept in $swap/old" >&2
+      swap=
+    fi
+  fi
   exit 1
 fi
-trap - EXIT
-rm -rf "$old"
 echo "upstream/ is claude-mem $tag ($commit): $(find "$here/upstream" -type f | wc -l) files"

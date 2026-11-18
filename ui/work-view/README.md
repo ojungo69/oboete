@@ -4,7 +4,7 @@ Decision 114 (2026-11-17) serves claude-mem's work-view on oboete's engine: My W
 
 - `upstream/` is the work-view as claude-mem published it, unchanged. It holds the sources, the files outside `src/ui/my-work` they import, and claude-mem's root `package.json`, which sets `"type": "module"`. `LICENSE` and `NOTICE` are claude-mem's. claude-mem's `src/` layout is kept, because the sources' relative imports climb to it.
 - `UPSTREAM` names the tag and the commit `upstream/` came from. oboete's `NOTICE` points here rather than repeating them.
-- `fetch.sh` makes `upstream/` again from a claude-mem checkout at a tag: `ui/work-view/fetch.sh <checkout> <tag>`.
+- `fetch.sh` makes `upstream/` again from a claude-mem checkout at a tag: `ui/work-view/fetch.sh <checkout> <tag>`. Nothing else changes `upstream/`. A Dependabot pull request that edits its `package-lock.json` is closed, and its advisory is handled where the bundle's packages are checked (step 4 below).
 - `patches/` holds oboete's changes, applied in order. Each file they change says "Modified by oboete".
   - `0001-token-and-transport.patch` sends oboete's token header, keeps the pages' own key in the browser, and polls in place of claude-mem's event stream. It answers claude-mem's setup probe in the page, and takes the key out of the address once read.
   - `0002-build-output.patch` keeps the build inside its copy.
