@@ -1306,6 +1306,14 @@ fn serve(
                 e.poll(&raw, &k)?;
                 e.hold(hold);
             }
+            // #1063: a backlog that outlasts the pause indexes' hour does not hold them off
+            // (CodeRabbit on #1069), after the checks a round makes before its upkeep.
+            if yields && !pause_kept {
+                if crate::backup::restore_requested(home) || replaced(&raw) {
+                    return Ok(true);
+                }
+                pause_kept = pause_upkeep(home, &raw, departing, calling(phases), Upkeep::Round);
+            }
             unread = Some((marks, seen));
             continue;
         }

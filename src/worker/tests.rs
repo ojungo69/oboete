@@ -181,9 +181,16 @@ fn a_build_its_hour_started_that_fails_waits_another_hour() {
     assert_eq!(index::made(&raw, Pause), others);
     let again = pause_mark(p).unwrap();
     assert!(again >= start, "the failed build marks a new wait");
+    // What failed the build gone, a look within the hour still builds nothing: the hour holds it
+    // off, not the failure (the local Codex review of #1069).
+    block.execute_batch("DROP TABLE records_expired").unwrap();
     assert!(!pause_upkeep(p, &raw, false, false, Upkeep::Round));
     assert_eq!(pause_mark(p), Some(again), "no other build within the hour");
-    block.execute_batch("DROP TABLE records_expired").unwrap();
+    assert_eq!(
+        index::made(&raw, Pause),
+        others,
+        "nothing built within the hour"
+    );
     pause_mark_back(p, index::PAUSE_WAIT_MS);
     assert!(pause_upkeep(p, &raw, false, false, Upkeep::Round));
     let mut last = others.clone();
@@ -2468,6 +2475,81 @@ fn a_round_whose_store_a_newer_oboete_stamped_writes_no_pause_mark() {
         None,
         "a mark through the stamped store's handle"
     );
+}
+
+/// CodeRabbit on #1069: a round whose time runs out before its consumers have read what it began
+/// with still looks after the pause's indexes, so a backlog that outlasts their hour does not
+/// hold their build off. Each step of this consumer outlasts a round's time.
+#[test]
+fn a_round_behind_its_backlog_builds_the_pause_indexes_after_their_hour() {
+    use crate::raw::index::{self, Builder::Pause};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Behind {
+        steps: usize,
+        built_at: Arc<AtomicUsize>,
+    }
+    impl Consumer for Behind {
+        fn name(&self) -> &'static str {
+            "behind"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, _: &str, after: i64) -> Result<i64> {
+            self.steps += 1;
+            if !index::made(raw, Pause).is_empty() {
+                let _ = self.built_at.compare_exchange(
+                    0,
+                    self.steps,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+            }
+            std::thread::sleep(PASS_BUDGET + Duration::from_millis(50));
+            Ok(raw
+                .after(raw.device(), after, 1)?
+                .last()
+                .map_or(after, |r| r.seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let p = home.path();
+    let mut raw = raw::open(p).unwrap();
+    for i in 0..4 {
+        let e = raw::Event {
+            ts: crate::db::now_ms() - 1_000,
+            ..raw::test_event(&format!("record {i}"))
+        };
+        raw.append(&e).unwrap();
+    }
+    drop(raw);
+    // The pause's wait was marked over an hour ago.
+    Connection::open(p.join("raw.db"))
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                index::WAITING,
+                (crate::db::now_ms() - index::PAUSE_WAIT_MS - 60_000).to_string()
+            ],
+        )
+        .unwrap();
+    let built_at = Arc::new(AtomicUsize::new(0));
+    let behind = Behind {
+        steps: 0,
+        built_at: Arc::clone(&built_at),
+    };
+    let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> { Ok(Phase::Idle) };
+    let held = lock(p).unwrap();
+    let phases = Phases {
+        yields: true,
+        curation: Some(&mut phase),
+        ..Phases::default()
+    };
+    run_holding(p, 0, vec![Box::new(behind)], || {}, held, phases).unwrap();
+    let at = built_at.load(Ordering::SeqCst);
+    assert!(at > 0 && at < 4, "built at step {at} of the backlog's 4");
 }
 
 /// The local Codex review of #1069: an idle time's upkeep, too, builds nothing through the old

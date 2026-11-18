@@ -559,12 +559,20 @@ meta (`pause_index_waiting`), which outlasts the worker's exits. A look that a c
 from the build marks it too; one while the worker is leaving, or while a command asks it aside,
 writes nothing. An hour after the mark, the worker
 builds them without the pause. It does so at an idle time or in a round, so a worker that never
-has an idle time builds them too. A build the hour starts first marks the time again, so a build
-that fails waits another hour. A hook during the build waits its 2 s and keeps its events for the
-next hook to write back, as during a pause's build. A pause still builds them as before. A store
-that has every pause index writes nothing for them: the mark goes when the last one is built.
+has an idle time builds them too, and a round whose time runs out before its consumers have read
+what it began with looks too, so a backlog that outlasts the hour does not hold them off. A build the hour starts first marks the time again, so after a
+build that fails, the next one with no pause waits another hour; a pause still builds them at any
+time, as before. A hook during the build waits for the store as it does for any held store (2 s,
+or for a call Pi waits for, until a second before Pi kills it: #955) and keeps its events for the
+next hook to write back, as during a pause's build. A store that has every pause index writes
+nothing for them: the mark goes when the last one is built.
 
 Tests: `worker::tests::the_pause_indexes_are_built_once_they_have_waited_their_hour` (at an idle
 time and in a round), `a_build_its_hour_started_that_fails_waits_another_hour`,
-`a_store_that_has_every_pause_index_writes_nothing_for_them` and
-`a_busy_resident_worker_builds_the_pause_indexes_after_their_hour`.
+`a_store_that_has_every_pause_index_writes_nothing_for_them`,
+`a_busy_resident_worker_builds_the_pause_indexes_after_their_hour`,
+`a_round_behind_its_backlog_builds_the_pause_indexes_after_their_hour`, and for the mark and the
+checks before a look: `a_mark_left_beside_every_pause_index_stays_while_leaving_or_asked_aside`,
+`a_mark_no_build_writes_starts_the_wait_again`, `a_mark_whose_delete_failed_goes_at_the_next_look`,
+`a_round_whose_store_a_newer_oboete_stamped_writes_no_pause_mark` and
+`an_idle_upkeep_whose_store_a_newer_oboete_stamped_builds_nothing`.
