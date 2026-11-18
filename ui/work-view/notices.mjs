@@ -129,68 +129,15 @@ for (const font of dist.filter((f) => FONT.test(f))) {
   if (!source) throw new Error(`${shown(font)}: a font no package listed here holds, and no notice covers`)
   if (source.startsWith(own + sep)) hanken = true
 }
-// Each data: URL in the bundle's scripts, styles and pages that holds a font, by its type or by its
-// header (a font labelled application/octet-stream too): its bytes are a listed package's font, or
-// Hanken Grotesk's. A URL is read as the browser reads it: to the end of the literal it is in (the
-// quote, backtick or parenthesis before it closes it; a bare one ends at whitespace), without the
-// tabs and line breaks URL parsing drops, and without its #fragment. Vite writes a font's bytes in
-// base64; a font whose payload is not plain base64 as written stops the build, as this check
-// compares that form alone.
-const DATA = /data:/gi
-const CLOSE = { '"': '"', "'": "'", '`': '`', '(': ')' }
-function* dataUrls(text) {
-  for (const m of text.matchAll(DATA)) {
-    const close = CLOSE[text[m.index - 1]]
-    let end = m.index
-    while (end < text.length && (close ? text[end] !== close : !/[\s"'`()]/.test(text[end]))) end++
-    const literal = text.slice(m.index + 5, end).replace(/[\t\n\r]/g, '')
-    const body = literal.split('#')[0]
-    const comma = body.indexOf(',')
-    if (comma < 0) continue
-    // The header as the Fetch standard's data: URL reading takes it: trimmed, and in base64 when
-    // it ends with `;`, any spaces, and `base64`.
-    const header = body.slice(0, comma).trim()
-    const marked = /^(.*?);[ ]*base64$/i.exec(header)
-    const type = (marked ? marked[1] : header).split(';')[0].trim()
-    yield { type, base64: !!marked, data: body.slice(comma + 1), written: text.slice(m.index, end) }
-  }
-}
-const FONT_TYPE = /^(font\/[\w.+-]+|application\/(x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)$/i
-// Base64 as Vite writes it: whole groups of four, `=` only to pad the last.
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
-// A font by its header, not by a few bytes alone: a woff or woff2 gives its own length at byte 8; an
-// sfnt (TrueType, OpenType) the number of its tables at byte 4, each 16 bytes after a 12-byte head;
-// a collection its version and the number of its fonts; an EOT one of its three versions at byte 8
-// and "LP" at byte 34.
-const tag = (b) => b.subarray(0, 4).toString('latin1')
-function isFont(b) {
-  if (b.length < 12) return false
-  if (['wOF2', 'wOFF'].includes(tag(b))) return b.readUInt32BE(8) === b.length
-  if (['\0\x01\0\0', 'true', 'OTTO'].includes(tag(b))) {
-    const tables = b.readUInt16BE(4)
-    return tables > 0 && b.length >= 12 + 16 * tables
-  }
-  if (tag(b) === 'ttcf') {
-    const fonts = b.length >= 16 ? b.readUInt32BE(8) : 0
-    return [0x00010000, 0x00020000].includes(b.readUInt32BE(4)) && fonts > 0 && b.length >= 12 + 4 * fonts
-  }
-  return b.length > 36 && [0x00010000, 0x00020001, 0x00020002].includes(b.readUInt32LE(8)) && b[34] === 0x4c && b[35] === 0x50
-}
-const known = [...sources.values()].flat()
+// Vite inlines an asset under 4 KiB (its `assetsInlineLimit`) in a script, a style or a page as a
+// `data:` URL of the type its extension gives (font/woff2 and the like). A font so inlined has no
+// file of its own to read against a package's, so the build takes none: such a font stops it, and
+// the fix is a limit that sends fonts as files. Read in the text as it is, with no URL taken apart:
+// `data:`, any whitespace, a font type.
+const INLINED_FONT = /data:\s*(?:font\/|application\/(?:x-)?font-|application\/vnd\.ms-fontobject)/i
 for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
-  for (const { type, base64, data, written } of dataUrls(readFileSync(file, 'utf8'))) {
-    // The bytes as the browser reads them, each %XX escape the byte it stands for (a font's are
-    // not UTF-8), to tell a font by.
-    const text = data.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    const bytes = Buffer.from(text, base64 ? 'base64' : 'latin1')
-    if (!FONT_TYPE.test(type) && !isFont(bytes)) continue
-    // Plain base64 as written: no escape, no tab or line break inside.
-    const payload = written.split('#')[0].slice(written.indexOf(',') + 1)
-    if (!base64 || !BASE64.test(payload)) throw new Error(`${shown(file)}: a font in a data: URL (${type || 'no type'}) not in plain base64, which this check cannot read`)
-    const source = known.find((f) => readFileSync(f).equals(bytes))
-    if (!source) throw new Error(`${shown(file)}: a font inlined as a data: URL (${type || 'no type'}) that no package listed here holds, and no notice covers`)
-    if (source.startsWith(own + sep)) hanken = true
-  }
+  const found = INLINED_FONT.exec(readFileSync(file, 'utf8'))
+  if (found) throw new Error(`${shown(file)}: a font inlined as a data: URL (${found[0]}), which no file of a package listed here stands for: set Vite's assetsInlineLimit so that fonts go as files`)
 }
 if (hanken) {
   const ofl = lf(join(own, 'HankenGrotesk-OFL.txt'))
