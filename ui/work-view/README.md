@@ -30,3 +30,11 @@ At each new release that is wanted:
 3. Run `build.sh`. When a patch no longer applies, make it again against the new tree: put the old tree, with its patched copy on top, in a scratch git repository, and use `git apply --3way` or a rebase.
 4. Read the diff of `assets/work-view/THIRD-PARTY-NOTICES.md` and check each package that is new or changed: where it comes from, what it runs when installed, and the advisories against it (decision 114).
 5. Commit `upstream/`, `UPSTREAM`, the patches and `assets/work-view/` together. `NOTICE` names `UPSTREAM`, so it does not change.
+
+## Advisories
+
+Checked on 2026-11-18, for claude-mem v15.19.0. GitHub's Dependabot lists 13 advisories against the vendored lockfiles. Only one of the packages they name is in the bundle:
+
+- `linkify-it` 3.0.3: two advisories of quadratic time on crafted text (GHSA-22p9-wv53-3rq4, GHSA-v245-v573-v5vm). `ansi-to-react` brings it in and calls it only for its `linkify` option. The pages render `<Ansi>` without that option (`components/ai-elements/terminal.tsx:215`), so its matcher never runs.
+
+The other twelve name build tools and claude-mem's own server: `hono`, `@hono/node-server`, `body-parser`, `minimatch`, `picomatch`, and `shell-quote`. `shell-quote` comes from claude-mem's root `package.json`, which the build never installs. None of them is in the bundle (`THIRD-PARTY-NOTICES.md`). The build runs them with install scripts off, as a user who cannot read the owner's keys.
