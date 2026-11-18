@@ -1,0 +1,30 @@
+# The work-view bundle (decision 114, ui/work-view/README.md). Built again from claude-mem's pinned
+# tree and oboete's patches, with install scripts off, it must be the committed assets/work-view/
+# byte for byte, so that what is served is what the sources and the patches make.
+name: work-view
+
+on:
+  pull_request:
+    paths: [ui/work-view/**, assets/work-view/**, .github/workflows/work-view.yml]
+  push:
+    branches: [main]
+    paths: [ui/work-view/**, assets/work-view/**, .github/workflows/work-view.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.3
+      - name: Build the bundle again from the pinned tree and the patches
+        run: ui/work-view/build.sh
+      - name: The committed bundle is the one built
+        run: |
+          git status --porcelain -- assets/work-view
+          test -z "$(git status --porcelain -- assets/work-view)"

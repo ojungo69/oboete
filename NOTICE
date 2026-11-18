@@ -28,9 +28,12 @@ src/ui/my-work/src/live/to-work-model.ts and src/ui/my-work/src/lib/product-icon
 which icon each kind of work product takes (`DELIVERABLE_KINDS` in assets/viewer/app.js).
 
 ui/work-view/upstream/ holds Claude-Mem's work-view (My Work, focus areas, Suggested, Past focus
-and My Rules) as published at v15.19.0, commit 01a86b23 (ui/work-view/UPSTREAM): its sources and
-the files outside src/ui/my-work they import, unchanged, with Claude-Mem's LICENSE and NOTICE
-beside them (decision 114, docs/page.md). No other code of Claude-Mem is included.
+and My Rules) as published at the release ui/work-view/UPSTREAM names: its sources and the files
+outside src/ui/my-work they import, unchanged, with Claude-Mem's LICENSE and NOTICE beside them
+(decision 114, docs/page.md). assets/work-view/ is that work-view with oboete's changes
+(ui/work-view/patches/, each changed file marked "Modified by oboete"), built by
+ui/work-view/build.sh. assets/work-view/THIRD-PARTY-NOTICES.md names every package and font the
+bundle holds, with its licence. No other code of Claude-Mem is included.
 
 This product includes a model graph derived from BGE-M3 (https://huggingface.co/BAAI/bge-m3),
 licensed under the MIT License:
