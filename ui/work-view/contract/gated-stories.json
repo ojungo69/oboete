@@ -78,5 +78,15 @@
         "writtenAt": null
       }
     }
+  },
+  {
+    "name": "a paragraph that opens with an issue's number, read without its word joiner",
+    "hidden": "zebravalue",
+    "story": {
+      "story": {
+        "narrative": "⁠#1087 [REDACTED]\n\nOther.\n\n## 2026-11-16\n\nNothing here.",
+        "writtenAt": null
+      }
+    }
   }
 ]

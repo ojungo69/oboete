@@ -232,7 +232,9 @@ fn home() -> (Store, i64) {
 
 /// What the route reads (`read`): the two answers as their readers give them, and the story's kept texts.
 fn answers(h: &Store, now: i64) -> (Value, Value) {
-    read(h.home.path(), now, &Gate::now()).unwrap()
+    let (mut work, goals) = read(h.home.path(), now).unwrap();
+    refer(h.home.path(), &mut work, &Gate::now()).unwrap();
+    (work, goals)
 }
 
 /// The one item of `list` whose `key` is `value`.
@@ -950,7 +952,8 @@ fn pages_views(narrative: &str) -> Vec<String> {
 /// gate reads again what it masked; and a rule on a kept text as it was kept, a heading and a line
 /// of prose under it, or a recap of a heading alone, which the story writes in another shape; and
 /// what the masks leave read again as the pages show each block, a heading masked in part or a
-/// paragraph a rule masked in part as it read the next.
+/// paragraph a rule masked in part as it read the next; and a paragraph read without the word
+/// joiner the adapter puts before its `#`.
 /// `ui/work-view/contract/gated-stories.json` is what it writes of each, which the Node test reads
 /// through the mapper; written again as the other contract files are (OBOETE_CONTRACT_WRITE=1).
 #[test]
@@ -968,7 +971,8 @@ fn a_story_is_read_whole_before_any_mask() {
                  { id = \"token\", regex = '^## (Token) Orchid$' }, \
                  { id = \"shown\", regex = '^\\[REDACTED\\] (Orchid)$' }, \
                  { id = \"context\", regex = '(Alpha) 42 Beta\\s+Gamma' }, \
-                 { id = \"paragraph\", regex = '^\\[REDACTED\\] (\\d+) Beta$' }]\n";
+                 { id = \"paragraph\", regex = '^\\[REDACTED\\] (\\d+) Beta$' }, \
+                 { id = \"issue\", regex = '^#1087 (zebravalue)$' }]\n";
     std::fs::write(gate.path().join("config.toml"), rules).unwrap();
     crate::redact::set_home(gate.path()).unwrap();
     let mut written = Vec::new();
@@ -1030,6 +1034,13 @@ fn a_story_is_read_whole_before_any_mask() {
             "Nothing here.",
             "42",
             false,
+        ),
+        (
+            "a paragraph that opens with an issue's number, read without its word joiner",
+            "#1087 zebravalue\n\nOther.",
+            "Nothing here.",
+            "zebravalue",
+            true,
         ),
     ] {
         assert_eq!(

@@ -246,14 +246,17 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   their readers give them, each text gated at its source, and from the Build story's kept texts,
   and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
   it is sent, and the Build story whole, read before any mask as each kept text as it was kept,
-  the kept texts joined, each block as the pages split it (whole and with a heading's `#` marks
-  off) and the story as sent, then each of those views but the kept texts read again as the masks
-  leave it, until the rules find nothing new. No rule on a key takes what the pages read by it:
+  the kept texts joined, each block of both as the pages split it (whole and with a heading's `#`
+  marks off) and the story as sent, then each of those views but the kept texts read again as the
+  masks leave it, until the rules find nothing new. A rule that matches only a part of one stored
+  text the story cuts out, or only stored texts it joins, and that the stored text's own gate leaves
+  as oboete's own page does, is a known limit (decision 115). No rule on a key takes what the pages read by it:
   the counts, days and times are read by the keys the code names. A request or conversation whose
   id My Work masked, or whose id the gate would change in a shape the snapshot writes it in, goes
   by a reference, `m:` and the keyed print of its stored id, the same in every place the pages
   match it; no id My Work gives begins `m:`. A work item's status goes as one of the words the
-  pages read, or as none. One read of the rules serves the references and the walk. The
+  pages read, or as none. One read of the rules, once My Work's and the goals' reads are done,
+  serves the references and the walk. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
   moves. Until the pages have their address, both answer at the main page's, with its token. What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its

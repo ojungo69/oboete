@@ -17,12 +17,13 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 /// `GET /api/work-view`'s answer: what `read` reads, made into the snapshot, its goals' times in
-/// this machine's zone, which the pages show as written. One read of the rules serves both: the
-/// references of what the gate would mask (`refer`) and the walk and the story of the snapshot
-/// (#1089).
+/// this machine's zone, which the pages show as written. The rules are read once both reads are
+/// done, so a rule added meanwhile is in force, and that one read serves the references of what
+/// the gate would mask (`refer`) and the walk and the story of the snapshot (#1089).
 pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
+    let (mut work, goals) = read(home, now)?;
     let gate = Gate::now();
-    let (work, goals) = read(home, now, &gate)?;
+    refer(home, &mut work, &gate)?;
     Ok(snapshot_at(&work, &goals, now, &Local, &gate))
 }
 
@@ -68,15 +69,13 @@ where
 /// What the snapshot is made of, read as `GET /api/work-view` reads it, in the readers' hold
 /// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
 /// text gated at its source and none of their keys, so that the counts, days and times the pages
-/// need are read by the keys this file names whatever a rule finds in a key; the Build story's
-/// texts as they were kept (`build_story` gates the story it makes of them); and each request and
-/// conversation whose id goes by a reference, marked with it (`refer`).
-pub(crate) fn read(home: &Path, now: i64, gate: &Gate) -> anyhow::Result<(Value, Value)> {
+/// need are read by the keys this file names whatever a rule finds in a key; and the Build story's
+/// texts as they were kept (`build_story` gates the story it makes of them).
+pub(crate) fn read(home: &Path, now: i64) -> anyhow::Result<(Value, Value)> {
     // The work-view shows no deliverables yet: their links are not made.
     let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
-    let mut work = crate::my_work::listed_kept(home, crate::my_work::Range::Week, now, &tag)?;
+    let work = crate::my_work::listed_kept(home, crate::my_work::Range::Week, now, &tag)?;
     let goals = crate::my_work_goals::page(home, now)?;
-    refer(home, &mut work, gate)?;
     Ok((work, goals))
 }
 
@@ -471,8 +470,9 @@ impl Narrative {
     /// `sent` with what the gate hides masked, found before any mask and then read again until it
     /// finds nothing new, as the gate reads one text (#1089). Each pass reads the views of the story
     /// as its masks so far leave it: the story as sent; its words joined with no mark of the
-    /// adapter's but its blank lines; and each of its blocks as the pages split it, whole and, as
-    /// the pages show every block, with a heading's leading `#` marks off. The first pass, before
+    /// adapter's but its blank lines; and each block of both as the pages split it, whole and, as
+    /// the pages show every block, with a heading's leading `#` marks off, so that a paragraph is
+    /// read with its word joiner and without it. The first pass, before
     /// any mask, reads each kept text as it was kept too. A pass reads all its views before it
     /// masks what they found, so that no mask of one takes the context a rule needs in another. The
     /// adapter's marks stay as they are: a mask that runs over one is cut on each side of it. Still
@@ -482,21 +482,27 @@ impl Narrative {
         let sent_at: Vec<Option<usize>> = (0..self.sent.len()).map(Some).collect();
         for pass in 0..=PASSES {
             let sent = shown(&self.sent, &sent_at, &masked);
-            let mut views = vec![shown(&self.plain, &self.at, &masked)];
-            views.extend(page_blocks(&sent));
-            if pass == 0 {
-                let kept = texts.iter().zip(&self.went);
-                views.extend(kept.map(|(text, went)| ((*text).to_owned(), went.clone())));
-            }
-            views.push(sent);
+            let plain = shown(&self.plain, &self.at, &masked);
+            let blocks = [page_blocks(&sent), page_blocks(&plain)];
             let mut found = Vec::new();
-            for (text, at) in &views {
+            // Each view is read where it is, none copied.
+            let mut read = |text: &str, at: &[Option<usize>]| {
                 let hidden = gate.hidden(text).unwrap_or_else(|| vec![(0, text.len())]);
                 for (s, e) in hidden {
                     let words = at[s..e].iter().flatten().copied();
                     found.extend(words.filter(|&p| !self.mark[p] && !masked[p]));
                 }
+            };
+            for (text, at) in blocks.iter().flatten() {
+                read(text, at);
             }
+            if pass == 0 {
+                for (text, went) in texts.iter().zip(&self.went) {
+                    read(text, went);
+                }
+            }
+            read(&plain.0, &plain.1);
+            read(&sent.0, &sent.1);
             if found.is_empty() {
                 break;
             }
