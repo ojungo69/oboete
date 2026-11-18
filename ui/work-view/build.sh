@@ -61,6 +61,16 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# A reserved folder of fetch.sh's that holds an UPSTREAM line is a fetch that did not finish: its
+# UPSTREAM is what says so, as a folder left only because its removal failed holds none. The trees
+# in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
+# run that was killed").
+for left in "$here"/.upstream.*/UPSTREAM; do
+  if [ -e "$left" ]; then
+    echo "build.sh: ${left%/UPSTREAM} is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+done
 work=$(mktemp -d)
 # An absolute path: Git ignores a relative entry of GIT_CEILING_DIRECTORIES, as a relative TMPDIR
 # would give. CDPATH is cleared, as a cd it resolved would print the folder too, and mktemp's path
@@ -73,7 +83,9 @@ cp -a "$here/upstream/." "$work/"
 # skip each one, and succeed with nothing applied; a file it skips stops the build all the same.
 for patch in "$here"/patches/*.patch; do
   # LC_ALL=C: Git words its messages in the caller's language, and the skip is read in English.
-  if ! out=$(cd "$work" && LC_ALL=C GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose "$patch" 2>&1); then
+  # --whitespace=nowarn: a warning prints the line it is about by itself, which a line of the patch
+  # that opens with "Skipped patch" would make read as a skip. The patch applies as it is either way.
+  if ! out=$(cd "$work" && LC_ALL=C GIT_CEILING_DIRECTORIES=$(dirname "$work") git apply --verbose --whitespace=nowarn "$patch" 2>&1); then
     printf '%s\n' "$out" >&2
     exit 1
   fi

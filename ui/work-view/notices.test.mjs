@@ -122,5 +122,32 @@ test('claude-mem\'s NOTICE gives the same notices with CRLF line ends, and a tre
   const [a, b, c] = [notice(lf), notice(crlf), notice(bare)]
   assert.equal(b.error, undefined)
   assert.equal(b.out, a.out)
+  // The NOTICE whole, its second line too, whichever line ends it has.
+  assert.match(b.out, /^claude-mem\nline two\n```$/m)
   assert.equal(c.error, undefined)
+})
+
+test('a font copied under its own name, with no hash, is a listed package\'s file by that name', () => {
+  // `-variable` looks like a hash of 8 characters: the name with it taken off is not the font's.
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/inter-variable.woff2']]]
+  const sources = ['../../node_modules/x/i.js']
+  const { error } = notice(tree({ packages, sources, fonts: [['dist/assets/inter-variable.woff2', 'font']] }))
+  assert.equal(error, undefined)
+  const hashed = notice(tree({ packages, sources, fonts: [['dist/assets/inter-variable-AbCd1234.woff2', 'font']] }))
+  assert.equal(hashed.error, undefined)
+})
+
+test('a font the build inlines as a data: URL is a listed package\'s file by its bytes, or it stops the build', () => {
+  const packages = [['node_modules/x', x('1.0.0'), 'MIT x', ['files/x-latin-wght-normal.woff2']]]
+  const sources = ['../../node_modules/x/i.js']
+  const url = (type, bytes) => `@font-face{src:url(data:${type};base64,${Buffer.from(bytes).toString('base64')}) format("woff2")}`
+  const listed = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', url('font/woff2', 'font')]] }))
+  assert.equal(listed.error, undefined)
+  const stray = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', url('font/woff2', 'other bytes')]] }))
+  assert.match(stray.error, /index-AbCd1234\.css: a font\/woff2 font inlined as a data: URL that no package listed here holds/)
+  // In a script, and of the older font types, as well.
+  const script = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.js', `const f = "${url('application/font-woff', 'other bytes')}"`]] }))
+  assert.match(script.error, /index-AbCd1234\.js: a application\/font-woff font inlined as a data: URL/)
+  const unread = notice(tree({ packages, sources, fonts: [['dist/assets/index-AbCd1234.css', '@font-face{src:url(data:font/woff2,wOF2)}']] }))
+  assert.match(unread.error, /index-AbCd1234\.css: a font\/woff2 data: URL not in base64/)
 })

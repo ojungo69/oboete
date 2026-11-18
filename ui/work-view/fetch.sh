@@ -86,6 +86,16 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# A reserved folder of fetch.sh's that holds an UPSTREAM line is a fetch that did not finish: its
+# UPSTREAM is what says so, as a folder left only because its removal failed holds none. The trees
+# in place may not be the pair UPSTREAM names, so nothing runs until it is recovered (README.md, "A
+# run that was killed").
+for left in "$here"/.upstream.*/UPSTREAM; do
+  if [ -e "$left" ]; then
+    echo "fetch.sh: ${left%/UPSTREAM} is a fetch that did not finish; see ui/work-view/README.md, \"A run that was killed\"" >&2
+    exit 1
+  fi
+done
 swap=$(mktemp -d "$here/.upstream.XXXXXX")
 mkdir "$swap/new"
 git -C "$src" archive --format=tar "$commit" "${paths[@]}" | tar -x -C "$swap/new"

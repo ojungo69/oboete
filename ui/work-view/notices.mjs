@@ -106,7 +106,9 @@ for (const { rel, dir, pkg } of copies) {
 for (const { entry, text, folders } of entries.values()) section(entry, text, folders)
 // Every font the bundle emits, in any of its folders, is a file of a package listed above or
 // claude-mem's own Hanken Grotesk, with its licence below, byte for byte: Vite copies fonts as they
-// are. The emitted name is the file's with `-` and an 8-character hash before the extension.
+// are. The emitted name is the file's with `-` and an 8-character hash before the extension, or the
+// file's own when it is copied as it is; a font under Vite's `assetsInlineLimit` (4 KiB) is inlined
+// in a script or a style as a `data:` URL instead, and is read by its bytes alone.
 const FONT = /\.(woff2?|ttf|otf|eot)$/i
 // A package's own files, not its nested node_modules (packages of their own); every file of a folder.
 const walk = (dir, nested = true) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -118,12 +120,28 @@ for (const file of [...copies.flatMap(({ dir }) => walk(dir, false)), ...hankenF
   sources.set(basename(file), [...(sources.get(basename(file)) ?? []), file])
 }
 let hanken = false
-for (const font of walk(join(app, 'dist')).filter((f) => FONT.test(f)).sort()) {
+const shown = (path) => relative(app, path).split(sep).join('/')
+const dist = walk(join(app, 'dist')).sort()
+for (const font of dist.filter((f) => FONT.test(f))) {
   const bytes = readFileSync(font)
-  const name = basename(font).replace(/-[\w-]{8}(\.[^.]+)$/, '$1')
-  const source = (sources.get(name) ?? []).find((f) => readFileSync(f).equals(bytes))
-  if (!source) throw new Error(`${relative(app, font).split(sep).join('/')}: a font no package listed here holds, and no notice covers`)
+  const names = new Set([basename(font), basename(font).replace(/-[\w-]{8}(\.[^.]+)$/, '$1')])
+  const source = [...names].flatMap((name) => sources.get(name) ?? []).find((f) => readFileSync(f).equals(bytes))
+  if (!source) throw new Error(`${shown(font)}: a font no package listed here holds, and no notice covers`)
   if (source.startsWith(own + sep)) hanken = true
+}
+// Each data: URL of a font type in the bundle's scripts, styles and pages: its bytes are a listed
+// package's font, or Hanken Grotesk's. Vite writes a font's bytes in base64; one it cannot read so
+// stops the build too.
+const DATA_FONT = /data:(font\/[\w.+-]+|application\/(?:x-)?font-[\w.+-]+|application\/vnd\.ms-fontobject)([^,'")\s]*),([A-Za-z0-9+/=]*)/gi
+const known = [...sources.values()].flat()
+for (const file of dist.filter((f) => /\.(m?js|css|html)$/i.test(f))) {
+  for (const [, type, params, data] of readFileSync(file, 'utf8').matchAll(DATA_FONT)) {
+    if (!/;base64$/i.test(params)) throw new Error(`${shown(file)}: a ${type} data: URL not in base64, which this check cannot read`)
+    const bytes = Buffer.from(data, 'base64')
+    const source = known.find((f) => readFileSync(f).equals(bytes))
+    if (!source) throw new Error(`${shown(file)}: a ${type} font inlined as a data: URL that no package listed here holds, and no notice covers`)
+    if (source.startsWith(own + sep)) hanken = true
+  }
 }
 if (hanken) {
   const ofl = lf(join(own, 'HankenGrotesk-OFL.txt'))
