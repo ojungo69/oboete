@@ -372,7 +372,8 @@ fn a_request_shipped_by_its_review_is_completed_on_the_reviews_day() {
         "updated": 1_795_100_000_000_i64, "started": 1_795_000_000_000_i64, "completed_at": null,
         "ask": {"text": "Release it.", "ts": 1_795_000_000_000_i64}, "checked": null,
         "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64,
-            "completed": "2026-11-19", "completed_at": null},
+            "completed": "2026-11-19", "completed_at": null,
+            "readings": [{"ts": 1_795_050_000_000_i64, "percent": 100}]},
         "story": {"narrative": "Shipped.", "milestones": [{"date": "2026-11-18", "text": "Built"}]}}]});
     let snapshot = snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc);
     let request = &snapshot["humanRequests"][0];
@@ -451,7 +452,8 @@ fn a_masked_review_day_leaves_the_request_readable() {
         "updated": 1_795_100_000_000_i64, "completed_at": null,
         "ask": {"text": "Release it.", "ts": 1_795_000_000_000_i64},
         "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64,
-            "completed": "[REDACTED]", "completed_at": null},
+            "completed": "[REDACTED]", "completed_at": null,
+            "readings": [{"ts": 1_795_050_000_000_i64, "percent": 100}]},
         "story": {"narrative": "Shipped.", "milestones": [{"date": "[REDACTED]", "text": "Built"}]}}]});
     let request = &snapshot_at(&work, &json!({}), 1_795_200_000_000, &Utc)["humanRequests"][0];
     assert_eq!(request["completedAtEpoch"], json!(1_795_100_000_000_i64));
@@ -521,7 +523,22 @@ fn a_request_its_review_shipped_is_completed_on_the_reviews_day() {
         json!("in-progress"),
         "{request}"
     );
+    // A review that did not ship the request has no shipped day (CodeRabbit on #1087).
+    assert!(request["progress"]["shippedAt"].is_null(), "{request}");
     assert_eq!(request["completedAtEpoch"], json!(noon));
+}
+
+/// A review goes with its own percent, its newest reading's, or not at all: a request a status
+/// shipped is at 100% whatever its review found (CodeRabbit on #1087).
+#[test]
+fn a_review_with_no_reading_of_its_own_does_not_go() {
+    let work = json!({"requests": [{"id": "r:n", "status": "shipped", "title": "Release",
+        "updated": 1_795_100_000_000_i64, "completed_at": 1_795_090_000_000_i64,
+        "progress": {"percent": 100, "reviewed": 1_795_050_000_000_i64, "completed": "2026-11-19",
+            "completed_at": 1_795_090_000_000_i64, "readings": []}}]});
+    let request = &snapshot_at(&work, &json!({}), 0, &Utc)["humanRequests"][0];
+    assert!(request["progress"].is_null(), "{request}");
+    assert_eq!(request["completedAtEpoch"], json!(1_795_090_000_000_i64));
 }
 
 /// The current goals' period is the window the goals page read, the 31 days that end now, in this
@@ -636,6 +653,34 @@ fn a_recap_of_headings_alone_gives_their_text() {
     assert_eq!(story, &json!("\u{2060}#1087"));
 }
 
+/// The pages split and trim by JavaScript's `\s`, which U+0085 is not of: a line of it alone does
+/// not end a paragraph (CodeRabbit on #1087).
+#[test]
+fn a_line_of_a_next_line_mark_alone_ends_no_paragraph() {
+    let work = json!({"story": {"recap": "A\n\u{85}\nB", "chapters": []}});
+    let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+    assert_eq!(story, &json!("A\n\u{85}\nB"));
+}
+
+/// A story with no paragraph at all, which the pages would not show, gives the text of its first
+/// heading of its own, not a week's, as its recap; one with nothing of its own has none (Codex on
+/// #1087).
+#[test]
+fn a_story_of_headings_alone_gives_its_first_heading_of_its_own() {
+    for (text, want) in [
+        (
+            "### Parser\n### Lexer",
+            "## 2026-11-16\n\nParser\n\n### Lexer",
+        ),
+        ("", "## 2026-11-16"),
+    ] {
+        let chapters = json!([{"week": "2026-11-16", "text": text}]);
+        let work = json!({"story": {"recap": "", "chapters": chapters}});
+        let story = &snapshot_at(&work, &json!({}), 0, &Utc)["story"]["story"]["narrative"];
+        assert_eq!(story, &json!(want), "{text:?}");
+    }
+}
+
 /// A case of a stored Build story: its name, its recap, and its chapters as (week, text).
 type Story = (
     &'static str,
@@ -678,6 +723,12 @@ const STORIES: &[Story] = &[
         &[],
     ),
     ("chapters alone", "", &[("2026-11-16", "Built the parser.")]),
+    (
+        "chapters of headings alone",
+        "",
+        &[("2026-11-16", "### Parser")],
+    ),
+    ("chapters of no text", "", &[("2026-11-16", "")]),
 ];
 
 /// The contract's Build stories: `ui/work-view/contract/stories.json` holds the story this adapter

@@ -70,5 +70,23 @@
         "writtenAt": null
       }
     }
+  },
+  {
+    "name": "chapters of headings alone",
+    "story": {
+      "story": {
+        "narrative": "## 2026-11-16\n\nParser",
+        "writtenAt": null
+      }
+    }
+  },
+  {
+    "name": "chapters of no text",
+    "story": {
+      "story": {
+        "narrative": "## 2026-11-16",
+        "writtenAt": null
+      }
+    }
   }
 ]

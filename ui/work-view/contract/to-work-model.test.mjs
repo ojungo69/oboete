@@ -161,6 +161,10 @@ test('each Build story the adapter writes reads, through the pinned mapper, as i
     'a recap after a byte-order mark, alone': ['#7 follows a byte-order mark.', ['#7 follows a byte-order mark.']],
     // A story of chapters alone opens on its newest chapter.
     'chapters alone': ['Built the parser.', ['2026-11-16', 'Built the parser.']],
+    // A story of headings alone opens on its first heading of its own.
+    'chapters of headings alone': ['Parser', ['2026-11-16', 'Parser']],
+    // Nothing of its own to show: no story.
+    'chapters of no text': null,
   }
   assert.deepEqual(stories.map((s) => s.name).sort(), Object.keys(want).sort())
   const shown = (text) => text.replace(/\u2060/g, '')

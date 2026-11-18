@@ -54,7 +54,9 @@ where
 /// The Build story: the recap, then each week's chapter under its week. The mapper splits the
 /// narrative at blank lines and takes its first block that is not a heading as the recap
 /// (`to-work-model.ts:433-442`), so a story of chapters alone opens on its newest chapter, and a
-/// recap of headings alone gives their text as its paragraphs, as the pages show a heading's.
+/// recap of headings alone gives their text as its paragraphs, as the pages show a heading's. A
+/// story with no paragraph at all, which the pages would not show, gives the text of its first
+/// heading of its own, not a week's, as one.
 fn build_story(story: &Value) -> Value {
     let recap = story["recap"].as_str().map(blocks).unwrap_or_default();
     let mut out: Vec<String> = match recap.iter().any(|b| !b.starts_with('#')) {
@@ -63,10 +65,20 @@ fn build_story(story: &Value) -> Value {
             .filter_map(|h| prose(h.trim_start_matches('#')))
             .collect(),
     };
+    let mut weeks = Vec::new();
     for c in arr(&story["chapters"]) {
         if let (Some(week), Some(text)) = (c["week"].as_str(), c["text"].as_str()) {
+            weeks.push(out.len());
             out.push(format!("## {week}"));
             out.extend(blocks(text));
+        }
+    }
+    if out.iter().all(|b| b.starts_with('#')) {
+        let first = (0..out.len())
+            .filter(|i| !weeks.contains(i))
+            .find_map(|i| Some((i, prose(out[i].trim_start_matches('#'))?)));
+        if let Some((i, text)) = first {
+            out[i] = text;
         }
     }
     match out.is_empty() {
@@ -117,9 +129,9 @@ fn prose(block: &str) -> Option<String> {
     })
 }
 
-/// JavaScript's `\s`, by which the pages split and trim, holds U+FEFF, which Rust's does not.
+/// JavaScript's `\s`, by which the pages split and trim: Rust's whitespace but U+0085, and U+FEFF.
 fn space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{FEFF}'
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{FEFF}'
 }
 
 /// Unix ms as ISO time with 3 fraction digits, in UTC: the times the mapper parses.
@@ -314,19 +326,20 @@ fn request<Tz: TimeZone>(
             Some(json!({"at": iso(r["ts"].as_i64()?), "percent": r["percent"].as_f64()?}))
         })
         .collect();
-    let reviewed = (progress["reviewed"].as_i64()).zip(
-        readings
-            .last()
-            .map_or(progress["percent"].as_f64(), |r| r["percent"].as_f64()),
-    );
+    // A review goes with its own percent, its newest reading's, or not at all: the request's
+    // percent is another's when a status shipped it after a review at 30%.
+    let reviewed =
+        (progress["reviewed"].as_i64()).zip(readings.last().and_then(|r| r["percent"].as_f64()));
     // A review at 100% of a shipped request goes as a shipped review, with the day or time it
     // shipped: the pages take that day for the request's completion when no status gave one
-    // (`to-work-model.ts:148-149`), in the browser's zone, as the day is written with none.
+    // (`to-work-model.ts:148-149`), in the browser's zone, as the day is written with none. Any
+    // other review has no shipped day.
     let shipped_review =
         reviewed.is_some_and(|(_, percent)| status == "shipped" && percent >= 100.0);
-    let shipped_at = match progress["completed_at"].as_i64() {
-        Some(at) => iso(at),
-        None => noon(&progress["completed"]),
+    let shipped_at = match (shipped_review, progress["completed_at"].as_i64()) {
+        (false, _) => Value::Null,
+        (true, Some(at)) => iso(at),
+        (true, None) => noon(&progress["completed"]),
     };
     // When the newest status recorded completed the request: a done one's clock stops by it. A
     // request shipped by its review alone has no such time: its shipped review's day completes it.
@@ -340,7 +353,7 @@ fn request<Tz: TimeZone>(
         .map(|t| t.timestamp_millis());
     let completed = match (r["completed_at"].as_i64(), status) {
         (Some(at), _) => json!(at),
-        (None, "shipped") if shipped_review && !shipped_at.is_null() => Value::Null,
+        (None, "shipped") if !shipped_at.is_null() => Value::Null,
         (None, "shipped") => noon_here.map_or_else(|| r["updated"].clone(), |at| json!(at)),
         _ => Value::Null,
     };
