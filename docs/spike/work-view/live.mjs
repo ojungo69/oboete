@@ -46,6 +46,13 @@ try {
   console.error(scrub(e?.stack ?? e))
   process.exitCode = 1
 } finally {
-  if (stopped) as('kill', '-CONT', pid)
-  await browser?.close()
+  try {
+    if (stopped) as('kill', '-CONT', pid)
+  } catch (e) {
+    // A viewer that is gone cannot be resumed; the browser is still closed.
+    console.error(scrub(e?.message ?? e))
+    process.exitCode = 1
+  } finally {
+    await browser?.close()
+  }
 }
