@@ -1,3 +1,78 @@
+diff --git a/src/ui/i18n/mywork-fr.ts b/src/ui/i18n/mywork-fr.ts
+index e9bf72ac4473b19bdafc7a4f86e30cfd9a8eca88..1f9e64e0079dfe75c70e949f3049d5a2869a9507 100644
+--- a/src/ui/i18n/mywork-fr.ts
++++ b/src/ui/i18n/mywork-fr.ts
+@@ -493,8 +493,10 @@ export const myworkFr: Record<string, string> = {
+   'Save rule': 'Enregistrer la règle',
+   'Can’t read your rules right now': 'Impossible de lire vos règles pour le moment',
+   'No rules yet': 'Pas encore de règles',
+-  'claude-mem learns how you like to work from your requests on its own. You can also add one.': 'claude-mem apprend automatiquement vos préférences de travail à partir de vos demandes. Vous pouvez aussi en ajouter une.',
+-  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine, or add a rule yourself.": 'L’apprentissage des règles attend qu’un agent soit disponible. Connectez-vous à un agent pris en charge sur la machine du processus en arrière-plan, ou ajoutez vous-même une règle.',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem apprend automatiquement vos préférences de travail à partir de vos demandes.',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": 'L’apprentissage des règles attend qu’un agent soit disponible. Connectez-vous à un agent pris en charge sur la machine du processus en arrière-plan.',
+   'Add rule': 'Ajouter une règle',
+   '{waiting} learned rules are waiting for you. ': '{waiting} règles apprises attendent votre décision. ',
+   '{waiting} learned rule is waiting for you. ': '{waiting} règle apprise attend votre décision. ',
+diff --git a/src/ui/i18n/mywork-ko.ts b/src/ui/i18n/mywork-ko.ts
+index 632326bc77ee587b69f9e304f20ccd7a7df4b2cc..ba6bd4ad20ba53a893b7f3ed3ce052cc530ee50c 100644
+--- a/src/ui/i18n/mywork-ko.ts
++++ b/src/ui/i18n/mywork-ko.ts
+@@ -476,8 +476,10 @@ export const myworkKo: Record<string, string> = {
+   'Save rule': '규칙 저장',
+   'Can’t read your rules right now': '지금은 규칙을 읽을 수 없습니다',
+   'No rules yet': '아직 규칙이 없습니다',
+-  'claude-mem learns how you like to work from your requests on its own. You can also add one.': 'claude-mem은 요청을 바탕으로 선호하는 작업 방식을 스스로 학습합니다. 규칙을 직접 추가할 수도 있습니다.',
+-  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine, or add a rule yourself.": "규칙 학습이 에이전트를 기다리고 있습니다. 워커가 실행되는 컴퓨터에서 지원되는 에이전트에 로그인하거나 직접 규칙을 추가하세요.",
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem은 요청을 바탕으로 선호하는 작업 방식을 스스로 학습합니다.',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": "규칙 학습이 에이전트를 기다리고 있습니다. 워커가 실행되는 컴퓨터에서 지원되는 에이전트에 로그인하세요.",
+   'Add rule': '규칙 추가',
+   '{waiting} learned rules are waiting for you. ': '학습된 규칙 {waiting}개가 결정을 기다리고 있습니다. ',
+   '{waiting} learned rule is waiting for you. ': '학습된 규칙 {waiting}개가 결정을 기다리고 있습니다. ',
+diff --git a/src/ui/i18n/mywork-tr.ts b/src/ui/i18n/mywork-tr.ts
+index dc818010b83932ee39c38bfc97bd80b9bda7a1df..a49a46307fbd4e95cdb256d705b181cccbe47b0c 100644
+--- a/src/ui/i18n/mywork-tr.ts
++++ b/src/ui/i18n/mywork-tr.ts
+@@ -476,7 +476,8 @@ export const myworkTr: Record<string, string> = {
+   'Save rule': 'Kuralı kaydet',
+   'Can’t read your rules right now': 'Kurallarınız şu anda okunamıyor',
+   'No rules yet': 'Henüz kural yok',
+-  'claude-mem learns how you like to work from your requests on its own. You can also add one.': 'claude-mem çalışma tercihlerinizi isteklerinizden öğrenir. Kendiniz de kural ekleyebilirsiniz.',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem çalışma tercihlerinizi isteklerinizden öğrenir.',
+   'Add rule': 'Kural ekle',
+   '{waiting} learned rules are waiting for you. ': 'Öğrenilen {waiting} kural incelemenizi bekliyor. ',
+   '{waiting} learned rule is waiting for you. ': 'Öğrenilen {waiting} kural incelemenizi bekliyor. ',
+@@ -534,7 +535,8 @@ export const myworkTr: Record<string, string> = {
+   'Terminal': 'Terminal',
+   'Previous slide': 'Önceki slayt',
+   'Next slide': 'Sonraki slayt',
+-  'Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine, or add a rule yourself.': 'Kural öğrenme bir ajan bekliyor. Çalışan sürecin bulunduğu cihazda desteklenen bir ajanda oturum açın veya kuralı kendiniz ekleyin.',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  'Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.': 'Kural öğrenme bir ajan bekliyor. Çalışan sürecin bulunduğu cihazda desteklenen bir ajanda oturum açın.',
+   'Focus overview': 'Odak alanlarına genel bakış',
+   'Concept illustration': 'Kavram çizimi',
+   'Your focus areas': 'Odak alanlarınız',
+diff --git a/src/ui/i18n/mywork-zh.ts b/src/ui/i18n/mywork-zh.ts
+index 6b82046cb43063e5fd57194d8bd1f5a6e0cb9bbc..88cc8de0f815866aa17a5c517c61634bc6f1d527 100644
+--- a/src/ui/i18n/mywork-zh.ts
++++ b/src/ui/i18n/mywork-zh.ts
+@@ -493,8 +493,10 @@ export const myworkZh: Record<string, string> = {
+   'Save rule': '保存规则',
+   'Can’t read your rules right now': '当前无法读取您的规则',
+   'No rules yet': '暂无规则',
+-  'claude-mem learns how you like to work from your requests on its own. You can also add one.': 'claude-mem 会从您的请求中自动学习工作偏好。您也可以手动添加一条。',
+-  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine, or add a rule yourself.": "规则学习正在等待代理。请在工作进程所在的机器上登录受支持的代理，或手动添加规则。",
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem 会从您的请求中自动学习工作偏好。',
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
++  "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": "规则学习正在等待代理。请在工作进程所在的机器上登录受支持的代理。",
+   'Add rule': '添加规则',
+   '{waiting} learned rules are waiting for you. ': '{waiting} 条习得的规则正在等待您处理。',
+   '{waiting} learned rule is waiting for you. ': '{waiting} 条习得的规则正在等待您处理。',
 diff --git a/src/ui/my-work/src/App.tsx b/src/ui/my-work/src/App.tsx
 index 35eb64ba00f12202292e0bc572c614c9919e0e02..618cfa82645ce21cb3cc04c6243bd75119947a32 100644
 --- a/src/ui/my-work/src/App.tsx

@@ -129,14 +129,15 @@ app="$work/src/ui/my-work"
 # package.json's test command, run by node with each test held to a minute and the run to 15
 # minutes, so a test that never ends fails by its name rather than holding the job. A test command
 # package.json no longer names, or a folder of it with no test left (failglob), would leave tests
-# out: the build stops instead.
+# out: the build stops instead. NODE_TEST_CONTEXT goes: a build a Node test runs inherits it, and
+# with it node --test skips every file and passes.
 tests='node --test src/live/*.test.ts src/setup/*.test.ts src/store/*.test.ts'
 (cd "$app" && shopt -s failglob && npm ci --ignore-scripts --include=dev --no-audit --no-fund \
   && if [ "$(node -p "require('./package.json').scripts.test")" != "$tests" ]; then
     echo "build.sh: package.json's test command is no longer $tests" >&2
     exit 1
   fi \
-  && timeout 900 node --test --test-timeout=60000 ${tests#node --test } \
+  && env -u NODE_TEST_CONTEXT timeout 900 node --test --test-timeout=60000 ${tests#node --test } \
   && ./node_modules/.bin/tsc -b && ./node_modules/.bin/vite build --sourcemap hidden)
 node "$here/notices.mjs" "$work" "$here/licences" > "$app/dist/THIRD-PARTY-NOTICES.md"
 find "$app/dist" -name '*.map' -delete
