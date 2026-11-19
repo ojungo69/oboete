@@ -2240,14 +2240,33 @@ fn each_origin_answers_its_own_routes_with_its_own_token() {
         // The work-view's token is not the main page's.
         assert_eq!(status("/api/version", &[host, wv]), 401);
     }
-    // The work-view's origin: its page with no token, at its path and at the name alone.
+    // The work-view's origin: its page with no token, at its path and at the name alone, the
+    // bundle's own index.html under the work-view's policy, which the main page's `/` is not.
+    let index = WORK_VIEW_FILES
+        .iter()
+        .find(|(p, _, _)| *p == "index.html")
+        .unwrap()
+        .2;
     for target in ["/", "/work-view", "/work-view/"] {
         let r = v.route("GET", target, &[WV_HOST]);
+        let html = "text/html; charset=utf-8";
         assert_eq!(
-            (r.status, r.ctype),
-            (200, "text/html; charset=utf-8"),
+            (r.status, r.ctype, r.body.as_slice()),
+            (200, html, index),
             "{target}"
         );
+        let head = String::from_utf8(r.bytes(true)).unwrap();
+        assert!(head.contains(WORK_VIEW_HEADERS), "{target}: {head}");
+    }
+    assert_ne!(v.route("GET", "/", &[HOST]).body.as_slice(), index);
+    // One Host: two, in either order, are refused before any route, a copy's link's too.
+    for hosts in [[HOST, WV_HOST], [WV_HOST, HOST]] {
+        for target in ["/api/work-view", "/", "/files/abc"] {
+            match v.head("GET", target, &[hosts[0], hosts[1], wv]) {
+                Head::Answer(r) => assert_eq!(r.status, 400, "{target} {hosts:?}"),
+                _ => panic!("{target}: answered on the head"),
+            }
+        }
     }
     // Its reads take its token, and the main page's token is not it.
     for target in ["/api/work-view", "/api/work-view/version"] {
@@ -2337,10 +2356,30 @@ fn the_work_views_bundle_is_served_under_its_own_policy() {
         head.contains("script-src 'self';") && head.contains("frame-ancestors 'none'"),
         "{head}"
     );
-    // Each of the bundle's files has a media type and is served at its path.
-    for (path, ctype, _) in WORK_VIEW_FILES {
+    // Each of the bundle's files is served at its path with its bytes and the media type a browser
+    // takes its kind for, written here apart from build.rs's table; the bundle has each kind the
+    // pages load.
+    let want = |path: &str| match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "png" => "image/png",
+        "woff2" => "font/woff2",
+        "md" => "text/plain; charset=utf-8",
+        other => panic!("{path}: a kind of file the bundle had none of ({other})"),
+    };
+    for (path, _, bytes) in WORK_VIEW_FILES {
         let r = v.route("GET", &format!("/work-view/{path}"), &[WV_HOST]);
-        assert_eq!((r.status, r.ctype), (200, *ctype), "{path}");
+        let got = (r.status, r.ctype, r.body.as_slice());
+        assert_eq!(got, (200, want(path), *bytes), "{path}");
+    }
+    for kind in [".css", ".woff2", ".webp", ".svg", ".js"] {
+        assert!(
+            WORK_VIEW_FILES.iter().any(|(p, _, _)| p.ends_with(kind)),
+            "{kind}"
+        );
     }
     assert!(WORK_VIEW_FILES.iter().any(|(p, _, _)| *p == "index.html"));
     let main = String::from_utf8(v.route("GET", "/", &[HOST]).bytes(true)).unwrap();
@@ -2349,9 +2388,9 @@ fn the_work_views_bundle_is_served_under_its_own_policy() {
 }
 
 /// Decision 116: a save comes from oboete's page alone. One with the work-view's Origin is refused
-/// with the main token too, the hooks' three paths take a request with no Origin only, the
-/// work-view's name takes no save and no copy's link, and a refused request leaves the page
-/// `--open` wrote in place.
+/// with the main token too, the hooks' three paths among them, which take a request with no Origin
+/// as before and one with an Origin as every save; the work-view's name takes no save and no
+/// copy's link, and a refused request leaves the page `--open` wrote in place.
 #[test]
 fn a_save_from_the_work_views_origin_is_refused_and_leaves_the_opener() {
     let (dir, v) = viewer("save-origin");
@@ -2377,6 +2416,7 @@ fn a_save_from_the_work_views_origin_is_refused_and_leaves_the_opener() {
         "/api/preferences",
         "/api/my-work/review",
         "/api/prompt-context",
+        "/api/query-vector",
         "/api/lookup",
     ] {
         // The work-view's Origin, with the main token: refused, and the opener page stays.
@@ -2461,6 +2501,13 @@ fn a_save_from_the_work_views_origin_is_refused_and_leaves_the_opener() {
         403
     );
     assert!(!opener.exists());
+    // A hook's path with this viewer's Origin is a save as any other: it passes the gate, and its
+    // token arrives, so the page goes too.
+    std::fs::write(&opener, "page").unwrap();
+    *v.opener.lock().unwrap() = Some(opener.clone());
+    let ours = Some("http://127.0.0.1:4321");
+    assert_ne!(save("/api/lookup", "127.0.0.1:4321", ours, "t0k"), 403);
+    assert!(!opener.exists());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2484,7 +2531,9 @@ fn the_work_views_address_is_made_from_the_main_pages() {
 }
 
 /// Decision 116: the resident viewer's work-view token follows its token file, read again for each
-/// request (R6): a new token ends the work-view's old one with the main page's.
+/// request (R6): a new token ends the work-view's old one with the main page's. Linux only, as the
+/// token file is (`keyfile::private_fs`).
+#[cfg(target_os = "linux")]
 #[test]
 fn the_work_views_token_follows_a_new_token() {
     let home = tempfile::tempdir().unwrap();

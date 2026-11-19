@@ -175,14 +175,15 @@ token (Limits).
 R6. **A token that outlives a restart.** `state/view-token`: 32 lowercase hex characters from the
 OS generator, mode 0600. One function reads it, and returns it only when the mode check passes (not
 readable by group or others) and the content is exactly 32 lowercase hex characters; anything else
-refuses every request. `token_ok` is false for an empty or absent header. The viewer reads the file
+refuses every request that takes the token (the pages' own files are served without one). `token_ok`
+is false for an empty or absent header. The viewer reads the file
 for each request (no cache to go stale). It writes the file at its start, under `state/view.lock`,
 when it is missing or not of that shape, staged, synced and renamed.
 It is kept only where the filesystem enforces a Unix mode (the check `keyfile` uses); elsewhere the
 resident viewer does not start and `oboete view` serves in the foreground as today.
 `oboete view --new-token` replaces the file the same way and, in a resident home, also writes the
-next free port into `[view] port`, so the viewer comes back on a new address; it prints that address
-and one line telling the owner to delete the old bookmark. The new address is what ends a page a
+next free port into `[view] port`, so the viewer comes back on a new address; it prints that address,
+the work-view's under it (decision 116), and one line telling the owner to delete the old bookmark. The new address is what ends a page a
 squatter left in the browser under the old one. The page's New page token makes the same two steps
 inside the resident viewer, which serves the new port at once and answers with the new address.
 A port saved on the page comes with a new token as well: under one hold of `state/config.lock` the
@@ -203,20 +204,24 @@ that page sent, since another tab may have kept a newer one. Storage belongs to 
 and port, so a page of another port or name (`localhost` is another name) cannot read it; a page another program serves at the same address while the
 viewer is down can, as it could read a bookmark's token opened there, and a new token ends both.
 What the token may do is an owner decision (below). The local HTTP API and the bot adapter get
-their own credential and never reuse `state/view-token`.
+their own credential and never reuse `state/view-token`. The work-view's pages, on a name of their
+own, take a token made from it (decision 116), which follows each new token; neither is taken on the
+other's origin.
 
 R7. **`oboete view` in a resident home.** It makes sure the viewer runs (R4), and starts the worker
 too when `state/worker.lock` is free, as a hook does, so one command brings up both. It sends
 nothing to the port: ready means `state/view.lock` is held and `state/view-outcome` says
-`listening` on the configured port, waited for up to 3 s. Then it prints the address (`--open` opens
-it through the owner-only opener page, as today) and returns. Otherwise it says why and serves in
+`listening` on the configured port, waited for up to 3 s. Then it prints the address and the
+work-view's under it (`--open` opens the first through the owner-only opener page, as today) and
+returns. Otherwise it says why and serves in
 the foreground on a free port with a token for this run, as today, never opening the fixed address.
 `--port N` asks for the foreground viewer. The page of such a foreground run, once its home is saved
 resident, offers the same bring-up; on success it answers with the resident address and the run ends
 once that answer is sent. Both read the address's port and token as one pair under
 `state/config.lock`, so a new token made meanwhile never goes out with the old port. The resident viewer removes `view-open-<its port>.html`
-by name when a request with the token arrives, so spec 6.6's "the first request with the token
-removes the page" stays true.
+by name when a request with the token arrives from the browser (a read, or a save once its Origin is
+the page's; the hooks' requests and the work-view's leave it), so spec 6.6's "the first request with
+the token removes the page" stays true.
 
 R8. **No checkout of its own.** The resident viewer holds no checkout: its search has no caller
 checkout, its timeline covers every repository, `/api/repos` returns an empty `current` and
@@ -504,7 +509,9 @@ left as a setting to add before a public release.
    `oboete view` serves in the foreground and prints why. A foreign listener on the port receives no
    connection and no `X-Oboete-Token` from `oboete view`.
 6. A home on a filesystem without modes (the `FS` test seam of keyfile): no resident viewer.
-7. Host check with the fixed port: `127.0.0.1:<port>` and `localhost:<port>` pass, anything else 403.
+7. Host check with the fixed port: `127.0.0.1:<port>` and `localhost:<port>` pass for oboete's page,
+   `work-view.localhost:<port>` for the work-view's pages and their two reads alone (decision 116),
+   anything else 403.
 8. The resident viewer's default scope is every repository; `/api/context` with no repository
    answers the marker; a worker started from a directory that is then removed still starts a viewer
    that answers.

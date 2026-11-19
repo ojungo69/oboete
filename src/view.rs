@@ -1651,7 +1651,18 @@ impl Viewer {
 
     /// Typed operations with a body go through `save_gate`; other requests use `route`.
     fn head(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Head {
+        // One Host for a read or a copy's link: with two, which origin answered would hang on their
+        // order (decision 116). A save's gate takes exactly one, refusing two as before.
+        let one_host = headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+            .count()
+            <= 1;
+        let two_hosts = || Head::Answer(Response::text(400, "a request names one Host"));
         if let Some(rest) = target.strip_prefix("/files/") {
+            if !one_host {
+                return two_hosts();
+            }
             return self.file_head(method, rest, headers);
         }
         let (cap, save): (usize, Save) = match (method, target) {
@@ -1698,6 +1709,7 @@ impl Viewer {
             ("POST", "/api/prompt-context") => (PROMPT_BODY, |v, b, _| v.prompt_context(b)),
             ("POST", "/api/query-vector") => (PROMPT_BODY, |v, b, _| v.query_vector(b)),
             ("POST", "/api/lookup") => (PROMPT_BODY, |v, b, _| v.lookup(b)),
+            _ if !one_host => return two_hosts(),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
         // `save_gate` passes a request with exactly one, the viewer's.
@@ -2818,7 +2830,7 @@ impl Viewer {
             }
             // The pages read the version alone (`local-api-token-client.ts`): the main page's
             // other fields, its curation and forget state among them, stay off their origin.
-            "work-view/version" => json!({ "v": self.version()?["v"] }),
+            "work-view/version" => json!({ "v": self.full_v(&version(&self.home)?.0)? }),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
                 let now = crate::db::now_ms();
@@ -2890,17 +2902,22 @@ impl Viewer {
             }
             // A copy made or swept, and a viewer whose links changed (docs/deliverables.md, slice
             // 2), move the page's version too.
-            "version" => self.version()?,
+            "version" => {
+                let mut answer = polled(&self.home)?;
+                let v = self.full_v(answer["v"].as_str().unwrap_or(""))?;
+                answer["v"] = json!(v);
+                answer
+            }
             "stats" => stats(&self.home)?,
             _ => return Ok(Response::text(404, "not found")),
         };
         Ok(Response::json(&answered(name, answer)))
     }
 
-    /// The page's version, `v`, which moves with what the page shows, and what the page polls for
-    /// with it (`polled`); a copy made or swept, and a viewer whose links changed, move `v` too.
-    fn version(&self) -> Result<Value> {
-        let mut answer = polled(&self.home)?;
+    /// The page's `v` from the stores' version (`version`): a copy made or swept, and a viewer
+    /// whose links changed, move it too. The work-view's version is this alone, so its polls count
+    /// nothing else (the records waiting to be curated are the main page's).
+    fn full_v(&self, base: &str) -> Result<String> {
         // A copies' store that does not read moves no version rather than stopping the
         // page's polls (the list and the products report it, less often than this).
         let files = (|| -> Result<String> {
@@ -2910,9 +2927,7 @@ impl Viewer {
             })
         })()
         .unwrap_or_else(|_| "unread".into());
-        let v = answer["v"].as_str().unwrap_or("").to_owned();
-        answer["v"] = json!(format!("{v}:{files}:{}", self.files_instance()?));
-        Ok(answer)
+        Ok(format!("{base}:{files}:{}", self.files_instance()?))
     }
 
     /// The Context page: what SessionStart shows a new session in `repo`'s checkout (the viewer's
