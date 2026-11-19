@@ -971,6 +971,19 @@ impl Home {
         self.s.event("tool", session, (R, "main"), ts + 20, body);
     }
 
+    /// The judge's ops raw.db holds, applied or not (W3b-1: what an answer wrote, if any).
+    fn recorded(&self) -> i64 {
+        Connection::open(self.s.home.path().join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ops WHERE type = 'my_work'
+                   AND json_extract(body, '$.job') = 'judge'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     /// The home after the record `seq` of this device was forgotten and purged.
     fn forgot(self, seq: i64) -> Self {
         let Home { s, t, judge } = self;
@@ -1356,10 +1369,10 @@ fn a_suggestion_whose_answer_would_move_an_anchor_is_not_shown() {
     h.grouped(&["s8", "s7"], "Eight");
     let own = h.request_of("s2");
     assert!(own.get("suggestion").is_none(), "{own}");
-    let before = h.judged().len();
+    let before = h.recorded();
     let join = h.post(json!({"request": own["id"], "action": "join"}));
     assert_eq!(join, Err((409, "suggestion_target_gone")));
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
     let not_this = h.post(json!({"request": own["id"], "action": "not-this"}));
     assert_eq!(not_this.unwrap()["state"], "applied");
 }
@@ -1375,12 +1388,12 @@ fn an_answer_whose_placement_changed_is_refused_and_records_nothing() {
     let id = h.request_of("s3")["id"].clone();
     h.said("s4", 12, "Another thing entirely.");
     h.grouped(&["s4", "s2"], "Other");
-    let before = h.judged().len();
+    let before = h.recorded();
     for action in ["join", "not-this"] {
         let answer = h.post(json!({"request": id, "action": action}));
         assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
     }
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
 }
 
 /// W3b-1: an op this device appends of a kind the answer reads (a regroup, here of another
@@ -1429,13 +1442,13 @@ fn the_stores_moving_between_the_check_and_the_write_refuse_the_answer() {
         let _served = suggested(&mut h);
         let home = h.s.home.path().to_owned();
         CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || move_(&home))));
-        let before = h.judged().len();
+        let before = h.recorded();
         assert_eq!(
             h.answer_on("s2", "join"),
             Err((409, "my_work_pending")),
             "{what}"
         );
-        assert_eq!(h.judged().len(), before, "{what}");
+        assert_eq!(h.recorded(), before, "{what}");
         assert!(
             h.request_of("s2").get("suggestion").is_some(),
             "{what}: still open"
@@ -1450,10 +1463,10 @@ fn an_answer_whose_token_was_replaced_records_nothing() {
     let _served = suggested(&mut h);
     let body = json!({"request": h.request_of("s2")["id"], "action": "join"});
     let body = serde_json::to_vec(&body).unwrap();
-    let before = h.judged().len();
+    let before = h.recorded();
     let refused = act(h.s.home.path(), &Mutex::new(()), &body, &|| false).unwrap_err();
     assert_eq!((refused.status, refused.code), (401, "token"));
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
     assert!(h.request_of("s2").get("suggestion").is_some(), "still open");
 }
 
@@ -1508,10 +1521,10 @@ fn join_refuses_when_its_pick_is_no_request_now() {
     let _served = suggested(&mut h);
     h.named("s1", "A");
     let own = h.request_of("s2")["id"].clone();
-    let before = h.judged().len();
+    let before = h.recorded();
     let join = h.post(json!({"request": own, "action": "join"}));
     assert_eq!(join, Err((409, "suggestion_target_gone")));
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
     let not_this = h.post(json!({"request": own, "action": "not-this"}));
     assert_eq!(not_this.unwrap()["state"], "applied");
 }
@@ -1535,12 +1548,12 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
     h.named("s3", "B");
     let carrier = h.request_of("s2");
     assert!(carrier.get("suggestion").is_none(), "{carrier}");
-    let before = h.judged().len();
+    let before = h.recorded();
     for action in ["join", "not-this"] {
         let answer = h.post(json!({"request": carrier["id"], "action": action}));
         assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
     }
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
 }
 
 /// W3b-1 (Codex on #1113): a work state write whose op was applied, and whose call was recorded
@@ -1557,8 +1570,60 @@ fn an_answer_is_checked_after_the_record_index_takes_what_was_recorded() {
     let write = h.naming("B");
     h.s.run();
     h.called("s3", write);
-    let before = h.judged().len();
+    let before = h.recorded();
     let join = h.post(json!({"request": id, "action": "join"}));
     assert_eq!(join, Err((409, "suggestion_changed")));
-    assert_eq!(h.judged().len(), before);
+    assert_eq!(h.recorded(), before);
+}
+
+/// Codex on #1113: a resident viewer an upgrade exec'd keeps the viewer's role and cannot run the
+/// worker's pass: an answer there, the record index behind by an agent's record, waits for the
+/// worker that runs, and lands.
+#[test]
+fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let id = h.request_of("s2")["id"].clone();
+    h.said("s5", 20, "Something else.");
+    let home = h.s.home.path().to_owned();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let running = std::sync::Arc::clone(&stop);
+    let worker = std::thread::spawn(move || {
+        while !running.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::worker::run_once(&home).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
+    let answer = h.post(json!({"request": id, "action": "join"}));
+    crate::executable::RESUMED_AS.set(None);
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker.join().unwrap();
+    assert_eq!(answer.unwrap()["state"], "applied");
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
+}
+
+/// Codex on #1113: the record index behind and this device's ops applied: a worker that fails is
+/// 503, and an index no worker moves, where none can run here, is 409 when the wait runs out;
+/// raw.db holds no answer after either.
+#[test]
+fn a_record_index_that_does_not_catch_up_refuses_the_answer() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    h.said("s5", 20, "Something else.");
+    let before = h.recorded();
+    let lock = h.s.home.path().join("state").join("worker.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    assert_eq!(h.post(answer.clone()), Err((503, "my_work_unavailable")));
+    std::fs::remove_dir(&lock).unwrap();
+    assert_eq!(h.recorded(), before);
+    crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
+    crate::claims::WAIT.set(Some(Duration::from_millis(300)));
+    let pending = h.post(answer);
+    crate::claims::WAIT.set(None);
+    crate::executable::RESUMED_AS.set(None);
+    assert_eq!(pending, Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before);
 }

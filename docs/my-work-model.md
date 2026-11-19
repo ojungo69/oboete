@@ -2097,7 +2097,8 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   placed takes none. The catch-up before an answer resolves at once when the consumer has applied
   what this device recorded; else the worker's pass in the viewer's process (when no other worker
   holds the lock) and the wait share the 10 seconds, a pass begun ending first. A worker or a store
-  that fails is 503 `my_work_unavailable`; only a wait that runs out is 409 `my_work_pending`. A
+  that fails is 503 `my_work_unavailable`; of the catch-up, only a wait that runs out is 409
+  `my_work_pending` (the append's guard is the other, W3b-1 below). A
   suggestion names the conversation it is about, by the id the page has it, which a Join follows to
   where it went, not the request's member active last. The poll after an answer whose read
   succeeded finds nothing new. A redraw keeps the search field the owner types in, with its caret.
@@ -2111,17 +2112,21 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   conversations an answer places. The route checks the answer against them, from one read of My
   Work and the fold after the catch-up: 409 `suggestion_changed` when the fold's conversations are
   other than those (a page read before they moved, or a suggestion the page did not show); a Join
-  whose pick's anchor is not in its own group, or whose request is no request now (a work state
-  took its conversations), 409 `suggestion_target_gone`. The op is appended only while this device
-  has appended no op of a kind the answer reads since the catch-up read it (every kind but
+  whose pick's request's anchor (`of` of the pick, the anchor J4 writes first; the request the
+  suggestion names, the one the pick is in now) is not in its own group, or whose request is no
+  request now (a work state took its conversations), 409 `suggestion_target_gone`. The op is
+  appended only while this device has appended no op of a kind the answer reads since the
+  catch-up read it (every kind but
   curation's claims, windows, turns, digests and corrections, which move no conversation between
   requests: on this PC, 174 of a day's 3,951 appends hold one of the others, so that a check of
   2 seconds meets one 0.39% of the time, where any op would refuse 9.1%) and forget has denied
   nothing since the answer's reading (`Raw::append_ops_at`, against the forget fence): else 409
   `my_work_pending`, nothing written, as for a catch-up that runs out (the page says My Work is
   still taking in a change). The catch-up waits for the record index too, through this device's
-  newest record (`claims::indexed`, consumer `fts`): My Work finds a work state write's call there,
-  which can be recorded after its op is applied. The page's token is asked again under config.lock, where new
+  newest record (consumer `fts`), under the same 10 seconds and the same pass
+  (`claims::applied_all`): My Work finds a work state write's call there, which can be recorded
+  after its op is applied. A resident viewer an upgrade exec'd keeps the viewer's role and runs no
+  pass of the worker itself (`executable::may_run_worker`): it waits for the worker that runs. The page's token is asked again under config.lock, where new
   tokens are made, before the append: a token replaced while the answer waited is 401, nothing
   written. The page posts the request and the action, not the suggestion it read: the answer is
   checked against My Work as read when it is answered (as before), and a card read before a member

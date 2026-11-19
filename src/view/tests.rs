@@ -3991,8 +3991,8 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
 
 /// A feed over invented records, without the older timeline fixture's claims or imports.
 /// W3b-1 (Codex on #1113): J4's answer asks the page's token again under config.lock, through
-/// the route: a token replaced while the answer waited, after the route took its body with the
-/// old one, is 401, and nothing is recorded.
+/// the route: a token made while the answer waits for that lock, after the route took its body
+/// with the old one, is 401, and nothing is recorded.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
@@ -4058,14 +4058,28 @@ fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
         ("Content-Type", "application/json"),
         ("Content-Length", len.as_str()),
     ];
-    let replaced = home.clone();
-    crate::my_work_judge::CHECKED
-        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_token(&replaced).unwrap())));
-    let r = match v.head("POST", "/api/my-work/suggestion", &h) {
-        Head::Body(_, save, given, site) => v.take(save, &body, &given, site),
-        Head::Answer(r) => r,
-        Head::File(_) => panic!("no link"),
-    };
+    // The answer comes to config.lock while a new token is made under it: the token is replaced
+    // while the answer waits for the lock, which is let go after.
+    let held = crate::settings::config_lock(&home).unwrap();
+    let (reached, at_lock) = std::sync::mpsc::channel();
+    let (v, h, body) = (&v, &h, &body);
+    let r = std::thread::scope(|scope| {
+        let answer = scope.spawn(move || {
+            crate::my_work_judge::CHECKED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || reached.send(()).unwrap()))
+            });
+            match v.head("POST", "/api/my-work/suggestion", h) {
+                Head::Body(_, save, given, site) => v.take(save, body, &given, site),
+                Head::Answer(r) => r,
+                Head::File(_) => panic!("no link"),
+            }
+        });
+        at_lock.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        write_token(&home).unwrap();
+        drop(held);
+        answer.join().unwrap()
+    });
     assert_eq!(r.status, 401, "{}", String::from_utf8_lossy(&r.body));
     assert_eq!(recorded(), before, "nothing recorded");
     assert_ne!(file_token(&home).unwrap(), token, "the token was replaced");
