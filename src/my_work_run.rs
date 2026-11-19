@@ -50,7 +50,10 @@ fn mark(path: &std::path::Path, at: std::time::SystemTime) -> std::io::Result<()
 }
 
 fn modified_ms(path: &std::path::Path) -> Option<i64> {
-    let at = std::fs::metadata(path).ok()?.modified().ok()?;
+    unix_ms(std::fs::metadata(path).ok()?.modified().ok()?)
+}
+
+fn unix_ms(at: std::time::SystemTime) -> Option<i64> {
     i64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
@@ -59,23 +62,40 @@ fn modified_ms(path: &std::path::Path) -> Option<i64> {
 /// wake the worker at every look until it caught up). A done mark dated that far ahead marks
 /// nothing done, so that a request after the clock went back stands.
 pub(crate) fn refresh_request(home: &std::path::Path, now: i64) -> Option<i64> {
-    let ahead = |t: i64| t - now > 60_000;
     let at = modified_ms(&refresh_path(home))?;
-    if now - at >= REFRESH_MS || ahead(at) {
-        return None;
-    }
-    if modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at && !ahead(done)) {
-        return None;
-    }
-    Some(at)
+    stands(home, at, now).then_some(at)
 }
 
-/// Refresh now's part of the work-view's version (decision 117): the request's time and whether it
-/// stands, so that a start, a finish and an expiry each move it, and, as each request is later than
-/// the last, it comes back to no value it had while the clock goes forward.
+/// Whether the request dated `at` stands at `now` (`refresh_request`).
+fn stands(home: &std::path::Path, at: i64, now: i64) -> bool {
+    let ahead = |t: i64| t - now > 60_000;
+    if now - at >= REFRESH_MS || ahead(at) {
+        return false;
+    }
+    !modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at && !ahead(done))
+}
+
+/// A new request's time: `now`, or just after the done mark while one stands at or after it (the
+/// clock went back under it, by less than the minute that would make it count for nothing), so
+/// that a request the page is told stands, stands (Codex on #1103).
+fn request_time(home: &std::path::Path, now: std::time::SystemTime) -> std::time::SystemTime {
+    match (unix_ms(now), modified_ms(&refresh_done_path(home))) {
+        (Some(now_ms), Some(done)) if done >= now_ms && done - now_ms <= 60_000 => {
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(done + 1).unwrap_or(0))
+        }
+        _ => now,
+    }
+}
+
+/// Refresh now's part of the work-view's version (decision 117), from one look at the request: its
+/// time and whether it stands, so that a start, a finish and an expiry each move it, and, as each
+/// request is later than the last, it comes back to no value it had while the clock goes forward.
 pub(crate) fn refresh_version(home: &std::path::Path, now: i64) -> String {
-    let at = modified_ms(&refresh_path(home)).unwrap_or(0);
-    format!("{at}.{}", u8::from(refresh_request(home, now).is_some()))
+    match modified_ms(&refresh_path(home)) {
+        Some(at) => format!("{at}.{}", u8::from(stands(home, at, now))),
+        None => "0.0".to_owned(),
+    }
 }
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -985,7 +1005,7 @@ fn refresh_with(
     let _one = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    mark(&path, std::time::SystemTime::now())?;
+    mark(&path, request_time(home, std::time::SystemTime::now()))?;
     Ok(json!({"state": "started", "due": due}))
 }
 

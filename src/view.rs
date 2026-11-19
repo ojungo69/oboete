@@ -2390,7 +2390,7 @@ impl Viewer {
         }
         match crate::my_work_run::request_refresh(&self.home, crate::db::now_ms()) {
             Ok(answer) => work_view_refresh_answer(&answer),
-            Err(e) => failed(&e),
+            Err(e) => work_view_failed(&e),
         }
     }
 
@@ -2775,7 +2775,7 @@ impl Viewer {
             return Response::text(401, "missing or wrong token").on_work_view();
         }
         self.api(name, &params(query))
-            .unwrap_or_else(|e| failed(&e))
+            .unwrap_or_else(|e| work_view_failed(&e))
             .on_work_view()
     }
 
@@ -2927,10 +2927,13 @@ impl Viewer {
             // The pages read the version alone (`local-api-token-client.ts`): the main page's
             // other fields, its curation and forget state among them, stay off their origin. Refresh
             // now's request moves it too, as it is left, marked done and runs out (decision 117).
+            // It is counts, prints and times, no stored text, so it leaves outside the gate, whose
+            // rules could make two versions one (Codex on #1103).
             "work-view/version" => {
                 let base = version(&self.home)?.0;
                 let refresh = crate::my_work_run::refresh_version(&self.home, crate::db::now_ms());
-                json!({ "v": self.full_v(&format!("{base}:{refresh}"))? })
+                let v = self.full_v(&format!("{base}:{refresh}"))?;
+                return Ok(Response::json(&json!({ "v": v })));
             }
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
@@ -3085,8 +3088,21 @@ impl Viewer {
 /// A route's failure (D11): a restore holding raw.db past `raw::open`'s wait, or SQLite busy or
 /// locked during a rebuild, is 503 "try again"; anything else is 500, its text gated (spec 6.5).
 fn failed(e: &anyhow::Error) -> Response {
-    // A forget that holds the reading fence past its wait (`dispatch::busy`) is one to retry too.
-    let again = crate::dispatch::busy(e)
+    if again(e) {
+        Response::text(
+            503,
+            "the memory is being restored or rebuilt: try again in a moment",
+        )
+    } else {
+        Response::text(500, &redact::outbound(&format!("{e:#}")))
+    }
+}
+
+/// Whether a route's failure is one to try again (`failed`): a restore holding raw.db past
+/// `raw::open`'s wait, SQLite busy or locked during a rebuild, or a forget that holds the reading
+/// fence past its wait (`dispatch::busy`).
+fn again(e: &anyhow::Error) -> bool {
+    crate::dispatch::busy(e)
         || e.chain().any(|c| {
         c.is::<crate::raw::Restoring>()
             || matches!(
@@ -3094,14 +3110,22 @@ fn failed(e: &anyhow::Error) -> Response {
                 Some(rusqlite::Error::SqliteFailure(f, _))
                     if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
             )
-    });
-    if again {
-        Response::text(
-            503,
-            "the memory is being restored or rebuilt: try again in a moment",
-        )
+    })
+}
+
+/// A failure on the work-view's origin (decision 117): 503 to try again, as `failed` tells it, else
+/// 500, each in a sentence of the pages' own. The error's words can hold the configuration's
+/// values and the home's path, which the work-view's token does not reach; oboete's own page, whose
+/// token reaches the settings, still shows them (Codex on #1103).
+fn work_view_failed(e: &anyhow::Error) -> Response {
+    if again(e) {
+        work_view_refused(503, "busy", "oboete is busy for a moment. Try again.")
     } else {
-        Response::text(500, &redact::outbound(&format!("{e:#}")))
+        work_view_refused(
+            500,
+            "failed",
+            "oboete could not answer. Its own page shows why.",
+        )
     }
 }
 

@@ -2939,6 +2939,77 @@ fn the_work_views_refresh_reaches_my_work() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Codex on #1103: a failure on the work-view's origin says so in a sentence of the pages' own,
+/// never in the error's words, which can hold the configuration's values and the home's path: a
+/// refresh over a configuration that does not load, and the snapshot and its version over a store
+/// that does not open.
+#[test]
+fn a_failure_on_the_work_views_origin_says_no_more_than_that() {
+    let (dir, v) = viewer("wv-failed");
+    let made = work_view_token("t0k");
+    let token = ("X-Oboete-Token", made.as_str());
+    let home = dir.to_str().unwrap().to_owned();
+    let unsaid = |answer: &Response, held: &str| {
+        let body = String::from_utf8_lossy(&answer.body).into_owned();
+        assert_eq!(
+            (answer.status, answer.headers),
+            (500, WORK_VIEW_HEADERS),
+            "{body}"
+        );
+        assert_eq!(json_any(answer)["code"], "failed", "{body}");
+        for shown in [held, home.as_str()] {
+            assert!(!body.contains(shown), "{shown}: {body}");
+        }
+    };
+    let config = "[embedding]\nprovider = \"zebra-provider-77\"\n";
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    let headers = [
+        WV_HOST,
+        token,
+        ("Origin", "http://work-view.localhost:4321"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", "2"),
+    ];
+    let answer = request(&v, "POST", "/api/work-view/refresh", &headers, b"{}");
+    unsaid(&answer, "zebra-provider-77");
+    std::fs::remove_file(dir.join("config.toml")).unwrap();
+    std::fs::create_dir(dir.join("raw.db")).unwrap();
+    for target in ["/api/work-view", "/api/work-view/version"] {
+        unsaid(&v.route("GET", target, &[WV_HOST, token]), "raw.db");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Codex on #1103: the work-view's version holds counts, prints and times, no stored text, so it
+/// leaves outside the gate: a rule that matches its digits leaves it as it is, and two requests'
+/// times still make two versions.
+#[test]
+fn the_work_views_version_leaves_outside_the_gate() {
+    if !in_child("view::tests::the_work_views_version_leaves_outside_the_gate") {
+        return;
+    }
+    let (dir, v) = viewer("wv-version-gate");
+    let rules = "[redaction]\nextra_rules = [{ id = \"digits\", regex = '[0-9]{6,}' }]\n";
+    std::fs::write(dir.join("config.toml"), rules).unwrap();
+    redact::set_home(&dir).unwrap();
+    let request = crate::my_work_run::refresh_path(&dir);
+    std::fs::create_dir_all(request.parent().unwrap()).unwrap();
+    let version = |at: std::time::SystemTime| {
+        std::fs::File::create(&request)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        let v = get_work_view(&v, "/api/work-view/version")["v"].clone();
+        v.as_str().unwrap().to_owned()
+    };
+    let now = std::time::SystemTime::now();
+    let first = version(now);
+    let second = version(now + std::time::Duration::from_secs(1));
+    assert!(!first.contains(crate::redact::MASK), "{first}");
+    assert_ne!(first, second);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Decision 117: while a Refresh now request stands, the work-view's snapshot says it runs; the
 /// work-view's version moves as a request is left, marked done and runs out, never back to a value
 /// it had, so a snapshot read across a refresh is read again; the main page's version stays. A
@@ -2980,9 +3051,12 @@ fn the_work_views_snapshot_and_version_follow_refresh_now() {
         (&done, now, false),
         // Another, a second later.
         (&request, now + second, true),
-        // It runs out.
+        // It runs out, with no done mark to cover it (CodeRabbit on #1103).
         (&request, now - stale, false),
     ] {
+        if !running && path == &request {
+            std::fs::remove_file(&done).unwrap();
+        }
         mark(path, at);
         let (refresh, version) = read();
         let expected = if running {

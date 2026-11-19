@@ -1160,6 +1160,62 @@ fn a_mark_that_fails_leaves_the_marker_as_it_was() {
     mark(&path, second).unwrap();
     assert_eq!(modified(&path), second);
     assert!(!own.exists());
+    // The marker cannot be replaced (a folder of its name, here): the mark fails and takes its
+    // own file away again (Codex on #1103).
+    let folder = home.path().join("state").join("folder");
+    std::fs::create_dir_all(folder.join("inside")).unwrap();
+    assert!(mark(&folder, second).is_err());
+    assert!(folder.join("inside").is_dir());
+    assert!(
+        !folder
+            .with_extension(std::process::id().to_string())
+            .exists()
+    );
+}
+
+/// Codex on #1103: a request left while a done mark stands at or just after the clock (the clock
+/// went back under it, by less than the minute that would make the mark count for nothing) goes
+/// just after the mark, so that it stands, as the page is told.
+#[test]
+fn a_request_left_under_a_done_mark_ahead_of_the_clock_stands() {
+    let (s, seq) = curating();
+    let now = crate::db::now_ms();
+    let done = refresh_done_path(s.home.path());
+    std::fs::create_dir_all(done.parent().unwrap()).unwrap();
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+    std::fs::File::create(&done)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let jobs = vec![Box::new(Echo {
+        subjects: vec![("r1", now - MINUTE)],
+        seq,
+    }) as Box<dyn Job>];
+    assert_eq!(
+        refresh_with(s.home.path(), now, jobs, &["group"]).unwrap(),
+        json!({"state": "started", "due": 1})
+    );
+    assert!(refresh_request(s.home.path(), crate::db::now_ms()).is_some());
+}
+
+/// Decision 117: Refresh now's part of the work-view's version, read from one look at the request,
+/// moves when the request stands no more as its time runs out, with no done mark (CodeRabbit on
+/// #1103).
+#[test]
+fn refresh_nows_version_moves_as_its_request_runs_out() {
+    let home = tempfile::tempdir().unwrap();
+    let path = refresh_path(home.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let at = 1_700_000_000_000_i64;
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(at.unsigned_abs());
+    mark(&path, time).unwrap();
+    let (before, after) = (at + REFRESH_MS - 1, at + REFRESH_MS);
+    assert_eq!(refresh_request(home.path(), before), Some(at));
+    assert_eq!(refresh_request(home.path(), after), None);
+    assert_ne!(
+        refresh_version(home.path(), before),
+        refresh_version(home.path(), after)
+    );
 }
 
 /// Decision 70: a request `REFRESH_MS` old stands no more and changes nothing.
