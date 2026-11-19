@@ -784,6 +784,13 @@ pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
     read_held(home, Range::All, now, None, None)
 }
 
+/// `reviewing` under `rules`, those a work-view snapshot is made under, so that the work-view's
+/// check finds the request it names as its snapshot showed it (`work_view::named`, decision 117).
+/// The story it reads is the kept one (`listed_kept`), which nothing it answers sends.
+pub(crate) fn reviewing_under(home: &Path, now: i64, rules: &Rules) -> Result<(Value, Vec<Held>)> {
+    read_held(home, Range::All, now, None, Some(rules))
+}
+
 /// What My Work reads of the stores before it makes requests: each conversation with its
 /// prompts, summaries and cards, the work and who wrote it, and the request ids each
 /// conversation's work names. The page's read and grouping's (docs/my-work-model.md C1) share it.
@@ -1958,6 +1965,22 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
     (std::fs::read(home.join("state").join(REVIEWS)).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+/// The checks' part of the work-view's version (decision 117): the file's time and a digest of its
+/// bytes, so that a check, an Undo and a forget's sweep each move it whichever page made them, and
+/// a check undone at once brings back no version a poll saw; the same while there is no file.
+pub(crate) fn reviews_version(home: &Path) -> String {
+    use sha2::Digest;
+    let path = home.join("state").join(REVIEWS);
+    let at = (std::fs::metadata(&path).and_then(|m| m.modified()).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    format!(
+        "{at}.{}",
+        crate::db::hex(&sha2::Sha256::digest(&bytes)[..8])
+    )
 }
 
 /// The hold on `state/my-work-reviews.lock`, from the read a check is tested against to its write,

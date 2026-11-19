@@ -27,31 +27,110 @@ pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
     Ok(snapshot)
 }
 
-/// How many times `answered` reads the stores before it gives up on rules that keep changing.
+/// How many times a read under one generation of rules (`settled`) runs before it gives up on
+/// rules that keep changing.
 const READS: usize = 3;
 
-/// `answer`, the rules it leaves through as `rules_now` reads them: two sets of rules for the
-/// whole answer, read before the stores are read and again once they are, the home's, which My
-/// Work and its goals gate their texts under at their source (`read`), and those the references of
-/// what the gate would mask (`refer`) and the walk and the story of the snapshot read with (the
-/// same file's in the viewer). When either changed while the stores were read, they are read again
-/// under the new sets, so that a rule saved meanwhile is in force in the shapes My Work gates at
-/// its source and the walk does not read again too (an id's parts, a work item's text beside its
-/// key: Codex on #1093).
-fn answered(home: &Path, now: i64, mut rules_now: impl FnMut() -> Gate) -> anyhow::Result<Value> {
+/// `answer`, the rules it leaves through as `rules_now` reads them: My Work and its goals read
+/// under one generation of rules (`settled`), and the references of what the gate would mask
+/// (`refer`), the walk and the story of the snapshot made under that generation's gate.
+fn answered(home: &Path, now: i64, rules_now: impl FnMut() -> Gate) -> anyhow::Result<Value> {
+    let ((mut work, goals), gate) = settled(home, rules_now, |source| read(home, now, source))?;
+    refer(home, &mut work, &gate)?;
+    Ok(snapshot_at(&work, &goals, now, &Local, &gate))
+}
+
+/// What `read` reads under one generation of rules, and that generation's gate: two sets of rules,
+/// read before `read` runs and again once it ran, the home's, which My Work and its goals gate
+/// their texts under at their source and which `read` is given, and those `rules_now` gives, which
+/// the references of what the gate would mask (`refer`) and the walk read with (the same file's in
+/// the viewer). When either changed while `read` ran, it runs again under the new sets, so that a
+/// rule saved meanwhile is in force in the shapes My Work gates at its source and the walk does
+/// not read again too (an id's parts, a work item's text beside its key: Codex on #1093); past
+/// `READS` runs, the rules kept changing (`Unsettled`).
+fn settled<T>(
+    home: &Path,
+    mut rules_now: impl FnMut() -> Gate,
+    mut read: impl FnMut(&crate::redact::Rules) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, Gate)> {
     let mut gate = rules_now();
     let mut source = crate::redact::Rules::load(home)?;
     for _ in 0..READS {
-        let (mut work, goals) = read(home, now, &source)?;
+        let got = read(&source)?;
         let after = rules_now();
         let after_source = crate::redact::Rules::load(home)?;
         if after.version() == gate.version() && after_source.version() == source.version() {
-            refer(home, &mut work, &gate)?;
-            return Ok(snapshot_at(&work, &goals, now, &Local, &gate));
+            return Ok((got, gate));
         }
         (gate, source) = (after, after_source);
     }
-    anyhow::bail!("the redaction rules changed while each of {READS} reads of the work view ran")
+    Err(Unsettled.into())
+}
+
+/// The redaction rules changed while each of `READS` reads of the work view ran: a moment to try
+/// again in, as the pages are told (`view::work_view_failed`).
+#[derive(Debug)]
+pub(crate) struct Unsettled;
+
+impl Display for Unsettled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the redaction rules changed while each of {READS} reads of the work view ran"
+        )
+    }
+}
+
+impl std::error::Error for Unsettled {}
+
+/// What a check from the pages names by a request's id in the snapshot (decision 117).
+pub(crate) enum Named {
+    /// The one request that goes by it: its answer as My Work reads it, its place among every
+    /// range's requests, and their held list, by which a check's write prunes (`set_review`).
+    One(Value, usize, Vec<crate::my_work::Held>),
+    /// No request goes by it now.
+    Gone,
+    /// Two requests or more go by it, which only two stored ids of one keyed print would make: a
+    /// check can tell none of them.
+    Shared,
+}
+
+/// The request whose id in the snapshot (`selector`) is `id` (decision 117): read under one
+/// generation of rules (`settled`) and referred to as the snapshot refers to it (`refer`), so that
+/// a rule saved since the pages read their snapshot makes the id they have one no request goes
+/// by, never another's; from every range, as a request the pages read may have left the week
+/// since. It takes no readers' hold, as `reviewing` takes none: a check reads it under the
+/// reviews' lock, which a purge waits for while it holds that hold (Codex on slice 2).
+pub(crate) fn named(home: &Path, now: i64, id: &str) -> anyhow::Result<Named> {
+    named_with(home, now, id, Gate::now)
+}
+
+/// `named`, its gate's rules as `rules_now` reads them.
+fn named_with(
+    home: &Path,
+    now: i64,
+    id: &str,
+    rules_now: impl FnMut() -> Gate,
+) -> anyhow::Result<Named> {
+    let reviewing =
+        |source: &crate::redact::Rules| crate::my_work::reviewing_under(home, now, source);
+    let ((mut work, held), gate) = settled(home, rules_now, reviewing)?;
+    refer(home, &mut work, &gate)?;
+    let requests = arr(&work["requests"]);
+    Ok(match going_by(requests, id)[..] {
+        [i] => Named::One(requests[i].clone(), i, held),
+        [] => Named::Gone,
+        _ => Named::Shared,
+    })
+}
+
+/// The places of the requests that go by `id` (`selector`), two at most: enough to tell one from
+/// several.
+fn going_by(requests: &[Value], id: &str) -> Vec<usize> {
+    (0..requests.len())
+        .filter(|&i| selector(&requests[i]) == id)
+        .take(2)
+        .collect()
 }
 
 /// The snapshot of `work` and `goals`, its goals' times in `tz`, through `gate`.
@@ -820,6 +899,29 @@ fn lifecycle(status: &str) -> &'static str {
     }
 }
 
+/// The id the pages know a request by, as the snapshot gives it (`request`) and a check names it
+/// (`named`, decision 117), matched whole: a conversation's own request goes by its
+/// conversation's key, as claude-mem's does (its drawer gives that conversation the ask's time,
+/// `to-work-model.ts:228`), with the conversation's reference there where it goes by one; any
+/// other request goes by its reference where it goes by one, else by its id (`refer`).
+fn selector(r: &Value) -> Value {
+    let mut own = if r["ref"].is_string() {
+        r["ref"].clone()
+    } else {
+        r["id"].clone()
+    };
+    for c in arr(&r["sessions"]) {
+        let (agent, held) = (
+            c["agent"].as_str().unwrap_or(""),
+            c["id"].as_str().unwrap_or(""),
+        );
+        if r["id"] == held {
+            own = json!(conversation_key(agent, c["ref"].as_str().unwrap_or(held)));
+        }
+    }
+    own
+}
+
 /// One My Work request as claude-mem's human request; each conversation's agent goes in `agents`
 /// once, titled by the conversation's own request, else by the first request that names it.
 fn request<Tz: TimeZone>(
@@ -829,12 +931,7 @@ fn request<Tz: TimeZone>(
     tz: &Tz,
 ) -> Value {
     let status = r["status"].as_str().unwrap_or("unknown");
-    // A request whose id goes by a reference goes by it (`refer`).
-    let mut own = if r["ref"].is_string() {
-        r["ref"].clone()
-    } else {
-        r["id"].clone()
-    };
+    let own = selector(r);
     let mut agent_ids = Vec::new();
     let mut keys = Vec::new();
     for c in arr(&r["sessions"]) {
@@ -855,13 +952,9 @@ fn request<Tz: TimeZone>(
             agents.len() - 1
         });
         let conversation = conversation_key(agent, id);
-        // A conversation's own request is known by the conversation's key, as claude-mem's is:
-        // its drawer gives that conversation the ask's time (`to-work-model.ts:228`). A write
-        // that names it takes oboete's id back from the key's last part, or from the reference
-        // there, whose print is the id's.
+        // A conversation's own request (`selector`): its title and project are the
+        // conversation's, whichever request named it first.
         if r["id"] == held {
-            own = json!(conversation);
-            // Its title and project are the conversation's, whichever request named it first.
             agents[at]["sessionTitle"] = s(&r["title"]);
             agents[at]["project"] = arr(&r["projects"]).first().cloned().unwrap_or(Value::Null);
         }
