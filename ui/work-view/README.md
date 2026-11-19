@@ -23,7 +23,7 @@ Decision 114 (2026-11-17) serves claude-mem's work-view on oboete's engine: My W
 - `notices.test.mjs` runs `notices.mjs` over small built trees it makes, `scripts.test.mjs` runs `build.sh` and `fetch.sh` in small checkouts it makes, and `bundle.test.mjs` reads the committed bundle: no part of the installer is in it, by its chunks' names and by the setup routes its scripts call (`node --test 'ui/work-view/*.test.mjs'`).
 - `.github/workflows/work-view.yml` runs `build.sh` again in CI. It fails when the bundle it makes differs from the committed one by a byte.
 
-The bundle is not served yet. Its data is `GET /api/work-view` (`src/work_view.rs`), which answers at the main page's address with its token; the pages' own address and their token come in the pull request that serves them.
+The viewer serves the bundle at `http://work-view.localhost:{port}/work-view/` (decision 116), from the binary: `build.rs` tables `assets/work-view/` for it. Its data, `GET /api/work-view` (`src/work_view.rs`) and its version, answers on that origin alone, with the token made from the viewer's, which `oboete view` prints in the pages' address.
 
 ## Following claude-mem
 

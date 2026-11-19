@@ -236,7 +236,12 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   hand to claude-mem's pages instead (Claude; overrulable). The spike runs beside the remaining speed
   work of the page (Claude; overrulable). It passed on 2026-11-18, and each file its bundle holds had
   a confirmed licence, so none is replaced ([spike/work-view.md](spike/work-view.md)).
-- The new pages open at an address of their own, with a token that reaches `/api/work-view/` alone.
+- The new pages open at an address of their own, `http://work-view.localhost:{port}/work-view/`
+  (decision 116), with a token made from the viewer's that reaches their two reads alone; `oboete
+  view` prints it under the main page's address. Its known limits: Safari before macOS 26 is
+  reported not to resolve names under `.localhost` (measured once oboete runs on a Mac), and the
+  viewer listens on 127.0.0.1 alone, so another program listening on `::1` at its port would get
+  the pages' address, and in it the work-view's token, never the main one.
   Every action on them works there, as in claude-mem. Every package their bundle holds is checked
   before it ships and again at each update: where it comes from, what it runs when installed (the
   bundle is built with install scripts off), and the advisories against it. The page may reach no
@@ -265,7 +270,7 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   new sets when either changed meanwhile, so that a rule saved during the reads is in force in each
   shape a text is gated in. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
-  moves. Until the pages have their address, both answer at the main page's, with its token. What
+  moves. Both answer on the pages' own origin alone, with its token (decision 116). What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its
   place in its request), the
   weekly chapters of the Build story follow its recap, a finished month of goals is a period of Past

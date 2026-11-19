@@ -54,6 +54,20 @@ const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; scr
     style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; \
     frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
     Cache-Control: no-store\r\n";
+/// Decision 116: the work-view's own name. Every name under `.localhost` is this computer (RFC
+/// 6761), and no page of oboete's was ever served under this one (`Viewer::site`), so its origin
+/// holds nothing of theirs: not the main page's token, and no tab of it.
+const WORK_VIEW_HOST: &str = "work-view.localhost";
+/// The work-view's policy: the main page's, with fonts as files and images as files or `data:`
+/// URLs (the grain the pages draw), as the bundle loads them (docs/spike/work-view.md).
+const WORK_VIEW_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
+    style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; \
+    form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\n\
+    Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
+/// The work-view bundle, as `ui/work-view/build.sh` built it into `assets/work-view/`, in the
+/// binary (`build.rs`): each file's path under `/work-view/`, its media type and its bytes.
+const WORK_VIEW_FILES: &[(&str, &str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/work_view_files.rs"));
 
 struct Viewer {
     home: PathBuf,
@@ -158,6 +172,33 @@ enum Token {
     /// The resident viewer's: `state/view-token`, read for each request (`file_token`), so it
     /// outlives a restart and a file that changed is never trusted from before (R6).
     File,
+}
+
+/// The viewer's two origins (decision 116), each on its port: oboete's page at 127.0.0.1 and
+/// localhost, and the work-view's at `WORK_VIEW_HOST`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Site {
+    Main,
+    WorkView,
+}
+
+/// Decision 116: the work-view's token, made from the viewer's own, so that it follows each new
+/// token and each move's; neither token is taken on the other's origin.
+fn work_view_token(token: &str) -> String {
+    crate::db::hex(&Sha256::digest(
+        format!("oboete work-view token\0{token}").as_bytes(),
+    ))
+}
+
+/// The work-view's address beside the main page's, `http://127.0.0.1:{port}/#t={token}`, made
+/// from the same port and token, so a moved port and a new token go out together; none for
+/// another address.
+pub(crate) fn work_view_address(main: &str) -> Option<String> {
+    let (port, token) = main.strip_prefix("http://127.0.0.1:")?.split_once("/#t=")?;
+    Some(format!(
+        "http://{WORK_VIEW_HOST}:{port}/work-view/#t={}",
+        work_view_token(token)
+    ))
 }
 
 /// What the accept loop does instead of serving its next connection (`Viewer::wake`): that
@@ -335,6 +376,8 @@ struct Response {
     status: u16,
     ctype: &'static str,
     body: Vec<u8>,
+    /// The policy and the other headers it goes with: the main page's, or the work-view's.
+    headers: &'static str,
 }
 
 impl Response {
@@ -343,7 +386,13 @@ impl Response {
             status,
             ctype,
             body: body.into(),
+            headers: SECURITY_HEADERS,
         }
+    }
+    /// The same answer under the work-view's policy (decision 116).
+    fn on_work_view(mut self) -> Self {
+        self.headers = WORK_VIEW_HEADERS;
+        self
     }
     fn text(status: u16, msg: &str) -> Self {
         Self::new(status, "text/plain; charset=utf-8", msg)
@@ -371,10 +420,11 @@ impl Response {
             _ => "Internal Server Error",
         };
         let mut out = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
             self.status,
             self.ctype,
-            self.body.len()
+            self.body.len(),
+            self.headers
         )
         .into_bytes();
         if !head_only {
@@ -409,6 +459,7 @@ pub fn run(home: &Path, port: Option<u16>, open: bool) -> Result<()> {
         Token::Run(token),
     ));
     println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
+    print_work_view_address(&url);
     if open {
         viewer.open(home, &url, open_browser);
     }
@@ -470,6 +521,7 @@ fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
         anyhow!("the resident viewer moved or its token file cannot be read; run this again")
     })?;
     println!("{url}\n(the resident viewer: bookmark this address; it stays up)");
+    print_work_view_address(&url);
     if open {
         match opener_page(home, port, &url) {
             Ok(page) => open_browser(&page),
@@ -477,6 +529,13 @@ fn show_resident(home: &Path, port: u16, open: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Decision 116: the work-view's address under the main page's, made from the same pair.
+pub(crate) fn print_work_view_address(main: &str) {
+    if let Some(address) = work_view_address(main) {
+        println!("{address}\n(the new My Work pages, at an address of their own)");
+    }
 }
 
 /// The resident viewer's address once `bring_up` saw it listen on `port`: the port and the token
@@ -1703,13 +1762,20 @@ impl Viewer {
         if !self.token_ok(only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
-        // The prompt hook's request says nothing of the page: the opener page stays for it.
-        if browser {
-            self.token_arrived();
-        }
+        // A request with an Origin is a browser's, whatever its path: the hooks send none, so the
+        // work-view's origin is refused on their paths too (decision 116).
+        let browser = browser
+            || headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("origin"));
         let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
         if browser && !self.host_ok(origin) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
+        }
+        // The prompt hook's request says nothing of the page, and a refused one nothing either:
+        // the opener page stays for them.
+        if browser {
+            self.token_arrived();
         }
         // The media type itself, parameters aside: `application/jsonp` is not JSON.
         let media = only("content-type").map(|t| t.split(';').next().unwrap_or("").trim());
@@ -2216,10 +2282,6 @@ impl Viewer {
         ))
     }
 
-    /// docs/my-work.md rule 6: `{request, version, checked}`, a check of the version of a request
-    /// as the page saw it, or its Undo. The request is found by its id as this route shows it; a
-    /// version that is not its current one, or a check of one not reported complete, is refused
-    /// with 409, and the page reads My Work again.
     /// Decision 70 (parity row X14): Refresh now. The body is `{}`; the answer is the status
     /// line's state when nothing can run, else `nothing_due`, or `started` with how many subjects
     /// the worker takes at its next round.
@@ -2300,6 +2362,10 @@ impl Viewer {
         }
     }
 
+    /// docs/my-work.md rule 6: `{request, version, checked}`, a check of the version of a request
+    /// as the page saw it, or its Undo. The request is found by its id as this route shows it; a
+    /// version that is not its current one, or a check of one not reported complete, is refused
+    /// with 409, and the page reads My Work again.
     fn my_work_review(&self, body: &[u8]) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2359,24 +2425,47 @@ impl Viewer {
     }
 
     /// DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
-    /// Browsers leave port 80 out of Host.
-    fn host_ok(&self, host: Option<&str>) -> bool {
+    /// Browsers leave port 80 out of Host. Which of the viewer's two origins a Host or an Origin
+    /// names, matched exactly (decision 116); none for any other name.
+    fn site(&self, host: Option<&str>) -> Option<Site> {
         let port = self.port();
-        host.is_some_and(|h| {
-            h == format!("127.0.0.1:{port}")
-                || h == format!("localhost:{port}")
-                || (port == 80 && (h == "127.0.0.1" || h == "localhost"))
-        })
+        let h = host?;
+        let named = |name: &str| h == format!("{name}:{port}") || (port == 80 && h == name);
+        if named("127.0.0.1") || named("localhost") {
+            Some(Site::Main)
+        } else if named(WORK_VIEW_HOST) {
+            Some(Site::WorkView)
+        } else {
+            None
+        }
+    }
+
+    /// oboete's own page's names: the only ones its routes, its files and its saves take.
+    fn host_ok(&self, host: Option<&str>) -> bool {
+        self.site(host) == Some(Site::Main)
+    }
+
+    /// The viewer's token now: this run's, or the token file's, read again each time (R6).
+    fn token_now(&self) -> Option<String> {
+        match &self.token {
+            Token::Run(t) => Some(t.clone()),
+            Token::File => file_token(&self.home),
+        }
     }
 
     /// A token is 32 characters, so an empty or absent header never passes (R6).
     fn token_ok(&self, given: Option<&str>) -> bool {
-        let want = match &self.token {
-            Token::Run(t) => Some(t.clone()),
-            Token::File => file_token(&self.home),
-        };
-        want.is_some_and(|w| {
+        self.token_now().is_some_and(|w| {
             Sha256::digest(given.unwrap_or("").as_bytes()) == Sha256::digest(w.as_bytes())
+        })
+    }
+
+    /// The work-view's token, made from the viewer's now (`work_view_token`); it is not the
+    /// token arriving, as the page `--open` took to the browser is the main page's.
+    fn work_view_token_ok(&self, given: Option<&str>) -> bool {
+        self.token_now().is_some_and(|w| {
+            Sha256::digest(given.unwrap_or("").as_bytes())
+                == Sha256::digest(work_view_token(&w).as_bytes())
         })
     }
 
@@ -2469,8 +2558,8 @@ impl Viewer {
                 .map(|(_, v)| *v)
         };
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        // Reads only: the stores' writes (forget) come with milestone 5 (D11), and the settings
-        // saves take `head`'s other path. OPTIONS stays 405, so no cross-site preflight passes.
+        // Reads only: every write, the settings' and the stores' (forget), takes `head`'s other
+        // path through `save_gate`. OPTIONS stays 405, so no cross-site preflight passes.
         if method != "GET" && method != "HEAD" {
             return Response::text(405, "method not allowed");
         }
@@ -2479,8 +2568,14 @@ impl Viewer {
         if header("transfer-encoding").is_some() || header("content-length").is_some() {
             return Response::text(400, "requests carry no body");
         }
-        if !self.host_ok(header("host")) {
-            return Response::text(403, "open the viewer through 127.0.0.1 or localhost");
+        match self.site(header("host")) {
+            Some(Site::Main) => {}
+            Some(Site::WorkView) => {
+                return self.work_view_route(path, query, header("x-oboete-token"));
+            }
+            None => {
+                return Response::text(403, "open the viewer through 127.0.0.1 or localhost");
+            }
         }
         match path {
             "/" => return Response::new(200, "text/html; charset=utf-8", INDEX),
@@ -2489,6 +2584,10 @@ impl Viewer {
             "/favicon.ico" => return Response::new(200, "image/x-icon", FAVICON_ICO),
             "/favicon.svg" => return Response::new(200, "image/svg+xml", FAVICON_SVG),
             "/apple-touch-icon.png" => return Response::new(200, "image/png", TOUCH_ICON),
+            // Decision 116: the work-view's reads answer on its own origin alone.
+            p if p == "/api/work-view" || p.starts_with("/api/work-view/") => {
+                return Response::text(404, "not found");
+            }
             p if !p.starts_with("/api/") => return Response::text(404, "not found"),
             _ => {}
         }
@@ -2543,6 +2642,33 @@ impl Viewer {
             };
         }
         self.api(name, &q).unwrap_or_else(|e| failed(&e))
+    }
+
+    /// The work-view's origin (decision 116): its bundle's files, at `/work-view/` and at `/` too,
+    /// and its two reads, with its own token; nothing else of the viewer's, and no write yet
+    /// (#1085). A request's method and framing are checked before (`route`).
+    fn work_view_route(&self, path: &str, query: &str, token: Option<&str>) -> Response {
+        let file = match path {
+            "/" | "/work-view" | "/work-view/" => Some("index.html"),
+            p => p.strip_prefix("/work-view/"),
+        };
+        if let Some(name) = file {
+            return match WORK_VIEW_FILES.iter().find(|(p, _, _)| *p == name) {
+                Some((_, ctype, bytes)) => Response::new(200, ctype, *bytes).on_work_view(),
+                None => Response::text(404, "not found").on_work_view(),
+            };
+        }
+        let name = match path {
+            "/api/work-view" => "work-view",
+            "/api/work-view/version" => "work-view/version",
+            _ => return Response::text(404, "not found").on_work_view(),
+        };
+        if !self.work_view_token_ok(token) {
+            return Response::text(401, "missing or wrong token").on_work_view();
+        }
+        self.api(name, &params(query))
+            .unwrap_or_else(|e| failed(&e))
+            .on_work_view()
     }
 
     /// The label and branch of the checkout the viewer was started in, read per request as
@@ -2690,7 +2816,9 @@ impl Viewer {
                 let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
                 return Ok(Response::json(&crate::work_view::answer(&self.home, now)?));
             }
-            "work-view/version" => return self.api("version", q),
+            // The pages read the version alone (`local-api-token-client.ts`): the main page's
+            // other fields, its curation and forget state among them, stay off their origin.
+            "work-view/version" => json!({ "v": self.version()?["v"] }),
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
                 let now = crate::db::now_ms();
@@ -2762,27 +2890,29 @@ impl Viewer {
             }
             // A copy made or swept, and a viewer whose links changed (docs/deliverables.md, slice
             // 2), move the page's version too.
-            "version" => {
-                let mut answer = polled(&self.home)?;
-                // A copies' store that does not read moves no version rather than stopping the
-                // page's polls (the list and the products report it, less often than this).
-                let files = (|| -> Result<String> {
-                    Ok(match crate::deliverables::open_read(&self.home)? {
-                        Some(db) => {
-                            crate::deliverables::fingerprint(&crate::deliverables::rows(&db)?)
-                        }
-                        None => String::new(),
-                    })
-                })()
-                .unwrap_or_else(|_| "unread".into());
-                let v = answer["v"].as_str().unwrap_or("").to_owned();
-                answer["v"] = json!(format!("{v}:{files}:{}", self.files_instance()?));
-                answer
-            }
+            "version" => self.version()?,
             "stats" => stats(&self.home)?,
             _ => return Ok(Response::text(404, "not found")),
         };
         Ok(Response::json(&answered(name, answer)))
+    }
+
+    /// The page's version, `v`, which moves with what the page shows, and what the page polls for
+    /// with it (`polled`); a copy made or swept, and a viewer whose links changed, move `v` too.
+    fn version(&self) -> Result<Value> {
+        let mut answer = polled(&self.home)?;
+        // A copies' store that does not read moves no version rather than stopping the
+        // page's polls (the list and the products report it, less often than this).
+        let files = (|| -> Result<String> {
+            Ok(match crate::deliverables::open_read(&self.home)? {
+                Some(db) => crate::deliverables::fingerprint(&crate::deliverables::rows(&db)?),
+                None => String::new(),
+            })
+        })()
+        .unwrap_or_else(|_| "unread".into());
+        let v = answer["v"].as_str().unwrap_or("").to_owned();
+        answer["v"] = json!(format!("{v}:{files}:{}", self.files_instance()?));
+        Ok(answer)
     }
 
     /// The Context page: what SessionStart shows a new session in `repo`'s checkout (the viewer's

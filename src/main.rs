@@ -1040,6 +1040,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         } => {
             let (moved, url) = view::new_token(&home)?;
             println!("{url}");
+            view::print_work_view_address(&url);
             if moved {
                 println!(
                     "Delete the old bookmark and bookmark this address: the viewer moves here within two minutes, and the old address no longer opens the page."

@@ -490,9 +490,15 @@ left as a setting to add before a public release.
    `oboete view` in a resident home with nothing running leaves both locks held.
 3. The viewer answers on the configured port with the token of `state/view-token`; after a restart
    the same token works; `--new-token` makes the old one fail and the new one work, on the next
-   free port, and config.toml names that port. A request with the token removes the opener page.
+   free port, and config.toml names that port. A request with the token from the browser removes
+   the opener page: a read, or a save once its Origin is the page's; the hooks' requests, which
+   carry no Origin, leave it.
+   The work-view's pages answer at `work-view.localhost` on the same port, with the token made from
+   the file's (decision 116): a new token ends both, a manual port move keeps both, and a request
+   with the work-view's token leaves the opener page in place.
 4. The token file is 0600 when made. A file readable by group or others, a missing file, an empty
-   file and a 31-character file each refuse every request, with and without a token header.
+   file and a 31-character file each refuse every request that takes a token, with and without a
+   token header; the pages' own files are served without one.
 5. A port in use: the viewer exits, `state/view-outcome` says the port is in use, the worker keeps
    draining records and starts no second viewer within the next minute and leaves no zombie, and
    `oboete view` serves in the foreground and prints why. A foreign listener on the port receives no
