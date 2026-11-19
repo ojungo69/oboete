@@ -2259,6 +2259,18 @@ fn each_origin_answers_its_own_routes_with_its_own_token() {
         assert!(head.contains(WORK_VIEW_HEADERS), "{target}: {head}");
     }
     assert_ne!(v.route("GET", "/", &[HOST]).body.as_slice(), index);
+    // The page is the checked-in index.html, and every file it loads is served there.
+    let on_disk = include_bytes!("../../assets/work-view/index.html");
+    assert_eq!(index, on_disk.as_slice());
+    let html = std::str::from_utf8(on_disk).unwrap();
+    let loads: Vec<&str> = (html.split('"'))
+        .filter(|s| s.starts_with("/work-view/"))
+        .collect();
+    assert!(loads.iter().any(|p| p.ends_with(".js")) && loads.iter().any(|p| p.ends_with(".css")));
+    for path in loads {
+        let r = v.route("GET", path, &[WV_HOST]);
+        assert!(r.status == 200 && !r.body.is_empty(), "{path}");
+    }
     // One Host: two, in either order, are refused before any route, a copy's link's too.
     for hosts in [[HOST, WV_HOST], [WV_HOST, HOST]] {
         for target in ["/api/work-view", "/", "/files/abc"] {
