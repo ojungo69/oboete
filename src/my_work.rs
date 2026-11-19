@@ -1968,8 +1968,10 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
 }
 
 /// The checks' part of the work-view's version (decision 117): the file's time and a digest of its
-/// bytes, so that a check, an Undo and a forget's sweep each move it whichever page made them, and
-/// a check undone at once brings back no version a poll saw; the same while there is no file.
+/// bytes, so that a check, an Undo and a forget's sweep each move it whichever page made them. A
+/// check undone at once brings back a version a poll saw only when the file's time comes back with
+/// its bytes, which needs the write before the check, the check's and the Undo's within one tick of
+/// the file's clock (Codex on #1107); the same while there is no file.
 pub(crate) fn reviews_version(home: &Path) -> String {
     use sha2::Digest;
     let path = home.join("state").join(REVIEWS);

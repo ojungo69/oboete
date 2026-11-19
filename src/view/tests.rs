@@ -2782,6 +2782,9 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
         assert_eq!(json_any(&answer)["code"], code, "{path}");
         assert!(opener.exists());
         for (status, headers) in &refused {
+            // Refused on the head, before a byte of the body is read (Codex on #1107).
+            let head = v.head("POST", path, headers);
+            assert!(matches!(head, Head::Answer(_)), "{path} {headers:?}");
             let answer = post(path, headers);
             assert_eq!(
                 (answer.status, answer.headers),
@@ -9219,9 +9222,25 @@ fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
         shown_by(&first, old_key).is_none(),
         "the week leaves it out"
     );
-    let (status, answer) = post(&check_of(old_key, old["version"].as_str().unwrap(), false));
+    // Its check, written as a check is: a route would refuse it, as the request is not ready.
+    let old_version = old["version"].as_str().unwrap().to_owned();
+    let (_, held) = crate::my_work::reviewing(home, crate::db::now_ms()).unwrap();
+    let place = (held.iter().position(|h| h.id() == "c:claude:old")).expect("its held request");
+    let lock = crate::my_work::reviews_lock(home).unwrap();
+    let at = crate::db::now_ms();
+    crate::my_work::set_review((home, &lock), (&held[place], &held), &old_version, true, at)
+        .unwrap();
+    drop(lock);
+    let checked_now = |id: &str| {
+        let all = get(&v, "/api/my-work?range=all");
+        let r = (all["requests"].as_array().unwrap().iter()).find(|r| r["id"] == id);
+        r.expect("the request")["checked"].is_i64()
+    };
+    assert!(checked_now("c:claude:old"));
+    let (status, answer) = post(&check_of(old_key, &old_version, false));
     assert_eq!(status, 200, "{answer}");
     assert!(shown_by(&answer, old_key).is_none(), "{answer}");
+    assert!(!checked_now("c:claude:old"), "its Undo took the check back");
 }
 
 /// Decision 117 (Codex on slice 2): the work-view's check lets go of the reviews' lock before it
