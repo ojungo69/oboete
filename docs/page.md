@@ -237,11 +237,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   work of the page (Claude; overrulable). It passed on 2026-11-18, and each file its bundle holds had
   a confirmed licence, so none is replaced ([spike/work-view.md](spike/work-view.md)).
 - The new pages open at an address of their own, `http://work-view.localhost:{port}/work-view/`
-  (decision 116), with a token made from the viewer's that reaches their two reads alone; `oboete
-  view` prints it under the main page's address. Its known limits: Safari before macOS 26 is
+  (decision 116), with a token made from the viewer's that reaches their two reads and the writes
+  of My Work they make, each on their origin alone, and nothing else of the viewer's (decision
+  117); `oboete view` prints it under the main page's address. Its known limits: Safari before macOS 26 is
   reported not to resolve names under `.localhost` (measured once oboete runs on a Mac), and the
   viewer listens on 127.0.0.1 alone, so another program listening on `::1` at its port would get
-  the pages' address, and in it the work-view's token, never the main one.
+  the pages' address, and in it the work-view's token, which reads My Work and makes the writes
+  the pages take (decision 117), never the main one.
   Every action on them works there, as in claude-mem. Every package their bundle holds is checked
   before it ships and again at each update: where it comes from, what it runs when installed (the
   bundle is built with install scripts off), and the advisories against it. The page may reach no
@@ -298,7 +300,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   [claude-mem-parity.md](claude-mem-parity.md). Continuing a conversation will work from the new
   pages directly too. Focus sharing and Team stay unbuilt (row 22). A control whose write oboete
   does not take yet is hidden until the pull request that takes it: checking a request, adding a
-  rule, changing an area or a suggested one, and Refresh now (#1085). claude-mem's installer is none
+  rule, and changing an area or a suggested one (#1085, #1102). Refresh now works there
+  (decision 117). claude-mem's installer is none
   of the pages and is left out of the bundle: oboete's setup is `oboete setup` and its settings page.
 - The page's words are [GLOSSARY.md](../GLOSSARY.md)'s. In English a claim is a memory, and their list
   is Memories, since Learned is a summary's section, as in claude-mem (Claude; overrulable).

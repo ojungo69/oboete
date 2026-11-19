@@ -697,33 +697,6 @@ index d21f2bf02a9201e572c7e8d6007d8db664dbe6dd..2a4fefa01520a7a3cfa0a19bca7b2b39
              {sample ? <RefreshButton run={SAMPLE_RUNS.rules} ids={['R14.13', 'R11.1']} /> : <RefreshStatus refresh={refresh} run={lastRuns.progress} ids={['R14.13']} />}
            </div>
          </div>
-diff --git a/src/ui/my-work/src/pages/my-work.tsx b/src/ui/my-work/src/pages/my-work.tsx
-index c667adb32d6e437a2e033aa4499fb9f0257454b9..0867647193cd9ee0818264f6c8553964ed2677e3 100644
---- a/src/ui/my-work/src/pages/my-work.tsx
-+++ b/src/ui/my-work/src/pages/my-work.tsx
-@@ -547,7 +547,8 @@ export function MyWork({ focusAreaId, onOpen, onOpenFocus, onOpenRules }: { focu
-           <div className="order-last w-full md:ml-auto md:w-auto">
-             <div className="flex items-center justify-end gap-3">
-               <RefreshStatus refresh={refresh} run={lastRuns.progress} label="Last reviewed" ids={['R14.12']} />
--              <ManualRefreshButton ids={['R14.12']} running={refresh?.state === 'running'} />
-+              {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete starts no refresh from these pages yet (#1085). */}
-+              {false && <ManualRefreshButton ids={['R14.12']} running={refresh?.state === 'running'} />}
-             </div>
-           </div>
-         ) : (refresh || lastRuns.progress) && (
-diff --git a/src/ui/my-work/src/pages/past-focus.tsx b/src/ui/my-work/src/pages/past-focus.tsx
-index 811017b6246fe8cc4898781adb271f9c01a419a1..70995c7e9d089e816b4129df0c914df5a6198702 100644
---- a/src/ui/my-work/src/pages/past-focus.tsx
-+++ b/src/ui/my-work/src/pages/past-focus.tsx
-@@ -129,7 +129,7 @@ export function PastFocus({ onOpenFocus }: { onOpenFocus: (focusAreaId: string)
-             <h2 className="text-lg font-semibold tracking-tight">{t("Past focus")}</h2>
-             <p className="text-sm text-muted-foreground">{t("Areas you finished, and what you asked for in earlier months.")}</p>
-           </div>
--          {sourceKind === 'sample' ? <RefreshButton run={SAMPLE_RUNS.goals} ids={['R14.10']} /> : sourceKind === 'local' ? <div className="flex items-center justify-end gap-3"><RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} /><ManualRefreshButton ids={['R14.10']} running={refresh?.state === 'running'} /></div> : <RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />}
-+          {sourceKind === 'sample' ? <RefreshButton run={SAMPLE_RUNS.goals} ids={['R14.10']} /> : sourceKind === 'local' ? <div className="flex items-center justify-end gap-3"><RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />{/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete starts no refresh from these pages yet (#1085). */}{false && <ManualRefreshButton ids={['R14.10']} running={refresh?.state === 'running'} />}</div> : <RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />}
-         </div>
-         <DoneAreas onOpenFocus={onOpenFocus} />
-         {currentPeriod ? <MonthByMonth onOpenFocus={onOpenFocus} /> : !hasDone && (
 diff --git a/src/ui/my-work/src/pages/suggested-areas.tsx b/src/ui/my-work/src/pages/suggested-areas.tsx
 index 12a1d2959c4dce016e34903facdcf7a021665073..6ce18cf644d5440d41a0c046f27169bbf35651cb 100644
 --- a/src/ui/my-work/src/pages/suggested-areas.tsx

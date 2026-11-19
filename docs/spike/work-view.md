@@ -125,4 +125,6 @@ These are the study's pull requests, corrected by this spike and by their review
 2. **Patches and build**: P1 and the hiding patches, `build.sh`, the committed bundle and the Node job (#1082). Nothing is served.
 3. **The read adapter**: `GET /api/work-view`, from `src/work_view.rs` here, with a contract test that runs `toWorkModel` over its answer. It answers at the main page's address and with its token, as `/api/my-work` does, until serving gives it its own.
 4. **Serving, at an address of its own** (done: the bundle's side in #1099, then the viewer's, at `work-view.localhost`, decision 116): the `/work-view/` arm with its CSP, the address of its own, its token, and the two comments above. Serving waits for the address: the main page keeps its token in its origin's storage, which the bundle would share at the same address.
-5. Then the writes, the rules and Japanese, one pull request each.
+5. Then the writes, one pull request per family (decision 117: Refresh now with the gate first,
+   then a request's check, a suggestion's answer, Mark finished and the focus actions), the
+   rules and Japanese.

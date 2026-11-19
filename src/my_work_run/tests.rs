@@ -1139,6 +1139,29 @@ fn a_request_from_ahead_of_the_clock_stands_not() {
     );
 }
 
+/// Codex on the work-view's writes: a marker is replaced in one step, at its time, and a mark that
+/// fails before it replaces leaves the one there as it was, with nothing of its own left behind.
+#[test]
+fn a_mark_that_fails_leaves_the_marker_as_it_was() {
+    let home = tempfile::tempdir().unwrap();
+    let path = refresh_path(home.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let modified = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    let first = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    mark(&path, first).unwrap();
+    assert_eq!(modified(&path), first);
+    // The process's own file cannot be made: the mark fails, and the marker keeps its time.
+    let own = path.with_extension(std::process::id().to_string());
+    std::fs::create_dir(&own).unwrap();
+    let second = first + std::time::Duration::from_secs(60);
+    assert!(mark(&path, second).is_err());
+    assert_eq!(modified(&path), first);
+    std::fs::remove_dir(&own).unwrap();
+    mark(&path, second).unwrap();
+    assert_eq!(modified(&path), second);
+    assert!(!own.exists());
+}
+
 /// Decision 70: a request `REFRESH_MS` old stands no more and changes nothing.
 #[test]
 fn a_stale_refresh_request_changes_nothing() {

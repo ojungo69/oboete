@@ -2020,6 +2020,12 @@ fn json_of(r: &Response) -> Value {
     serde_json::from_slice(&r.body).unwrap()
 }
 
+/// A JSON answer whatever its status: a save's, or a refusal's.
+fn json_any(r: &Response) -> Value {
+    serde_json::from_slice(&r.body)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&r.body)))
+}
+
 fn get(v: &Viewer, target: &str) -> Value {
     json_of(&v.route("GET", target, &[HOST, TOKEN]))
 }
@@ -2170,7 +2176,7 @@ fn the_work_views_story_leaves_through_the_gate() {
 
 /// Decision 114: the work-view's snapshot and its version take its token, on its own origin
 /// (decision 116). Over an empty home the snapshot has no request and no goals, and its source is
-/// connected; its version is the page's.
+/// connected; its version is its own (decision 117: Refresh now's request moves it too).
 #[test]
 fn the_work_view_routes_take_the_token() {
     let (dir, v) = viewer("work-view");
@@ -2182,7 +2188,10 @@ fn the_work_view_routes_take_the_token() {
     assert_eq!(snapshot["source"]["connected"], json!(true));
     assert!(snapshot["goals"].is_null(), "{snapshot}");
     let version = get_work_view(&v, "/api/work-view/version");
-    assert_eq!(version["v"], get(&v, "/api/version")["v"], "{version}");
+    assert!(
+        version["v"].as_str().is_some_and(|v| !v.is_empty()),
+        "{version}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2203,7 +2212,12 @@ fn the_work_views_version_is_v_alone() {
         "{main}"
     );
     let version = get_work_view(&v, "/api/work-view/version");
-    assert_eq!(version, json!({ "v": main["v"] }));
+    let fields: Vec<&String> = version.as_object().unwrap().keys().collect();
+    assert_eq!(fields, ["v"], "{version}");
+    assert!(
+        version["v"].as_str().is_some_and(|v| !v.is_empty()),
+        "{version}"
+    );
 }
 
 /// Decision 116: the work-view's name as the test viewer's Host.
@@ -2424,9 +2438,22 @@ fn a_save_from_the_work_views_origin_is_refused_and_leaves_the_opener() {
         request(&v, "POST", target, &headers, body).status
     };
     let made = work_view_token("t0k");
+    // The work-view's token writes My Work on its own origin (decision 117) and nothing here: the
+    // settings, the keys, forget, hide and My Work's own saves of oboete's page among them.
     for target in [
         "/api/preferences",
         "/api/my-work/review",
+        "/api/my-work/refresh",
+        "/api/my-work/finished",
+        "/api/my-work/suggestion",
+        "/api/my-focus",
+        "/api/my-rules",
+        "/api/settings",
+        "/api/key",
+        "/api/providers/key",
+        "/api/forget/start",
+        "/api/hide",
+        "/api/view/token",
         "/api/prompt-context",
         "/api/query-vector",
         "/api/lookup",
@@ -2623,6 +2650,356 @@ fn the_my_work_refresh_route_takes_the_token_and_an_empty_object() {
     assert_eq!(json_of(&answer), json!({"state": "off"}));
     assert!(!crate::my_work_run::refresh_path(&dir).exists());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Decision 117: the work-view's Refresh now is a save of the work-view's origin alone: its Host,
+/// its token and its Origin, each refused on its own when it is missing, doubled or another's, the
+/// framing checked as every save's, and each refusal under the work-view's policy; it leaves the
+/// page `--open` wrote, which a request of oboete's page ends. A work-view path with no write yet is
+/// refused as before, with the work-view's credentials too.
+#[test]
+fn the_work_views_refresh_is_taken_on_its_own_origin_alone() {
+    let (dir, v) = viewer("wv-refresh-gate");
+    let opener = dir.join("opener.html");
+    std::fs::write(&opener, "page").unwrap();
+    *v.opener.lock().unwrap() = Some(opener.clone());
+    let made = work_view_token("t0k");
+    let token = ("X-Oboete-Token", made.as_str());
+    let origin = ("Origin", "http://work-view.localhost:4321");
+    let main_origin = ("Origin", "http://127.0.0.1:4321");
+    let json_type = ("Content-Type", "application/json");
+    let cl = ("Content-Length", "2");
+    let path = "/api/work-view/refresh";
+    let post = |target: &str, h: &[(&str, &str)]| request(&v, "POST", target, h, b"{}");
+    // Over an empty home My Work is off: the refusal is the handler's, so every check passed.
+    let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
+    assert_eq!((answer.status, answer.headers), (409, WORK_VIEW_HEADERS));
+    assert_eq!(json_any(&answer)["code"], "off");
+    assert!(opener.exists());
+    let refused: Vec<(u16, Vec<(&str, &str)>)> = vec![
+        // The Host: none, two, oboete's page's names, another name or port.
+        (403, vec![token, origin, json_type, cl]),
+        (403, vec![WV_HOST, WV_HOST, token, origin, json_type, cl]),
+        (403, vec![HOST, token, origin, json_type, cl]),
+        (
+            403,
+            vec![("Host", "localhost:4321"), token, origin, json_type, cl],
+        ),
+        (
+            403,
+            vec![("Host", "evil.example:4321"), token, origin, json_type, cl],
+        ),
+        (
+            403,
+            vec![
+                ("Host", "work-view.localhost:4322"),
+                token,
+                origin,
+                json_type,
+                cl,
+            ],
+        ),
+        (403, vec![HOST, TOKEN, main_origin, json_type, cl]),
+        // The token: none, two, the main page's, another.
+        (401, vec![WV_HOST, origin, json_type, cl]),
+        (401, vec![WV_HOST, token, token, origin, json_type, cl]),
+        (401, vec![WV_HOST, TOKEN, origin, json_type, cl]),
+        (
+            401,
+            vec![WV_HOST, ("X-Oboete-Token", "nope"), origin, json_type, cl],
+        ),
+        // The Origin: none, two, `null`, oboete's page's, another scheme, name or port.
+        (403, vec![WV_HOST, token, json_type, cl]),
+        (403, vec![WV_HOST, token, origin, origin, json_type, cl]),
+        (403, vec![WV_HOST, token, ("Origin", "null"), json_type, cl]),
+        (403, vec![WV_HOST, token, main_origin, json_type, cl]),
+        (
+            403,
+            vec![
+                WV_HOST,
+                token,
+                ("Origin", "http://localhost:4321"),
+                json_type,
+                cl,
+            ],
+        ),
+        (
+            403,
+            vec![
+                WV_HOST,
+                token,
+                ("Origin", "https://work-view.localhost:4321"),
+                json_type,
+                cl,
+            ],
+        ),
+        (
+            403,
+            vec![
+                WV_HOST,
+                token,
+                ("Origin", "http://evil.example:4321"),
+                json_type,
+                cl,
+            ],
+        ),
+        (
+            403,
+            vec![
+                WV_HOST,
+                token,
+                ("Origin", "http://work-view.localhost:4322"),
+                json_type,
+                cl,
+            ],
+        ),
+        // The framing, as every save's.
+        (
+            400,
+            vec![
+                WV_HOST,
+                token,
+                origin,
+                json_type,
+                cl,
+                ("Transfer-Encoding", "chunked"),
+            ],
+        ),
+        (
+            400,
+            vec![WV_HOST, token, origin, ("Content-Type", "text/plain"), cl],
+        ),
+        (400, vec![WV_HOST, token, origin, json_type]),
+        (400, vec![WV_HOST, token, origin, json_type, cl, cl]),
+    ];
+    for (status, headers) in &refused {
+        let answer = post(path, headers);
+        assert_eq!(
+            (answer.status, answer.headers),
+            (*status, WORK_VIEW_HEADERS),
+            "{headers:?}"
+        );
+        assert!(opener.exists(), "{headers:?}");
+    }
+    let over = (MAX_BODY + 1).to_string();
+    let over = [
+        WV_HOST,
+        token,
+        origin,
+        json_type,
+        ("Content-Length", over.as_str()),
+    ];
+    match v.head("POST", path, &over) {
+        Head::Answer(r) => assert_eq!((r.status, r.headers), (413, WORK_VIEW_HEADERS)),
+        Head::Body(..) | Head::File(_) => panic!("a body over the cap would be read"),
+    }
+    // No other write of the work-view's yet: refused as before, with its credentials too.
+    for target in [
+        "/api/work-view/review",
+        "/api/work-view/focus",
+        "/api/work-view/rules",
+    ] {
+        let answer = post(target, &[WV_HOST, token, origin, json_type, cl]);
+        assert_eq!(answer.status, 405, "{target}");
+    }
+    assert_eq!(
+        v.route("OPTIONS", path, &[WV_HOST, token, origin]).status,
+        405
+    );
+    assert!(opener.exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Decision 117 with R6: a work-view save whose token was replaced between its head and its body
+/// is refused once its body is in, under the work-view's policy. Linux only, as the token file is
+/// (`keyfile::private_fs`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_work_view_save_is_refused_when_its_token_is_replaced_before_its_body() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("state")).unwrap();
+    write_token(home.path()).unwrap();
+    let made = work_view_token(&file_token(home.path()).unwrap());
+    let v = Viewer::new(home.path(), None, 4321, Token::File);
+    let headers = [
+        WV_HOST,
+        ("X-Oboete-Token", made.as_str()),
+        ("Origin", "http://work-view.localhost:4321"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", "2"),
+    ];
+    let Head::Body(_, save, given, site) = v.head("POST", "/api/work-view/refresh", &headers)
+    else {
+        panic!("the head passes the gate");
+    };
+    write_token(home.path()).unwrap();
+    let answer = v.take(save, b"{}", &given, site);
+    assert_eq!((answer.status, answer.headers), (401, WORK_VIEW_HEADERS));
+}
+
+/// Decision 117: Refresh now's outcomes as the work-view's pages read them (`refreshWork`,
+/// `ManualRefreshButton`): `idle` when nothing was due, `running` with how many when a request was
+/// left, and when My Work cannot run, a refusal whose sentence the pages show after "Refresh could
+/// not start:", in the words of oboete's own page's status line.
+#[test]
+fn the_work_views_refresh_answers_as_its_pages_read_it() {
+    let said = |answer: Value| {
+        let r = work_view_refresh_answer(&answer);
+        (r.status, json_any(&r))
+    };
+    assert_eq!(
+        said(json!({"state": "nothing_due"})),
+        (200, json!({"state": "idle"}))
+    );
+    assert_eq!(
+        said(json!({"state": "started", "due": 2})),
+        (200, json!({"state": "running", "due": 2}))
+    );
+    let until = 1_700_000_000_000_i64;
+    for (answer, code, error) in [
+        (
+            json!({"state": "off"}),
+            "off",
+            "My Work is off in oboete’s settings.",
+        ),
+        (
+            json!({"state": "summaries_off"}),
+            "summaries_off",
+            "Summaries are off in oboete’s settings, and My Work waits for them.",
+        ),
+        (
+            json!({"state": "waiting", "why": "bound", "until": until, "calls_a_day": 40}),
+            "waiting",
+            "The daily limit of 40 calls is reached.",
+        ),
+        (
+            json!({"state": "waiting", "why": "budget", "until": until}),
+            "waiting",
+            "An AI provider’s spending or call limit is reached.",
+        ),
+        (
+            json!({"state": "waiting", "why": "resting", "until": until}),
+            "waiting",
+            "Every AI provider is resting.",
+        ),
+        (
+            json!({"state": "waiting", "why": "owner", "until": until}),
+            "waiting",
+            "No AI provider can take it. Check the AI providers in oboete’s settings.",
+        ),
+    ] {
+        assert_eq!(
+            said(answer),
+            (409, json!({"error": error, "code": code, "field": ""}))
+        );
+    }
+}
+
+/// Decision 117, through the viewer: an empty home's My Work is off and no request is written; a
+/// body that is not `{}` is refused with a sentence; with My Work and summaries on and no stores
+/// yet nothing is due; a hold of a job My Work's status line speaks for makes it wait.
+#[test]
+fn the_work_views_refresh_reaches_my_work() {
+    let (dir, v) = viewer("wv-refresh");
+    let made = work_view_token("t0k");
+    let post = |body: &[u8]| {
+        let length = body.len().to_string();
+        let headers = [
+            WV_HOST,
+            ("X-Oboete-Token", made.as_str()),
+            ("Origin", "http://work-view.localhost:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", length.as_str()),
+        ];
+        let r = request(&v, "POST", "/api/work-view/refresh", &headers, body);
+        (r.status, json_any(&r))
+    };
+    let (status, off) = post(b"{}");
+    assert_eq!((status, &off["code"]), (409, &json!("off")), "{off}");
+    assert!(!crate::my_work_run::refresh_path(&dir).exists());
+    for body in [&br#"{"now":true}"#[..], b"[]"] {
+        let (status, refused) = post(body);
+        assert_eq!((status, &refused["code"]), (400, &json!("bad_request")));
+        assert!(refused["error"].is_string(), "{refused}");
+    }
+    let config = "providers = []\n[my_work]\ncurate = true\n[summary]\ncurate = true\n";
+    std::fs::write(dir.join("config.toml"), config).unwrap();
+    assert_eq!(post(b"{}"), (200, json!({"state": "idle"})));
+    let db = crate::providers_db::open(&dir).unwrap();
+    let until = crate::db::now_ms() + 60 * 60_000;
+    crate::providers_db::set_my_work_round(&db, crate::my_work_progress::NAME, "budget", until)
+        .unwrap();
+    let (status, waiting) = post(b"{}");
+    assert_eq!(
+        (status, &waiting["code"]),
+        (409, &json!("waiting")),
+        "{waiting}"
+    );
+    drop(db);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Decision 117: while a Refresh now request stands, the work-view's snapshot says it runs; the
+/// work-view's version moves as a request is left, marked done and runs out, never back to a value
+/// it had, so a snapshot read across a refresh is read again; the main page's version stays. A
+/// record stored moves both, as the main page's moved the work-view's before (decision 116).
+#[test]
+fn the_work_views_snapshot_and_version_follow_refresh_now() {
+    let mut s = Store::new();
+    let home = s.home.path().to_owned();
+    s.said("s1", R, 1_000, "Fix the parser.");
+    s.run();
+    let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+    let main = get(&v, "/api/version")["v"].clone();
+    let read = || {
+        let refresh = get_work_view(&v, "/api/work-view")["refresh"].clone();
+        let version = get_work_view(&v, "/api/work-view/version")["v"].clone();
+        (refresh, version)
+    };
+    let mark = |path: &Path, at: std::time::SystemTime| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    let request = crate::my_work_run::refresh_path(&home);
+    let done = crate::my_work_run::refresh_done_path(&home);
+    let now = std::time::SystemTime::now();
+    let second = std::time::Duration::from_secs(1);
+    let stale = std::time::Duration::from_millis(
+        u64::try_from(crate::my_work_run::REFRESH_MS + 60_000).unwrap(),
+    );
+    let (refresh, first) = read();
+    assert_eq!(refresh, Value::Null);
+    let mut seen = vec![first];
+    for (path, at, running) in [
+        // Left by the page.
+        (&request, now, true),
+        // Marked done by its time, as the worker marks the request it read.
+        (&done, now, false),
+        // Another, a second later.
+        (&request, now + second, true),
+        // It runs out.
+        (&request, now - stale, false),
+    ] {
+        mark(path, at);
+        let (refresh, version) = read();
+        let expected = if running {
+            json!({"state": "running"})
+        } else {
+            Value::Null
+        };
+        assert_eq!(refresh, expected, "{}", path.display());
+        assert!(!seen.contains(&version), "{version} came back: {seen:?}");
+        seen.push(version);
+    }
+    assert_eq!(get(&v, "/api/version")["v"], main);
+    s.said("s2", R, 2_000, "Ship the parser.");
+    s.run();
+    assert_ne!(get(&v, "/api/version")["v"], main);
+    let (_, version) = read();
+    assert!(!seen.contains(&version), "{version} came back: {seen:?}");
 }
 
 /// Slice 4 (docs/my-work.md): a request's work product, by the id the page has, with the
@@ -2888,7 +3265,7 @@ fn the_my_work_review_route_checks_a_version_and_refuses_the_rest() {
             ("Content-Length", len.as_str()),
         ];
         let r = match v.head("POST", "/api/my-work/review", &h) {
-            Head::Body(_, save, given) => v.take(save, body, &given),
+            Head::Body(_, save, given, site) => v.take(save, body, &given, site),
             Head::Answer(r) => r,
             Head::File(_) => panic!("no link"),
         };
@@ -3108,7 +3485,7 @@ fn the_my_work_finished_route_appends_the_owners_stop_and_refuses_the_rest() {
             ("Content-Length", len.as_str()),
         ];
         let r = match v.head("POST", "/api/my-work/finished", &h) {
-            Head::Body(_, save, given) => v.take(save, body, &given),
+            Head::Body(_, save, given, site) => v.take(save, body, &given, site),
             Head::Answer(r) => r,
             Head::File(_) => panic!("no link"),
         };
@@ -3284,7 +3661,7 @@ fn mark_finished_opens_raw_before_the_readers_hold() {
             ("Content-Length", len.as_str()),
         ];
         match v.head("POST", "/api/my-work/finished", &h) {
-            Head::Body(_, save, given) => v.take(save, &body, &given).status,
+            Head::Body(_, save, given, site) => v.take(save, &body, &given, site).status,
             Head::Answer(r) => r.status,
             Head::File(_) => panic!("no link"),
         }
@@ -3462,7 +3839,7 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
             ("Content-Length", len.as_str()),
         ];
         let r = match v.head("POST", "/api/my-work/suggestion", &h) {
-            Head::Body(_, save, given) => v.take(save, body, &given),
+            Head::Body(_, save, given, site) => v.take(save, body, &given, site),
             Head::Answer(r) => r,
             Head::File(_) => panic!("no link"),
         };
@@ -5587,17 +5964,27 @@ fn the_opener_page_carries_the_token_and_goes_once_the_browser_has_it() {
         ("Content-Length", "2"),
     ];
     assert!(
-        v.save_gate(&[HOST, TOKEN, json[0], json[1]], MAX_BODY, true)
+        v.save_gate(&[HOST, TOKEN, json[0], json[1]], MAX_BODY, true, Site::Main)
             .is_err()
     );
     let theirs = ("Origin", "http://work-view.localhost:4321");
     assert!(
-        v.save_gate(&[HOST, TOKEN, theirs, json[0], json[1]], MAX_BODY, true)
-            .is_err()
+        v.save_gate(
+            &[HOST, TOKEN, theirs, json[0], json[1]],
+            MAX_BODY,
+            true,
+            Site::Main
+        )
+        .is_err()
     );
     assert!(page.exists());
     let ours = ("Origin", "http://127.0.0.1:4321");
-    let admitted = v.save_gate(&[HOST, TOKEN, ours, json[0], json[1]], MAX_BODY, true);
+    let admitted = v.save_gate(
+        &[HOST, TOKEN, ours, json[0], json[1]],
+        MAX_BODY,
+        true,
+        Site::Main,
+    );
     assert_eq!(admitted.ok(), Some(2));
     assert!(!page.exists());
     std::fs::remove_file(other).unwrap();
@@ -5648,9 +6035,9 @@ fn request(
     match v.head(method, target, headers) {
         Head::Answer(r) => r,
         Head::File(_) => panic!("a link is served on a stream (`send_file`)"),
-        Head::Body(len, save, given) => {
+        Head::Body(len, save, given, site) => {
             assert_eq!(len, body.len());
-            v.take(save, body, &given)
+            v.take(save, body, &given, site)
         }
     }
 }
@@ -7595,7 +7982,7 @@ fn w6p_a_new_token_asked_with_a_replaced_token_makes_none() {
             ("Content-Length", "2"),
         ];
         match v.head("POST", "/api/view/token", &h) {
-            Head::Body(2, _, given) => given,
+            Head::Body(2, _, given, _) => given,
             _ => panic!("the head did not pass"),
         }
     };
@@ -7666,7 +8053,7 @@ fn w6p_a_write_that_waited_out_a_new_token_does_nothing() {
             ("Content-Length", &len),
         ];
         match v.head("POST", path, &h) {
-            Head::Body(_, save, given) => (save, given),
+            Head::Body(_, save, given, _) => (save, given),
             Head::Answer(_) | Head::File(_) => panic!("the head did not pass"),
         }
     };
@@ -7676,8 +8063,11 @@ fn w6p_a_write_that_waited_out_a_new_token_does_nothing() {
     assert_eq!(status, 200, "{answer}");
     let new = file_token(home.path()).unwrap();
     let to = crate::config::view(home.path()).unwrap().port.get();
-    assert_eq!(v.take(save, &body, &given).status, 401);
-    assert_eq!(v.take(preview, b"{}", &preview_given).status, 401);
+    assert_eq!(v.take(save, &body, &given, Site::Main).status, 401);
+    assert_eq!(
+        v.take(preview, b"{}", &preview_given, Site::Main).status,
+        401
+    );
     // One that knew the version the new token wrote.
     let (_, shown) = w6p_call(to, "GET", "/api/settings", &new, None);
     let mut body: Value = serde_json::from_slice(&save_body(&shown)).unwrap();

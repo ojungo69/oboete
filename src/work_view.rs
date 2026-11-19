@@ -17,9 +17,14 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 /// `GET /api/work-view`'s answer: what `read` reads, made into the snapshot, its goals' times in
-/// this machine's zone, which the pages show as written.
+/// this machine's zone, which the pages show as written; Refresh now runs while a request the
+/// pages left stands (decision 117), a word of the snapshot's own that no gate need read.
 pub(crate) fn answer(home: &Path, now: i64) -> anyhow::Result<Value> {
-    answered(home, now, Gate::now)
+    let mut snapshot = answered(home, now, Gate::now)?;
+    if crate::my_work_run::refresh_request(home, now).is_some() {
+        snapshot["refresh"] = json!({"state": "running"});
+    }
+    Ok(snapshot)
 }
 
 /// How many times `answered` reads the stores before it gives up on rules that keep changing.
