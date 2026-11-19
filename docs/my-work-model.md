@@ -2257,11 +2257,26 @@ runs and leaves a run another live worker owns to it.
   windows takes every subject due now, not only those due an hour or more (`OVERDUE_MS`). It is
   still one call a round, so a refresh of n subjects takes n rounds, each ahead of the windows. A
   pass that finds no subject due now marks the request it read done, in a file of its own
-  (`my-work-refresh-done`, its time the request's): the page only writes the request and the worker
+  (`my-work-refresh-done`, its time the request's; the mark is left in one step, a file of the
+  worker's taking the time first, then replacing it, so no reader sees it at another time and a
+  failed mark leaves the one there: `my_work_run::mark`; the request's own time is set once its
+  file is there, so a round begun meanwhile sees a request newer than its start): the page only writes the request and the worker
   only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
   stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
   since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.
+  A request left while a done mark stands at or less than that far after the clock (it went back
+  under the mark) is dated just after the mark, so that it stands.
   The bound and the holds stop the pass as they stop any.
+- **The work-view's pages** (decision 117): their Refresh now, on My Work and Past focus, posts
+  `POST /api/work-view/refresh` on the work-view's origin with its token, which leaves the same
+  request. Its answer is what the pages read: `idle` when nothing was due, `running` with the
+  count, and for off, summaries off and waiting a refusal (409) whose sentence, in the status
+  line's words, the pages show after "Refresh could not start:"; a failure is one of the pages'
+  own sentences (503 to try again, else 500), never the error's words, which can hold the
+  configuration's values and the home's path. Their snapshot says `running` while a request
+  stands, and their version, which leaves outside the gate as it holds no stored text, moves
+  with the request's time and whether it stands: a start, a finish and an expiry each move it,
+  and the poll after reads the snapshot again as it is then.
 - **The page**: "Refresh now" / 「今すぐ更新」 beside My Work's status line while My Work and its
   summaries are on (on My Work, Suggested and Past focus, whose pages share the line; not on My
   Rules). It is marked busy

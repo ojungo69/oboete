@@ -510,7 +510,8 @@ left as a setting to add before a public release.
    connection and no `X-Oboete-Token` from `oboete view`.
 6. A home on a filesystem without modes (the `FS` test seam of keyfile): no resident viewer.
 7. Host check with the fixed port: `127.0.0.1:<port>` and `localhost:<port>` pass for oboete's page,
-   `work-view.localhost:<port>` for the work-view's pages and their two reads alone (decision 116),
+   `work-view.localhost:<port>` for the work-view's pages, their two reads and the writes they take
+   (decisions 116, 117),
    anything else 403.
 8. The resident viewer's default scope is every repository; `/api/context` with no repository
    answers the marker; a worker started from a directory that is then removed still starts a viewer

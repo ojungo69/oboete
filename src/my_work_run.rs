@@ -31,12 +31,30 @@ pub(crate) fn refresh_path(home: &std::path::Path) -> std::path::PathBuf {
 /// Where the worker marks the last request it finished, by the file's time. Only the page writes a
 /// request and only the worker marks one done: neither removes what the other wrote, so a request
 /// the page leaves while the worker finishes one stands.
-fn refresh_done_path(home: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn refresh_done_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join("state").join("my-work-refresh-done")
 }
 
+/// Leaves `path` dated `at` in one step: a file of this process's takes the time, then replaces
+/// it, so that a reader never sees the marker at another time, and a mark that fails leaves the one
+/// there as it was (Codex on the work-view's writes). The worker's done mark is left so: made first
+/// and dated after, it would be dated now for a moment, or for good, covering a newer request.
+fn mark(path: &std::path::Path, at: std::time::SystemTime) -> std::io::Result<()> {
+    let own = path.with_extension(std::process::id().to_string());
+    let marked = std::fs::File::create(&own)
+        .and_then(|f| f.set_modified(at))
+        .and_then(|()| std::fs::rename(&own, path));
+    if marked.is_err() {
+        let _ = std::fs::remove_file(&own);
+    }
+    marked
+}
+
 fn modified_ms(path: &std::path::Path) -> Option<i64> {
-    let at = std::fs::metadata(path).ok()?.modified().ok()?;
+    unix_ms(std::fs::metadata(path).ok()?.modified().ok()?)
+}
+
+fn unix_ms(at: std::time::SystemTime) -> Option<i64> {
     i64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
@@ -45,15 +63,40 @@ fn modified_ms(path: &std::path::Path) -> Option<i64> {
 /// wake the worker at every look until it caught up). A done mark dated that far ahead marks
 /// nothing done, so that a request after the clock went back stands.
 pub(crate) fn refresh_request(home: &std::path::Path, now: i64) -> Option<i64> {
-    let ahead = |t: i64| t - now > 60_000;
     let at = modified_ms(&refresh_path(home))?;
+    stands(home, at, now).then_some(at)
+}
+
+/// Whether the request dated `at` stands at `now` (`refresh_request`).
+fn stands(home: &std::path::Path, at: i64, now: i64) -> bool {
+    let ahead = |t: i64| t - now > 60_000;
     if now - at >= REFRESH_MS || ahead(at) {
-        return None;
+        return false;
     }
-    if modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at && !ahead(done)) {
-        return None;
+    !modified_ms(&refresh_done_path(home)).is_some_and(|done| done >= at && !ahead(done))
+}
+
+/// A new request's time: `now`, or just after the done mark while one stands at or after it (the
+/// clock went back under it, by less than the minute that would make it count for nothing), so
+/// that a request the page is told stands, stands (Codex on #1103).
+fn request_time(home: &std::path::Path, now: std::time::SystemTime) -> std::time::SystemTime {
+    match (unix_ms(now), modified_ms(&refresh_done_path(home))) {
+        (Some(now_ms), Some(done)) if done >= now_ms && done - now_ms <= 60_000 => {
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(done + 1).unwrap_or(0))
+        }
+        _ => now,
     }
-    Some(at)
+}
+
+/// Refresh now's part of the work-view's version (decision 117), from one look at the request: its
+/// time and whether it stands, so that a start, a finish and an expiry each move it, and, as each
+/// request is later than the last, it comes back to no value it had while the clock goes forward.
+pub(crate) fn refresh_version(home: &std::path::Path, now: i64) -> String {
+    match modified_ms(&refresh_path(home)) {
+        Some(at) => format!("{at}.{}", u8::from(stands(home, at, now))),
+        None => "0.0".to_owned(),
+    }
 }
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -345,7 +388,7 @@ impl<'a> Runner<'a> {
         {
             let at = std::time::UNIX_EPOCH
                 + std::time::Duration::from_millis(u64::try_from(at).unwrap_or(0));
-            let _ = std::fs::File::create(done).and_then(|f| f.set_modified(at));
+            let _ = mark(&done, at);
         }
         let refreshing = self.refresh.is_some();
         due.retain(|&(since, ..)| {
@@ -958,12 +1001,14 @@ fn refresh_with(
     std::fs::create_dir_all(path.parent().unwrap_or(home))?;
     // One write at a time, so a request's time never goes back under a later one's (cubic on
     // #827). The request is the file's time, set on a handle that writes (Windows refuses a
-    // read-only one).
+    // read-only one) and taken once the file is there, so that a round begun meanwhile, which read
+    // no request, sees one newer than its start (Codex on #1103). A time that cannot be set leaves
+    // the file at the time it was made, as before; a request of its own is #1104's.
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::fs::File::create(&path)?.set_modified(std::time::SystemTime::now())?;
+    std::fs::File::create(&path)?.set_modified(request_time(home, std::time::SystemTime::now()))?;
     Ok(json!({"state": "started", "due": due}))
 }
 

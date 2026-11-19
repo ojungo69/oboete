@@ -239,7 +239,7 @@ impl Drop for Slot {
 /// first and handed to it, with the token its request brought (`Viewer::take`).
 enum Head {
     Answer(Response),
-    Body(usize, Save, String),
+    Body(usize, Save, String, Site),
     /// A copy asked for by its link (`send_file`).
     File(FileAsk),
 }
@@ -393,6 +393,13 @@ impl Response {
     fn on_work_view(mut self) -> Self {
         self.headers = WORK_VIEW_HEADERS;
         self
+    }
+    /// The answer under the policy of the origin it goes to.
+    fn on(self, site: Site) -> Self {
+        match site {
+            Site::Main => self,
+            Site::WorkView => self.on_work_view(),
+        }
     }
     fn text(status: u16, msg: &str) -> Self {
         Self::new(status, "text/plain; charset=utf-8", msg)
@@ -1278,6 +1285,54 @@ fn refused(status: u16, code: &'static str, field: &str) -> Response {
     }))
 }
 
+/// Refresh now's outcome (`my_work_run::request_refresh`) as the work-view's pages read it
+/// (`refreshWork`, `ManualRefreshButton`): `idle` when nothing was due, `running` with how many
+/// when a request was left for the worker, and when My Work cannot run, a refusal whose sentence
+/// the pages show after "Refresh could not start:", in the words of oboete's page's status line.
+/// The outcome is states and counts, read before any gate: no stored text reaches the answer.
+fn work_view_refresh_answer(answer: &Value) -> Response {
+    let state = answer["state"].as_str().unwrap_or("");
+    let error = match state {
+        "nothing_due" => return Response::json(&json!({"state": "idle"})),
+        "started" => return Response::json(&json!({"state": "running", "due": answer["due"]})),
+        "off" => "My Work is off in oboete’s settings.".to_owned(),
+        "summaries_off" => {
+            "Summaries are off in oboete’s settings, and My Work waits for them.".to_owned()
+        }
+        "waiting" => match answer["why"].as_str() {
+            Some("bound") => match answer["calls_a_day"].as_u64() {
+                Some(n) => format!("The daily limit of {n} calls is reached."),
+                None => "The daily limit of calls is reached.".to_owned(),
+            },
+            Some("budget") => "An AI provider’s spending or call limit is reached.".to_owned(),
+            Some("owner") => {
+                "No AI provider can take it. Check the AI providers in oboete’s settings."
+                    .to_owned()
+            }
+            // As oboete's page reads a hold it does not name.
+            _ => "Every AI provider is resting.".to_owned(),
+        },
+        _ => {
+            return work_view_refused(
+                500,
+                "unknown",
+                "oboete answered a state these pages do not know.",
+            );
+        }
+    };
+    work_view_refused(409, state, &error)
+}
+
+/// A refusal on the work-view's origin (decision 117): the sentence its pages show, with the code
+/// and field oboete's page's refusals carry (`refused`).
+fn work_view_refused(status: u16, code: &str, error: &str) -> Response {
+    Response::new(
+        status,
+        "application/json",
+        serde_json::to_vec(&json!({"error": error, "code": code, "field": ""})).unwrap_or_default(),
+    )
+}
+
 /// A body that must be `{}`: an operation that takes no input says so.
 fn empty_object(body: &[u8]) -> bool {
     matches!(
@@ -1442,7 +1497,7 @@ impl Viewer {
         let body = &buf[at..at + len];
         let resp = match head {
             Head::Answer(r) => r,
-            Head::Body(_, save, given) => self.take(save, body, &given),
+            Head::Body(_, save, given, site) => self.take(save, body, &given, site),
             Head::File(ask) => return self.send_file(&mut stream, &ask, head_only),
         };
         send(&mut stream, &resp.bytes(head_only), ANSWER_TIME);
@@ -1666,6 +1721,8 @@ impl Viewer {
             return self.file_head(method, rest, headers);
         }
         let (cap, save): (usize, Save) = match (method, target) {
+            // Decision 117: the work-view's writes, each taken on its origin alone (`save_gate`).
+            ("POST", "/api/work-view/refresh") => (MAX_BODY, |v, b, _| v.work_view_refresh(b)),
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -1712,7 +1769,14 @@ impl Viewer {
             _ if !one_host => return two_hosts(),
             _ => return Head::Answer(self.route(method, target, headers)),
         };
-        // `save_gate` passes a request with exactly one, the viewer's.
+        // Decision 117: a save's path names the origin it is taken from, the work-view's writes
+        // under `/api/work-view/` and oboete's page's every other.
+        let site = if target.starts_with("/api/work-view/") {
+            Site::WorkView
+        } else {
+            Site::Main
+        };
+        // `save_gate` passes a request with exactly one, its origin's.
         let given = headers
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case("x-oboete-token"))
@@ -1724,32 +1788,35 @@ impl Viewer {
             target,
             "/api/prompt-context" | "/api/query-vector" | "/api/lookup"
         );
-        match self.save_gate(headers, cap, browser) {
-            Ok(len) => Head::Body(len, save, given.to_owned()),
-            Err(r) => Head::Answer(r),
+        match self.save_gate(headers, cap, browser, site) {
+            Ok(len) => Head::Body(len, save, given.to_owned(), site),
+            Err(r) => Head::Answer(r.on(site)),
         }
     }
 
-    /// A save once its body is in, only while the token its request brought is still this
-    /// viewer's: the head was checked before the body, which the client may send up to the
-    /// request's deadline later, after a new token (R6).
-    fn take(&self, save: Save, body: &[u8], given: &str) -> Response {
-        if !self.token_ok(Some(given)) {
-            return Response::text(401, "missing or wrong token");
+    /// A save once its body is in, only while the token its request brought is still its origin's:
+    /// the head was checked before the body, which the client may send up to the request's
+    /// deadline later, after a new token (R6). The answer goes under that origin's policy.
+    fn take(&self, save: Save, body: &[u8], given: &str, site: Site) -> Response {
+        if !self.site_token_ok(site, Some(given)) {
+            return Response::text(401, "missing or wrong token").on(site);
         }
-        save(self, body, given)
+        save(self, body, given).on(site)
     }
 
     /// Spec 6.6 for the writes with a body, all on the head, before any byte of the body is
-    /// read: no chunked framing, the Host and token as for every `/api` request, an `Origin` of
-    /// this viewer (a browser sends one on every POST; the page's fetch asks for it with
+    /// read: no chunked framing, the Host and token of the save's origin (decision 117: the
+    /// work-view's writes take the work-view's, oboete's page's saves the page's), an `Origin` of
+    /// that origin (a browser sends one on every POST; the pages' fetch asks for it with
     /// `referrerPolicy: 'same-origin'`, as the document's `no-referrer` would make it `null`),
-    /// JSON, and one `Content-Length` of at most `cap`.
+    /// JSON, and one `Content-Length` of at most `cap`. Its refusals are text, as before, under the
+    /// origin's policy (`head`).
     fn save_gate(
         &self,
         headers: &[(&str, &str)],
         cap: usize,
         browser: bool,
+        site: Site,
     ) -> std::result::Result<usize, Response> {
         // Exactly one: a request with two of these is no browser's.
         let only = |name: &str| {
@@ -1765,13 +1832,16 @@ impl Viewer {
         {
             return Err(Response::text(400, "requests carry no chunked body"));
         }
-        if !self.host_ok(only("host")) {
+        if self.site(only("host")) != Some(site) {
             return Err(Response::text(
                 403,
-                "open the viewer through 127.0.0.1 or localhost",
+                match site {
+                    Site::Main => "open the viewer through 127.0.0.1 or localhost",
+                    Site::WorkView => "open the new My Work pages through work-view.localhost",
+                },
             ));
         }
-        if !self.token_ok(only("x-oboete-token")) {
+        if !self.site_token_ok(site, only("x-oboete-token")) {
             return Err(Response::text(401, "missing or wrong token"));
         }
         // A request with an Origin is a browser's, whatever its path: the hooks send none, so the
@@ -1781,12 +1851,13 @@ impl Viewer {
                 .iter()
                 .any(|(n, _)| n.eq_ignore_ascii_case("origin"));
         let origin = only("origin").and_then(|o| o.strip_prefix("http://"));
-        if browser && !self.host_ok(origin) {
+        if browser && self.site(origin) != Some(site) {
             return Err(Response::text(403, "a save comes from this viewer's page"));
         }
         // The prompt hook's request says nothing of the page, and a refused one nothing either:
-        // the opener page stays for them.
-        if browser {
+        // the opener page stays for them, and for the work-view's, whose token is not the one the
+        // page `--open` took there (`work_view_token_ok`).
+        if browser && site == Site::Main {
             self.token_arrived();
         }
         // The media type itself, parameters aside: `application/jsonp` is not JSON.
@@ -2307,6 +2378,22 @@ impl Viewer {
         }
     }
 
+    /// Refresh now on the work-view's pages (decision 117, parity row X14): the main route's request
+    /// (`my_work_run::request_refresh`), answered as the pages read it (`work_view_refresh_answer`).
+    fn work_view_refresh(&self, body: &[u8]) -> Response {
+        if !empty_object(body) {
+            return work_view_refused(
+                400,
+                "bad_request",
+                "The refresh could not be read. Reload the page.",
+            );
+        }
+        match crate::my_work_run::request_refresh(&self.home, crate::db::now_ms()) {
+            Ok(answer) => work_view_refresh_answer(&answer),
+            Err(e) => work_view_failed(&e),
+        }
+    }
+
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
     /// page has it; under its own lock and the readers' hold, from a fresh read to the write:
     /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
@@ -2479,6 +2566,14 @@ impl Viewer {
             Sha256::digest(given.unwrap_or("").as_bytes())
                 == Sha256::digest(work_view_token(&w).as_bytes())
         })
+    }
+
+    /// The token of the origin a request is taken on (decision 117).
+    fn site_token_ok(&self, site: Site, given: Option<&str>) -> bool {
+        match site {
+            Site::Main => self.token_ok(given),
+            Site::WorkView => self.work_view_token_ok(given),
+        }
     }
 
     /// A request brought the token, on any path and whatever it asks: the browser has it, and
@@ -2657,8 +2752,9 @@ impl Viewer {
     }
 
     /// The work-view's origin (decision 116): its bundle's files, at `/work-view/` and at `/` too,
-    /// and its two reads, with its own token; nothing else of the viewer's, and no write yet
-    /// (#1085). A request's method and framing are checked before (`route`).
+    /// and its two reads, with its own token; its writes take `head`'s other path, through
+    /// `save_gate` (decision 117); nothing else of the viewer's. A request's method and framing are
+    /// checked before (`route`).
     fn work_view_route(&self, path: &str, query: &str, token: Option<&str>) -> Response {
         let file = match path {
             "/" | "/work-view" | "/work-view/" => Some("index.html"),
@@ -2679,7 +2775,7 @@ impl Viewer {
             return Response::text(401, "missing or wrong token").on_work_view();
         }
         self.api(name, &params(query))
-            .unwrap_or_else(|e| failed(&e))
+            .unwrap_or_else(|e| work_view_failed(&e))
             .on_work_view()
     }
 
@@ -2829,8 +2925,16 @@ impl Viewer {
                 return Ok(Response::json(&crate::work_view::answer(&self.home, now)?));
             }
             // The pages read the version alone (`local-api-token-client.ts`): the main page's
-            // other fields, its curation and forget state among them, stay off their origin.
-            "work-view/version" => json!({ "v": self.full_v(&version(&self.home)?.0)? }),
+            // other fields, its curation and forget state among them, stay off their origin. Refresh
+            // now's request moves it too, as it is left, marked done and runs out (decision 117).
+            // It is counts, prints and times, no stored text, so it leaves outside the gate, whose
+            // rules could make two versions one (Codex on #1103).
+            "work-view/version" => {
+                let base = version(&self.home)?.0;
+                let refresh = crate::my_work_run::refresh_version(&self.home, crate::db::now_ms());
+                let v = self.full_v(&format!("{base}:{refresh}"))?;
+                return Ok(Response::json(&json!({ "v": v })));
+            }
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
             "my-rules" => {
                 let now = crate::db::now_ms();
@@ -2984,8 +3088,21 @@ impl Viewer {
 /// A route's failure (D11): a restore holding raw.db past `raw::open`'s wait, or SQLite busy or
 /// locked during a rebuild, is 503 "try again"; anything else is 500, its text gated (spec 6.5).
 fn failed(e: &anyhow::Error) -> Response {
-    // A forget that holds the reading fence past its wait (`dispatch::busy`) is one to retry too.
-    let again = crate::dispatch::busy(e)
+    if again(e) {
+        Response::text(
+            503,
+            "the memory is being restored or rebuilt: try again in a moment",
+        )
+    } else {
+        Response::text(500, &redact::outbound(&format!("{e:#}")))
+    }
+}
+
+/// Whether a route's failure is one to try again (`failed`): a restore holding raw.db past
+/// `raw::open`'s wait, SQLite busy or locked during a rebuild, or a forget that holds the reading
+/// fence past its wait (`dispatch::busy`).
+fn again(e: &anyhow::Error) -> bool {
+    crate::dispatch::busy(e)
         || e.chain().any(|c| {
         c.is::<crate::raw::Restoring>()
             || matches!(
@@ -2993,14 +3110,22 @@ fn failed(e: &anyhow::Error) -> Response {
                 Some(rusqlite::Error::SqliteFailure(f, _))
                     if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
             )
-    });
-    if again {
-        Response::text(
-            503,
-            "the memory is being restored or rebuilt: try again in a moment",
-        )
+    })
+}
+
+/// A failure on the work-view's origin (decision 117): 503 to try again, as `failed` tells it, else
+/// 500, each in a sentence of the pages' own. The error's words can hold the configuration's
+/// values and the home's path, which the work-view's token does not reach; oboete's own page, whose
+/// token reaches the settings, still shows them (Codex on #1103).
+fn work_view_failed(e: &anyhow::Error) -> Response {
+    if again(e) {
+        work_view_refused(503, "busy", "oboete is busy for a moment. Try again.")
     } else {
-        Response::text(500, &redact::outbound(&format!("{e:#}")))
+        work_view_refused(
+            500,
+            "failed",
+            "oboete could not answer. Its own page shows why.",
+        )
     }
 }
 
