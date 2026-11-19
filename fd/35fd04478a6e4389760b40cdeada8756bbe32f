@@ -1,0 +1,27 @@
+docs/my-work-model.md
+  s_52c3955e48bff4::t_0ee1c084538b5b 2122-2129,2138-2148
+src/my_work_judge/tests.rs
+  s_52c3955e48bff4::t_8cd9b18490e86f 1560-1561,1564-1571,1575,1577-1580,1582-1583,1591,1597-1599,1601,1605,1615-1633
+src/view/tests.rs
+  s_52c3955e48bff4::t_7fe1adde2e34e1 4077-4085
+src/claims.rs
+  s_52c3955e48bff4::t_8f380890fb156d 595-597,611-617
+src/my_work_judge.rs
+  s_52c3955e48bff4::t_3e30f75d9da1f5 413-416,425,447-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd35fd04478a6e4389760b40cdeada8756bbe32f",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
