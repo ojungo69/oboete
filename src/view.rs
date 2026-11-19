@@ -3394,6 +3394,18 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    // W3b-2: a judge's suggestion's binding, a keyed hash the page posts back with its answer, leaves
+    // the walk as the ids do, so that no rule's mask breaks it; that key of the suggestion alone.
+    let bindings: Vec<Option<Value>> = match answer.get_mut("requests") {
+        Some(Value::Array(requests)) if name == "my-work" => (requests.iter_mut())
+            .map(|r| {
+                (r.get_mut("suggestion"))
+                    .and_then(Value::as_object_mut)
+                    .and_then(|s| s.remove("binding"))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     // My Rules' uids go back to the claim routes as selectors (#739).
     let mut answer = if matches!(name, "claim" | "search" | "timeline" | "doc" | "my-rules") {
         gated_with_ids(answer, true)
@@ -3412,6 +3424,15 @@ pub(crate) fn answered(name: &str, mut answer: Value) -> Value {
     }
     if let Some(instance) = instance {
         answer["instance"] = instance;
+    }
+    if let Some(Value::Array(requests)) = answer.get_mut("requests") {
+        for (request, binding) in requests.iter_mut().zip(bindings) {
+            if let (Some(Value::Object(suggestion)), Some(binding)) =
+                (request.get_mut("suggestion"), binding)
+            {
+                suggestion.insert("binding".to_owned(), binding);
+            }
+        }
     }
     for (key, list, values) in [
         ("id", "areas", area_ids),

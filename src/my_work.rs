@@ -789,6 +789,16 @@ pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
     read_held(home, Range::All, now, None, None)
 }
 
+/// `reviewing` through the stores given (W3b-2: J4's check reads every part through one raw.db and
+/// one knowledge.db handle).
+pub(crate) fn reviewing_on(
+    stores: (&Raw, &Connection),
+    home: &Path,
+    now: i64,
+) -> Result<(Value, Vec<Held>)> {
+    read_held_on(stores, home, (Range::All, now), None, None)
+}
+
 /// `reviewing` under `rules`, those a work-view snapshot is made under, so that the work-view's
 /// check finds the request it names as its snapshot showed it (`work_view::named`, decision 117).
 /// The story it reads is the kept one (`listed_kept`), which nothing it answers sends.
@@ -980,6 +990,17 @@ fn read_held(
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok((json!({"requests": [], "unlinked": 0}), Vec::new()));
     };
+    read_held_on((&raw, &k), home, (range, now), cards, kept)
+}
+
+/// `read_held` through the stores given (W3b-2: the handles J4's answer is checked through).
+fn read_held_on(
+    (raw, k): (&Raw, &Connection),
+    home: &Path,
+    (range, now): (Range, i64),
+    cards: Option<Tag>,
+    kept: Option<&Rules>,
+) -> Result<(Value, Vec<Held>)> {
     // The page's list (`listed`) is read in the readers' hold from its first read to its answer
     // (#439), as a request's page is: a forget registered before it leaves out what it took, and
     // one registered meanwhile waits. `reviewing`, which the owner's actions read under the
@@ -993,20 +1014,20 @@ fn read_held(
         Some(rules) => rules.clone(),
         None => Rules::load(home)?,
     };
-    let reading = crate::curate::Reading::now(&raw, crate::curate::Reads::Live)?;
+    let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let Built {
         convs,
         work,
         requests,
         unlinked,
-    } = build(&raw, &k, &rules, &reading)?;
+    } = build(raw, k, &rules, &reading)?;
     let since = range.since(now);
     let mut answers = Vec::new();
     let mut key = None;
     let reviews = reviews(home);
-    let hidden = crate::my_work_ops::hidden(&raw, &k, &reading)?;
+    let hidden = crate::my_work_ops::hidden(raw, k, &reading)?;
     // V4: the current goals once, for each card's goal (L3).
-    let goals = (crate::my_work_goals::newest(&k, raw.device(), &hidden, now)?)
+    let goals = (crate::my_work_goals::newest(k, raw.device(), &hidden, now)?)
         .map(|(_, items)| items)
         .unwrap_or_default();
     let mut holders: HashMap<&Key, usize> = HashMap::new();
@@ -1019,7 +1040,7 @@ fn read_held(
     let mut listed: BTreeSet<Key> = BTreeSet::new();
     for r in &requests {
         listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
-        let stores = (&raw, &k, &rules, &hidden);
+        let stores = (raw, k, &rules, &hidden);
         let found = answer(
             r,
             (&convs, &work, &reviews),
@@ -1046,7 +1067,7 @@ fn read_held(
             return Ok(None);
         };
         Ok(Some(
-            (held.iter().map(|h| copies_of(&db, &raw, h))).collect::<Result<_>>()?,
+            (held.iter().map(|h| copies_of(&db, raw, h))).collect::<Result<_>>()?,
         ))
     })()
     .unwrap_or_else(|e| {
@@ -1060,7 +1081,7 @@ fn read_held(
         for (i, (a, h)) in answers.iter_mut().zip(&held).enumerate() {
             let copies = copies.as_ref().map_or(&[][..], |c| c[i].as_slice());
             // A request whose products do not read has no card; the others keep theirs.
-            match shown_products(home, (&raw, &k, &rules), &h.sources, copies, tag) {
+            match shown_products(home, (raw, k, &rules), &h.sources, copies, tag) {
                 Ok(list) => {
                     if let Some((deliverables, count)) = card(list) {
                         a["deliverables"] = json!(deliverables);
@@ -1072,7 +1093,7 @@ fn read_held(
         }
     }
     // F2, F7: where each request sits, and the areas.
-    let focus = crate::my_work_focus::Focus::read(&raw, &k, &reading)?;
+    let focus = crate::my_work_focus::Focus::read(raw, k, &reading)?;
     for (a, h) in answers.iter_mut().zip(&held) {
         a["focus"] = json!(focus.of(&crate::my_work_focus::subject(h.id())));
     }
@@ -1085,20 +1106,22 @@ fn read_held(
             continue;
         };
         let t = &answers[t];
+        let target = h.suggested.as_deref().unwrap_or_default();
+        let binding = binding((h.id(), target), h.placement(), home, &mut key)?;
         let suggestion = json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"],
-            "conversation": h.about});
+            "conversation": h.about, "binding": binding});
         answers[i]["suggestion"] = suggestion;
     }
     let areas = crate::my_work_focus::areas(&focus, &goals, &rules);
     let other_asks = crate::my_work_focus::other_asks(&focus, &goals, &rules);
     // P6, V4: the build story beside the requests.
     let story = match kept {
-        Some(_) => crate::my_work_story::kept(&k, raw.device(), &hidden, &rules)?,
-        None => crate::my_work_story::page(&k, raw.device(), &hidden, &rules)?,
+        Some(_) => crate::my_work_story::kept(k, raw.device(), &hidden, &rules)?,
+        None => crate::my_work_story::page(k, raw.device(), &hidden, &rules)?,
     };
     // The page's read alone (`listed`), in its readers' hold.
     let subagents = match cards {
-        Some(_) => subagents_of(home, (&raw, &k, &rules), &listed, now, &mut key)?,
+        Some(_) => subagents_of(home, (raw, k, &rules), &listed, now, &mut key)?,
         None => Vec::new(),
     };
     let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
@@ -1463,6 +1486,14 @@ fn build(
         }
     }
 
+    // W3b-2 (#1114): the request that owns each conversation whole, for a suggestion's target.
+    let owner: HashMap<Key, Id> = (requests.iter())
+        .flat_map(|r| {
+            (r.owns.iter())
+                .filter(|(_, own)| matches!(own, Owns::All))
+                .map(|(key, _)| (key.clone(), r.id.clone()))
+        })
+        .collect();
     for r in &mut requests {
         if let Id::Group(anchor) = &r.id {
             let group = grouped.groups.get(anchor);
@@ -1475,8 +1506,13 @@ fn build(
             // conversation the request owns whole and no other; and the target's anchor in its own
             // group. J4 writes both anchors, which the fold would otherwise take out of where they
             // are now. The placement goes with a regular request's open suggestion whatever its
-            // target, which the answer checks itself.
-            let members = group.map(|g| g.members.clone()).unwrap_or_default();
+            // target, which the answer checks itself. W3b-2: only a group with an open suggestion
+            // is looked at, and the target shown only while its request owns the pick whole (a
+            // work state that names another request for the pick takes it).
+            let Some(picked) = grouped.suggested.get(anchor) else {
+                continue;
+            };
+            let members = group.map_or(&[][..], |g| g.members.as_slice());
             let owned: HashSet<&Key> = (r.owns.iter())
                 .filter(|(_, own)| matches!(own, Owns::All))
                 .map(|(key, _)| key)
@@ -1485,15 +1521,14 @@ fn build(
                 && owned.len() == members.len()
                 && members.iter().all(|m| owned.contains(m));
             let in_its_own = |anchor: &Key| grouped.of.get(anchor) == Some(anchor);
-            let regular = whole && in_its_own(anchor);
-            r.suggested = (grouped.suggested.get(anchor))
-                .and_then(|picked| grouped.of.get(picked))
-                .filter(|target| *target != anchor)
-                .filter(|target| regular && in_its_own(target))
-                .map(|target| Id::Group(target.clone()).held());
-            if regular && grouped.suggested.contains_key(anchor) {
-                r.placement = members;
+            if !(whole && in_its_own(anchor)) {
+                continue;
             }
+            r.suggested = (grouped.of.get(picked))
+                .filter(|target| *target != anchor && in_its_own(target))
+                .filter(|target| owner.get(picked) == Some(&Id::Group((*target).clone())))
+                .map(|target| Id::Group(target.clone()).held());
+            r.placement = members.to_vec();
         }
     }
     Ok(Built {
@@ -2306,6 +2341,21 @@ fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     };
     let keyed = [key.as_slice(), held.as_bytes()].concat();
     Ok(crate::forget::hash(&keyed))
+}
+
+/// J4 (W3b-2): a suggestion's binding, `keyed` (the whole hash) of the carrier's held id, the
+/// target's and the conversations an answer places, in their order: the page posts it back with
+/// its answer, which lands only on the suggestion its card showed (`my_work_judge::act`).
+pub(crate) fn binding(
+    (carrier, target): (&str, &str),
+    placement: &[Key],
+    home: &Path,
+    key: &mut Option<Vec<u8>>,
+) -> Result<String> {
+    let placed: Vec<[&str; 2]> = (placement.iter())
+        .map(|(agent, session)| [agent.as_str(), session.as_str()])
+        .collect();
+    keyed(&json!([carrier, target, placed]).to_string(), home, key)
 }
 
 /// `keyed`'s first 12 hex digits: the fingerprint of a stored text the gate masks.

@@ -3734,7 +3734,7 @@ fn a_store_whose_write_lock_is_held_opens_at_once() {
 
 /// J4 (W3b-1): an owner's answer is appended only on the stores it was checked on: this device's
 /// newest op of a kind the answer reads and the forget fence; else nothing is written. Curation's
-/// ops in between leave it be.
+/// ops in between leave it be. W3b-2: and the raw.db file it was checked in.
 #[test]
 fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
     let home = tempfile::tempdir().unwrap();
@@ -3742,6 +3742,9 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
     let answer = || [(OpKind::MyWork, serde_json::json!({"text": "an answer"}))];
     let curated = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
     let checked = |raw: &Raw| (raw.answer_top().unwrap(), raw.fence_count().unwrap());
+    let file = raw.file_identity().map(str::to_owned);
+    let file = file.as_deref();
+    assert!(file.is_some(), "a raw.db opened as one file");
     let written = |raw: &Raw| raw.max_op_seq_of(raw.device()).unwrap();
     raw.append_ops(&answer()).unwrap();
     raw.append_ops(&curated()).unwrap();
@@ -3749,7 +3752,7 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
     assert_eq!(top, 1, "the newest op it reads, not curation's");
     // Curation since the check: appended.
     raw.append_ops(&curated()).unwrap();
-    let seqs = raw.append_ops_at(&answer(), top, fence).unwrap();
+    let seqs = raw.append_ops_at(&answer(), (top, fence, file)).unwrap();
     assert_eq!(seqs, vec![4]);
     // An op it reads since the check: a regroup, an exclusion.
     let moves: [fn(&mut Raw); 2] = [
@@ -3766,7 +3769,9 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
         let (top, fence) = checked(&raw);
         moved(&mut raw);
         let before = written(&raw);
-        let refused = raw.append_ops_at(&answer(), top, fence).unwrap_err();
+        let refused = raw
+            .append_ops_at(&answer(), (top, fence, file))
+            .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
     }
@@ -3781,9 +3786,19 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
         )
         .unwrap();
     let before = written(&raw);
-    let refused = raw.append_ops_at(&answer(), top, fence).unwrap_err();
+    let refused = raw
+        .append_ops_at(&answer(), (top, fence, file))
+        .unwrap_err();
     assert!(refused.is::<OpsMoved>(), "{refused:#}");
     assert_eq!(written(&raw), before, "nothing written");
+    // W3b-2: checked in another raw.db file, or in none known.
     let (top, fence) = checked(&raw);
-    raw.append_ops_at(&answer(), top, fence).unwrap();
+    for other in [Some("0:0"), None] {
+        let refused = raw
+            .append_ops_at(&answer(), (top, fence, other))
+            .unwrap_err();
+        assert!(refused.is::<OpsMoved>(), "{refused:#}");
+        assert_eq!(written(&raw), before, "nothing written");
+    }
+    raw.append_ops_at(&answer(), (top, fence, file)).unwrap();
 }

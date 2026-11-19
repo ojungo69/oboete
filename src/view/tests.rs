@@ -3953,8 +3953,20 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
         shown.starts_with("c:[REDACTED]#") && shown.len() == 25,
         "{own}"
     );
+    // W3b-2: the binding passes whole, though the rule matches hex digits.
+    let mut suggestion = own["suggestion"].clone();
+    let binding = suggestion
+        .as_object_mut()
+        .unwrap()
+        .remove("binding")
+        .unwrap();
+    let binding = binding.as_str().unwrap().to_owned();
+    assert!(
+        binding.len() == 64 && binding.chars().all(|c| c.is_ascii_hexdigit()),
+        "{binding}"
+    );
     assert_eq!(
-        own["suggestion"],
+        suggestion,
         json!({"id": id, "title": "Parser", "conversation": {"id": conversation}})
     );
     let post = |body: &[u8], token: &str, origin: &str| -> (u16, Value) {
@@ -3977,7 +3989,9 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
         )
     };
     let ours = "http://127.0.0.1:4321";
-    let join = serde_json::to_vec(&json!({"request": own["id"], "action": "join"})).unwrap();
+    let join = serde_json::to_vec(&json!({"request": own["id"], "action": "join",
+        "binding": binding}))
+    .unwrap();
     assert_eq!(post(&join, "wrong", ours).0, 401);
     assert_eq!(post(&join, "t0k", "http://evil.example").0, 403);
     let (status, answer) = post(&join, "t0k", ours);
@@ -3989,7 +4003,6 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
     assert_eq!(holding(&read(), &conversation)["id"], id);
 }
 
-/// A feed over invented records, without the older timeline fixture's claims or imports.
 /// W3b-1 (Codex on #1113): J4's answer asks the page's token again under config.lock, through
 /// the route: a token made while the answer waits for that lock, after the route took its body
 /// with the old one, is 401, and nothing is recorded.
@@ -4049,7 +4062,9 @@ fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
             .unwrap()
     };
     let before = recorded();
-    let body = serde_json::to_vec(&json!({"request": own["id"], "action": "join"})).unwrap();
+    let body = json!({"request": own["id"], "action": "join",
+        "binding": own["suggestion"]["binding"]});
+    let body = serde_json::to_vec(&body).unwrap();
     let len = body.len().to_string();
     let h = [
         HOST,
@@ -4065,7 +4080,7 @@ fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
     let (v, h, body) = (&v, &h, &body);
     let r = std::thread::scope(|scope| {
         let answer = scope.spawn(move || {
-            crate::my_work_judge::CHECKED.with(|hook| {
+            crate::my_work_judge::CAUGHT_UP.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || reached.send(()).unwrap()))
             });
             match v.head("POST", "/api/my-work/suggestion", h) {
@@ -4093,6 +4108,7 @@ fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
     assert_ne!(file_token(&home).unwrap(), token, "the token was replaced");
 }
 
+/// A feed over invented records, without the older timeline fixture's claims or imports.
 fn feed_fixture() -> (Store, Viewer) {
     let s = Store::new();
     let v = Viewer::new(

@@ -273,22 +273,22 @@ pub(crate) fn record(home: &std::path::Path, job: &str, ops: Vec<(String, Value)
 }
 
 /// `record`'s append for an owner's answer checked against the stores at this device's newest op
-/// `top` of a kind the answer reads and the forget fence `fence` (J4, `Raw::append_ops_at`, which
-/// refuses with `raw::OpsMoved`):
+/// `top` of a kind the answer reads, the forget fence `fence` and the raw.db file it read (J4,
+/// `Raw::append_ops_at`, which refuses with `raw::OpsMoved`):
 /// knowledge.db opened before it, as `record` opens it, and handed back with what the wait for the
 /// consumer takes (`applied`), so that the caller lets go of its locks before that wait.
 pub(crate) fn append_at(
     home: &std::path::Path,
     job: &str,
     ops: Vec<(String, Value)>,
-    (top, fence): (i64, i64),
+    checked: (i64, i64, Option<&str>),
 ) -> Result<(Connection, String, Vec<i64>)> {
     let rules = crate::capture::Settings::load(home)?.rules;
     let mut raw = crate::raw::open(home)?;
     let k = crate::knowledge::open(home)?;
     let bodies = bodies(job, ops)?;
     raw.gates_with(&rules);
-    let seqs = raw.append_ops_at(&bodies, top, fence)?;
+    let seqs = raw.append_ops_at(&bodies, checked)?;
     Ok((k, raw.device().to_owned(), seqs))
 }
 

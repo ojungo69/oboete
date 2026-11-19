@@ -2056,14 +2056,16 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   anchor is in now (`of`), its id and title as this answer shows them: `suggestion {id, title}`;
   none when the answer shows no such request. Its id leaves the gate's walk and comes back, as a
   request's own does (S6).
-- **The route**: `POST /api/my-work/suggestion`, `{request, action}` with `action` `join` or
-  `not-this`, past the save gate as the other owner actions. Refused before it writes: 400
-  `bad_request` (another shape, an id of no length or over 80 characters); 404
+- **The route**: `POST /api/my-work/suggestion`, `{request, action, binding}` with `action`
+  `join` or `not-this` and `binding` the suggestion's (W3b-2, below), past the save gate as the
+  other owner actions. Refused before it writes: 400 `bad_request` (another shape, an id of no
+  length or over 80 characters, no binding or one of another shape); 404
   `suggestion_not_found` (no such request, or no open suggestion on it); 409
   `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 409
   `suggestion_changed` and `my_work_pending`, and 401, when the answer would place other
   conversations than the request shows, or the stores or the token moved before its write
-  (W3b-1, below); 503 `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
+  (W3b-1, W3b-2, below); 503 `my_work_unavailable`. It answers `applied` or `pending`, as My
+  Focus does, and the page reads
   My Work again and says what was done; a Join from the request's page shows the request it
   joined, whose id stays.
 - **The op**: one op of job `judge` by the owner (no entry), about the conversation's repository,
@@ -2125,12 +2127,37 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   catch-up that runs out (the page says My Work is still taking in a change). A resident viewer an
   upgrade exec'd keeps the viewer's role and runs no pass of the worker itself
   (`executable::may_run_worker`, in every owner action's wait, `claims::applied`): it waits for
-  the worker that runs, and a wait that runs out there is 409 whether that worker failed or is
-  still busy. The page's token is asked again under config.lock, where new
-  tokens are made, before the append: a token replaced while the answer waited is 401, nothing
-  written. The page posts the request and the action, not the suggestion it read: the answer is
-  checked against My Work as read when it is answered (as before), and a card read before a member
-  joined the group answers for the group as it is (the binding to the card read: W3b-2, #1114).
+  the worker that runs. J4's catch-up before its write is 409 when that wait runs out, whether the
+  worker failed or is still busy; a wait after a write (J4's, My Focus's, a hide's) answers the
+  saved write as pending. The page's token is asked again under config.lock, where new tokens are
+  made, before the append: a token replaced while the answer waited is 401, nothing written.
+- **Bound to its card** (W3b-2, 2026-11-20): a suggestion My Work shows carries its `binding`, the
+  keyed hash (`my_work::binding`, the whole of `keyed`) of the carrier's held id, the target's
+  (the request the pick is in now) and the conversations an answer places, in their order; the
+  route's gate takes it out of its walk and puts it back, so that no rule's mask breaks it. The
+  page posts it with the answer; a body without it is 400 `bad_request`, which a page opened
+  before the binding words as "Please reload the page", and the reloaded page's posts carry it.
+  A suggestion is shown only while the target's group request owns the pick whole (a work state
+  that names another request for the pick takes it: then 409 `suggestion_target_gone` for a Join;
+  a Not this, which places nothing there, still closes it). The answer is checked under
+  config.lock, which a rebuild and a restore hold for their run, through one raw.db and one
+  knowledge.db handle opened there (an open handle reads the file it opened, whatever is put in
+  place at its path since): the fence's newest op read on that raw.db; the my_work, cards and
+  turns consumers past every op of this device they owe the answer on that knowledge.db, before
+  the reads (a knowledge.db put in place part way is 409 `my_work_pending`); then the suggestion
+  from one descriptor (the carrier, its placement, the request its pick is in now), whose binding
+  must be the posted one, else 409 `suggestion_changed`, for either action; the op is made from
+  that descriptor, and a Join needs My Work to show the suggestion too. The ops owed are, for my_work, an op of a kind an answer
+  reads whose job, if My Work's, can group, place or change which requests are read (not goals',
+  rules', the story's nor My Focus's: a goals skip that `my_work_run::pass` appends before its call
+  is not waited for); for cards and turns, a hide of a card and of a summary, which the worker's
+  pass takes into them before My Work and each in its own transaction. The catch-up waits for the
+  three under one deadline. The append compares the raw.db file the check read
+  (`Raw::file_identity`): another is 409 `my_work_pending`. The answer's receipt is the raw
+  commit's: a wait for the consumer that fails after it answers `pending`. The page says it read
+  the work again after a refusal only when the rows it read are the ones it draws (a newer read, a
+  poll's held behind "Show updates" among them, takes them otherwise), and asks for a reload when
+  that read failed.
   Known limits (#1114): what changes My Work's requests without an op of the kinds fenced, between
   the check and the write, is not fenced: a hook record (agents record all day: the call record of
   a work state write that names a request, arriving after its op, can take a conversation of the
@@ -2140,12 +2167,7 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   index: the worker indexes records between its calls to a provider, and on this PC on
   2026-11-19 a day held 4,628 calls, 7.6 hours of them, 608 longer than the answer's wait of 10
   seconds); curation's summaries and cards, which move My Work's bounded reads; retention's expiry
-  of a record a request is made from. The catch-up waits for the my_work consumer alone: an op it
-  applied that another consumer My Work reads (cards, turns) has not applied yet, a hide among
-  them, can take a request away after the check. A store replaced between the check and the
-  append is not fenced: knowledge.db rebuilt, whose replay can show a suggestion open before an
-  earlier answer to it, and raw.db restored, whose op sequence can be reused. Another device's ops
-  are not fenced (sync is not in use).
+  of a record a request is made from. Another device's ops are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).

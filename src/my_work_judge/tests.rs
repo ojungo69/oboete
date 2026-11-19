@@ -208,6 +208,9 @@ impl Home {
     }
 }
 
+/// A well-formed binding, for an answer refused before its binding is compared (W3b-2).
+const ANY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 fn key(session: &str) -> Key {
     ("claude".to_owned(), session.to_owned())
 }
@@ -905,9 +908,26 @@ impl Home {
             .unwrap()
     }
 
-    /// The owner's `action` on the request the page shows `session` in, as the page posts it.
+    /// The owner's `action` on the request the page shows `session` in, as the page posts it:
+    /// with the binding of the suggestion it shows (W3b-2).
     fn answer_on(&self, session: &str, action: &str) -> std::result::Result<Value, (u16, &str)> {
-        let body = json!({"request": self.request_of(session)["id"], "action": action});
+        let shown = self.request_of(session);
+        let body = json!({"request": shown["id"], "action": action,
+            "binding": shown["suggestion"]["binding"]});
+        self.post(body)
+    }
+
+    /// The card the page shows conversation `session`'s request as (W3b-2): its id and its
+    /// suggestion's binding, which an answer read from it posts, whatever has changed since.
+    fn card(&self, session: &str) -> Value {
+        let shown = self.request_of(session);
+        json!({"request": shown["id"], "binding": shown["suggestion"]["binding"]})
+    }
+
+    /// The owner's `action` on `card`, as the page posts it.
+    fn answer(&self, card: &Value, action: &str) -> std::result::Result<Value, (u16, &str)> {
+        let mut body = card.clone();
+        body["action"] = json!(action);
         self.post(body)
     }
 
@@ -1014,8 +1034,16 @@ fn a_suggestion_shows_on_its_conversations_request_and_names_the_pick() {
     let _served = suggested(&mut h);
     let (parser, own) = (h.request_of("s1"), h.request_of("s2"));
     assert_ne!(own["id"], parser["id"]);
+    // W3b-2: and its binding, a keyed hash the page posts back with its answer.
+    let mut shown = own["suggestion"].clone();
+    let binding = shown.as_object_mut().unwrap().remove("binding").unwrap();
+    let binding = binding.as_str().unwrap();
+    assert!(
+        binding.len() == 64 && binding.chars().all(|c| c.is_ascii_hexdigit()),
+        "{binding}"
+    );
     assert_eq!(
-        own["suggestion"],
+        shown,
         json!({"id": parser["id"], "title": "Parser", "conversation": {"id": "c:claude:s2"}})
     );
     assert!(parser.get("suggestion").is_none(), "{parser}");
@@ -1047,7 +1075,7 @@ fn join_moves_the_conversation_and_what_it_anchored_into_the_pick() {
     );
     assert!(op.read.spans.is_empty() && op.read.ops.is_empty());
     assert_eq!(
-        h.post(json!({"request": parser["id"], "action": "join"})),
+        h.post(json!({"request": parser["id"], "action": "join", "binding": ANY})),
         Err((404, "suggestion_not_found"))
     );
 }
@@ -1067,7 +1095,7 @@ fn not_this_keeps_it_its_own_request() {
     h.pass(true, &|_| panic!("the chain is not asked"));
     assert_eq!(bodies(&served).len(), 2, "no call after the answer");
     assert_eq!(
-        h.post(json!({"request": own, "action": "join"})),
+        h.post(json!({"request": own, "action": "join", "binding": ANY})),
         Err((404, "suggestion_not_found"))
     );
 }
@@ -1099,8 +1127,18 @@ fn an_answer_is_refused_before_it_writes() {
         h.request_of("s2")["id"].clone(),
         h.request_of("s1")["id"].clone(),
     );
+    let card = h.card("s2");
     let before = h.judged().len();
     for (body, refusal) in [
+        // W3b-2: a page from before the binding posts none (its words for this: reload the page).
+        (
+            json!({"request": own, "action": "join"}),
+            (400, "bad_request"),
+        ),
+        (
+            json!({"request": own, "action": "join", "binding": "f00"}),
+            (400, "bad_request"),
+        ),
         (
             json!({"request": own, "action": "merge"}),
             (400, "bad_request"),
@@ -1114,11 +1152,11 @@ fn an_answer_is_refused_before_it_writes() {
             (400, "bad_request"),
         ),
         (
-            json!({"request": "g:000000000000", "action": "join"}),
+            json!({"request": "g:000000000000", "action": "join", "binding": ANY}),
             (404, "suggestion_not_found"),
         ),
         (
-            json!({"request": parser, "action": "join"}),
+            json!({"request": parser, "action": "join", "binding": ANY}),
             (404, "suggestion_not_found"),
         ),
     ] {
@@ -1127,7 +1165,7 @@ fn an_answer_is_refused_before_it_writes() {
     h.ignored("s1");
     assert!(h.request_of("s2").get("suggestion").is_none());
     assert_eq!(
-        h.post(json!({"request": own, "action": "join"})),
+        h.answer(&card, "join"),
         Err((409, "suggestion_target_gone"))
     );
     assert_eq!(h.judged().len(), before);
@@ -1186,7 +1224,9 @@ fn an_inflight_grouping_answer_cannot_undo_the_owners_join() {
 
 /// #775 (pending_owner_joins_preserve_the_current_destination): an answer posted while an
 /// earlier one waits to be applied is resolved after it. s3 suggested to s2's request, and s2's
-/// Join into s1 recorded but not yet applied: s3's Join lands in s1, and s2 stays there.
+/// Join into s1 recorded but not yet applied: s3's card names s2's request, which its pick is in
+/// no more once that Join is applied (W3b-2: 409, nothing recorded); read again, it names s1's,
+/// and its Join lands there, and s2 stays there.
 #[test]
 fn pending_owner_joins_preserve_the_current_destination() {
     let mut h = Home::new();
@@ -1214,8 +1254,12 @@ fn pending_owner_joins_preserve_the_current_destination() {
     };
     let op = serde_json::to_value(op).unwrap();
     h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-    h.post(json!({"request": s3["id"], "action": "join"}))
-        .unwrap();
+    let stale = json!({"request": s3["id"], "action": "join",
+        "binding": s3["suggestion"]["binding"]});
+    let before = h.recorded();
+    assert_eq!(h.post(stale), Err((409, "suggestion_changed")));
+    assert_eq!(h.recorded(), before);
+    h.answer_on("s3", "join").unwrap();
     let parser = h.request_of("s1");
     for s in ["s2", "s3"] {
         assert_eq!(h.request_of(s)["id"], parser["id"], "{s}");
@@ -1261,7 +1305,7 @@ fn catch_up_does_not_wait_for_unrelated_work_after_its_checkpoint_is_applied() {
     let _served = suggested(&mut h);
     let _held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
     let started = std::time::Instant::now();
-    assert!(caught_up(h.s.home.path()).unwrap().is_some());
+    assert!(caught_up(h.s.home.path()).unwrap());
     let took = started.elapsed();
     assert!(took < Duration::from_secs(1), "{took:?}");
 }
@@ -1273,7 +1317,8 @@ fn catch_up_does_not_wait_for_unrelated_work_after_its_checkpoint_is_applied() {
 fn a_failed_catch_up_is_unavailable_not_pending() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
-    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    let mut answer = h.card("s2");
+    answer["action"] = json!("not-this");
     // An op of this device the consumer has not applied yet.
     h.grouped(&["s9"], "Unrelated");
     let lock = h.s.home.path().join("state").join("worker.lock");
@@ -1365,16 +1410,21 @@ fn a_suggestion_whose_answer_would_move_an_anchor_is_not_shown() {
     h.said("s7", -5, "Seven.");
     h.grouped(&["s7", "s1"], "Seven");
     assert_eq!(h.request_of("s2")["suggestion"]["title"], "Seven");
+    let card = h.card("s2");
     h.said("s8", -8, "Eight.");
     h.grouped(&["s8", "s7"], "Eight");
     let own = h.request_of("s2");
     assert!(own.get("suggestion").is_none(), "{own}");
+    // The card read before names the pick's request as it is (its anchor, Seven's, now out of its
+    // own group): a Join is refused, nothing recorded; a Not this, which places nothing there,
+    // still closes the suggestion.
     let before = h.recorded();
-    let join = h.post(json!({"request": own["id"], "action": "join"}));
-    assert_eq!(join, Err((409, "suggestion_target_gone")));
+    assert_eq!(
+        h.answer(&card, "join"),
+        Err((409, "suggestion_target_gone"))
+    );
     assert_eq!(h.recorded(), before);
-    let not_this = h.post(json!({"request": own["id"], "action": "not-this"}));
-    assert_eq!(not_this.unwrap()["state"], "applied");
+    assert_eq!(h.answer(&card, "not-this").unwrap()["state"], "applied");
 }
 
 /// W3b-1: an answer from a page read before the carrier's anchor moved is refused for either
@@ -1385,12 +1435,12 @@ fn an_answer_whose_placement_changed_is_refused_and_records_nothing() {
     let _served = suggested(&mut h);
     h.said("s3", 10, "The trailing comma again.");
     h.grouped(&["s2", "s3"], "");
-    let id = h.request_of("s3")["id"].clone();
+    let card = h.card("s3");
     h.said("s4", 12, "Another thing entirely.");
     h.grouped(&["s4", "s2"], "Other");
     let before = h.recorded();
     for action in ["join", "not-this"] {
-        let answer = h.post(json!({"request": id, "action": action}));
+        let answer = h.answer(&card, action);
         assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
     }
     assert_eq!(h.recorded(), before);
@@ -1461,7 +1511,8 @@ fn the_stores_moving_between_the_check_and_the_write_refuse_the_answer() {
 fn an_answer_whose_token_was_replaced_records_nothing() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
-    let body = json!({"request": h.request_of("s2")["id"], "action": "join"});
+    let mut body = h.card("s2");
+    body["action"] = json!("join");
     let body = serde_json::to_vec(&body).unwrap();
     let before = h.recorded();
     let refused = act(h.s.home.path(), &Mutex::new(()), &body, &|| false).unwrap_err();
@@ -1519,14 +1570,21 @@ fn curation_between_the_check_and_the_write_leaves_the_answer_be() {
 fn join_refuses_when_its_pick_is_no_request_now() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
+    let card = h.card("s2");
     h.named("s1", "A");
-    let own = h.request_of("s2")["id"].clone();
+    // W3b-2 (#1114): the request the suggestion names holds the pick no more: not shown.
+    assert!(
+        h.request_of("s2").get("suggestion").is_none(),
+        "{}",
+        h.request_of("s2")
+    );
     let before = h.recorded();
-    let join = h.post(json!({"request": own, "action": "join"}));
+    let join = h.answer(&card, "join");
     assert_eq!(join, Err((409, "suggestion_target_gone")));
     assert_eq!(h.recorded(), before);
-    let not_this = h.post(json!({"request": own, "action": "not-this"}));
+    let not_this = h.answer(&card, "not-this");
     assert_eq!(not_this.unwrap()["state"], "applied");
+    assert!(!h.groups().suggested.contains_key(&key("s2")));
 }
 
 /// W3b-1: a request's `Held` carries the conversations its suggestion's answer places; when a
@@ -1540,8 +1598,11 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
     h.grouped(&["s2", "s3"], "");
     let carrier = h.request_of("s3");
     assert!(carrier.get("suggestion").is_some(), "{carrier}");
+    let card = h.card("s3");
     let shown = carrier["id"].as_str().unwrap();
-    let checked = crate::my_work_focus::held_in(h.s.home.path(), shown).unwrap();
+    let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
+    let checked = crate::my_work_focus::held_in((&raw, &k), h.s.home.path(), shown).unwrap();
+    drop((raw, k));
     let mut placement = checked.unwrap().placement;
     placement.sort();
     assert_eq!(placement, vec![key("s2"), key("s3")]);
@@ -1550,7 +1611,7 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
     assert!(carrier.get("suggestion").is_none(), "{carrier}");
     let before = h.recorded();
     for action in ["join", "not-this"] {
-        let answer = h.post(json!({"request": carrier["id"], "action": action}));
+        let answer = h.answer(&card, action);
         assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
     }
     assert_eq!(h.recorded(), before);
@@ -1558,7 +1619,8 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
 
 /// Codex on #1113: a resident viewer an upgrade exec'd keeps the viewer's role and cannot run the
 /// worker's pass: an answer there, with an op of this device the consumer has not applied yet,
-/// waits for the worker that runs, and lands.
+/// waits for the worker that runs, and lands. W3b-2 (#1114): the worker starts only once the
+/// answer has found that op not applied (`claims::WAITING`), so that the wait is the one taken.
 #[test]
 fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -1571,24 +1633,28 @@ fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
     }
     let mut h = Home::new();
     let _served = suggested(&mut h);
-    let id = h.request_of("s2")["id"].clone();
+    let card = h.card("s2");
     h.grouped(&["s9"], "Unrelated");
     let home = h.s.home.path().to_owned();
     let stop = Stop(std::sync::Arc::new(AtomicBool::new(false)));
     let running = std::sync::Arc::clone(&stop.0);
-    // Its first pass a while after the answer's start: the answer waits for the op, not finds it
-    // applied.
-    let worker = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
-        while !running.load(SeqCst) {
-            crate::worker::run_once(&home).unwrap();
-            std::thread::sleep(Duration::from_millis(50));
-        }
+    let (started, worker) = std::sync::mpsc::channel();
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let worker = std::thread::spawn(move || {
+                while !running.load(SeqCst) {
+                    crate::worker::run_once(&home).unwrap();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+            started.send(worker).unwrap();
+        }))
     });
     crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
-    let answer = h.post(json!({"request": id, "action": "join"}));
+    let answer = h.answer(&card, "join");
     crate::executable::RESUMED_AS.set(None);
     drop(stop);
+    let worker = worker.try_recv().expect("the answer waited for the op");
     worker.join().unwrap();
     assert_eq!(answer.unwrap()["state"], "applied");
     assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
@@ -1601,7 +1667,8 @@ fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
 fn an_execd_viewers_answer_whose_op_no_worker_applies_is_pending() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
-    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    let mut answer = h.card("s2");
+    answer["action"] = json!("not-this");
     h.grouped(&["s9"], "Unrelated");
     let before = h.recorded();
     crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
@@ -1620,7 +1687,8 @@ fn an_execd_viewers_answer_whose_op_no_worker_applies_is_pending() {
 fn an_answer_lands_while_the_worker_is_busy_and_the_record_index_is_behind() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
-    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    let mut answer = h.card("s2");
+    answer["action"] = json!("not-this");
     h.said("s5", 20, "Something else.");
     let before = h.recorded();
     let busy = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
@@ -1630,4 +1698,315 @@ fn an_answer_lands_while_the_worker_is_busy_and_the_record_index_is_behind() {
     drop(busy);
     assert_eq!(landed.unwrap()["state"], "pending");
     assert_eq!(h.recorded(), before + 1);
+}
+
+impl Home {
+    /// The owner's hide of `target` (`hide::CARD`, `hide::SUMMARY`), as the page records it.
+    fn hid(&mut self, target: &str) {
+        let device = self.s.raw.device().to_owned();
+        let body = json!({"target": target, "device": device, "op_seq": 1, "hidden": true});
+        self.s.raw.append_ops(&[(OpKind::Hide, body)]).unwrap();
+    }
+
+    /// A my_work op of `job` that groups and places nothing, as a goals skip is.
+    fn skipped(&mut self, job: &str) {
+        let op = MyWorkOp {
+            job: job.into(),
+            about: R.into(),
+            entry: "fake".into(),
+            ts: crate::db::now_ms(),
+            read: Read::default(),
+            removed: vec![],
+            fields: BTreeMap::new(),
+            skipped: true,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        self.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    }
+
+    /// The worker's pass with only `consumers`, as a round reads the log one consumer at a time.
+    fn applied_by(&self, consumers: Vec<Box<dyn crate::worker::Consumer>>) {
+        let mut consumers = consumers;
+        let mut k = crate::knowledge::open(self.s.home.path()).unwrap();
+        crate::worker::drain(&self.s.raw, &mut k, &mut consumers).unwrap();
+    }
+
+    /// An answer with `card` while the worker is held, within `WAIT`'s 300 ms.
+    fn held_answer(&self, card: &Value, action: &str) -> std::result::Result<Value, (u16, &str)> {
+        let held = crate::worker::lock(self.s.home.path()).unwrap().unwrap();
+        crate::claims::WAIT.set(Some(Duration::from_millis(300)));
+        let answer = self.answer(card, action);
+        crate::claims::WAIT.set(None);
+        drop(held);
+        answer
+    }
+}
+
+/// W3b-2 (#1114): a card read before a conversation joined the group answers for the group it
+/// showed: its binding is another now, and either answer is refused, nothing recorded; the card
+/// read again answers, and its Join moves the new member too.
+#[test]
+fn an_old_card_after_a_member_joined_answers_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    h.said("s3", 10, "The trailing comma again.");
+    h.grouped(&["s2", "s3"], "");
+    assert!(
+        h.request_of("s3").get("suggestion").is_some(),
+        "shown, for both now"
+    );
+    let before = h.recorded();
+    for action in ["join", "not-this"] {
+        assert_eq!(
+            h.answer(&card, action),
+            Err((409, "suggestion_changed")),
+            "{action}"
+        );
+    }
+    assert_eq!(h.recorded(), before);
+    assert_eq!(h.answer_on("s2", "join").unwrap()["state"], "applied");
+    for s in ["s2", "s3"] {
+        assert_eq!(h.request_of(s)["id"], h.request_of("s1")["id"], "{s}");
+    }
+}
+
+/// W3b-2 (review of the plan, round 1): the request the pick is in moved, the carrier's own
+/// conversations as they were: a card read before names another target, and either answer is
+/// refused, nothing recorded; read again, Join lands in the request the pick is in now.
+#[test]
+fn an_old_card_whose_target_moved_answers_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    h.said("s0", -10, "Ship the reader.");
+    h.grouped(&["s0", "s1"], "Reader");
+    assert_eq!(h.request_of("s2")["suggestion"]["title"], "Reader");
+    let before = h.recorded();
+    for action in ["join", "not-this"] {
+        assert_eq!(
+            h.answer(&card, action),
+            Err((409, "suggestion_changed")),
+            "{action}"
+        );
+    }
+    assert_eq!(h.recorded(), before);
+    h.answer_on("s2", "join").unwrap();
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s0")["id"]);
+}
+
+/// W3b-2 (#1114): a hide of a card the my_work consumer took and the cards' consumer did not (a
+/// round reads the log one consumer at a time), the worker held: the answer waits for cards, and
+/// is refused when the wait runs out, nothing recorded; the same for a summary's hide and turns.
+#[test]
+fn an_answer_waits_for_cards_and_turns_to_take_a_hide() {
+    for target in [crate::hide::CARD, crate::hide::SUMMARY] {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let card = h.card("s2");
+        h.hid(target);
+        h.applied_by(vec![Box::new(crate::consumer::my_work::MyWork)]);
+        let before = h.recorded();
+        assert_eq!(
+            h.held_answer(&card, "not-this"),
+            Err((409, "my_work_pending")),
+            "{target}"
+        );
+        assert_eq!(h.recorded(), before, "{target}");
+        h.s.run();
+        assert_eq!(
+            h.answer(&card, "not-this").unwrap()["state"],
+            "applied",
+            "{target}"
+        );
+    }
+}
+
+/// W3b-2 (#1114, R3): what no answer depends on is not waited for: curation's turn in the turns'
+/// and the my_work consumer's lag, and a goals skip in the my_work consumer's, the worker held:
+/// the answer is recorded, told as pending.
+#[test]
+fn an_answer_does_not_wait_for_curation_nor_a_goals_skip() {
+    /// What is appended to the log, by its name.
+    type Owed = (&'static str, fn(&mut Home));
+    let owed: [Owed; 2] = [
+        ("a parked turn", |h| {
+            let body = json!({"text": "a turn parked before its call"});
+            h.s.raw.append_ops(&[(OpKind::Turn, body)]).unwrap();
+        }),
+        ("a goals skip", |h| h.skipped(crate::my_work_goals::NAME)),
+    ];
+    for (what, owed) in owed {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let card = h.card("s2");
+        owed(&mut h);
+        let before = h.recorded();
+        let answer = h.held_answer(&card, "not-this");
+        assert_eq!(answer.unwrap()["state"], "pending", "{what}");
+        assert_eq!(h.recorded(), before + 1, "{what}");
+    }
+}
+
+/// W3b-2 (R1): an earlier answer recorded after the catch-up and before config.lock, the my_work
+/// consumer not yet applying it: the check reads it on its own raw.db, finds it not applied, and
+/// refuses the second, which records nothing.
+#[test]
+fn an_answer_after_an_earlier_one_the_consumer_has_not_applied_records_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let earlier = move || {
+        let declined = json!({"conversation": ["claude", "s2"], "action": "not-this",
+            "groups": [{"conversations": [["claude", "s2"]], "title": null, "links": []}]});
+        let op = MyWorkOp {
+            job: NAME.into(),
+            about: R.into(),
+            entry: String::new(),
+            ts: crate::db::now_ms(),
+            read: Read::default(),
+            removed: vec![],
+            fields: serde_json::from_value(declined).unwrap(),
+            skipped: false,
+            forgotten: None,
+        };
+        let op = serde_json::to_value(op).unwrap();
+        let mut raw = crate::raw::open(&home).unwrap();
+        raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    };
+    CAUGHT_UP.with(|hook| *hook.borrow_mut() = Some(Box::new(earlier)));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before + 1, "the earlier answer alone");
+}
+
+/// W3b-2 (#1114: the rebuild): a knowledge.db put in place while the answer waits for config.lock
+/// that has not taken this device's ops (a projection made again, a rebuild that stopped part way)
+/// is not answered on: 409, nothing recorded.
+#[test]
+fn a_knowledge_db_short_of_the_ops_is_not_answered_on() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    CAUGHT_UP.with(|hook| *hook.borrow_mut() = Some(Box::new(move || set_aside(&home))));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before);
+}
+
+/// W3b-2: knowledge.db replaced after the check is the answer's no more (the snapshot is the
+/// decision): the answer is recorded, and the log, read again into the new knowledge.db, gives
+/// the grouping it was checked on.
+#[test]
+fn a_knowledge_db_replaced_after_the_check_keeps_the_answer() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || set_aside(&home))));
+    let before = h.recorded();
+    h.answer(&card, "join").unwrap();
+    assert_eq!(h.recorded(), before + 1);
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
+}
+
+/// W3b-2 (#1114: the restore): raw.db put in place after the check as a restore leaves it, the
+/// same device and the same ops in another file: the answer is refused, and the new raw.db holds
+/// none. (A restore itself refuses while this test's store keeps raw.db open.)
+#[test]
+fn a_raw_db_restored_after_the_check_records_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let device = h.s.raw.device().to_owned();
+    let restore = move || {
+        let (path, copy) = (home.join("raw.db"), home.join("raw.db.restored"));
+        Connection::open(&path)
+            .unwrap()
+            .execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+            .unwrap();
+        // Its own file, as a restore's raw.db names itself.
+        Connection::open(&copy)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'store_file'",
+                [crate::db::store_file(&copy)],
+            )
+            .unwrap();
+        for journal in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(home.join(journal));
+        }
+        std::fs::rename(&copy, &path).unwrap();
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(restore)));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    let raw = crate::raw::open(h.s.home.path()).unwrap();
+    assert_eq!(raw.device(), device, "the restore kept the device");
+    drop(raw);
+    assert_eq!(h.recorded(), before);
+}
+
+/// W3b-2 (R5): the receipt is the raw commit's: a wait for the consumer that fails after the
+/// answer is written answers it as pending, and exactly one op is recorded.
+#[test]
+fn a_wait_that_fails_after_the_write_answers_pending() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let broken = move || {
+        let k = Connection::open(home.join("knowledge.db")).unwrap();
+        k.execute_batch("DROP TABLE op_checkpoints").unwrap();
+    };
+    APPENDED.with(|hook| *hook.borrow_mut() = Some(Box::new(broken)));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join").unwrap()["state"], "pending");
+    assert_eq!(h.recorded(), before + 1);
+}
+
+/// knowledge.db and its journal set aside under other names, as a projection made again leaves
+/// the path: the next open makes a new one, which has taken no op.
+fn set_aside(home: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let path = home.join(format!("knowledge.db{suffix}"));
+        if path.exists() {
+            std::fs::rename(&path, home.join(format!("knowledge.db.aside{suffix}"))).unwrap();
+        }
+    }
+}
+
+/// W3b-2 (#1114): the pick in a group of two, a work state taking the pick alone into a request it
+/// names: the group's request is still a request, without the pick, so the suggestion is not shown,
+/// and a Join on the card read before is refused, nothing recorded; a Not this still closes it.
+#[test]
+fn a_join_whose_pick_left_a_group_that_stays_is_refused() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s0", -10, "Ship the reader.");
+    h.grouped(&["s0", "s1"], "Reader");
+    assert_eq!(h.request_of("s2")["suggestion"]["title"], "Reader");
+    let card = h.card("s2");
+    h.named("s1", "A");
+    assert_eq!(
+        h.request_of("s0")["title"],
+        "Reader",
+        "the group's request stays"
+    );
+    assert!(
+        h.request_of("s2").get("suggestion").is_none(),
+        "{}",
+        h.request_of("s2")
+    );
+    let before = h.recorded();
+    assert_eq!(
+        h.answer(&card, "join"),
+        Err((409, "suggestion_target_gone"))
+    );
+    assert_eq!(h.recorded(), before);
+    assert_eq!(h.answer(&card, "not-this").unwrap()["state"], "applied");
 }

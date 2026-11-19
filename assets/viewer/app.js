@@ -2774,9 +2774,11 @@ const TEXT = {
   focus_merge_target: ['That area can’t take a merge now.', 'その分野には、今は合併できません。'],
   focus_restore: ['An area you wrote can’t be put back in Suggested.', 'あなたが作った分野は、提案に戻せません。'],
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
-  suggestion_not_found: ['That suggestion is no longer waiting for an answer. The page has been read again.', 'その提案は、もう答えを待っていません。ページを読み直しました。'],
-  suggestion_target_gone: ['The request it suggested is no longer there. The page has been read again.', '提案された依頼は、もうありません。ページを読み直しました。'],
-  suggestion_changed: ['That suggestion no longer matches its requests as they are now. The page has been read again.', 'その提案は、今の依頼と合わなくなっています。ページを読み直しました。'],
+  suggestion_not_found: ['That suggestion is no longer waiting for an answer.', 'その提案は、もう答えを待っていません。'],
+  suggestion_target_gone: ['The request it suggested is no longer there.', '提案された依頼は、もうありません。'],
+  suggestion_changed: ['That suggestion no longer matches its requests as they are now.', 'その提案は、今の依頼と合わなくなっています。'],
+  my_work_reread_done: ['{text} The page has been read again.', '{text}ページを読み直しました。'],
+  my_work_reread_failed: ['{text} The page couldn’t be read again. Reload it to see My Work as it is now.', '{text}ページを読み直せませんでした。今のマイワークを見るには、ページを読み込み直してください。'],
   my_work_pending: ['My Work is still taking in a change. Try again in a moment.', 'マイワークがまだ変更を取り込んでいます。少し待ってから、もう一度お試しください。'],
   my_work_unavailable: ['My Work can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
@@ -9449,7 +9451,9 @@ function myWorkSuggestion(row) {
 // J4: the owner's answer, then My Work read again and drawn once (#775). Only the answers' buttons
 // wait, as a review's do, since drawing clears the status line; a save the server took stays said
 // as taken when the read after it fails (#602). A Join names, and from the request's page shows,
-// the request the conversation is in as the read after it has it.
+// the request the conversation is in as the read after it has it. W3b-2: the answer names the
+// suggestion the card shows by its binding; a refusal says the page was read again only when the
+// rows read are the ones drawn, and asks for a reload when the read failed.
 async function myWorkAnswer(row, action) {
   if (mw.answering) return;
   mw.answering = true;
@@ -9458,17 +9462,23 @@ async function myWorkAnswer(row, action) {
   let failed = true;
   let applied = false;
   try {
-    const { res, answer } = await memoryWrite('my-work/suggestion', { request: row.id, action });
+    const body = { request: row.id, action, binding: row.suggestion?.binding };
+    const { res, answer } = await memoryWrite('my-work/suggestion', body);
     if (!res.ok) message = memoryFailure(res, answer);
     else {
       failed = false;
       applied = answer.state === 'applied';
       if (!applied) message = t('my_focus_pending');
     }
-    await myWorkReread().catch(() => {
+    const read = await myWorkReread().then((drawn) => (drawn ? 'drawn' : 'taken'), () => 'failed');
+    if (read === 'failed') {
       applied = false;
       if (res.ok) message = t('my_work_saved_unread');
-    });
+    }
+    if (!res.ok && ['suggestion_not_found', 'suggestion_target_gone', 'suggestion_changed'].includes(answer.code)) {
+      if (read === 'drawn') message = t('my_work_reread_done', { text: message });
+      if (read === 'failed') message = t('my_work_reread_failed', { text: message });
+    }
   } catch {
     // Not saved, as far as the page knows; nothing changed.
   } finally {
@@ -10217,13 +10227,16 @@ async function myWorkReview(row, checked) {
 }
 
 // A read the page asked for itself, applied though a person reads, unless a newer one was taken.
+// Whether its rows are the page's now: a newer read, a poll's held behind "Show updates" among
+// them, or the page left, takes them instead (W3b-2).
 async function myWorkReread() {
   const mine = generation;
   const read = ++mw.reads;
   const answer = await api('my-work', { range: 'all' });
-  if (mine !== generation || view !== 'my_work' || read < mw.taken) return;
+  if (mine !== generation || view !== 'my_work' || read < mw.taken) return false;
   mw.taken = read;
   myWorkAccept(answer);
+  return true;
 }
 
 // `presentation.js` `handoffText`, in the page's language (decision 55); a state the page names
