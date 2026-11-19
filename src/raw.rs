@@ -1681,6 +1681,45 @@ pub(crate) fn answer_top_in(conn: &Connection, device: &str) -> Result<i64> {
         .unwrap_or(0))
 }
 
+/// J4 (W3b-2): this device's newest op past `after` that the answer waits for `consumer` to have
+/// applied, none when there is none. For the my_work consumer, an op of a kind an answer reads
+/// whose job, if My Work's, can group, place, or change which requests are read (goals', rules',
+/// the story's and My Focus's jobs cannot: `my_work_run::pass` appends a goals skip before its
+/// call); for cards and turns, a hide of a card and of a summary, which they apply before My Work
+/// reads them.
+pub(crate) fn owed_to_j4_in(
+    conn: &Connection,
+    device: &str,
+    consumer: &str,
+    after: i64,
+) -> Result<Option<i64>> {
+    use rusqlite::OptionalExtension;
+    let (sql, target) = match consumer {
+        "my_work" => (
+            "SELECT op_seq FROM ops WHERE device = ?1 AND op_seq > ?2
+               AND type NOT IN ('claim', 'window', 'turn', 'digest', 'correction')
+               AND NOT (type = 'my_work' AND json_extract(body, '$.job') IN
+                 ('goals', 'rules', 'story', 'focus', 'focus-judge'))
+             ORDER BY op_seq DESC LIMIT 1",
+            None,
+        ),
+        "cards" => (HIDE_PAST, Some(crate::hide::CARD)),
+        "turns" => (HIDE_PAST, Some(crate::hide::SUMMARY)),
+        other => anyhow::bail!("J4 waits for no consumer {other}"),
+    };
+    let row = |r: &rusqlite::Row<'_>| r.get(0);
+    Ok(match target {
+        Some(target) => conn.query_row(sql, rusqlite::params![device, after, target], row),
+        None => conn.query_row(sql, rusqlite::params![device, after], row),
+    }
+    .optional()?)
+}
+
+/// `owed_to_j4_in`'s hides of one target past a checkpoint.
+const HIDE_PAST: &str = "SELECT op_seq FROM ops WHERE device = ?1 AND op_seq > ?2
+   AND type = 'hide' AND json_extract(body, '$.target') = ?3
+ ORDER BY op_seq DESC LIMIT 1";
+
 pub(crate) fn max_op_seq_in(conn: &Connection, device: &str) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
@@ -6796,12 +6835,18 @@ impl Raw {
 
     /// This device's newest op of a kind an owner's answer reads (`answer_top_in`), which the
     /// answer is appended against (`append_ops_at`).
+    /// `owed_to_j4_in` on this handle's device (W3b-2).
+    pub(crate) fn owed_to_j4(&self, consumer: &str, after: i64) -> Result<Option<i64>> {
+        owed_to_j4_in(&self.conn, &self.device, consumer, after)
+    }
+
     pub fn answer_top(&self) -> Result<i64> {
         answer_top_in(&self.conn, &self.device)
     }
 
     /// `append_ops` for an owner's answer checked against the stores as they stood at this device's
-    /// op `top` of a kind it reads (`answer_top`) and the forget fence `fence` (`fence_count`, J4):
+    /// op `top` of a kind it reads (`answer_top`) and the forget fence `fence` (`fence_count`, J4),
+    /// in the raw.db `file` (`file_identity`, W3b-2: none or another is a raw.db put in place since):
     /// only while this device has appended no such op since and forget denies what it denied
     /// then, compared inside the write; else nothing is written and the error is `OpsMoved`. A
     /// judge's or grouping's op, a work state write, an exclusion and a forget are all such ops or
@@ -6809,9 +6854,11 @@ impl Raw {
     pub fn append_ops_at(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
-        top: i64,
-        fence: i64,
+        (top, fence, file): (i64, i64, Option<&str>),
     ) -> Result<Vec<i64>> {
+        if file.is_none() || self.file_identity() != file {
+            return Err(OpsMoved.into());
+        }
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;

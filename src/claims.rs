@@ -602,11 +602,28 @@ pub(crate) fn applied(
     seqs: &[i64],
     (what, consumer): (&str, &str),
 ) -> Result<()> {
-    let at = seqs.last().copied().unwrap_or(0);
+    applied_by(home, k, device, seqs, (what, consumer), deadline())
+}
+
+/// `applied`'s 10 seconds from now (a test's own wait in its place), which several waits can share.
+pub(crate) fn deadline() -> std::time::Instant {
     let wait = std::time::Duration::from_secs(10);
     #[cfg(test)]
     let wait = WAIT.get().unwrap_or(wait);
-    let deadline = std::time::Instant::now() + wait;
+    std::time::Instant::now() + wait
+}
+
+/// `applied` by `deadline`, which the waits of one command share (W3b-2: J4's catch-up waits for
+/// three consumers within one).
+pub(crate) fn applied_by(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    seqs: &[i64],
+    (what, consumer): (&str, &str),
+    deadline: std::time::Instant,
+) -> Result<()> {
+    let at = seqs.last().copied().unwrap_or(0);
     let done = || -> Result<bool> {
         let got = crate::knowledge::checkpoint::get_in(
             k,
@@ -619,7 +636,13 @@ pub(crate) fn applied(
     if done()? {
         return Ok(());
     }
-    if crate::executable::may_run_worker() {
+    #[cfg(test)]
+    if let Some(hook) = WAITING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    // A pass begun ends first; none begins once the deadline the waits share has run out (W3b-2:
+    // CodeRabbit and Codex on #1115), which another pass, of no bound, would overrun.
+    if crate::executable::may_run_worker() && std::time::Instant::now() < deadline {
         crate::worker::run_once(home)?;
     }
     #[cfg(test)]
@@ -660,6 +683,10 @@ thread_local! {
     /// pass counts within the wait (#782).
     pub(crate) static AFTER_PASS: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
+    /// One-shot for this thread's next wait that finds its op not applied, run before the wait's
+    /// pass (W3b-2: a test starts the worker that runs from there).
+    pub(crate) static WAITING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `pref_add_in` of every repository.

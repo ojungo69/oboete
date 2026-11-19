@@ -568,11 +568,19 @@ pub(crate) struct Checked {
     pub(crate) placement: Vec<(String, String)>,
     /// The held ids of every request read.
     pub(crate) current: std::collections::HashSet<String>,
+    /// The binding of the suggestion My Work shows on the request, none when it shows none
+    /// (W3b-2), as the page reads it.
+    pub(crate) binding: Option<String>,
 }
 
-/// `held_of` with what J4 checks an answer against, from the same read.
-pub(crate) fn held_in(home: &Path, shown: &str) -> Result<Option<Checked>> {
-    let (answer, held) = crate::my_work::reviewing(home, crate::db::now_ms())?;
+/// `held_of` with what J4 checks an answer against, from the same read, through the stores given
+/// (W3b-2).
+pub(crate) fn held_in(
+    stores: (&crate::raw::Raw, &rusqlite::Connection),
+    home: &Path,
+    shown: &str,
+) -> Result<Option<Checked>> {
+    let (answer, held) = crate::my_work::reviewing_on(stores, home, crate::db::now_ms())?;
     let answer = crate::view::answered("my-work", answer);
     let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
     let Some(i) = requests.iter().position(|r| r["id"] == shown) else {
@@ -582,6 +590,9 @@ pub(crate) fn held_in(home: &Path, shown: &str) -> Result<Option<Checked>> {
         held: held[i].id().to_owned(),
         placement: held[i].placement().to_vec(),
         current: held.iter().map(|h| h.id().to_owned()).collect(),
+        binding: requests[i]["suggestion"]["binding"]
+            .as_str()
+            .map(str::to_owned),
     }))
 }
 

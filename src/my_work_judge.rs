@@ -409,24 +409,58 @@ fn key((agent, session): &Key) -> Value {
     json!([agent, session])
 }
 
-/// Whether the my_work consumer has applied every op this device recorded, within
-/// `claims::applied`'s wait for this device's newest op: this device's newest op of a kind an
-/// answer reads (`Raw::answer_top`), read before it and so among what the wait applied (W3b-1: the
-/// answer is appended only while it is still the newest), none only when the wait ran out; a
-/// worker or a store that failed is an error (#777).
-fn caught_up(home: &Path) -> Result<Option<i64>> {
+/// The consumers whose state My Work's read of a suggestion is made from, which the answer waits
+/// for (W3b-2).
+const CONSUMERS: [&str; 3] = ["my_work", "cards", "turns"];
+
+/// The my_work, cards and turns consumers each past this device's newest op past its checkpoint
+/// that an answer depends on (`Raw::owed_to_j4`, W3b-2: none for curation's own ops, nor for a
+/// job that groups and places nothing), waited for within one deadline, the worker's pass run here
+/// where this process may run it (`claims::applied_by`); false when the wait ran out; an error for
+/// a worker or a store that failed (#777). The check under config.lock looks again (`reached`).
+fn caught_up(home: &Path) -> Result<bool> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(Some(0));
+        return Ok(true);
     };
     let device = raw.device().to_owned();
-    let read = raw.answer_top()?;
-    let top = raw.max_op_seq_of(&device)?;
-    drop(raw);
-    match crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")) {
-        Ok(()) => Ok(Some(read)),
-        Err(e) if e.is::<crate::claims::NotYet>() => Ok(None),
-        Err(e) => Err(e),
+    let mut owed = Vec::new();
+    for consumer in CONSUMERS {
+        let at = crate::knowledge::checkpoint::get_in(
+            &k,
+            crate::knowledge::checkpoint::OPS,
+            consumer,
+            &device,
+        )?;
+        if let Some(op) = raw.owed_to_j4(consumer, at)? {
+            owed.push((consumer, op));
+        }
     }
+    drop(raw);
+    let deadline = crate::claims::deadline();
+    for (consumer, op) in owed {
+        match crate::claims::applied_by(home, &k, &device, &[op], (NAME, consumer), deadline) {
+            Ok(()) => {}
+            Err(e) if e.is::<crate::claims::NotYet>() => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `k` has each of `CONSUMERS` past every op of `raw`'s device that it owes an answer.
+fn reached(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<bool> {
+    for consumer in CONSUMERS {
+        let at = crate::knowledge::checkpoint::get_in(
+            k,
+            crate::knowledge::checkpoint::OPS,
+            consumer,
+            raw.device(),
+        )?;
+        if raw.owed_to_j4(consumer, at)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// J4's answer as the page posts it.
@@ -436,7 +470,16 @@ struct Answer {
     /// The request My Work shows the suggestion on, by its shown id.
     request: String,
     action: String,
+    /// W3b-2: the binding of the suggestion the card showed (`my_work::binding`).
+    binding: Option<String>,
+    /// The request the card's suggestion named, by the id the page has it (`suggestion.id`), which
+    /// its binding proves: a Not this whose pick is in no group now is checked with it.
+    target: Option<String>,
 }
+
+/// What an answer appends and what its append is fenced against: this device's newest op of a
+/// kind an answer reads, the forget fence and the raw.db file (`Raw::append_ops_at`).
+type Decided = (Vec<(String, Value)>, (i64, i64, Option<String>));
 
 /// J4: the owner's Join or Not this on the request of a conversation the judge suggested, `POST
 /// /api/my-work/suggestion`, refused before it writes; an op of the job that reads nothing, as an
@@ -446,10 +489,13 @@ struct Answer {
 ///
 /// W3b-1: it places what the request shows when it is checked (its `Held`'s placement, checked
 /// against the groups read now, both anchors in their own groups), is appended only while this
-/// device has appended no op of a kind an answer reads since `caught_up` read the newest
+/// device has appended no op of a kind an answer reads since the check read the newest
 /// (`Raw::answer_top`) and the forget fence of its reading is as it was (`Raw::append_ops_at`),
 /// and only while `authorized` holds, which it asks under config.lock, where new tokens are made
-/// (R6): 401 with nothing recorded otherwise.
+/// (R6): 401 with nothing recorded otherwise. W3b-2: it names the suggestion its card showed by
+/// that suggestion's binding, without which it is 400 (a page from before the binding, which words
+/// it as "Please reload the page"); it is checked under config.lock (`check`), and its receipt is
+/// the raw commit's, whatever the wait for the consumer then finds.
 pub(crate) fn act(
     home: &Path,
     saving: &Mutex<()>,
@@ -466,36 +512,82 @@ pub(crate) fn act(
     if !(1..=80).contains(&posted.request.len()) {
         return Err(refused(400, "bad_request", "request"));
     }
+    if (posted.target.as_ref()).is_some_and(|t| !(1..=80).contains(&t.len())) {
+        return Err(refused(400, "bad_request", "target"));
+    }
+    let bound = (posted.binding.as_deref())
+        .is_some_and(|b| b.len() == 64 && b.bytes().all(|c| c.is_ascii_hexdigit()));
+    if !bound {
+        return Err(refused(400, "bad_request", "binding"));
+    }
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = || refused(503, "my_work_unavailable", "");
+    let pending = || refused(409, "my_work_pending", "");
     // #775: what this device recorded before, an earlier answer among it, applied first, so that
     // this answer is resolved against it; still pending after the wait, it is refused.
-    let Some(top) = caught_up(home).map_err(|_| unavailable())? else {
-        return Err(refused(409, "my_work_pending", ""));
-    };
+    if !caught_up(home).map_err(|_| unavailable())? {
+        return Err(pending());
+    }
+    #[cfg(test)]
+    hook(&CAUGHT_UP);
+    let config = crate::settings::config_lock(home).map_err(|_| unavailable())?;
+    let (ops, (top, fence, file)) = check(home, &posted, join)?;
+    #[cfg(test)]
+    hook(&CHECKED);
+    if !authorized() {
+        return Err(refused(401, "token", ""));
+    }
+    let appended = crate::my_work_ops::append_at(home, NAME, ops, (top, fence, file.as_deref()));
+    drop(config);
+    let (k, device, seqs) = appended.map_err(|e| {
+        if e.is::<crate::raw::OpsMoved>() {
+            pending()
+        } else {
+            unavailable()
+        }
+    })?;
+    #[cfg(test)]
+    hook(&APPENDED);
+    let applied = crate::my_work_ops::applied(home, &k, &device, &seqs, NAME);
+    Ok(json!({"state": if applied { "applied" } else { "pending" }}))
+}
+
+/// The answer checked under config.lock (W3b-2), every read through one raw.db and one knowledge.db
+/// handle: an open handle reads the file it opened, whatever a rebuild, a restore or a projection
+/// put in place since; the consumers past what the answer owes on these handles before the reads
+/// (a knowledge.db put in place part way reads short of it: 409 `my_work_pending`); the
+/// suggestion is the one the posted binding names, from one descriptor (the carrier, its
+/// placement, the request its pick is in now), which a Join also needs My Work to show; and the
+/// ops of its decision, with what the append is fenced against, read here.
+fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
+    let unavailable = || refused(503, "my_work_unavailable", "");
+    let pending = || refused(409, "my_work_pending", "");
     let not_found = || refused(404, "suggestion_not_found", "request");
-    // The reading, and with it the forget fence the op is appended against, before any read the
-    // answer is checked against.
+    let changed = || refused(409, "suggestion_changed", "request");
+    let gone = || refused(409, "suggestion_target_gone", "request");
     let Some((raw, k)) = crate::search::b::stores(home).map_err(|_| unavailable())? else {
         return Err(not_found());
     };
+    // What the append is fenced against, read on this raw.db, its consumers past what it owes.
+    let top = raw.answer_top().map_err(|_| unavailable())?;
+    if !reached(&raw, &k).map_err(|_| unavailable())? {
+        return Err(pending());
+    }
+    // The reading, and with it the forget fence the op is appended against, before any read the
+    // answer is checked against.
     let reading =
         crate::curate::Reading::now(&raw, crate::curate::Reads::Live).map_err(|_| unavailable())?;
-    drop((raw, k));
     let crate::my_work_focus::Checked {
         held,
         placement,
         current,
-    } = crate::my_work_focus::held_in(home, &posted.request)
+        binding: shown,
+    } = crate::my_work_focus::held_in((&raw, &k), home, &posted.request)
         .map_err(|_| unavailable())?
         .ok_or_else(not_found)?;
-    let Some((raw, k)) = crate::search::b::stores(home).map_err(|_| unavailable())? else {
-        return Err(not_found());
-    };
     let groups = crate::my_work_group::groups(&raw, &k, &reading).map_err(|_| unavailable())?;
-    drop((raw, k));
     let Some((c, picked)) =
         (groups.suggested.iter()).find(|(c, _)| crate::my_work::anchored(c) == held)
     else {
@@ -508,15 +600,36 @@ pub(crate) fn act(
     // group; anything else changed since (`my_work::read`'s check, made again here).
     let in_its_own = |anchor: &Key| groups.of.get(anchor) == Some(anchor);
     if !in_its_own(c) || group.members != placement {
-        return Err(refused(409, "suggestion_changed", "request"));
+        return Err(changed());
+    }
+    // W3b-2: the descriptor's binding is the posted one. A Not this whose pick is in no group now
+    // (a grouping that left it out since the card was read) is bound by the request the card named,
+    // which the binding proves, as Not this places nothing there; a Join needs the request the pick
+    // is in.
+    let target = groups.of.get(picked);
+    let mut mask = None;
+    let named = match (target, join) {
+        (Some(target), _) => {
+            crate::my_work::shown_group(target, home, &mut mask).map_err(|_| unavailable())?
+        }
+        (None, false) => posted.target.clone().ok_or_else(changed)?,
+        (None, true) => return Err(gone()),
+    };
+    let now = crate::my_work::binding((&held, &named), &placement, home, &mut mask)
+        .map_err(|_| unavailable())?;
+    if posted.binding.as_deref() != Some(now.as_str()) {
+        return Err(changed());
     }
     // Its own request's other conversations come with it (claude-mem's `brought`).
     let others = placement.iter().filter(|m| *m != c).map(key);
     let decision = if join {
-        let target = (groups.of.get(picked))
-            .filter(|target| *target != c && in_its_own(target))
-            .filter(|target| current.contains(&crate::my_work::anchored(target)))
-            .ok_or_else(|| refused(409, "suggestion_target_gone", "request"))?;
+        // A Join places them in the target, which must be a request My Work shows the suggestion
+        // to.
+        let target = target.ok_or_else(gone)?;
+        let current_target = current.contains(&crate::my_work::anchored(target));
+        if target == c || !in_its_own(target) || !current_target || shown.is_none() {
+            return Err(gone());
+        }
         let ends = json!([key(target), key(c)]);
         let members: Vec<Value> = [key(target), key(c)].into_iter().chain(others).collect();
         let ja = crate::config::load(home).map_or_else(
@@ -535,33 +648,34 @@ pub(crate) fn act(
         json!([{"conversations": members, "title": null, "links": []}])
     };
     let fields = json!({"conversation": key(c), "action": posted.action, "groups": decision});
-    let ops = vec![(group.repo.clone(), fields)];
-    #[cfg(test)]
-    if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+    let fence = (top, reading.fence, raw.file_identity().map(str::to_owned));
+    Ok((vec![(group.repo.clone(), fields)], fence))
+}
+
+/// A test's one-shot, kept in a thread-local until the answer comes to its place.
+#[cfg(test)]
+type Hook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+/// Runs a test's one-shot at `at`, if it set one.
+#[cfg(test)]
+fn hook(at: &'static std::thread::LocalKey<Hook>) {
+    if let Some(hook) = at.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let config = crate::settings::config_lock(home).map_err(|_| unavailable())?;
-    if !authorized() {
-        return Err(refused(401, "token", ""));
-    }
-    let appended = crate::my_work_ops::append_at(home, NAME, ops, (top, reading.fence));
-    drop(config);
-    let (k, device, seqs) = appended.map_err(|e| {
-        if e.is::<crate::raw::OpsMoved>() {
-            refused(409, "my_work_pending", "")
-        } else {
-            unavailable()
-        }
-    })?;
-    let applied = crate::my_work_ops::applied(home, &k, &device, &seqs, NAME);
-    Ok(json!({"state": if applied { "applied" } else { "pending" }}))
 }
 
 #[cfg(test)]
 thread_local! {
-    /// One-shot for this thread's next answer, run once it is checked and before it is written: a
-    /// test's way to move the stores between the two.
+    /// One-shot for this thread's next answer, run after its catch-up and before config.lock: a
+    /// test's way to replace a token, a store or a raw.db while the answer comes to that lock.
+    pub(crate) static CAUGHT_UP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// One-shot for this thread's next answer, run once it is checked, under its config.lock, and
+    /// before it is written: a test's way to move the stores between the two.
     pub(crate) static CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// One-shot for this thread's next answer, run once it is written, before the consumer's wait.
+    pub(crate) static APPENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
