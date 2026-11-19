@@ -1,8 +1,54 @@
 diff --git a/src/ui/my-work/src/App.tsx b/src/ui/my-work/src/App.tsx
-index 35eb64ba00f12202292e0bc572c614c9919e0e02..429eb140e52761fd6f2ac68fea150a622304ef50 100644
+index 35eb64ba00f12202292e0bc572c614c9919e0e02..618cfa82645ce21cb3cc04c6243bd75119947a32 100644
 --- a/src/ui/my-work/src/App.tsx
 +++ b/src/ui/my-work/src/App.tsx
-@@ -232,10 +232,11 @@ function LoadedApp() {
+@@ -113,7 +113,6 @@ function LanguageSelector() {
+   )
+ }
+ 
+-const SetupPage = lazy(() => import('@/setup/setup-page'))
+ const MyRules = lazy(() => import('@/pages/my-rules').then(module => ({ default: module.MyRules })))
+ const SuggestedAreas = lazy(() => import('@/pages/suggested-areas').then(module => ({ default: module.SuggestedAreas })))
+ const PastFocus = lazy(() => import('@/pages/past-focus').then(module => ({ default: module.PastFocus })))
+@@ -142,24 +141,12 @@ function RequestDetailLoading({ title, onClose }: { title: string; onClose: () =
+ }
+ 
+ export default function App() {
+-  // An agent may leave setup for the person's first visit. Only a persisted
+-  // install handoff opens it automatically; old installations and cloud readers keep My Work.
+-  const page = useStore((state) => state.view.page)
+-  const finishSetup = useStore.use.finishSetup()
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete has no installer, so no
++  // handoff opens one and the page is always My Work.
+   // Once per mount, read from the store at effect time. Depending on the action
+   // identity re-posted an open whenever that function was replaced.
+   useEffect(() => { useStore.getState().reportOpen() }, [])
+-  useEffect(() => {
+-    if (page === 'setup' || isServedFromCloud(window.location.hostname)
+-      || new URLSearchParams(window.location.search).get('source') === 'sample') return
+-    let active = true
+-    void import('@/setup/setup-data').then(module => module.setupPending()).then(pending => {
+-      if (active && pending && useStore.getState().view.page === 'app') useStore.getState().startSetup()
+-    }).catch(() => { /* No confirmed handoff: keep the existing workspace usable. */ })
+-    return () => { active = false }
+-  }, [page])
+-  if (page !== 'setup') return <WorkApp />
+-  return <MotionConfig reducedMotion="user"><Suspense fallback={null}><SetupPage onComplete={finishSetup} /></Suspense></MotionConfig>
++  return <WorkApp />
+ }
+ 
+ /** Reads the active source once and follows its live feed, then renders the app. A failed load says so plainly instead of showing anything made up. */
+@@ -191,7 +178,8 @@ function LoadedApp() {
+   const { t } = useI18n()
+   const { sourceKind, requests, focusAreas } = useWorkModel()
+   // Which areas are shared, for their Shared mark. The worker keeps the pages current (R17.3).
+-  useFocusSharesLoader(sourceKind === 'local')
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete shares no area, so My Work never asks which ones are shared.
++  useFocusSharesLoader(false && sourceKind === 'local')
+   const sample = sourceKind === 'sample'
+   const view = useStore((state) => state.view.section)
+   const focusChoice = useStore((state) => state.view.focusChoice)
+@@ -232,10 +220,11 @@ function LoadedApp() {
                      <Switch id="dark-mode" checked={dark} onCheckedChange={setDark} />
                      <Label htmlFor="dark-mode" className="text-xs">{t('Dark')}</Label>
                    </div>
@@ -16,7 +62,7 @@ index 35eb64ba00f12202292e0bc572c614c9919e0e02..429eb140e52761fd6f2ac68fea150a62
                  </div>
                </StickyBanner>
  
-@@ -250,8 +251,9 @@ function LoadedApp() {
+@@ -250,8 +239,9 @@ function LoadedApp() {
                      </Req>
                      <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight whitespace-nowrap md:hidden [.header-pill_&]:text-base">{heading}</h1>
                      <div className="ml-auto flex shrink-0 items-center gap-0.5 md:gap-2">
@@ -28,6 +74,379 @@ index 35eb64ba00f12202292e0bc572c614c9919e0e02..429eb140e52761fd6f2ac68fea150a62
                        <LiveIndicator />
                        <LanguageSelector />
                        <ClassicViewerLink />
+diff --git a/src/ui/my-work/src/components/focus-header.tsx b/src/ui/my-work/src/components/focus-header.tsx
+index fffefca648bc5a6b846879125ba9fbd081d3d4ea..d2d070628ca2a316a30e079884f95b0eb7c6f7cd 100644
+--- a/src/ui/my-work/src/components/focus-header.tsx
++++ b/src/ui/my-work/src/components/focus-header.tsx
+@@ -238,7 +238,8 @@ export function FocusHeader({ area, requests, changes }: { area: FocusArea; requ
+             {/* The area's own evidence sits with its goal, so it can't be read as belonging to the asks below. */}
+             {area.quotes.length > 0 ? <WhyItsHere quotes={area.quotes} /> : area.evidence && <p className="text-xs text-muted-foreground">{interpolate(t('Why it’s here: {evidence}'), { evidence: area.evidence })}</p>}
+           </div>
+-          <AreaMenu area={area} changes={changes} onEdit={setEdit} onShare={() => setSharing(true)} />
++          {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no change to an area yet (#1085). */}
++          {false && <AreaMenu area={area} changes={changes} onEdit={setEdit} onShare={() => setSharing(true)} />}
+         </div>
+         </div>
+         {navWord && <p className="text-xs text-attention-foreground">{interpolate(t('“{name}” reuses the page name “{navWord}”. Rename it so each word means one thing.'), { name: area.name, navWord })}</p>}
+@@ -252,7 +253,8 @@ export function FocusHeader({ area, requests, changes }: { area: FocusArea; requ
+         </div>
+         {shippedBefore && <p className="text-xs text-review-foreground">{interpolate(t('You asked again on {latestAt}, after the last ship on {shippedBefore}. What shipped doesn’t cover it yet.'), { latestAt: formatPromptDay(area.latestAt!), shippedBefore })}</p>}
+         <NotStartedAsks asks={area.asks} />
+-        {area.status === 'suggested' && (
++        {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no change to an area yet (#1085). */}
++        {false && area.status === 'suggested' && (
+           <Req ids={['R16.4']}>
+             <div className="flex flex-wrap gap-2 border-t pt-3">
+               <Button size="sm" className="h-11 sm:h-8" disabled={changes.saving} onClick={() => changes.apply({ action: 'keep', focusAreaId: area.id })}><CheckIcon />{t('Keep')}</Button>
+diff --git a/src/ui/my-work/src/components/request-detail.tsx b/src/ui/my-work/src/components/request-detail.tsx
+index 5a759a0eddc7c4f8edd43d69e258699e160531a6..39483543b87d0861d64a78f29b06f874ab62281e 100644
+--- a/src/ui/my-work/src/components/request-detail.tsx
++++ b/src/ui/my-work/src/components/request-detail.tsx
+@@ -308,7 +308,8 @@ function LoadedRequestDetail({ request, newerVersionReadFailure, onClose, onOpen
+               <Button variant="outline" onClick={newerVersionReadFailure.tryAgain}>{t('Try again')}</Button>
+             </div>
+           )}
+-          <CheckAction key={request.id} request={request} />
++          {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete takes no check yet (#1085). */}
++          {false && <CheckAction key={request.id} request={request} />}
+           <SuggestionAction key={`suggestion:${request.id}`} request={request} />
+           <OpenFollowUps request={request} />
+ 
+diff --git a/src/ui/my-work/src/live/conversation-continuation.test.ts b/src/ui/my-work/src/live/conversation-continuation.test.ts
+index 6b0085c41507f7755f6089cfadf05faee9130176..07cf9c50fa5cd4224fb53e17db42460eba39d089 100644
+--- a/src/ui/my-work/src/live/conversation-continuation.test.ts
++++ b/src/ui/my-work/src/live/conversation-continuation.test.ts
+@@ -43,8 +43,10 @@ const failed = (fields: Partial<ConversationContinuation> = {}) => exchange({ st
+ describe('which sources can continue a conversation', () => {
+   const fetchNothing = (() => Promise.reject(new Error('No call is made here.'))) as typeof fetch
+ 
+-  it('the page this computer\'s worker serves', () => {
+-    assert.equal(canContinueConversations(createLocalSource({ hostname: 'localhost', fetchImpl: fetchNothing })), true)
++  // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete continues no conversation
++  // from these pages, so not even the page this computer serves can (#1085).
++  it('not the page this computer\'s worker serves either, in oboete', () => {
++    assert.equal(canContinueConversations(createLocalSource({ hostname: 'localhost', fetchImpl: fetchNothing })), false)
+   })
+ 
+   it('not sample data, a cloud-served page, or a source without one of the four calls', () => {
+diff --git a/src/ui/my-work/src/live/local-source.test.ts b/src/ui/my-work/src/live/local-source.test.ts
+index 872e681c26e693b29c180952667ab369a485b6e9..f3c78f00e5621ede6639a8732eac17226ea2a050 100644
+--- a/src/ui/my-work/src/live/local-source.test.ts
++++ b/src/ui/my-work/src/live/local-source.test.ts
+@@ -3,11 +3,10 @@ import { readFileSync } from 'node:fs'
+ import { describe, it, type TestContext } from 'node:test'
+ import { createLocalSource, type LocalSourceOptions } from './local-source.ts'
+ import { sampleSource } from './sample-source.ts'
+-import type { ConversationContinuationEvent, MappedWorkModel, WorkModel } from './work-data-source.ts'
++import type { MappedWorkModel, WorkModel } from './work-data-source.ts'
+ import type { WorkViewOverview } from './work-view-overview.ts'
+ import type { WorkViewSnapshot } from './work-view-api-types.ts'
+ import { SaveRefusedError } from '../data.ts'
+-import { OPEN_IN_APP_CLICK_ID_PATTERN } from '../../../../shared/conversation-continuation.ts'
+ 
+ const SAMPLE = await sampleSource.loadWorkModel()
+ const FIRST = 'a'.repeat(64)
+@@ -45,16 +44,6 @@ class FakeStream {
+   emit(type: string, value: unknown) { this.handlers.get(type)?.({ data: JSON.stringify(value) }) }
+   close() { this.closed = true; this.readyState = 2 }
+ }
+-/** A page that can be unloaded: it fires 'pagehide' to its listeners, as `window` does on a reload or a closed tab. */
+-function fakePageUnload() {
+-  const listeners = new Set<() => void>()
+-  return {
+-    addEventListener: (_type: 'pagehide', listener: () => void) => { listeners.add(listener) },
+-    removeEventListener: (_type: 'pagehide', listener: () => void) => { listeners.delete(listener) },
+-    hide: () => { for (const listener of [...listeners]) listener() },
+-    listenerCount: () => listeners.size,
+-  }
+-}
+ 
+ function harness(fetcher: typeof fetch, bootstrapTimeoutMs = 100, page: Pick<LocalSourceOptions, 'hostname' | 'visibility' | 'pageUnload'> = {}) {
+   const streams: FakeStream[] = []
+@@ -804,278 +793,14 @@ describe('a hidden cloud tab', () => {
+   })
+ })
+ 
++// Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete continues no conversation from these
++// pages, so its local source offers none of the members the tests of this block read and called. They are replaced
++// by this one, as each of them failed and the stream they opened kept the file from ending (#1085).
+ describe('continuing a conversation from this computer', () => {
+-  const SESSION = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+-  const OTHER_SESSION = '9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f'
+   const CONTINUATION_MEMBERS = ['loadConversationContinuation', 'continueConversation', 'stopConversationContinuation', 'subscribeToConversationContinuations', 'openConversationInApp'] as const
+-  const target = { canContinue: true, recordedFolder: '/work/example/worktree', runsInFolder: '/work/example', recordedFolderIsGone: true, opensInAppNamed: 'Claude' }
+-  // Text that would read as a flag or a shell command if it were ever an argument. It travels in the JSON body, as typed.
+-  const ownerMessage = '--resume other "; rm -rf ~'
+-  const running = { exchangeId: 7, platform: 'claude', conversationSessionId: SESSION, state: 'running', ownerMessage, startedAtEpochMs: 1_000, ranInFolder: '/work/example' }
+-  const notice = { exchangeId: 7, platform: 'claude', conversationSessionId: SESSION, state: 'replied' }
+-  async function rejectionMessage(call: Promise<unknown>): Promise<string> {
+-    try { await call } catch (error) { return error instanceof Error ? error.message : String(error) }
+-    throw new Error('The call resolved; a rejection was expected.')
+-  }
+-  /**
+-   * Records each console.warn and console.error call's arguments, in order, and prints none, until restore(). By hand, so
+-   * a test runs the same under `node --test` and under bun, whose node:test has no mock.
+-   */
+-  function recordingConsole() {
+-    const { warn: originalWarn, error: originalError } = console
+-    const warnings: unknown[][] = []
+-    const errors: unknown[][] = []
+-    console.warn = (...args: unknown[]) => { warnings.push(args) }
+-    console.error = (...args: unknown[]) => { errors.push(args) }
+-    return { warnings, errors, restore: () => { console.warn = originalWarn; console.error = originalError } }
+-  }
+-
+-  it('reads, sends and stops through the three conversation routes', async () => {
+-    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+-    const { local } = harness(async (url, init) => {
+-      calls.push({ url: String(url), init })
+-      if (init?.method !== 'POST') return json({ target, exchanges: [running] })
+-      return json({ exchange: running }, String(url).endsWith('/continue') ? 202 : 200)
+-    })
+-    assert.deepEqual(await local.loadConversationContinuation!('claude', SESSION), { target, exchanges: [running] })
+-    assert.deepEqual(await local.continueConversation!('claude', SESSION, ownerMessage), running)
+-    assert.deepEqual(await local.stopConversationContinuation!('claude', SESSION), running)
+-    assert.deepEqual(calls.map(({ url, init }) => ({ url, method: init?.method ?? 'GET', headers: init?.headers, body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) })), [
+-      { url: `/api/work-view/conversations/continuation?platform=claude&conversationSessionId=${SESSION}`, method: 'GET', headers: undefined, body: undefined },
+-      { url: '/api/work-view/conversations/continue', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { platform: 'claude', conversationSessionId: SESSION, ownerMessage } },
+-      { url: '/api/work-view/conversations/stop', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { platform: 'claude', conversationSessionId: SESSION } },
+-    ])
+-    assert.equal(calls[0].init?.cache, 'no-store')
+-  })
+-
+-  it('opens a conversation in its app through the open-in-app route, naming each click by an id of its own, and resolves with what the CLI printed as it opened it', async () => {
+-    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+-    const printedText = `Opening session ${SESSION} in Claude Desktop`
+-    const answers = [json({ printedText }), json({ printedText: null })]
+-    const { local } = harness(async (url, init) => { calls.push({ url: String(url), init }); return answers.shift()! })
+-    assert.deepEqual(await local.openConversationInApp!('claude', SESSION), { printedText })
+-    assert.deepEqual(await local.openConversationInApp!('claude', SESSION), { printedText: null })
+-    const bodies = calls.map(({ init }) => JSON.parse(String(init?.body)) as { openInAppClickId: string })
+-    const clickIds = bodies.map((body) => body.openInAppClickId)
+-    for (const clickId of clickIds) assert.match(clickId, OPEN_IN_APP_CLICK_ID_PATTERN)
+-    assert.notEqual(clickIds[0], clickIds[1], 'each click has its own id')
+-    assert.deepEqual(calls.map(({ url, init }) => ({ url, method: init?.method, headers: init?.headers, body: JSON.parse(String(init?.body)) })), clickIds.map((openInAppClickId) => ({
+-      url: '/api/work-view/conversations/open-in-app', method: 'POST', headers: { 'Content-Type': 'application/json' },
+-      body: { platform: 'claude', conversationSessionId: SESSION, openInAppClickId },
+-    })))
+-  })
+-
+-  it('names in each stop it sends as the page goes away the click whose open is still running', async () => {
+-    const pageUnload = fakePageUnload()
+-    const openings = [deferred<Response>(), deferred<Response>()]
+-    const calls: Array<{ url: string; body: { conversationSessionId: string; openInAppClickId: string } }> = []
+-    const { local } = harness(async (url, init) => {
+-      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) })
+-      return String(url).endsWith('/open-in-app') ? openings[calls.filter((call) => call.url.endsWith('/open-in-app')).length - 1].promise : json({})
+-    }, 100, { pageUnload })
+-    // Two rows of the page, each opening its own conversation in its app.
+-    const firstOpen = local.openConversationInApp!('claude', SESSION)
+-    const secondOpen = local.openConversationInApp!('claude', OTHER_SESSION)
+-    pageUnload.hide()
+-    const opens = calls.filter((call) => call.url.endsWith('/open-in-app'))
+-    const stops = calls.filter((call) => call.url.endsWith('/open-in-app/stop'))
+-    assert.equal(stops.length, 2)
+-    assert.deepEqual(stops.map((stop) => stop.body), opens.map((open) => open.body))
+-    assert.notEqual(opens[0].body.openInAppClickId, opens[1].body.openInAppClickId)
+-    for (const opening of openings) opening.resolve(json({ printedText: null }))
+-    await Promise.all([firstOpen, secondOpen])
+-  })
+-
+-  it('asks the worker to stop the open when the page is unloaded while the open still runs, and not before or after', async () => {
+-    const pageUnload = fakePageUnload()
+-    const opening = deferred<Response>()
+-    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+-    const { local } = harness(async (url, init) => {
+-      calls.push({ url: String(url), init })
+-      return String(url).endsWith('/open-in-app') ? opening.promise : json({})
+-    }, 100, { pageUnload })
+-    pageUnload.hide()
+-    assert.equal(calls.length, 0, 'nothing to stop before an open')
+-
+-    const opened = local.openConversationInApp!('claude', SESSION)
+-    // A reload or a closed tab while the worker's command still runs: the worker cannot see this request go away.
+-    pageUnload.hide()
+-    // The stop names the same click as the open it stops.
+-    const body = { platform: 'claude', conversationSessionId: SESSION, openInAppClickId: (JSON.parse(String(calls[0].init?.body)) as { openInAppClickId: string }).openInAppClickId }
+-    assert.match(body.openInAppClickId, OPEN_IN_APP_CLICK_ID_PATTERN)
+-    assert.deepEqual(calls.map(({ url, init }) => ({ url, method: init?.method, keepalive: init?.keepalive, headers: init?.headers, body: JSON.parse(String(init?.body)) })), [
+-      { url: '/api/work-view/conversations/open-in-app', method: 'POST', keepalive: undefined, headers: { 'Content-Type': 'application/json' }, body },
+-      { url: '/api/work-view/conversations/open-in-app/stop', method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body },
+-    ])
+-    const stopped = 'Claude Code could not open this conversation in the Claude app: the page that asked went away, so it was stopped.'
+-    opening.resolve(json({ error: stopped }, 409))
+-    assert.equal(await rejectionMessage(opened), stopped)
+-    assert.equal(pageUnload.listenerCount(), 0)
+-    pageUnload.hide()
+-    assert.equal(calls.length, 2, 'nothing to stop once the open has ended')
+-  })
+-
+-  it('rejects an open that did not happen with the worker\'s sentence, whole, and an answer it cannot read with a plain one', async () => {
+-    const noDocumentedWay = 'Codex has no documented way to open a conversation in its app. Copy the resume command instead.'
+-    // What the worker answers when Claude Code did not open the app: a sentence, then everything the CLI printed.
+-    const didNotOpen = `Claude Code could not open this conversation in the Claude app. Claude Code exited with code 1.\n\n${'x'.repeat(200_000)}`
+-    const answers = [json({ error: noDocumentedWay }, 409), json({ error: didNotOpen }, 409), json([]), json({ error: 'Continuing a conversation is unavailable on this worker.' }, 503)]
+-    const { local } = harness(async () => answers.shift()!)
+-    assert.equal(await rejectionMessage(local.openConversationInApp!('codex', SESSION)), noDocumentedWay)
+-    const whole = await rejectionMessage(local.openConversationInApp!('claude', SESSION))
+-    assert.equal(whole.length, didNotOpen.length)
+-    assert.equal(whole, didNotOpen)
+-    assert.equal(await rejectionMessage(local.openConversationInApp!('claude', SESSION)), 'The worker answered 200, but this page cannot read its answer.')
+-    assert.equal(await rejectionMessage(local.openConversationInApp!('claude', SESSION)), 'Continuing a conversation is unavailable on this worker.')
+-  })
+-
+-  it('rejects an open with a plain sentence when the worker cannot be reached', async () => {
+-    const { local } = harness(async () => { throw new TypeError('fetch failed') })
+-    assert.equal(await rejectionMessage(local.openConversationInApp!('claude', SESSION)), 'Could not open this conversation in its app: the worker could not be reached (fetch failed).')
+-  })
+-
+-  it('rejects a refusal with the worker\'s own sentence', async () => {
+-    const stillRunning = 'This conversation is still answering your last message from here. Wait for its reply, or stop it, before you send another.'
+-    const nothingRunning = 'Nothing sent from here is running in this conversation.'
+-    const answers = [json({ error: stillRunning }, 409), json({ error: nothingRunning }, 409)]
+-    const { local } = harness(async () => answers.shift()!)
+-    assert.equal(await rejectionMessage(local.continueConversation!('claude', SESSION, 'And the word before that?')), stillRunning)
+-    assert.equal(await rejectionMessage(local.stopConversationContinuation!('claude', SESSION)), nothingRunning)
+-  })
+-
+-  it('turns an HTML error page, a failed request check, a lost worker and an unreadable answer into plain sentences', async () => {
+-    const answers: Array<() => Promise<Response>> = [
+-      // Express's own page for a body over the worker's 5 MB JSON limit.
+-      async () => new Response('<!DOCTYPE html><html><body><pre>PayloadTooLargeError: request entity too large</pre></body></html>', { status: 413, headers: { 'Content-Type': 'text/html' } }),
+-      async () => json({ error: 'ValidationError', issues: [{ path: ['ownerMessage'], message: 'Too small: expected string to have >=1 characters', code: 'too_small' }] }, 400),
+-      async () => { throw new TypeError('fetch failed') },
+-      async () => json({ accepted: true }, 202),
+-      async () => new Response('<html><body>Bad gateway</body></html>', { status: 502, headers: { 'Content-Type': 'text/html' } }),
+-    ]
+-    const { local } = harness(() => answers.shift()!())
+-    const sentences = [
+-      await rejectionMessage(local.continueConversation!('claude', SESSION, 'x'.repeat(6_000_000))),
+-      await rejectionMessage(local.continueConversation!('claude', SESSION, ' ')),
+-      await rejectionMessage(local.continueConversation!('claude', SESSION, 'Which word?')),
+-      await rejectionMessage(local.continueConversation!('claude', SESSION, 'Which word?')),
+-      await rejectionMessage(local.loadConversationContinuation!('claude', SESSION)),
+-    ]
+-    assert.deepEqual(sentences, [
+-      'Could not send your message: it is too large for the worker to take.',
+-      'Could not send your message: the worker could not read the request (ownerMessage: Too small: expected string to have >=1 characters).',
+-      'Could not send your message: the worker could not be reached (fetch failed).',
+-      'The worker answered 202, but this page cannot read its answer.',
+-      'Could not read this conversation: the worker answered 502.',
+-    ])
+-    for (const sentence of sentences) assert.doesNotMatch(sentence, /</, 'no HTML reaches the row')
+-  })
+-
+-  it('tells subscribers each notice with its four fields only, and skips a frame it cannot read', () => {
+-    let fetches = 0
+-    const { local, streams } = harness(async () => { fetches++; return json(overview()) })
+-    const heard: ConversationContinuationEvent[] = []
+-    const stopLive = local.subscribeToLiveUpdates(() => {}, () => {})
+-    const unsubscribe = local.subscribeToConversationContinuations!((event) => { heard.push(event) })
+-    const originalWarn = console.warn
+-    const warnings: string[] = []
+-    console.warn = (message: string) => { warnings.push(message) }
+-    try {
+-      streams[0].onopen?.()
+-      streams[0].emit('conversation-continuation', { ...notice, ownerMessage: 'never on the stream' })
+-      streams[0].emit('conversation-continuation', { ...notice, state: 'paused' })
+-      streams[0].handlers.get('conversation-continuation')?.({ data: '<html>secret prompt</html>' })
+-      assert.deepEqual(heard, [notice])
+-      assert.equal(warnings.length, 2, 'each skipped frame is reported')
+-      for (const warning of warnings) {
+-        assert.match(warning, /conversation-continuation/)
+-        assert.doesNotMatch(warning, /secret|paused/, 'a warning names the event type only')
+-      }
+-      unsubscribe()
+-      streams[0].emit('conversation-continuation', notice)
+-      assert.deepEqual(heard, [notice])
+-      assert.equal(fetches, 0, 'a notice asks nothing of the worker: the row it concerns reads')
+-    } finally { console.warn = originalWarn; stopLive() }
+-  })
+-
+-  it('tells subscribers each time the live stream opens again, and sends or reads nothing itself', () => {
+-    let fetches = 0
+-    const { local, streams } = harness(async () => { fetches++; return json(overview()) })
+-    const heard: ConversationContinuationEvent[] = []
+-    const unsubscribe = local.subscribeToConversationContinuations!((event) => { heard.push(event) })
+-    let stopLive = local.subscribeToLiveUpdates(() => {}, () => {})
+-    try {
+-      streams[0].onopen?.()
+-      assert.deepEqual(heard, [], 'the first open has missed nothing: a row reads its conversation when it opens')
+-      // The worker restarted: the browser reconnects the same stream by itself.
+-      streams[0].onerror?.()
+-      streams[0].onopen?.()
+-      assert.deepEqual(heard, ['live-updates-reconnected'])
+-      // The page stopped and started its live updates: a new stream, and notices sent in between are lost.
+-      stopLive()
+-      streams[0].onopen?.()
+-      stopLive = local.subscribeToLiveUpdates(() => {}, () => {})
+-      streams[1].onopen?.()
+-      assert.deepEqual(heard, ['live-updates-reconnected', 'live-updates-reconnected'], 'a stopped stream tells nothing')
+-      // An outage cannot send a message again or start a turn: the source made no request of its own.
+-      assert.equal(fetches, 0)
+-    } finally { unsubscribe(); stopLive() }
+-  })
+-
+-  it('tells every subscriber a notice when one before it throws, and reports the throw as that listener\'s own error', () => {
+-    const { local, streams } = harness(async () => json(overview()))
+-    const consoleOutput = recordingConsole()
+-    const listenerError = new Error('the first row could not draw its reply')
+-    const heardBySecondRow: ConversationContinuationEvent[] = []
+-    const stopLive = local.subscribeToLiveUpdates(() => {}, () => {})
+-    const unsubscribeFirstRow = local.subscribeToConversationContinuations!(() => { throw listenerError })
+-    const unsubscribeSecondRow = local.subscribeToConversationContinuations!((event) => { heardBySecondRow.push(event) })
+-    try {
+-      streams[0].emit('conversation-continuation', notice)
+-      // Missing this 'replied' notice would leave the second row on 'Working…' until the stream reopens.
+-      assert.deepEqual(heardBySecondRow, [notice], 'the row after a throwing one still hears the notice')
+-      assert.deepEqual(consoleOutput.warnings, [], 'a readable frame is never reported as unreadable')
+-      assert.equal(consoleOutput.errors.length, 1)
+-      const [message, reported] = consoleOutput.errors[0]
+-      assert.match(String(message), /conversation-continuation listener threw/)
+-      assert.equal(reported, listenerError, 'the listener\'s own error is reported, with its stack')
+-      // A frame that really is unreadable is still skipped with its warning, and reaches no listener.
+-      streams[0].handlers.get('conversation-continuation')?.({ data: '<html>secret prompt</html>' })
+-      assert.deepEqual(consoleOutput.warnings, [['[work-view] Ignoring a conversation-continuation frame that is not JSON']])
+-      assert.deepEqual(heardBySecondRow, [notice])
+-      assert.equal(consoleOutput.errors.length, 1)
+-    } finally { consoleOutput.restore(); unsubscribeFirstRow(); unsubscribeSecondRow(); stopLive() }
+-  })
+-
+-  it('tells every subscriber the stream reopened when one before it throws, and reports the throw as that listener\'s own error', () => {
+-    const { local, streams } = harness(async () => json(overview()))
+-    const consoleOutput = recordingConsole()
+-    const listenerError = new Error('the first row could not read its conversation again')
+-    const heardBySecondRow: ConversationContinuationEvent[] = []
+-    const stopLive = local.subscribeToLiveUpdates(() => {}, () => {})
+-    const unsubscribeFirstRow = local.subscribeToConversationContinuations!(() => { throw listenerError })
+-    const unsubscribeSecondRow = local.subscribeToConversationContinuations!((event) => { heardBySecondRow.push(event) })
+-    try {
+-      streams[0].onopen?.()
+-      streams[0].onerror?.()
+-      assert.doesNotThrow(() => streams[0].onopen?.(), 'a listener\'s throw does not escape the stream\'s open handler')
+-      // A row that misses this, while it shows 'Working…', would stay that way until the stream reopens again.
+-      assert.deepEqual(heardBySecondRow, ['live-updates-reconnected'], 'the row after a throwing one still hears the stream reopened')
+-      assert.deepEqual(consoleOutput.warnings, [], 'nothing is reported as an unreadable frame')
+-      assert.equal(consoleOutput.errors.length, 1)
+-      const [message, reported] = consoleOutput.errors[0]
+-      assert.match(String(message), /conversation-continuation listener threw/)
+-      assert.equal(reported, listenerError, 'the listener\'s own error is reported, with its stack')
+-    } finally { consoleOutput.restore(); unsubscribeFirstRow(); unsubscribeSecondRow(); stopLive() }
+-  })
+-
+-  it('exists only on the page this computer\'s worker serves', () => {
++  it('exists on no page oboete serves', () => {
+     const fetcher = async () => json(overview())
+     const onThisComputer = harness(fetcher).local
+-    const cloudServed = harness(fetcher, 100, { hostname: 'work.cmem.ai' }).local
+-    for (const member of CONTINUATION_MEMBERS) {
+-      assert.equal(typeof onThisComputer[member], 'function', member)
+-      assert.equal(member in cloudServed, false, `a cloud-served page has ${member}`)
+-      assert.equal(member in sampleSource, false, `the sample source has ${member}`)
+-    }
++    for (const member of CONTINUATION_MEMBERS) assert.equal(member in onThisComputer, false, member)
+   })
+ })
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
 index 1314782bfc7cef513a61275f8495c8164169560b..b87ccb2997402ca2c502cd53d1002b05ee041852 100644
 --- a/src/ui/my-work/src/live/local-source.ts
@@ -41,6 +460,108 @@ index 1314782bfc7cef513a61275f8495c8164169560b..b87ccb2997402ca2c502cd53d1002b05
      loadConversationContinuation: (platform, conversationSessionId) => callConversationRoute(
        `${WORK_VIEW_CONVERSATION_CONTINUATION_URL}?${new URLSearchParams({ platform, conversationSessionId })}`,
        { cache: 'no-store' }, 'read this conversation', readConversationContinuationAnswer),
+diff --git a/src/ui/my-work/src/live/to-shared-focus.test.ts b/src/ui/my-work/src/live/to-shared-focus.test.ts
+index 52520f14401b142b2f5f971fdb7a932b53b2b2ad..c1286622fcc6398469368c65809e0f0a684610ae 100644
+--- a/src/ui/my-work/src/live/to-shared-focus.test.ts
++++ b/src/ui/my-work/src/live/to-shared-focus.test.ts
+@@ -1,88 +1,19 @@
+ // The shared page keeps to its area (R17.3) and carries display text only.
++// Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete shares no area, so no area can be
++// shared and no shared page is made. The tests of the page's contents are replaced by this one, as each of them
++// failed on the page it could not make (#1085).
+ import assert from 'node:assert/strict'
+ import { test } from 'node:test'
+ import { sampleSource } from './sample-source.ts'
+-import { canShareArea, titleQuotesPrompt, toSharedFocusPage } from './to-shared-focus.ts'
++import { canShareArea, toSharedFocusPage } from './to-shared-focus.ts'
+ 
+ const NOW = Date.parse('2026-10-29T20:00:00Z')
+ 
+-test('only requests placed in the area: none from other areas, Other or Sorting…', async () => {
++test('no area can be shared, and no shared page is made', async () => {
+   const model = await sampleSource.loadWorkModel()
+-  const page = toSharedFocusPage(model, 'fa-viewer', NOW)!
+-  assert.deepEqual(page.requests.map((request) => request.id).sort(), ['r1', 'r4'])
+-  assert.equal(page.area.name, model.focusAreas.find((area) => area.id === 'fa-viewer')!.name)
+-  assert.equal(page.area.shipped, 1)
+-  assert.equal(page.generatedAt, '2026-10-29T20:00:00.000Z')
+-})
+-
+-test('a request that lands in the area later shows up, and one moved out leaves', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const landed = { ...model, requests: model.requests.map((request) => request.id === 'r5' ? { ...request, focusAreaId: 'fa-viewer' } : request) }
+-  assert.ok(toSharedFocusPage(landed, 'fa-viewer', NOW)!.requests.some((request) => request.id === 'r5'))
+-  const movedOut = { ...model, requests: model.requests.map((request) => request.id === 'r1' ? { ...request, focusAreaId: 'fa-sync' } : request) }
+-  assert.ok(!toSharedFocusPage(movedOut, 'fa-viewer', NOW)!.requests.some((request) => request.id === 'r1'))
+-})
+-
+-test('requests in an area merged into this one count as its own, as My Work shows them', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const merged = { ...model, focusAreas: model.focusAreas.map((area) => area.id === 'fa-sync' ? { ...area, mergedInto: 'fa-viewer' } : area) }
+-  assert.deepEqual(toSharedFocusPage(merged, 'fa-viewer', NOW)!.requests.map((request) => request.id).sort(), ['r1', 'r3', 'r4'])
+-  assert.equal(toSharedFocusPage(merged, 'fa-sync', NOW), null, 'a merged-away area is not shared')
+-})
+-
+-test('closed requests stay off the page but still count in the rollup, like the area header', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const closed = { ...model, requests: model.requests.map((request) => request.id === 'r4' ? { ...request, closed: true } : request) }
+-  const page = toSharedFocusPage(closed, 'fa-viewer', NOW)!
+-  assert.deepEqual(page.requests.map((request) => request.id), ['r1'])
+-  assert.equal(page.area.progress.total, 2)
+-})
+-
+-test("the owner's own words and private detail never leave", async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const page = toSharedFocusPage(model, 'fa-viewer', NOW)!
+-  const text = JSON.stringify(page)
+-  const area = model.focusAreas.find((entry) => entry.id === 'fa-viewer')!
+-  for (const quote of [...area.quotes, ...area.asks.flatMap((ask) => ask.quotes)]) assert.ok(!text.includes(quote.quote), `quote left: ${quote.quote}`)
+-  for (const request of model.requests) {
+-    for (const prompt of request.prompts) assert.ok(!text.includes(prompt.quote), `prompt left: ${prompt.quote}`)
+-    for (const line of request.terminal) assert.ok(!text.includes(line), `terminal line left: ${line}`)
++  assert.ok(model.focusAreas.length > 0)
++  for (const area of model.focusAreas) {
++    assert.equal(canShareArea(area), false, area.id)
++    assert.equal(toSharedFocusPage(model, area.id, NOW), null, area.id)
+   }
+-  for (const device of model.devices) assert.ok(!text.includes(device.name), `machine name left: ${device.name}`)
+-  assert.deepEqual(Object.keys(page.requests[0]).sort(), ['agent', 'completedAt', 'id', 'next', 'percent', 'runningFor', 'stage', 'startedAt', 'state', 'summary', 'title'])
+-  assert.deepEqual(Object.keys(page.notStarted[0]).sort(), ['id', 'latestAt', 'timesAsked', 'title'])
+-})
+-
+-test('Other, suggestions and unknown areas cannot be shared', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  assert.equal(toSharedFocusPage(model, 'other', NOW), null)
+-  assert.equal(toSharedFocusPage(model, 'fa-team', NOW), null)
+-  assert.equal(toSharedFocusPage(model, 'nope', NOW), null)
+-  assert.ok(canShareArea(model.focusAreas.find((area) => area.id === 'fa-fixes')), 'a done area can still be shared')
+-})
+-
+-test('a title that repeats the owner\'s prompt stays home; a written title goes out', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const prompt = 'Fix the **login** redirect loop. It breaks on Safari for everyone at work.'
+-  const copied = { ...model, requests: model.requests.map((request) => request.id === 'r1' ? { ...request, title: 'Fix the login redirect loop.', prompts: [{ at: 'now', quote: prompt }] } : request) }
+-  const page = toSharedFocusPage(copied, 'fa-viewer', NOW)!
+-  assert.equal(page.requests.find((request) => request.id === 'r1')!.title, 'Untitled request')
+-  assert.ok(!JSON.stringify(page).includes('redirect loop'))
+-  assert.ok(titleQuotesPrompt('Fix the login redirect…', [{ quote: prompt }]), 'a cut title still counts as the prompt')
+-  const written = { ...model, requests: model.requests.map((request) => request.id === 'r1' ? { ...request, title: 'Safari sign-in fixed', prompts: [{ at: 'now', quote: prompt }] } : request) }
+-  assert.equal(toSharedFocusPage(written, 'fa-viewer', NOW)!.requests.find((request) => request.id === 'r1')!.title, 'Safari sign-in fixed')
+-})
+-
+-test('a title that repeats a prompt past the quoted part, an echoing ask or an echoing goal stays home', async () => {
+-  const model = await sampleSource.loadWorkModel()
+-  const flagged = { ...model, requests: model.requests.map((request) => request.id === 'r1' ? { ...request, title: 'Ship the private beta to Acme', titleRepeatsPrompt: true } : request) }
+-  assert.equal(toSharedFocusPage(flagged, 'fa-viewer', NOW)!.requests.find((request) => request.id === 'r1')!.title, 'Untitled request')
+-  const quote = { at: 'now', quote: 'Get the board deck to Acme by Friday, please.' }
+-  const echoing = { ...model, focusAreas: model.focusAreas.map((area) => area.id === 'fa-viewer'
+-    ? { ...area, goal: 'Get the board deck to Acme by Friday', quotes: [quote], asks: [{ id: 'ask-x', title: 'board deck to Acme', timesAsked: 2, latestAt: '', quotes: [quote] }] }
+-    : area) }
+-  const page = toSharedFocusPage(echoing, 'fa-viewer', NOW)!
+-  assert.equal(page.area.goal, null)
+-  assert.deepEqual(page.notStarted.map((ask) => ask.title), ['Untitled ask'])
+-  assert.ok(!JSON.stringify(page).includes('Acme'))
+ })
 diff --git a/src/ui/my-work/src/live/to-shared-focus.ts b/src/ui/my-work/src/live/to-shared-focus.ts
 index e6e1b818520cedbc0a6c60fe76303cdac4aeeff7..428f554f7ccda120d96b663b5de492e7cd607cfe 100644
 --- a/src/ui/my-work/src/live/to-shared-focus.ts
@@ -54,6 +575,80 @@ index e6e1b818520cedbc0a6c60fe76303cdac4aeeff7..428f554f7ccda120d96b663b5de492e7
    return !!area && area.id !== OTHER_FOCUS_AREA_ID && !area.mergedInto && (area.status === 'kept' || area.status === 'done')
  }
  
+diff --git a/src/ui/my-work/src/pages/my-rules.tsx b/src/ui/my-work/src/pages/my-rules.tsx
+index d21f2bf02a9201e572c7e8d6007d8db664dbe6dd..e9991f7da9b4c12eb109354d1ab516dc076f700f 100644
+--- a/src/ui/my-work/src/pages/my-rules.tsx
++++ b/src/ui/my-work/src/pages/my-rules.tsx
+@@ -706,7 +706,8 @@ export function NoRulesYet({ onAdd, readError, refresh }: { onAdd: () => void; r
+           <EmptyDescription>{readError ?? description}</EmptyDescription>
+           {!readError && waiting && <RefreshStatus refresh={refresh} run={null} ids={['R14.13']} />}
+         </EmptyHeader>
+-        {!readError && (
++        {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no rule yet (#1083, #1085). */}
++        {false && !readError && (
+           <EmptyContent className="flex-row justify-center gap-2">
+             <Button size="sm" className="h-11 md:h-8" onClick={onAdd}><PlusIcon />{t("Add rule")}</Button>
+           </EmptyContent>
+@@ -826,7 +827,8 @@ export function MyRules() {
+             </div>
+           </Req>
+           <div className="flex flex-wrap items-center gap-2">
+-            <Req ids={['R14.9']}><Button className="h-11 sm:h-8" size="sm" onClick={startAdding}><PlusIcon />{t("Add rule")}</Button></Req>
++            {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no rule yet (#1083, #1085). */}
++            {false && <Req ids={['R14.9']}><Button className="h-11 sm:h-8" size="sm" onClick={startAdding}><PlusIcon />{t("Add rule")}</Button></Req>}
+             {sample ? <RefreshButton run={SAMPLE_RUNS.rules} ids={['R14.13', 'R11.1']} /> : <RefreshStatus refresh={refresh} run={lastRuns.progress} ids={['R14.13']} />}
+           </div>
+         </div>
+diff --git a/src/ui/my-work/src/pages/my-work.tsx b/src/ui/my-work/src/pages/my-work.tsx
+index c667adb32d6e437a2e033aa4499fb9f0257454b9..0867647193cd9ee0818264f6c8553964ed2677e3 100644
+--- a/src/ui/my-work/src/pages/my-work.tsx
++++ b/src/ui/my-work/src/pages/my-work.tsx
+@@ -547,7 +547,8 @@ export function MyWork({ focusAreaId, onOpen, onOpenFocus, onOpenRules }: { focu
+           <div className="order-last w-full md:ml-auto md:w-auto">
+             <div className="flex items-center justify-end gap-3">
+               <RefreshStatus refresh={refresh} run={lastRuns.progress} label="Last reviewed" ids={['R14.12']} />
+-              <ManualRefreshButton ids={['R14.12']} running={refresh?.state === 'running'} />
++              {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete starts no refresh from these pages yet (#1085). */}
++              {false && <ManualRefreshButton ids={['R14.12']} running={refresh?.state === 'running'} />}
+             </div>
+           </div>
+         ) : (refresh || lastRuns.progress) && (
+diff --git a/src/ui/my-work/src/pages/past-focus.tsx b/src/ui/my-work/src/pages/past-focus.tsx
+index 811017b6246fe8cc4898781adb271f9c01a419a1..70995c7e9d089e816b4129df0c914df5a6198702 100644
+--- a/src/ui/my-work/src/pages/past-focus.tsx
++++ b/src/ui/my-work/src/pages/past-focus.tsx
+@@ -129,7 +129,7 @@ export function PastFocus({ onOpenFocus }: { onOpenFocus: (focusAreaId: string)
+             <h2 className="text-lg font-semibold tracking-tight">{t("Past focus")}</h2>
+             <p className="text-sm text-muted-foreground">{t("Areas you finished, and what you asked for in earlier months.")}</p>
+           </div>
+-          {sourceKind === 'sample' ? <RefreshButton run={SAMPLE_RUNS.goals} ids={['R14.10']} /> : sourceKind === 'local' ? <div className="flex items-center justify-end gap-3"><RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} /><ManualRefreshButton ids={['R14.10']} running={refresh?.state === 'running'} /></div> : <RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />}
++          {sourceKind === 'sample' ? <RefreshButton run={SAMPLE_RUNS.goals} ids={['R14.10']} /> : sourceKind === 'local' ? <div className="flex items-center justify-end gap-3"><RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />{/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete starts no refresh from these pages yet (#1085). */}{false && <ManualRefreshButton ids={['R14.10']} running={refresh?.state === 'running'} />}</div> : <RefreshStatus refresh={refresh} run={lastRuns.goals} ids={['R14.10']} />}
+         </div>
+         <DoneAreas onOpenFocus={onOpenFocus} />
+         {currentPeriod ? <MonthByMonth onOpenFocus={onOpenFocus} /> : !hasDone && (
+diff --git a/src/ui/my-work/src/pages/suggested-areas.tsx b/src/ui/my-work/src/pages/suggested-areas.tsx
+index 12a1d2959c4dce016e34903facdcf7a021665073..688d7b6aa7df38624f3a8ed818c46fc8ce9dfc46 100644
+--- a/src/ui/my-work/src/pages/suggested-areas.tsx
++++ b/src/ui/my-work/src/pages/suggested-areas.tsx
+@@ -48,7 +48,8 @@ function SuggestionCard({ area, requests, decision, saving, onKeep, onDismiss, o
+           <p className="text-xs text-muted-foreground">{requests.length ? interpolate(t('{count} placed in it'), { count: requests.length }) : t("No requests placed in it yet")}{area.asks.length ? interpolate(t(' · {count} not started'), { count: area.asks.length }) : ''}</p>
+         </div>
+ 
+-        <ConfirmationRequest>
++        {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no change to an area yet (#1085). */}
++        {false && <ConfirmationRequest>
+           <Req ids={['R11.1']}>
+             <ConfirmationActions className="grid w-full grid-cols-2 gap-2 self-stretch sm:flex sm:w-auto sm:self-start">
+               <ConfirmationAction className="h-11 sm:h-9" disabled={saving} onClick={onKeep}><CheckIcon />{t("Keep")}</ConfirmationAction>
+@@ -57,7 +58,7 @@ function SuggestionCard({ area, requests, decision, saving, onKeep, onDismiss, o
+               <ConfirmationAction variant="ghost" className="h-11 sm:h-9" disabled={saving} onClick={onDismiss}><XIcon />{t("Dismiss")}</ConfirmationAction>
+             </ConfirmationActions>
+           </Req>
+-        </ConfirmationRequest>
++        </ConfirmationRequest>}
+         <ConfirmationAccepted>
+           <div className="relative flex flex-wrap items-center justify-between gap-x-3">
+             {/* Keeping an area is a choice of focus, so it gets the launch screen's sparkles; a merge or dismissal doesn't. */}
 diff --git a/src/ui/my-work/src/store/index.ts b/src/ui/my-work/src/store/index.ts
 index 5e9f77b0ee91e0ed3afd2e59244e92fcf8ad5f95..d23b5ecc0b415f4db5cf770928f2b01b7402f62b 100644
 --- a/src/ui/my-work/src/store/index.ts
@@ -68,3 +663,36 @@ index 5e9f77b0ee91e0ed3afd2e59244e92fcf8ad5f95..d23b5ecc0b415f4db5cf770928f2b01b
    sendUsage: isServedFromCloud(window.location.hostname) ? sendHostedUsage : sendUsageReport,
    scrollToTop: () => window.scrollTo(0, 0),
  })
+diff --git a/src/ui/my-work/src/store/oboete-setup.test.ts b/src/ui/my-work/src/store/oboete-setup.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3c0009d96cce5ae6796195633ae8744712a31e0
+--- /dev/null
++++ b/src/ui/my-work/src/store/oboete-setup.test.ts
+@@ -0,0 +1,13 @@
++// Added by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete has no installer, so no
++// address opens one (issue #1085). claude-mem's `npm test` runs this file with its own.
++import assert from 'node:assert/strict'
++import { describe, it } from 'node:test'
++import { readRoute } from './slices/view-slice.ts'
++
++describe('oboete has no installer', () => {
++  it('opens My Work at an address that asks for setup, and keeps the rest of the address', () => {
++    assert.equal(readRoute(new URL('http://work-view.localhost:17373/work-view/?setup=1')).page, 'app')
++    const route = readRoute(new URL('http://work-view.localhost:17373/work-view/?setup=1&view=rules&request=r1'))
++    assert.deepEqual([route.page, route.section, route.requestId], ['app', 'rules', 'r1'])
++  })
++})
+diff --git a/src/ui/my-work/src/store/slices/view-slice.ts b/src/ui/my-work/src/store/slices/view-slice.ts
+index 78cc587ffd11a89520cb1d72ac4e9d40a7838f31..a0563d504e84ebe0fc6303c98a1034a4761e8d09 100644
+--- a/src/ui/my-work/src/store/slices/view-slice.ts
++++ b/src/ui/my-work/src/store/slices/view-slice.ts
+@@ -15,7 +15,8 @@ export function readRoute(url: URL): Route {
+   const view = url.searchParams.get('view') as Section | null
+   const section = view && SECTIONS.includes(view) ? view : 'work'
+   return {
+-    page: url.searchParams.get('setup') === '1' ? 'setup' : 'app',
++    // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete has no installer, so `?setup=1` opens My Work.
++    page: 'app',
+     section,
+     focusChoice: section === 'work' ? url.searchParams.get('focus') || null : null,
+     requestId: url.searchParams.get('request') || null,
