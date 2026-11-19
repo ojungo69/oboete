@@ -14,7 +14,7 @@ Decision 114 (2026-11-17) serves claude-mem's work-view on oboete's engine: My W
 - `build.sh` builds the bundle into `assets/work-view/`:
   - it applies the patches to a copy;
   - it installs the packages with `npm ci --ignore-scripts`;
-  - it runs claude-mem's own tests on the patched tree, oboete's beside them, each test held to a minute (`package.json`'s test command; the build stops when that command changes, or when a folder it names has no test left);
+  - it runs claude-mem's own tests on the patched tree, oboete's beside them, each test held to a minute (`package.json`'s test command; the build stops when that command changes, or when a folder it names has no test left), with neither the caller's `NODE_OPTIONS` nor a Node test's `NODE_TEST_CONTEXT`, which could make the runner skip them and pass;
   - it type-checks and builds;
   - it writes `THIRD-PARTY-NOTICES.md` with `notices.mjs`, which lists every package and font the bundle holds with its licence. `licences/` holds the texts of the packages that ship none, and the build stops at a package with no text, and at a font inlined as a `data:` URL, which has no file to check: fonts go as files.
 

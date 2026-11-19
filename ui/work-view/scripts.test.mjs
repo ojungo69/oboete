@@ -260,12 +260,28 @@ test('a failing test stops the build before it type-checks, and passing ones let
   })
 })
 
-test('a build run from a Node test still runs its tests, which a failing one stops before the type check', () => {
-  // A Node test's children inherit its NODE_TEST_CONTEXT, with which a node --test inside skips
-  // every file and passes.
-  checkout(app(TESTS, ['live', 'setup', 'store'], 'store'), ({ root, view }) => {
-    const { status, stderr } = run(view, 'build.sh', [], npmPasses(root), { NODE_TEST_CONTEXT: 'child-v8' })
-    assert.notEqual(status, 0, stderr)
-    assert.doesNotMatch(stderr, /node_modules\/\.bin\/tsc/)
-  })
+test('a build run from a Node test, or with the runner\'s options in NODE_OPTIONS, still runs every test', () => {
+  // A Node test's children inherit its NODE_TEST_CONTEXT, and NODE_OPTIONS may hold the runner's
+  // own options: with either, a node --test inside can skip every file, or every test, and pass.
+  const callers = [
+    { NODE_TEST_CONTEXT: 'child-v8' },
+    { NODE_OPTIONS: '--test-shard=4/4' },
+    { NODE_OPTIONS: '--test-skip-pattern=.' },
+    { NODE_OPTIONS: '--test-name-pattern=zzz' },
+    { NODE_OPTIONS: '--test-only' },
+  ]
+  for (const caller of callers) {
+    const named = JSON.stringify(caller)
+    checkout(app(TESTS, ['live', 'setup', 'store'], 'store'), ({ root, view }) => {
+      const { status, stderr } = run(view, 'build.sh', [], npmPasses(root), caller)
+      assert.notEqual(status, 0, `${named}: ${stderr}`)
+      assert.doesNotMatch(stderr, /node_modules\/\.bin\/tsc/, named)
+    })
+    // Its tests passing, the build goes on to the type check: the caller is not refused outright.
+    checkout(app(TESTS, ['live', 'setup', 'store']), ({ root, view }) => {
+      const { status, stderr } = run(view, 'build.sh', [], npmPasses(root), caller)
+      assert.notEqual(status, 0, stderr)
+      assert.match(stderr, /node_modules\/\.bin\/tsc/, named)
+    })
+  }
 })
