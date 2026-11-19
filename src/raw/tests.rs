@@ -3734,25 +3734,31 @@ fn a_store_whose_write_lock_is_held_opens_at_once() {
 
 /// J4 (W3b-1): an owner's answer is appended only on the stores it was checked on: this device's
 /// newest op of a kind the answer reads and the forget fence; else nothing is written. Curation's
-/// ops in between leave it be. W3b-2: and the raw.db file it was checked in.
+/// ops in between leave it be. W3b-2: and the raw.db file it was checked in. W3b-2b: and no call of
+/// oboete's `work_state_write` recorded since, nor a row retention expired.
 #[test]
 fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
     let home = tempfile::tempdir().unwrap();
     let mut raw = open(home.path()).unwrap();
     let answer = || [(OpKind::MyWork, serde_json::json!({"text": "an answer"}))];
     let curated = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
-    let checked = |raw: &Raw| (raw.answer_top().unwrap(), raw.fence_count().unwrap());
     let file = raw.file_identity().map(str::to_owned);
-    let file = file.as_deref();
     assert!(file.is_some(), "a raw.db opened as one file");
+    let checked = |raw: &Raw| AnswerFence {
+        top: raw.answer_top().unwrap(),
+        forget: raw.fence_count().unwrap(),
+        file: file.clone(),
+        records: raw.record_top().unwrap(),
+        expired: raw.expired_rows().unwrap(),
+    };
     let written = |raw: &Raw| raw.max_op_seq_of(raw.device()).unwrap();
     raw.append_ops(&answer()).unwrap();
     raw.append_ops(&curated()).unwrap();
-    let (top, fence) = checked(&raw);
-    assert_eq!(top, 1, "the newest op it reads, not curation's");
+    let fence = checked(&raw);
+    assert_eq!(fence.top, 1, "the newest op it reads, not curation's");
     // Curation since the check: appended.
     raw.append_ops(&curated()).unwrap();
-    let seqs = raw.append_ops_at(&answer(), (top, fence, file)).unwrap();
+    let seqs = raw.append_ops_at(&answer(), &fence).unwrap();
     assert_eq!(seqs, vec![4]);
     // An op it reads since the check: a regroup, an exclusion.
     let moves: [fn(&mut Raw); 2] = [
@@ -3766,17 +3772,15 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
         },
     ];
     for moved in moves {
-        let (top, fence) = checked(&raw);
+        let fence = checked(&raw);
         moved(&mut raw);
         let before = written(&raw);
-        let refused = raw
-            .append_ops_at(&answer(), (top, fence, file))
-            .unwrap_err();
+        let refused = raw.append_ops_at(&answer(), &fence).unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
     }
     // A forget's denial since the check, with no op.
-    let (top, fence) = checked(&raw);
+    let fence = checked(&raw);
     let device = raw.device().to_owned();
     raw.conn
         .execute(
@@ -3786,19 +3790,131 @@ fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
         )
         .unwrap();
     let before = written(&raw);
-    let refused = raw
-        .append_ops_at(&answer(), (top, fence, file))
-        .unwrap_err();
+    let refused = raw.append_ops_at(&answer(), &fence).unwrap_err();
     assert!(refused.is::<OpsMoved>(), "{refused:#}");
     assert_eq!(written(&raw), before, "nothing written");
     // W3b-2: checked in another raw.db file, or in none known.
-    let (top, fence) = checked(&raw);
-    for other in [Some("0:0"), None] {
-        let refused = raw
-            .append_ops_at(&answer(), (top, fence, other))
-            .unwrap_err();
+    let fence = checked(&raw);
+    for other in [Some("0:0".to_owned()), None] {
+        let moved = AnswerFence {
+            file: other,
+            ..fence.clone()
+        };
+        let refused = raw.append_ops_at(&answer(), &moved).unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
     }
-    raw.append_ops_at(&answer(), (top, fence, file)).unwrap();
+    raw.append_ops_at(&answer(), &fence).unwrap();
+}
+
+/// A live tool record of `tool`, as the hook records an agent's call.
+fn called(raw: &mut Raw, tool: &str) -> i64 {
+    let body = serde_json::json!({"tool": tool, "input": "{\"list\": \"notes\", \"fields\": {}}",
+        "output": "Saved.", "failed": false});
+    let e = Event {
+        kind: "tool".into(),
+        ..test_event(&body.to_string())
+    };
+    raw.append(&e).unwrap()
+}
+
+/// W3b-2b (#1114): a call of oboete's `work_state_write` recorded after the answer's check, which
+/// can attribute a work state write that moves the pick, refuses the answer; another tool's call,
+/// a prompt, oboete's other tools or an imported transcript's call do not; more tool records than
+/// the append decodes refuse it undecoded.
+#[test]
+fn an_answer_is_refused_after_a_work_state_call_is_recorded() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let answer = || [(OpKind::MyWork, serde_json::json!({"text": "an answer"}))];
+    let checked = |raw: &Raw| AnswerFence {
+        top: raw.answer_top().unwrap(),
+        forget: raw.fence_count().unwrap(),
+        file: raw.file_identity().map(str::to_owned),
+        records: raw.record_top().unwrap(),
+        expired: raw.expired_rows().unwrap(),
+    };
+    let written = |raw: &Raw| raw.max_op_seq_of(raw.device()).unwrap();
+    // Recorded before the check: what the check read.
+    called(&mut raw, "mcp__oboete__work_state_write");
+    let fence = checked(&raw);
+    called(&mut raw, "Bash");
+    called(&mut raw, "mcp__oboete__search");
+    raw.append(&test_event("{\"prompt\": \"and the commas\"}"))
+        .unwrap();
+    // An imported transcript's call, which attributes no write (`my_work::call` reads live ones).
+    let body = serde_json::json!({"tool": "mcp__oboete__work_state_write", "input": "{}",
+        "output": "Saved.", "failed": false});
+    let imported = Event {
+        kind: "tool".into(),
+        source: "transcript".into(),
+        ..test_event(&body.to_string())
+    };
+    raw.append(&imported).unwrap();
+    raw.append_ops_at(&answer(), &fence).unwrap();
+    for tool in [
+        "mcp__oboete__work_state_write",
+        "mcp__plugin_oboete_oboete__work_state_write",
+    ] {
+        let fence = checked(&raw);
+        called(&mut raw, tool);
+        let before = written(&raw);
+        let refused = raw.append_ops_at(&answer(), &fence).unwrap_err();
+        assert!(refused.is::<OpsMoved>(), "{tool}: {refused:#}");
+        assert_eq!(written(&raw), before, "{tool}: nothing written");
+    }
+    // More tool records than it reads, none of them a work state write's.
+    let fence = checked(&raw);
+    for _ in 0..=CALLS_READ {
+        called(&mut raw, "Bash");
+    }
+    let before = written(&raw);
+    let refused = raw.append_ops_at(&answer(), &fence).unwrap_err();
+    assert!(refused.is::<OpsMoved>(), "{refused:#}");
+    assert_eq!(written(&raw), before, "nothing written");
+    let fence = checked(&raw);
+    raw.append_ops_at(&answer(), &fence).unwrap();
+}
+
+/// W3b-2b (#1114, R4): rows retention expires after the answer's check refuse it, the count moved
+/// in the expiry's own transaction by the rows it expired; a store that never expired one counts 0.
+#[test]
+fn an_answer_is_refused_after_retention_expires_a_row() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let answer = || [(OpKind::MyWork, serde_json::json!({"text": "an answer"}))];
+    assert_eq!(raw.expired_rows().unwrap(), 0, "none counted before");
+    let e = |ts| Event {
+        ts,
+        ..test_event("{\"prompt\": \"an old prompt\"}")
+    };
+    let (a, b) = (
+        raw.append(&e(1_000)).unwrap(),
+        raw.append(&e(2_000)).unwrap(),
+    );
+    let fence = AnswerFence {
+        top: raw.answer_top().unwrap(),
+        forget: raw.fence_count().unwrap(),
+        file: raw.file_identity().map(str::to_owned),
+        records: raw.record_top().unwrap(),
+        expired: raw.expired_rows().unwrap(),
+    };
+    let session = (Some("claude".to_owned()), Some("s".to_owned()), b);
+    assert!(
+        raw.begin_expiry(&[(a, 1_000), (b, 2_000)], &[session])
+            .unwrap()
+    );
+    assert_eq!(raw.expire_owed(3_000).unwrap(), 2);
+    assert_eq!(raw.expired_rows().unwrap(), 2, "moved by the rows expired");
+    let before = raw.max_op_seq_of(raw.device()).unwrap();
+    let refused = raw.append_ops_at(&answer(), &fence).unwrap_err();
+    assert!(refused.is::<OpsMoved>(), "{refused:#}");
+    assert_eq!(
+        raw.max_op_seq_of(raw.device()).unwrap(),
+        before,
+        "nothing written"
+    );
+    // The same batch again expires nothing more, and moves nothing.
+    assert_eq!(raw.expire_owed(4_000).unwrap(), 0);
+    assert_eq!(raw.expired_rows().unwrap(), 2);
 }

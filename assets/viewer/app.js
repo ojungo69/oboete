@@ -9476,6 +9476,13 @@ async function myWorkAnswer(row, action) {
       applied = false;
       if (res.ok) message = t('my_work_saved_unread');
     }
+    // A newer read took the page, maybe held behind "Show updates": where a Join put the
+    // conversation is not in the rows drawn, so it is said as saved and names no request
+    // (CodeRabbit on #1115).
+    if (read === 'taken' && applied && action === 'join') {
+      applied = false;
+      message = t('my_work_saved_unread');
+    }
     if (!res.ok && ['suggestion_not_found', 'suggestion_target_gone', 'suggestion_changed'].includes(answer.code)) {
       if (read === 'drawn') message = t('my_work_reread_done', { text: message });
       if (read === 'failed') message = t('my_work_reread_failed', { text: message });
