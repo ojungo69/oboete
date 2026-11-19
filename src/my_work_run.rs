@@ -1002,18 +1002,13 @@ fn refresh_with(
     // One write at a time, so a request's time never goes back under a later one's (cubic on
     // #827). The request is the file's time, set on a handle that writes (Windows refuses a
     // read-only one) and taken once the file is there, so that a round begun meanwhile, which read
-    // no request, sees one newer than its start (Codex on #1103); a time that cannot be set leaves
-    // no request, as the page is told.
+    // no request, sees one newer than its start (Codex on #1103). A time that cannot be set leaves
+    // the file at the time it was made, as before; a request of its own is #1104's.
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let file = std::fs::File::create(&path)?;
-    if let Err(e) = file.set_modified(request_time(home, std::time::SystemTime::now())) {
-        drop(file);
-        let _ = std::fs::remove_file(&path);
-        return Err(e.into());
-    }
+    std::fs::File::create(&path)?.set_modified(request_time(home, std::time::SystemTime::now()))?;
     Ok(json!({"state": "started", "due": due}))
 }
 

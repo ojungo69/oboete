@@ -2260,8 +2260,7 @@ runs and leaves a run another live worker owns to it.
   (`my-work-refresh-done`, its time the request's; the mark is left in one step, a file of the
   worker's taking the time first, then replacing it, so no reader sees it at another time and a
   failed mark leaves the one there: `my_work_run::mark`; the request's own time is set once its
-  file is there, so a round begun meanwhile sees a request newer than its start, and a time that
-  cannot be set leaves no request): the page only writes the request and the worker
+  file is there, so a round begun meanwhile sees a request newer than its start): the page only writes the request and the worker
   only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
   stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
   since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.
