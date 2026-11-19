@@ -2982,7 +2982,6 @@ fn a_copy_joins_the_request_that_holds_its_call() {
         key: String::new(),
         id: String::new(),
         sessions: Vec::new(),
-        repos: Vec::new(),
         sources: Sources {
             convs: vec![(key.clone(), spans)],
             fields: Vec::new(),

@@ -9058,9 +9058,27 @@ fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
     let (mut s, v) = checked_fixture();
     let now = crate::db::now_ms();
     // A conversation whose session's id is long and full of what JSON escapes: its key, in a
-    // check's body, is longer than a save's body may be.
+    // check's body, is longer than a save's body may be. Its work note, which its call sent,
+    // reports it done.
     let long = "\"\\".repeat(4_000) + "s";
     s.said(&long, R, now - 60_000, "Plan the long one.");
+    let done = json!({"task": "Long", "status": "done", "request_status": "done"});
+    let seq = s
+        .raw
+        .work_state(R, "long", done.as_object().unwrap(), None)
+        .unwrap();
+    let at: i64 = rusqlite::Connection::open(s.home.path().join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT ts FROM ops WHERE device = ?1 AND op_seq = ?2",
+            rusqlite::params![s.raw.device(), seq],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let input = json!({"list": "long", "fields": done}).to_string();
+    let call = json!({"tool": "mcp__oboete__work_state_write", "input": input,
+        "output": "Saved.", "failed": false});
+    s.event("tool", &long, (R, "main"), at + 20, call);
     // One that has left the week.
     s.said("old", R, now - 9 * 24 * 3_600_000, "Plan the old one.");
     s.run();
@@ -9182,10 +9200,15 @@ fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
         .to_owned();
     assert!(key.starts_with(r#"["conversation","claude","#), "{key}");
     let long_fingerprint = shown_by(&first, &key).unwrap()["contentFingerprint"].clone();
-    let long_check = check_of(&key, long_fingerprint.as_str().unwrap(), false);
+    let long_check = check_of(&key, long_fingerprint.as_str().unwrap(), true);
     assert!(serde_json::to_vec(&long_check).unwrap().len() > MAX_BODY);
     let (status, answer) = post(&long_check);
     assert_eq!(status, 200, "{answer}");
+    assert_eq!(shown_by(&answer, &key).unwrap()["review"]["checked"], true);
+    let long_undo = check_of(&key, long_fingerprint.as_str().unwrap(), false);
+    let (status, answer) = post(&long_undo);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(shown_by(&answer, &key).unwrap()["review"]["checked"], false);
     // A request that has left the week since: still the one it was.
     let all = get(&v, "/api/my-work?range=all");
     let old = (all["requests"].as_array().unwrap().iter())
@@ -9280,7 +9303,8 @@ fn a_check_whose_snapshot_does_not_read_is_answered_with_its_receipt() {
 
 /// Codex on #1107: the check of a request with no conversation, of a repository excluded since,
 /// outlives another request's check, from the work-view's pages and from oboete's own page, and
-/// shows again with its version once the exclusion is lifted.
+/// shows again with its version once the exclusion is lifted. So does one an exclusion of another
+/// repository hides, as work of no known session while a session is excluded.
 #[test]
 fn a_check_hidden_by_an_exclusion_outlives_another_check() {
     let (mut s, v) = checked_fixture();
@@ -9321,5 +9345,25 @@ fn a_check_hidden_by_an_exclusion_outlives_another_check() {
     s.run();
     let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:other").expect("shown again");
     assert_eq!(back["contentFingerprint"], other.as_str());
+    assert_eq!(back["review"]["checked"], true, "{back}");
+    // An exclusion of a third repository, where a session was recorded: work of no known session,
+    // `r:rel`'s, is hidden in every repository, and its check outlives an Undo of a request shown.
+    let third = "github.com/o/third";
+    let now = crate::db::now_ms();
+    s.said("s3", third, now - 2_000, "Plan the third one.");
+    s.said("s4", R, now - 1_000, "Plan the fourth one.");
+    s.run();
+    assert_eq!(post_check(&v, &check_of("r:rel", &rel, true)).0, 200);
+    s.raw.exclude(third, false).unwrap();
+    s.run();
+    let hidden = get_work_view(&v, "/api/work-view");
+    assert!(shown_by(&hidden, "r:rel").is_none(), "{hidden}");
+    let s4 = r#"["conversation","claude","c:claude:s4"]"#;
+    let shown = shown_by(&hidden, s4).expect("the fourth conversation");
+    let s4_fingerprint = shown["contentFingerprint"].as_str().unwrap();
+    assert_eq!(post_check(&v, &check_of(s4, s4_fingerprint, false)).0, 200);
+    s.raw.exclude(third, true).unwrap();
+    s.run();
+    let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:rel").expect("shown again");
     assert_eq!(back["review"]["checked"], true, "{back}");
 }
