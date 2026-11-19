@@ -601,17 +601,36 @@ pub(crate) fn applied(
     (what, consumer): (&str, &str),
 ) -> Result<()> {
     let at = seqs.last().copied().unwrap_or(0);
+    let ops = crate::knowledge::checkpoint::OPS;
+    caught_up_to(home, k, (device, at), (what, ops, consumer))
+}
+
+/// `applied` for this device's records through `seq`, read by `consumer` (J4, W3b-1: the record
+/// index My Work finds a work state write's call in, before an answer is checked against it).
+pub(crate) fn indexed(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    seq: i64,
+    (what, consumer): (&str, &str),
+) -> Result<()> {
+    let seqs = crate::knowledge::checkpoint::SEQS;
+    caught_up_to(home, k, (device, seq), (what, seqs, consumer))
+}
+
+/// `applied`'s wait: `consumer`'s checkpoint in `table` past `at` for `device`.
+fn caught_up_to(
+    home: &std::path::Path,
+    k: &Connection,
+    (device, at): (&str, i64),
+    (what, table, consumer): (&str, &str, &str),
+) -> Result<()> {
     let wait = std::time::Duration::from_secs(10);
     #[cfg(test)]
     let wait = WAIT.get().unwrap_or(wait);
     let deadline = std::time::Instant::now() + wait;
     let done = || -> Result<bool> {
-        let got = crate::knowledge::checkpoint::get_in(
-            k,
-            crate::knowledge::checkpoint::OPS,
-            consumer,
-            device,
-        )?;
+        let got = crate::knowledge::checkpoint::get_in(k, table, consumer, device)?;
         Ok(got >= at)
     };
     if done()? {

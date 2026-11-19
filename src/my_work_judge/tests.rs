@@ -942,6 +942,12 @@ impl Home {
     /// A work state write in `session` naming request `id`, as the server appends it and the
     /// agent's call records it 20 ms after (W3b-1).
     fn named(&mut self, session: &str, id: &str) {
+        let write = self.naming(id);
+        self.called(session, write);
+    }
+
+    /// A work state write naming request `id`, as the server appends it: its time and fields.
+    fn naming(&mut self, id: &str) -> (i64, serde_json::Map<String, Value>) {
         let fields = json!({"task": "notes", "request_id": id, "request": "Write the notes",
             "status": "doing"});
         let fields = fields.as_object().unwrap().clone();
@@ -954,6 +960,11 @@ impl Home {
                 |r| r.get(0),
             )
             .unwrap();
+        (ts, fields)
+    }
+
+    /// The agent's call in `session` that sent the write `naming` made, recorded 20 ms after it.
+    fn called(&mut self, session: &str, (ts, fields): (i64, serde_json::Map<String, Value>)) {
         let input = json!({"list": "notes", "fields": fields}).to_string();
         let body = json!({"tool": "mcp__oboete__work_state_write", "input": input,
             "output": "Saved.", "failed": false});
@@ -1529,5 +1540,25 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
         let answer = h.post(json!({"request": carrier["id"], "action": action}));
         assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
     }
+    assert_eq!(h.judged().len(), before);
+}
+
+/// W3b-1 (Codex on #1113): a work state write whose op was applied, and whose call was recorded
+/// and not yet taken into the record index, before the answer: the answer is checked after the
+/// index takes it, which takes a conversation of the group into the request it names; refused,
+/// nothing recorded.
+#[test]
+fn an_answer_is_checked_after_the_record_index_takes_what_was_recorded() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s3", 10, "The trailing comma again.");
+    h.grouped(&["s2", "s3"], "");
+    let id = h.request_of("s3")["id"].clone();
+    let write = h.naming("B");
+    h.s.run();
+    h.called("s3", write);
+    let before = h.judged().len();
+    let join = h.post(json!({"request": id, "action": "join"}));
+    assert_eq!(join, Err((409, "suggestion_changed")));
     assert_eq!(h.judged().len(), before);
 }

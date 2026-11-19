@@ -410,10 +410,12 @@ fn key((agent, session): &Key) -> Value {
 }
 
 /// Whether the my_work consumer has applied every op this device recorded, within
-/// `claims::applied`'s wait for this device's newest op: this device's newest op of a kind an
-/// answer reads (`Raw::answer_top`), read before it and so among what the wait applied (W3b-1:
-/// the answer is appended only while it is still the newest), none only when the wait ran out; a
-/// worker or a store that failed is an error (#777).
+/// `claims::applied`'s wait for this device's newest op, and then for the record index through
+/// this device's newest record (W3b-1: My Work finds a work state write's call there, which can
+/// be recorded after its op is applied): this device's newest op of a kind an answer reads
+/// (`Raw::answer_top`), read before both and so among what they waited for (the answer is
+/// appended only while it is still the newest), none only when a wait ran out; a worker or a
+/// store that failed is an error (#777).
 fn caught_up(home: &Path) -> Result<Option<i64>> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(Some(0));
@@ -421,8 +423,11 @@ fn caught_up(home: &Path) -> Result<Option<i64>> {
     let device = raw.device().to_owned();
     let read = raw.answer_top()?;
     let top = raw.max_op_seq_of(&device)?;
+    let records = raw.max_seq_of(&device)?;
     drop(raw);
-    match crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")) {
+    let waited = crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work"))
+        .and_then(|()| crate::claims::indexed(home, &k, &device, records, (NAME, "fts")));
+    match waited {
         Ok(()) => Ok(Some(read)),
         Err(e) if e.is::<crate::claims::NotYet>() => Ok(None),
         Err(e) => Err(e),

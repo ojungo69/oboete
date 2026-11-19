@@ -3990,6 +3990,87 @@ fn the_my_work_suggestion_route_is_gated_and_keeps_the_picks_id() {
 }
 
 /// A feed over invented records, without the older timeline fixture's claims or imports.
+/// W3b-1 (Codex on #1113): J4's answer asks the page's token again under config.lock, through
+/// the route: a token replaced while the answer waited, after the route took its body with the
+/// old one, is 401, and nothing is recorded.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
+    let mut s = Store::new();
+    let home = s.home.path().to_owned();
+    std::fs::create_dir_all(home.join("state")).unwrap();
+    write_token(&home).unwrap();
+    let token = file_token(&home).unwrap();
+    let v = Viewer::new(&home, Some(home.clone()), 4321, Token::File);
+    let t = crate::db::now_ms() - 3_600_000;
+    s.said("s1", R, t, "Build the parser.");
+    s.said("s2", R, t + 300_000, "The parser drops a trailing comma.");
+    let op = |job: &str, fields: Value| {
+        let op = crate::my_work_ops::MyWorkOp {
+            job: job.into(),
+            about: R.into(),
+            entry: "fake".into(),
+            ts: crate::db::now_ms(),
+            read: crate::my_work_ops::Read::default(),
+            removed: vec![],
+            fields: serde_json::from_value(fields).unwrap(),
+            skipped: false,
+            forgotten: None,
+        };
+        (
+            crate::raw::OpKind::MyWork,
+            serde_json::to_value(op).unwrap(),
+        )
+    };
+    let parser = json!({"ignored": [],
+            "groups": [{"conversations": [["claude", "s1"]], "title": "Parser", "links": []}]});
+    let judged = json!({"conversation": ["claude", "s2"], "outcome": "suggested",
+            "groups": [{"conversations": [["claude", "s2"]], "title": null, "links": []}],
+            "suggestion": {"request": ["claude", "s1"], "score": 0.6}});
+    s.raw
+        .append_ops(&[op("group", parser), op("judge", judged)])
+        .unwrap();
+    s.run();
+    let now = crate::db::now_ms();
+    let answer = answered(
+        "my-work",
+        crate::my_work::read(&home, crate::my_work::Range::All, now).unwrap(),
+    );
+    let own = (answer["requests"].as_array().unwrap().iter())
+        .find(|r| r.get("suggestion").is_some())
+        .unwrap()
+        .clone();
+    let recorded = || -> i64 {
+        rusqlite::Connection::open(home.join("raw.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM ops WHERE type = 'my_work'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let before = recorded();
+    let body = serde_json::to_vec(&json!({"request": own["id"], "action": "join"})).unwrap();
+    let len = body.len().to_string();
+    let h = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        ("X-Oboete-Token", token.as_str()),
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let replaced = home.clone();
+    crate::my_work_judge::CHECKED
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_token(&replaced).unwrap())));
+    let r = match v.head("POST", "/api/my-work/suggestion", &h) {
+        Head::Body(_, save, given, site) => v.take(save, &body, &given, site),
+        Head::Answer(r) => r,
+        Head::File(_) => panic!("no link"),
+    };
+    assert_eq!(r.status, 401, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(recorded(), before, "nothing recorded");
+    assert_ne!(file_token(&home).unwrap(), token, "the token was replaced");
+}
+
 fn feed_fixture() -> (Store, Viewer) {
     let s = Store::new();
     let v = Viewer::new(

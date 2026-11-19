@@ -2777,7 +2777,7 @@ const TEXT = {
   suggestion_not_found: ['That suggestion is no longer waiting for an answer. The page has been read again.', 'その提案は、もう答えを待っていません。ページを読み直しました。'],
   suggestion_target_gone: ['The request it suggested is no longer there. The page has been read again.', '提案された依頼は、もうありません。ページを読み直しました。'],
   suggestion_changed: ['That suggestion no longer matches its requests as they are now. The page has been read again.', 'その提案は、今の依頼と合わなくなっています。ページを読み直しました。'],
-  my_work_pending: ['The last answer is still being saved. Try again in a moment.', '前の答えをまだ保存しています。少し待ってから、もう一度お試しください。'],
+  my_work_pending: ['My Work is still taking in a change. Try again in a moment.', 'マイワークがまだ変更を取り込んでいます。少し待ってから、もう一度お試しください。'],
   my_work_unavailable: ['My Work can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   my_rules: ['My Rules', '規則'],
   my_rules_eyebrow: ['How you like to work, as rules your agents are given', 'エージェントに渡す、あなたの仕事の進め方の規則'],

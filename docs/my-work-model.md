@@ -2118,13 +2118,21 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   requests: on this PC, 174 of a day's 3,951 appends hold one of the others, so that a check of
   2 seconds meets one 0.39% of the time, where any op would refuse 9.1%) and forget has denied
   nothing since the answer's reading (`Raw::append_ops_at`, against the forget fence): else 409
-  `my_work_pending`, nothing written. The page's token is asked again under config.lock, where new
+  `my_work_pending`, nothing written, as for a catch-up that runs out (the page says My Work is
+  still taking in a change). The catch-up waits for the record index too, through this device's
+  newest record (`claims::indexed`, consumer `fts`): My Work finds a work state write's call there,
+  which can be recorded after its op is applied. The page's token is asked again under config.lock, where new
   tokens are made, before the append: a token replaced while the answer waited is 401, nothing
-  written. Known limits: a hook record that arrives between the check and the write is not fenced
-  (agents record all day): the call record of a work state write that names a request, arriving
-  after its op, can take a conversation of the group into that request after the check, and the
-  answer then places it in the fold, where the request the work state names outranks the group;
-  another device's ops are not fenced (sync is not in use).
+  written. The page posts the request and the action, not the suggestion it read: the answer is
+  checked against My Work as read when it is answered (as before), and a card read before a member
+  joined the group answers for the group as it is (the binding to the card read: W3b-2, #1114).
+  Known limits (#1114): what changes My Work's requests without an op of the kinds fenced, between
+  the check and the write, is not fenced: a hook record (agents record all day: the call record of
+  a work state write that names a request, arriving after its op, can take a conversation of the
+  group into that request after the check, and the answer then places it in the fold, where the
+  request the work state names outranks the group); curation's summaries and cards, which move My
+  Work's bounded reads; retention's expiry of a record a request is made from. Another device's
+  ops are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).
