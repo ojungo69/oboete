@@ -1,0 +1,37 @@
+assets/work-view/assets/index-D47e5HA6.js
+  s_52c3955e48bff4::t_aca8e05a9c41ec 1-2,39
+assets/work-view/assets/my-rules-CC3BhaAl.js
+  s_52c3955e48bff4::t_fc6df419cb8e9e 1
+assets/work-view/assets/past-focus-mOXKEUAj.js
+  s_52c3955e48bff4::t_86eab9ed5bbb59 1
+assets/work-view/assets/request-detail-7gg9BxHn.js
+  s_52c3955e48bff4::t_0d17050c902605 1
+assets/work-view/assets/suggested-areas-DlHnQSNo.js
+  s_52c3955e48bff4::t_9d9f673ede5139 1
+assets/work-view/assets/swipe-to-decide-Cx55RfbZ.js
+  s_52c3955e48bff4::t_7cb52dc96f49a9 1
+assets/work-view/assets/textarea-BW8NRQKR.js
+  s_52c3955e48bff4::t_882677633c6221 1,41,46,51
+assets/work-view/index.html
+  s_52c3955e48bff4::t_57302df50e7724 9-10
+ui/work-view/README.md
+  s_52c3955e48bff4::t_bc061bcb22462a 14
+ui/work-view/patches/0006-saved-answers.patch
+  s_52c3955e48bff4::t_a3c702bbba7da0 2,5,15-18,22-23,27,36,61,78,86,105,109,117-118,121,123-124,128,143,150,169,173,184,187,429-430,440-441,471-528,784,796,800-802,811-820,829-838
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8c00e68d2012f3dc159745b315f98db95254721e",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
