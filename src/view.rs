@@ -42,6 +42,10 @@ const PROMPT_NAMES: usize = 16;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
 const MAX_KEY_BODY: usize = 1024;
+/// The work-view's check's body (decision 117): its request's id can be a conversation's key, which
+/// wraps a session's id of up to `capture::MAX_FIELD_BYTES` in JSON, and the body's JSON escapes
+/// that again, to at most 7 bytes a byte the two together (Codex on #1107).
+const MAX_REVIEW_BODY: usize = 1024 * 1024;
 /// Head and body together: a slow sender holds its thread this long at most.
 const REQUEST_TIME: Duration = Duration::from_secs(5);
 /// The answer, all of it: a client that stops reading holds its thread this long at most.
@@ -1723,7 +1727,7 @@ impl Viewer {
         let (cap, save): (usize, Save) = match (method, target) {
             // Decision 117: the work-view's writes, each taken on its origin alone (`save_gate`).
             ("POST", "/api/work-view/refresh") => (MAX_BODY, |v, b, _| v.work_view_refresh(b)),
-            ("POST", "/api/work-view/review") => (MAX_BODY, |v, b, _| v.work_view_review(b)),
+            ("POST", "/api/work-view/review") => (MAX_REVIEW_BODY, |v, b, _| v.work_view_review(b)),
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -2418,8 +2422,9 @@ impl Viewer {
         }
         let hex =
             |v: &str| v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        // The id has no bound of its own but the body's: a conversation's key wraps the id of the
-        // conversation in JSON, which can escape it to several times its length.
+        // The id has no bound of its own but the body's (`MAX_REVIEW_BODY`): a conversation's key
+        // wraps the id of the conversation in JSON, which can escape it to several times its
+        // length.
         let posted = match serde_json::from_slice::<Posted>(body) {
             Ok(p) if !p.request_id.is_empty() && hex(&p.expected_fingerprint) => p,
             _ => {

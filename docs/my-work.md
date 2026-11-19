@@ -509,7 +509,9 @@ them; nothing else in it changes.
   `not_found`; a version that is not its current one 409 `stale`; a check of a request not
   reported complete 409 `not_ready`. Undo is `checked: false`, and takes back only a check of that
   version. Each write drops the checks of requests no longer read, as a request a forget took, but
-  not those of a session an exclusion hides now, which is read again once the exclusion is lifted.
+  not those of a request an exclusion hides now, by its conversations' sessions or, for a request
+  with none, by its work's repositories, which a check files keyed beside its sessions: it is read
+  again once the exclusion is lifted. A check written before it filed them keeps only the first.
   `state/my-work-reviews.lock` is held from the read a check is tested against to its write, and by
   a forget's sweep, so that a check of an older version replaces no newer one and a stale check
   brings back nothing a sweep took. A check waits 10 seconds for it at most, and four at most wait

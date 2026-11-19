@@ -1589,6 +1589,11 @@ struct Review {
     at: i64,
     actor: String,
     sessions: Vec<String>,
+    /// The repositories of its work, keyed (`repo_held`), by which an exclusion of one keeps the
+    /// check of a request with no conversation while it is hidden (Codex on #1107); none in a
+    /// check written before them.
+    #[serde(default)]
+    repos: Vec<String>,
 }
 
 /// What a request's check is filed under, beside its answer, and what its work product is read
@@ -1600,6 +1605,8 @@ pub(crate) struct Held {
     id: String,
     sessions: Vec<String>,
     sources: Sources,
+    /// The repositories of its work, keyed as a check files them (`Review::repos`).
+    repos: Vec<String>,
     /// The held id of the request the judge's open suggestion names (J4).
     suggested: Option<String>,
     /// The conversation that suggestion is about, as `sessions` shows it (its id and fingerprint),
@@ -2098,8 +2105,9 @@ fn change_reviews(
 
 /// Rule 6: a check of `version` filed for `held`, or its Undo, with the checks of the requests no
 /// longer read (`current`) dropped, so that a request a forget took leaves nothing here. A check
-/// of a session an exclusion hides now stays: the exclusion can be lifted, and the request is read
-/// again.
+/// of a request an exclusion hides now stays, by its conversations' sessions or, for one with
+/// none, by its work's repositories (Codex on #1107): the exclusion can be lifted, and the request
+/// is read again.
 pub(crate) fn set_review(
     (home, lock): (&Path, &ReviewsLock),
     (held, current): (&Held, &[Held]),
@@ -2108,10 +2116,12 @@ pub(crate) fn set_review(
     now: i64,
 ) -> Result<()> {
     let read: HashSet<&str> = current.iter().map(|h| h.key.as_str()).collect();
-    let hidden = excluded_sessions(home)?;
+    let (hidden, hidden_repos) = excluded(home)?;
     change_reviews(home, lock, |all| {
         all.retain(|key, r| {
-            read.contains(key.as_str()) || r.sessions.iter().any(|s| hidden.contains(s))
+            read.contains(key.as_str())
+                || r.sessions.iter().any(|s| hidden.contains(s))
+                || r.repos.iter().any(|s| hidden_repos.contains(s))
         });
         if checked {
             let review = Review {
@@ -2119,6 +2129,7 @@ pub(crate) fn set_review(
                 at: now,
                 actor: "local-user".to_owned(),
                 sessions: held.sessions.clone(),
+                repos: held.repos.clone(),
             };
             all.insert(held.key.clone(), review);
         } else if all.get(&held.key).is_some_and(|r| r.version == version) {
@@ -2128,17 +2139,29 @@ pub(crate) fn set_review(
     })
 }
 
-/// The sessions of the repositories excluded now, as a check names its sessions (`Held::sessions`).
-fn excluded_sessions(home: &Path) -> Result<HashSet<String>> {
+/// The sessions of the repositories excluded now, as a check names its sessions (`Held::sessions`),
+/// and those repositories, as it names its work's (`Held::repos`).
+fn excluded(home: &Path) -> Result<(HashSet<String>, HashSet<String>)> {
     if !crate::raw::exists(home) {
-        return Ok(HashSet::new());
+        return Ok((HashSet::new(), HashSet::new()));
     }
     let raw = crate::raw::open(home)?;
     let mut key = None;
-    (raw.sessions_in(&raw.exclusions_now()?)?.iter())
+    let repos = raw.exclusions_now()?;
+    let sessions = (raw.sessions_in(&repos)?.iter())
         .filter_map(|s| s.split_once('\0'))
         .map(|(agent, session)| keyed(&crate::forget::session(agent, session), home, &mut key))
-        .collect()
+        .collect::<Result<_>>()?;
+    let repos = (repos.iter())
+        .map(|repo| keyed(&repo_held(repo), home, &mut key))
+        .collect::<Result<_>>()?;
+    Ok((sessions, repos))
+}
+
+/// A repository as a check files it, before the home's key (`keyed`): in a namespace of its own,
+/// so that no repository's is a session's or a request's.
+fn repo_held(repo: &str) -> String {
+    format!("repo\0{repo}")
 }
 
 /// Rule 6: a forget's sweep at its step 5: the checks of the forgotten `sessions` (each target's
@@ -2617,10 +2640,16 @@ fn answer(
         }
         _ => None,
     };
+    let filed_repos = (items.iter().map(|w| w.repo.as_str()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|repo| keyed(&repo_held(repo), home, key))
+        .collect::<Result<Vec<_>>>()?;
     let held = Held {
         key: filed,
         id: held,
         sessions: swept_by,
+        repos: filed_repos,
         sources,
         suggested: r.suggested.clone(),
         about,

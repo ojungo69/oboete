@@ -2769,9 +2769,9 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
     ];
     // Over an empty home My Work is off, and `{}` is no check: each refusal is the handler's, so
     // every check of the gate passed.
-    for (path, passed, code) in [
-        ("/api/work-view/refresh", 409, "off"),
-        ("/api/work-view/review", 400, "bad_request"),
+    for (path, passed, code, cap) in [
+        ("/api/work-view/refresh", 409, "off", MAX_BODY),
+        ("/api/work-view/review", 400, "bad_request", MAX_REVIEW_BODY),
     ] {
         let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(
@@ -2790,7 +2790,7 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
             );
             assert!(opener.exists(), "{path} {headers:?}");
         }
-        let over = (MAX_BODY + 1).to_string();
+        let over = (cap + 1).to_string();
         let over = [
             WV_HOST,
             token,
@@ -9057,8 +9057,9 @@ fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
     }
     let (mut s, v) = checked_fixture();
     let now = crate::db::now_ms();
-    // A conversation whose session's id is long and full of what JSON escapes.
-    let long = "\"\\".repeat(600) + "s";
+    // A conversation whose session's id is long and full of what JSON escapes: its key, in a
+    // check's body, is longer than a save's body may be.
+    let long = "\"\\".repeat(4_000) + "s";
     s.said(&long, R, now - 60_000, "Plan the long one.");
     // One that has left the week.
     s.said("old", R, now - 9 * 24 * 3_600_000, "Plan the old one.");
@@ -9181,7 +9182,9 @@ fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
         .to_owned();
     assert!(key.starts_with(r#"["conversation","claude","#), "{key}");
     let long_fingerprint = shown_by(&first, &key).unwrap()["contentFingerprint"].clone();
-    let (status, answer) = post(&check_of(&key, long_fingerprint.as_str().unwrap(), false));
+    let long_check = check_of(&key, long_fingerprint.as_str().unwrap(), false);
+    assert!(serde_json::to_vec(&long_check).unwrap().len() > MAX_BODY);
+    let (status, answer) = post(&long_check);
     assert_eq!(status, 200, "{answer}");
     // A request that has left the week since: still the one it was.
     let all = get(&v, "/api/my-work?range=all");
@@ -9273,4 +9276,50 @@ fn a_check_whose_snapshot_does_not_read_is_answered_with_its_receipt() {
         shown_by(&after, "r:rel").unwrap()["review"]["checked"],
         true
     );
+}
+
+/// Codex on #1107: the check of a request with no conversation, of a repository excluded since,
+/// outlives another request's check, from the work-view's pages and from oboete's own page, and
+/// shows again with its version once the exclusion is lifted.
+#[test]
+fn a_check_hidden_by_an_exclusion_outlives_another_check() {
+    let (mut s, v) = checked_fixture();
+    let other_repo = "github.com/o/other";
+    let fields = json!({"task": "other", "request_id": "other", "request": "Fix the other notes",
+        "status": "done", "request_status": "done"});
+    s.raw
+        .work_state(other_repo, "plan", fields.as_object().unwrap(), None)
+        .unwrap();
+    s.run();
+    let first = get_work_view(&v, "/api/work-view");
+    let fingerprint = |id: &str| {
+        shown_by(&first, id).unwrap()["contentFingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (other, rel) = (fingerprint("r:other"), fingerprint("r:rel"));
+    assert_eq!(post_check(&v, &check_of("r:other", &other, true)).0, 200);
+    s.raw.exclude(other_repo, false).unwrap();
+    s.run();
+    let hidden = get_work_view(&v, "/api/work-view");
+    assert!(shown_by(&hidden, "r:other").is_none(), "{hidden}");
+    assert_eq!(post_check(&v, &check_of("r:rel", &rel, true)).0, 200);
+    let mine =
+        serde_json::to_vec(&json!({"request": "r:rel", "version": rel, "checked": false})).unwrap();
+    let len = mine.len().to_string();
+    let headers = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        TOKEN,
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let answer = request(&v, "POST", "/api/my-work/review", &headers, &mine);
+    assert_eq!(answer.status, 200);
+    s.raw.exclude(other_repo, true).unwrap();
+    s.run();
+    let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:other").expect("shown again");
+    assert_eq!(back["contentFingerprint"], other.as_str());
+    assert_eq!(back["review"]["checked"], true, "{back}");
 }
