@@ -173,20 +173,6 @@ index fffefca648bc5a6b846879125ba9fbd081d3d4ea..d2d070628ca2a316a30e079884f95b0e
            <Req ids={['R16.4']}>
              <div className="flex flex-wrap gap-2 border-t pt-3">
                <Button size="sm" className="h-11 sm:h-8" disabled={changes.saving} onClick={() => changes.apply({ action: 'keep', focusAreaId: area.id })}><CheckIcon />{t('Keep')}</Button>
-diff --git a/src/ui/my-work/src/components/request-detail.tsx b/src/ui/my-work/src/components/request-detail.tsx
-index 5a759a0eddc7c4f8edd43d69e258699e160531a6..39483543b87d0861d64a78f29b06f874ab62281e 100644
---- a/src/ui/my-work/src/components/request-detail.tsx
-+++ b/src/ui/my-work/src/components/request-detail.tsx
-@@ -308,7 +308,8 @@ function LoadedRequestDetail({ request, newerVersionReadFailure, onClose, onOpen
-               <Button variant="outline" onClick={newerVersionReadFailure.tryAgain}>{t('Try again')}</Button>
-             </div>
-           )}
--          <CheckAction key={request.id} request={request} />
-+          {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete takes no check yet (#1085). */}
-+          {false && <CheckAction key={request.id} request={request} />}
-           <SuggestionAction key={`suggestion:${request.id}`} request={request} />
-           <OpenFollowUps request={request} />
- 
 diff --git a/src/ui/my-work/src/live/conversation-continuation.test.ts b/src/ui/my-work/src/live/conversation-continuation.test.ts
 index 6b0085c41507f7755f6089cfadf05faee9130176..d2567709aabe99da58dd0e7986fe444250316694 100644
 --- a/src/ui/my-work/src/live/conversation-continuation.test.ts

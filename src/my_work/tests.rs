@@ -3379,3 +3379,27 @@ fn measure_the_cards_on_a_copy_of_a_store() {
         cards[3]
     );
 }
+
+/// Decision 117: the checks' part of the work-view's version holds still with no file of checks,
+/// and moves with the file's bytes though its time does not, as a coarse clock leaves it (Codex on
+/// #1107).
+#[test]
+fn the_checks_version_moves_with_their_bytes_at_one_time() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let none = reviews_version(home.path());
+    assert_eq!(reviews_version(home.path()), none);
+    let path = state.join(REVIEWS);
+    std::fs::write(&path, b"{}").unwrap();
+    let at = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let first = reviews_version(home.path());
+    assert_ne!(first, none);
+    std::fs::write(&path, br#"{"k":{}}"#).unwrap();
+    // A handle that writes: Windows refuses to set a read-only one's time.
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_modified(at).unwrap();
+    drop(file);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), at);
+    assert_ne!(reviews_version(home.path()), first);
+}

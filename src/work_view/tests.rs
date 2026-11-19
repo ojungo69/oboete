@@ -1608,3 +1608,137 @@ fn the_route_reads_the_story_as_it_was_kept() {
     let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     assert_eq!(snapshot["story"]["story"]["narrative"], crate::redact::MASK);
 }
+
+/// Decision 117: each request the snapshot shows is the one a check names by its id there, its
+/// version the snapshot's and its place among the held ones its own, in a home whose
+/// conversations' own requests go by their keys and in the gate home, whose ids go by references.
+/// Where the snapshot shows a request by another id, neither its stored id, nor the id My Work
+/// shows, nor its reference alone names it, nor any other.
+#[test]
+fn a_check_names_the_request_the_snapshot_shows() {
+    let name = "work_view::tests::a_check_names_the_request_the_snapshot_shows";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    for (h, now) in [home(), gate_home()] {
+        let home = h.home.path();
+        crate::redact::set_home(home).unwrap();
+        let snapshot = answered(home, now, Gate::now).unwrap();
+        let shown = arr(&snapshot["humanRequests"]);
+        assert!(shown.len() >= 5, "{snapshot}");
+        for r in shown {
+            let id = r["id"].as_str().unwrap();
+            let Named::One(found, i, held) = named(home, now, id).unwrap() else {
+                panic!("{id} names no one request");
+            };
+            assert_eq!(found["version"], r["contentFingerprint"], "{id}");
+            if found["fingerprint"].is_null() {
+                assert_eq!(found["id"], held[i].id(), "{id}");
+            }
+            let others = [
+                held[i].id(),
+                found["id"].as_str().unwrap_or(""),
+                found["ref"].as_str().unwrap_or(""),
+            ];
+            for other in others.into_iter().filter(|o| !o.is_empty() && *o != id) {
+                let other_named = named(home, now, other).unwrap();
+                assert!(matches!(other_named, Named::Gone), "{other} for {id}");
+            }
+        }
+    }
+}
+
+/// Decision 117: an id two requests would go by, as only two stored ids of one keyed print could
+/// make, is told from an id one request goes by, whose place it gives, and from one none goes by:
+/// a check of it names neither request (`Named::Shared`).
+#[test]
+fn an_id_two_requests_go_by_is_told_apart() {
+    let by = |id: &str| json!({"id": id, "sessions": []});
+    let one = json!({"id": "c:claude:s1", "sessions": [{"agent": "claude", "id": "c:claude:s1"}]});
+    let requests = [by("m:0123456789ab"), one, by("m:0123456789ab"), by("r:rel")];
+    assert_eq!(going_by(&requests, "m:0123456789ab"), [0, 2]);
+    assert_eq!(going_by(&requests, "r:rel"), [3]);
+    let key = conversation_key("claude", "c:claude:s1");
+    assert_eq!(going_by(&requests, &key), [1]);
+    assert!(going_by(&requests, "c:claude:s1").is_empty());
+}
+
+/// Decision 117: a rule saved since the pages read their snapshot makes the id they have of a
+/// request it finds one no request goes by, and the snapshot after it shows the request by its
+/// reference, which names it. A rule saved while a check's read runs is in force in it, as in the
+/// snapshot's (`settled`), and rules that keep changing give up (`Unsettled`).
+#[test]
+fn a_check_reads_under_the_rules_the_snapshot_is_made_under() {
+    let name = "work_view::tests::a_check_reads_under_the_rules_the_snapshot_is_made_under";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, now) = home();
+    let home = h.home.path();
+    crate::redact::set_home(home).unwrap();
+    let key = conversation_key("codex", "c:codex:c1");
+    let before = answered(home, now, Gate::now).unwrap();
+    assert!(
+        arr(&before["humanRequests"])
+            .iter()
+            .any(|r| r["id"] == key.as_str()),
+        "{before}"
+    );
+    let rule = |n: usize| {
+        format!(
+            "[redaction]\nextra_rules = [{{ id = \"c1\", regex = '^c:codex:c1$' }}, \
+             {{ id = \"n{n}\", regex = '^n{n}$' }}]\n"
+        )
+    };
+    std::fs::write(home.join("config.toml"), rule(0)).unwrap();
+    assert!(matches!(named(home, now, &key).unwrap(), Named::Gone));
+    let after = answered(home, now, Gate::now).unwrap();
+    let referred = (arr(&after["humanRequests"]).iter())
+        .filter_map(|r| r["id"].as_str())
+        .find(|id| id.starts_with(r#"["conversation","codex","m:"#))
+        .expect("the codex conversation by its reference")
+        .to_owned();
+    assert!(matches!(
+        named(home, now, &referred).unwrap(),
+        Named::One(..)
+    ));
+    // Saved once the first rules were read, as the stores are read under them.
+    std::fs::write(home.join("config.toml"), "[redaction]\n").unwrap();
+    let mut reads = 0;
+    let found = named_with(home, now, &key, || {
+        reads += 1;
+        if reads == 2 {
+            std::fs::write(home.join("config.toml"), rule(1)).unwrap();
+        }
+        Gate::now()
+    })
+    .unwrap();
+    assert_eq!(reads, 3);
+    assert!(matches!(found, Named::Gone));
+    let mut reads = 0;
+    let unsettled = named_with(home, now, &referred, || {
+        reads += 1;
+        std::fs::write(home.join("config.toml"), rule(reads)).unwrap();
+        Gate::now()
+    });
+    let e = unsettled.err().expect("rules that keep changing");
+    assert!(e.is::<Unsettled>(), "{e:#}");
+}
+
+/// Decision 117: a check's read of My Work is made under the rules it is given, those its snapshot
+/// was made under, whatever the home's file says (`my_work::reviewing_under`).
+#[test]
+fn a_checks_read_is_made_under_the_rules_it_is_given() {
+    let (h, now) = home();
+    let other = tempfile::tempdir().unwrap();
+    let rule = "[redaction]\nextra_rules = [{ id = \"c1\", regex = '^c1$' }]\n";
+    std::fs::write(other.path().join("config.toml"), rule).unwrap();
+    let ruled = crate::redact::Rules::load(other.path()).unwrap();
+    let (work, held) = crate::my_work::reviewing_under(h.home.path(), now, &ruled).unwrap();
+    let codex = (arr(&work["requests"]).iter())
+        .flat_map(|r| arr(&r["sessions"]))
+        .find(|c| c["agent"] == "codex")
+        .expect("the codex conversation");
+    assert!(codex["fingerprint"].is_string(), "{codex}");
+    assert_eq!(held.len(), arr(&work["requests"]).len());
+}

@@ -172,7 +172,15 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    that session's entries in the forget's purge (its step 5). `POST /api/my-work/review` (through `save_gate`) takes
    `{request, version, checked}`; a version that is not the current one, or a check of a request
    not reported complete, is refused with 409, and the page reloads the request. Undo is the same
-   route with `checked: false`.
+   route with `checked: false`. The work-view's pages check on their own origin (decision 117):
+   `POST /api/work-view/review` takes `{requestId, expectedFingerprint, checked}` as claude-mem's
+   pages post it (and their `expectedReviewHash`, a shared review's, which it takes and does not
+   read), and finds the request by its id in their snapshot, read under the rules that snapshot
+   is made under, from every range; an id no request goes by is 404, and the answer is the
+   snapshot after the check, read once the reviews' lock is let go, which a 409 carries too when
+   it reads (a 409 whose snapshot does not read comes without one, and the pages read it again).
+   A check saved whose snapshot does not read is answered with claude-mem's receipt alone, and the
+   work-view's version moves with the checks, from either page.
 7. **The page**: a My Work tab, first and opened by default, as claude-mem opens on My Work; the
    Timeline is one tab away. Cards, list and by agent (one card a conversation, as claude-mem's;
    decision 55); search, project, time range, sort and the status tabs with counts; the drill-down
@@ -500,8 +508,11 @@ them; nothing else in it changes.
   checked}`, the request named by its id as the route shows it. A request not read is 404
   `not_found`; a version that is not its current one 409 `stale`; a check of a request not
   reported complete 409 `not_ready`. Undo is `checked: false`, and takes back only a check of that
-  version. Each write drops the checks of requests no longer read, as a request a forget took, but
-  not those of a session an exclusion hides now, which is read again once the exclusion is lifted.
+  version. Each write drops the checks of requests no longer read, as a request a forget took,
+  but none while an exclusion is in force: a request not read may then be one it hides (its
+  repository's, an excluded session's, or work of no known session, which the read takes as
+  possibly an excluded session's in every repository), read again once the exclusion is lifted.
+  A forget's sweep drops a forgotten session's checks all the same.
   `state/my-work-reviews.lock` is held from the read a check is tested against to its write, and by
   a forget's sweep, so that a check of an older version replaces no newer one and a stale check
   brings back nothing a sweep took. A check waits 10 seconds for it at most, and four at most wait

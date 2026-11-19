@@ -2652,13 +2652,14 @@ fn the_my_work_refresh_route_takes_the_token_and_an_empty_object() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Decision 117: the work-view's Refresh now is a save of the work-view's origin alone: its Host,
-/// its token and its Origin, each refused on its own when it is missing, doubled or another's, the
-/// framing checked as every save's, and each refusal under the work-view's policy; it leaves the
-/// page `--open` wrote, which a request of oboete's page ends. A work-view path with no write yet is
-/// refused as before, with the work-view's credentials too.
+/// Decision 117: the work-view's writes, Refresh now and a request's check, are saves of the
+/// work-view's origin alone: its Host, its token and its Origin, each refused on its own when it
+/// is missing, doubled or another's, the framing checked as every save's, and each refusal under
+/// the work-view's policy; they leave the page `--open` wrote, which a request of oboete's page
+/// ends. A work-view path with no write yet is refused as before, with the work-view's credentials
+/// too.
 #[test]
-fn the_work_views_refresh_is_taken_on_its_own_origin_alone() {
+fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
     let (dir, v) = viewer("wv-refresh-gate");
     let opener = dir.join("opener.html");
     std::fs::write(&opener, "page").unwrap();
@@ -2669,13 +2670,7 @@ fn the_work_views_refresh_is_taken_on_its_own_origin_alone() {
     let main_origin = ("Origin", "http://127.0.0.1:4321");
     let json_type = ("Content-Type", "application/json");
     let cl = ("Content-Length", "2");
-    let path = "/api/work-view/refresh";
     let post = |target: &str, h: &[(&str, &str)]| request(&v, "POST", target, h, b"{}");
-    // Over an empty home My Work is off: the refusal is the handler's, so every check passed.
-    let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
-    assert_eq!((answer.status, answer.headers), (409, WORK_VIEW_HEADERS));
-    assert_eq!(json_any(&answer)["code"], "off");
-    assert!(opener.exists());
     let refused: Vec<(u16, Vec<(&str, &str)>)> = vec![
         // The Host: none, two, oboete's page's names, another name or port.
         (403, vec![token, origin, json_type, cl]),
@@ -2772,40 +2767,57 @@ fn the_work_views_refresh_is_taken_on_its_own_origin_alone() {
         (400, vec![WV_HOST, token, origin, json_type]),
         (400, vec![WV_HOST, token, origin, json_type, cl, cl]),
     ];
-    for (status, headers) in &refused {
-        let answer = post(path, headers);
+    // Over an empty home My Work is off, and `{}` is no check: each refusal is the handler's, so
+    // every check of the gate passed.
+    for (path, passed, code, cap) in [
+        ("/api/work-view/refresh", 409, "off", MAX_BODY),
+        ("/api/work-view/review", 400, "bad_request", MAX_REVIEW_BODY),
+    ] {
+        let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(
             (answer.status, answer.headers),
-            (*status, WORK_VIEW_HEADERS),
-            "{headers:?}"
+            (passed, WORK_VIEW_HEADERS),
+            "{path}"
         );
-        assert!(opener.exists(), "{headers:?}");
-    }
-    let over = (MAX_BODY + 1).to_string();
-    let over = [
-        WV_HOST,
-        token,
-        origin,
-        json_type,
-        ("Content-Length", over.as_str()),
-    ];
-    match v.head("POST", path, &over) {
-        Head::Answer(r) => assert_eq!((r.status, r.headers), (413, WORK_VIEW_HEADERS)),
-        Head::Body(..) | Head::File(_) => panic!("a body over the cap would be read"),
+        assert_eq!(json_any(&answer)["code"], code, "{path}");
+        assert!(opener.exists());
+        for (status, headers) in &refused {
+            // Refused on the head, before a byte of the body is read (Codex on #1107).
+            let head = v.head("POST", path, headers);
+            assert!(matches!(head, Head::Answer(_)), "{path} {headers:?}");
+            let answer = post(path, headers);
+            assert_eq!(
+                (answer.status, answer.headers),
+                (*status, WORK_VIEW_HEADERS),
+                "{path} {headers:?}"
+            );
+            assert!(opener.exists(), "{path} {headers:?}");
+        }
+        let over = (cap + 1).to_string();
+        let over = [
+            WV_HOST,
+            token,
+            origin,
+            json_type,
+            ("Content-Length", over.as_str()),
+        ];
+        match v.head("POST", path, &over) {
+            Head::Answer(r) => {
+                assert_eq!((r.status, r.headers), (413, WORK_VIEW_HEADERS), "{path}")
+            }
+            Head::Body(..) | Head::File(_) => panic!("a body over the cap would be read"),
+        }
+        assert_eq!(
+            v.route("OPTIONS", path, &[WV_HOST, token, origin]).status,
+            405,
+            "{path}"
+        );
     }
     // No other write of the work-view's yet: refused as before, with its credentials too.
-    for target in [
-        "/api/work-view/review",
-        "/api/work-view/focus",
-        "/api/work-view/rules",
-    ] {
+    for target in ["/api/work-view/focus", "/api/work-view/rules"] {
         let answer = post(target, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(answer.status, 405, "{target}");
     }
-    assert_eq!(
-        v.route("OPTIONS", path, &[WV_HOST, token, origin]).status,
-        405
-    );
     assert!(opener.exists());
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2819,22 +2831,27 @@ fn a_work_view_save_is_refused_when_its_token_is_replaced_before_its_body() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("state")).unwrap();
     write_token(home.path()).unwrap();
-    let made = work_view_token(&file_token(home.path()).unwrap());
     let v = Viewer::new(home.path(), None, 4321, Token::File);
-    let headers = [
-        WV_HOST,
-        ("X-Oboete-Token", made.as_str()),
-        ("Origin", "http://work-view.localhost:4321"),
-        ("Content-Type", "application/json"),
-        ("Content-Length", "2"),
-    ];
-    let Head::Body(_, save, given, site) = v.head("POST", "/api/work-view/refresh", &headers)
-    else {
-        panic!("the head passes the gate");
-    };
-    write_token(home.path()).unwrap();
-    let answer = v.take(save, b"{}", &given, site);
-    assert_eq!((answer.status, answer.headers), (401, WORK_VIEW_HEADERS));
+    for path in ["/api/work-view/refresh", "/api/work-view/review"] {
+        let made = work_view_token(&file_token(home.path()).unwrap());
+        let headers = [
+            WV_HOST,
+            ("X-Oboete-Token", made.as_str()),
+            ("Origin", "http://work-view.localhost:4321"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+        ];
+        let Head::Body(_, save, given, site) = v.head("POST", path, &headers) else {
+            panic!("the head passes the gate: {path}");
+        };
+        write_token(home.path()).unwrap();
+        let answer = v.take(save, b"{}", &given, site);
+        assert_eq!(
+            (answer.status, answer.headers),
+            (401, WORK_VIEW_HEADERS),
+            "{path}"
+        );
+    }
 }
 
 /// Decision 117: Refresh now's outcomes as the work-view's pages read them (`refreshWork`,
@@ -2977,6 +2994,12 @@ fn a_failure_on_the_work_views_origin_says_no_more_than_that() {
     for target in ["/api/work-view", "/api/work-view/version"] {
         unsaid(&v.route("GET", target, &[WV_HOST, token]), "raw.db");
     }
+    // Rules that kept changing while each read ran are a moment's, as a busy store is.
+    let unsettled = work_view_failed(&crate::work_view::Unsettled.into());
+    assert_eq!(
+        (unsettled.status, json_any(&unsettled)["code"].clone()),
+        (503, json!("busy"))
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -8969,4 +8992,397 @@ fn a_page_read_while_a_forget_holds_the_fence_is_one_to_retry() {
     drop(held);
     assert_eq!(r.status, 503, "{}", String::from_utf8_lossy(&r.body));
     assert_eq!(v.route("GET", "/api/feed", &[HOST, TOKEN]).status, 200);
+}
+
+/// The work-view's check as its pages post it (`setRequestChecked`), on the work-view's origin.
+fn post_check(v: &Viewer, body: &Value) -> (u16, Value) {
+    let made = work_view_token("t0k");
+    let body = serde_json::to_vec(body).unwrap();
+    let len = body.len().to_string();
+    let headers = [
+        WV_HOST,
+        ("X-Oboete-Token", made.as_str()),
+        ("Origin", "http://work-view.localhost:4321"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let answer = request(v, "POST", "/api/work-view/review", &headers, &body);
+    assert_eq!(answer.headers, WORK_VIEW_HEADERS);
+    (
+        answer.status,
+        serde_json::from_slice(&answer.body).unwrap_or(Value::Null),
+    )
+}
+
+/// A check's body as the pages post it.
+fn check_of(id: &str, fingerprint: &str, checked: bool) -> Value {
+    json!({"requestId": id, "expectedFingerprint": fingerprint, "checked": checked})
+}
+
+/// The request a work-view snapshot shows by `id`, if it shows one.
+fn shown_by(snapshot: &Value, id: &str) -> Option<Value> {
+    (snapshot["humanRequests"].as_array()?.iter())
+        .find(|r| r["id"] == id)
+        .cloned()
+}
+
+/// Whether `v` is a work-view snapshot as the pages tell one (`isWorkViewSnapshot`).
+fn is_snapshot(v: &Value) -> bool {
+    v["humanRequests"].is_array() && v["source"]["connected"].is_boolean()
+}
+
+/// A home with a ready request (`r:rel`), and one still being worked on (`r:wip`).
+fn checked_fixture() -> (Store, Viewer) {
+    let (mut s, v) = feed_fixture();
+    for (id, status) in [("rel", "done"), ("wip", "doing")] {
+        let fields = json!({"task": id, "request_id": id, "request": "Fix the release notes",
+                "status": status, "request_status": status});
+        s.raw
+            .work_state(R, "plan", fields.as_object().unwrap(), None)
+            .unwrap();
+    }
+    (s, v)
+}
+
+/// Decision 117, docs/my-work.md rule 6: the work-view's check of a request, as its pages post it,
+/// finds the request by its id in the snapshot and answers with the snapshot after it: a check of
+/// a ready version and its Undo show in it at once and move the work-view's version, as a check
+/// from oboete's own page does, and not the main page's. A body of another shape is 400 and an id
+/// no request goes by 404, with no snapshot; a version not the current one and a check of a
+/// request not ready are 409 with the snapshot; none writes a check. A
+/// conversation's own request goes by its key, however long its id makes it, and a request that
+/// has left the week is still the one it was: its Undo is taken, and the snapshot it answers with
+/// does not show it. The fingerprint goes as it came, though a rule matches hex digits.
+#[test]
+fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
+    if !in_child("view::tests::the_work_views_check_saves_a_version_and_refuses_the_rest") {
+        return;
+    }
+    let (mut s, v) = checked_fixture();
+    let now = crate::db::now_ms();
+    // A conversation whose session's id is long and full of what JSON escapes: its key, in a
+    // check's body, is longer than a save's body may be. Its work note, which its call sent,
+    // reports it done.
+    let long = "\"\\".repeat(4_000) + "s";
+    s.said(&long, R, now - 60_000, "Plan the long one.");
+    let done = json!({"task": "Long", "status": "done", "request_status": "done"});
+    let seq = s
+        .raw
+        .work_state(R, "long", done.as_object().unwrap(), None)
+        .unwrap();
+    let at: i64 = rusqlite::Connection::open(s.home.path().join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT ts FROM ops WHERE device = ?1 AND op_seq = ?2",
+            rusqlite::params![s.raw.device(), seq],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let input = json!({"list": "long", "fields": done}).to_string();
+    let call = json!({"tool": "mcp__oboete__work_state_write", "input": input,
+        "output": "Saved.", "failed": false});
+    s.event("tool", &long, (R, "main"), at + 20, call);
+    // One that has left the week.
+    s.said("old", R, now - 9 * 24 * 3_600_000, "Plan the old one.");
+    s.run();
+    let home = s.home.path();
+    std::fs::write(
+        home.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n",
+    )
+    .unwrap();
+    redact::set_home(home).unwrap();
+    let snapshot = || get_work_view(&v, "/api/work-view");
+    let version = || get_work_view(&v, "/api/work-view/version")["v"].clone();
+    let main_version = || get(&v, "/api/version")["v"].clone();
+    let post = |body: &Value| post_check(&v, body);
+    let first = snapshot();
+    let rel = shown_by(&first, "r:rel").expect("the ready request");
+    let fingerprint = rel["contentFingerprint"].as_str().unwrap().to_owned();
+    assert!(
+        fingerprint.len() == 64 && fingerprint.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{rel}"
+    );
+    let wip = shown_by(&first, "r:wip").expect("the request being worked on");
+    let wip_fingerprint = wip["contentFingerprint"].as_str().unwrap();
+    let more = json!({"requestId": "r:rel", "expectedFingerprint": fingerprint, "checked": true,
+        "more": 1});
+    for body in [
+        more,
+        check_of("r:rel", "abc", true),
+        check_of("", &fingerprint, true),
+        json!({"requestId": "r:rel", "checked": true}),
+        json!({"requestId": "r:rel", "expectedFingerprint": fingerprint, "checked": true,
+            "expectedReviewHash": 7}),
+    ] {
+        let (status, answer) = post(&body);
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (400, Some("bad_request")),
+            "{body}"
+        );
+        assert!(answer["error"].is_string() && answer.get("snapshot").is_none());
+    }
+    let (status, gone) = post(&check_of("r:none", &fingerprint, true));
+    assert_eq!(
+        (status, gone["code"].as_str()),
+        (404, Some("not_found")),
+        "{gone}"
+    );
+    assert!(gone["error"].is_string() && gone.get("snapshot").is_none());
+    for (body, code) in [
+        (check_of("r:rel", &"0".repeat(64), true), "stale"),
+        (check_of("r:wip", wip_fingerprint, true), "not_ready"),
+    ] {
+        let (status, answer) = post(&body);
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (409, Some(code)),
+            "{answer}"
+        );
+        assert!(
+            answer["error"].is_string() && is_snapshot(&answer["snapshot"]),
+            "{answer}"
+        );
+    }
+    let reviews = home.join("state").join("my-work-reviews.json");
+    assert!(!reviews.exists(), "no refusal writes a check");
+    // A check of a ready version, in the snapshot it answers with at once, and its Undo; the
+    // shared review's hash the pages may send is taken, and not read.
+    let v0 = version();
+    let m0 = main_version();
+    assert_eq!(
+        version(),
+        v0,
+        "the version holds still with no file of checks"
+    );
+    let mut body = check_of("r:rel", &fingerprint, true);
+    body["expectedReviewHash"] = json!(null);
+    let (status, saved) = post(&body);
+    assert_eq!(status, 200, "{saved}");
+    assert!(is_snapshot(&saved), "{saved}");
+    assert_eq!(
+        shown_by(&saved, "r:rel").unwrap()["review"]["checked"],
+        true
+    );
+    let v1 = version();
+    assert_ne!(v1, v0);
+    assert_eq!(main_version(), m0, "the main page's version holds still");
+    let (status, undone) = post(&check_of("r:rel", &fingerprint, false));
+    assert_eq!(status, 200, "{undone}");
+    assert_eq!(
+        shown_by(&undone, "r:rel").unwrap()["review"]["checked"],
+        false
+    );
+    let v2 = version();
+    assert!(v2 != v1 && v2 != v0, "{v0} {v1} {v2}");
+    // A check from oboete's own page moves it too.
+    let mine = serde_json::to_vec(&json!({"request": "r:rel", "version": fingerprint,
+        "checked": true}))
+    .unwrap();
+    let len = mine.len().to_string();
+    let headers = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        TOKEN,
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let answer = request(&v, "POST", "/api/my-work/review", &headers, &mine);
+    assert_eq!(answer.status, 200);
+    assert_ne!(version(), v2);
+    assert_eq!(
+        shown_by(&snapshot(), "r:rel").unwrap()["review"]["checked"],
+        true
+    );
+    // A conversation's own request, by its key, longer than any id the main route takes.
+    let key = (first["humanRequests"].as_array().unwrap().iter())
+        .filter_map(|r| r["id"].as_str())
+        .find(|id| id.chars().count() > 2_000)
+        .expect("the long conversation's key")
+        .to_owned();
+    assert!(key.starts_with(r#"["conversation","claude","#), "{key}");
+    let long_fingerprint = shown_by(&first, &key).unwrap()["contentFingerprint"].clone();
+    let long_check = check_of(&key, long_fingerprint.as_str().unwrap(), true);
+    assert!(serde_json::to_vec(&long_check).unwrap().len() > MAX_BODY);
+    let (status, answer) = post(&long_check);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(shown_by(&answer, &key).unwrap()["review"]["checked"], true);
+    let long_undo = check_of(&key, long_fingerprint.as_str().unwrap(), false);
+    let (status, answer) = post(&long_undo);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(shown_by(&answer, &key).unwrap()["review"]["checked"], false);
+    // A request that has left the week since: still the one it was.
+    let all = get(&v, "/api/my-work?range=all");
+    let old = (all["requests"].as_array().unwrap().iter())
+        .find(|r| r["id"] == "c:claude:old")
+        .expect("the old conversation's request");
+    let old_key = r#"["conversation","claude","c:claude:old"]"#;
+    assert!(
+        shown_by(&first, old_key).is_none(),
+        "the week leaves it out"
+    );
+    // Its check, written as a check is: a route would refuse it, as the request is not ready.
+    let old_version = old["version"].as_str().unwrap().to_owned();
+    let (_, held) = crate::my_work::reviewing(home, crate::db::now_ms()).unwrap();
+    let place = (held.iter().position(|h| h.id() == "c:claude:old")).expect("its held request");
+    let lock = crate::my_work::reviews_lock(home).unwrap();
+    let at = crate::db::now_ms();
+    crate::my_work::set_review((home, &lock), (&held[place], &held), &old_version, true, at)
+        .unwrap();
+    drop(lock);
+    let checked_now = |id: &str| {
+        let all = get(&v, "/api/my-work?range=all");
+        let r = (all["requests"].as_array().unwrap().iter()).find(|r| r["id"] == id);
+        r.expect("the request")["checked"].is_i64()
+    };
+    assert!(checked_now("c:claude:old"));
+    let (status, answer) = post(&check_of(old_key, &old_version, false));
+    assert_eq!(status, 200, "{answer}");
+    assert!(shown_by(&answer, old_key).is_none(), "{answer}");
+    assert!(!checked_now("c:claude:old"), "its Undo took the check back");
+}
+
+/// Decision 117 (Codex on slice 2): the work-view's check lets go of the reviews' lock before it
+/// reads the snapshot it answers with, whose readers' hold waits for a purge, which holds that hold
+/// while it waits for the reviews' lock: while a check and a refusal wait for the purge's hold,
+/// the reviews' lock is free, and each answers once the purge lets go.
+#[test]
+fn the_work_views_check_lets_go_of_the_reviews_lock_before_its_snapshot() {
+    let name = "view::tests::the_work_views_check_lets_go_of_the_reviews_lock_before_its_snapshot";
+    if !in_child(name) {
+        return;
+    }
+    let (s, v) = checked_fixture();
+    s.run();
+    let home = s.home.path();
+    let rel = shown_by(&get_work_view(&v, "/api/work-view"), "r:rel").unwrap();
+    let fingerprint = rel["contentFingerprint"].as_str().unwrap().to_owned();
+    for (fingerprint, status) in [(fingerprint, 200), ("0".repeat(64), 409)] {
+        let purge = crate::dispatch::exclusive(home).unwrap();
+        let (got, answer) = std::thread::scope(|scope| {
+            let posting = scope.spawn(|| post_check(&v, &check_of("r:rel", &fingerprint, true)));
+            let wait = std::time::Duration::from_secs(20);
+            assert!(
+                crate::dispatch::shared_blocked(home, 1, wait),
+                "the check waits for the purge's hold"
+            );
+            let lock = std::time::Duration::from_secs(2);
+            let free = crate::my_work::reviews_lock_within(home, lock).unwrap();
+            assert!(
+                free.is_some(),
+                "the reviews' lock is free while the check waits"
+            );
+            drop(free);
+            drop(purge);
+            posting.join().unwrap()
+        });
+        assert_eq!(got, status, "{answer}");
+        let snapshot = if status == 200 {
+            &answer
+        } else {
+            &answer["snapshot"]
+        };
+        assert!(is_snapshot(snapshot), "{answer}");
+    }
+}
+
+/// Decision 117: a check saved whose snapshot does not read after it is answered 200 with
+/// claude-mem's receipt alone, which the pages tell as saved, and the check stands.
+#[test]
+fn a_check_whose_snapshot_does_not_read_is_answered_with_its_receipt() {
+    let name = "view::tests::a_check_whose_snapshot_does_not_read_is_answered_with_its_receipt";
+    if !in_child(name) {
+        return;
+    }
+    let (s, v) = checked_fixture();
+    s.run();
+    let home = s.home.path().to_owned();
+    let rel = shown_by(&get_work_view(&v, "/api/work-view"), "r:rel").unwrap();
+    let fingerprint = rel["contentFingerprint"].as_str().unwrap().to_owned();
+    let config = home.join("config.toml");
+    let broken = config.clone();
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::write(&broken, "[redaction\n").unwrap();
+        }));
+    });
+    let answer = post_check(&v, &check_of("r:rel", &fingerprint, true));
+    assert_eq!(
+        answer,
+        (200, json!({"save": {"scope": "local", "state": "saved"}}))
+    );
+    std::fs::remove_file(&config).unwrap();
+    let after = get_work_view(&v, "/api/work-view");
+    assert_eq!(
+        shown_by(&after, "r:rel").unwrap()["review"]["checked"],
+        true
+    );
+}
+
+/// Codex on #1107: the check of a request with no conversation, of a repository excluded since,
+/// outlives another request's check, from the work-view's pages and from oboete's own page, and
+/// shows again with its version once the exclusion is lifted. So does one an exclusion of another
+/// repository hides, as work of no known session while a session is excluded.
+#[test]
+fn a_check_hidden_by_an_exclusion_outlives_another_check() {
+    let (mut s, v) = checked_fixture();
+    let other_repo = "github.com/o/other";
+    let fields = json!({"task": "other", "request_id": "other", "request": "Fix the other notes",
+        "status": "done", "request_status": "done"});
+    s.raw
+        .work_state(other_repo, "plan", fields.as_object().unwrap(), None)
+        .unwrap();
+    s.run();
+    let first = get_work_view(&v, "/api/work-view");
+    let fingerprint = |id: &str| {
+        shown_by(&first, id).unwrap()["contentFingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (other, rel) = (fingerprint("r:other"), fingerprint("r:rel"));
+    assert_eq!(post_check(&v, &check_of("r:other", &other, true)).0, 200);
+    s.raw.exclude(other_repo, false).unwrap();
+    s.run();
+    let hidden = get_work_view(&v, "/api/work-view");
+    assert!(shown_by(&hidden, "r:other").is_none(), "{hidden}");
+    assert_eq!(post_check(&v, &check_of("r:rel", &rel, true)).0, 200);
+    let mine =
+        serde_json::to_vec(&json!({"request": "r:rel", "version": rel, "checked": false})).unwrap();
+    let len = mine.len().to_string();
+    let headers = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        TOKEN,
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let answer = request(&v, "POST", "/api/my-work/review", &headers, &mine);
+    assert_eq!(answer.status, 200);
+    s.raw.exclude(other_repo, true).unwrap();
+    s.run();
+    let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:other").expect("shown again");
+    assert_eq!(back["contentFingerprint"], other.as_str());
+    assert_eq!(back["review"]["checked"], true, "{back}");
+    // An exclusion of a third repository, where a session was recorded: work of no known session,
+    // `r:rel`'s, is hidden in every repository, and its check outlives an Undo of a request shown.
+    let third = "github.com/o/third";
+    let now = crate::db::now_ms();
+    s.said("s3", third, now - 2_000, "Plan the third one.");
+    s.said("s4", R, now - 1_000, "Plan the fourth one.");
+    s.run();
+    assert_eq!(post_check(&v, &check_of("r:rel", &rel, true)).0, 200);
+    s.raw.exclude(third, false).unwrap();
+    s.run();
+    let hidden = get_work_view(&v, "/api/work-view");
+    assert!(shown_by(&hidden, "r:rel").is_none(), "{hidden}");
+    let s4 = r#"["conversation","claude","c:claude:s4"]"#;
+    let shown = shown_by(&hidden, s4).expect("the fourth conversation");
+    let s4_fingerprint = shown["contentFingerprint"].as_str().unwrap();
+    assert_eq!(post_check(&v, &check_of(s4, s4_fingerprint, false)).0, 200);
+    s.raw.exclude(third, true).unwrap();
+    s.run();
+    let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:rel").expect("shown again");
+    assert_eq!(back["review"]["checked"], true, "{back}");
 }

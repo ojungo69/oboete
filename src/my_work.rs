@@ -784,6 +784,13 @@ pub(crate) fn reviewing(home: &Path, now: i64) -> Result<(Value, Vec<Held>)> {
     read_held(home, Range::All, now, None, None)
 }
 
+/// `reviewing` under `rules`, those a work-view snapshot is made under, so that the work-view's
+/// check finds the request it names as its snapshot showed it (`work_view::named`, decision 117).
+/// The story it reads is the kept one (`listed_kept`), which nothing it answers sends.
+pub(crate) fn reviewing_under(home: &Path, now: i64, rules: &Rules) -> Result<(Value, Vec<Held>)> {
+    read_held(home, Range::All, now, None, Some(rules))
+}
+
 /// What My Work reads of the stores before it makes requests: each conversation with its
 /// prompts, summaries and cards, the work and who wrote it, and the request ids each
 /// conversation's work names. The page's read and grouping's (docs/my-work-model.md C1) share it.
@@ -1960,6 +1967,24 @@ fn reviews(home: &Path) -> BTreeMap<String, Review> {
         .unwrap_or_default()
 }
 
+/// The checks' part of the work-view's version (decision 117): the file's time and a digest of its
+/// bytes, so that a check, an Undo and a forget's sweep each move it whichever page made them. A
+/// check undone at once brings back a version a poll saw only when the file's time comes back with
+/// its bytes, which needs the write before the check, the check's and the Undo's within one tick of
+/// the file's clock (Codex on #1107); the same while there is no file.
+pub(crate) fn reviews_version(home: &Path) -> String {
+    use sha2::Digest;
+    let path = home.join("state").join(REVIEWS);
+    let at = (std::fs::metadata(&path).and_then(|m| m.modified()).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    format!(
+        "{at}.{}",
+        crate::db::hex(&sha2::Sha256::digest(&bytes)[..8])
+    )
+}
+
 /// The hold on `state/my-work-reviews.lock`, from the read a check is tested against to its write,
 /// so that two checks, or a check and a forget's sweep, do not come between each other: a check of
 /// an older version does not replace a newer one, nor a stale one bring back what a forget took
@@ -2074,9 +2099,10 @@ fn change_reviews(
 }
 
 /// Rule 6: a check of `version` filed for `held`, or its Undo, with the checks of the requests no
-/// longer read (`current`) dropped, so that a request a forget took leaves nothing here. A check
-/// of a session an exclusion hides now stays: the exclusion can be lifted, and the request is read
-/// again.
+/// longer read (`current`) dropped, so that a request a forget took leaves nothing here; none is
+/// dropped while an exclusion is in force, as the request may be one it hides, read again once it
+/// is lifted (Codex on #1107). A forget's sweep drops a forgotten session's checks all the same
+/// (`forget_reviews`).
 pub(crate) fn set_review(
     (home, lock): (&Path, &ReviewsLock),
     (held, current): (&Held, &[Held]),
@@ -2085,11 +2111,11 @@ pub(crate) fn set_review(
     now: i64,
 ) -> Result<()> {
     let read: HashSet<&str> = current.iter().map(|h| h.key.as_str()).collect();
-    let hidden = excluded_sessions(home)?;
+    let excluding = excluding(home)?;
     change_reviews(home, lock, |all| {
-        all.retain(|key, r| {
-            read.contains(key.as_str()) || r.sessions.iter().any(|s| hidden.contains(s))
-        });
+        if !excluding {
+            all.retain(|key, _| read.contains(key.as_str()));
+        }
         if checked {
             let review = Review {
                 version: version.to_owned(),
@@ -2105,17 +2131,14 @@ pub(crate) fn set_review(
     })
 }
 
-/// The sessions of the repositories excluded now, as a check names its sessions (`Held::sessions`).
-fn excluded_sessions(home: &Path) -> Result<HashSet<String>> {
+/// Whether an exclusion is in force: while one is, a request not read may be one it hides, its
+/// repository's or a session's, or work of no known session, which `link` takes as possibly an
+/// excluded session's in every repository (Codex on #1107).
+fn excluding(home: &Path) -> Result<bool> {
     if !crate::raw::exists(home) {
-        return Ok(HashSet::new());
+        return Ok(false);
     }
-    let raw = crate::raw::open(home)?;
-    let mut key = None;
-    (raw.sessions_in(&raw.exclusions_now()?)?.iter())
-        .filter_map(|s| s.split_once('\0'))
-        .map(|(agent, session)| keyed(&crate::forget::session(agent, session), home, &mut key))
-        .collect()
+    Ok(!crate::raw::open(home)?.exclusions_now()?.is_empty())
 }
 
 /// Rule 6: a forget's sweep at its step 5: the checks of the forgotten `sessions` (each target's

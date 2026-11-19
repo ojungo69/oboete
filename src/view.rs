@@ -42,6 +42,10 @@ const PROMPT_NAMES: usize = 16;
 /// A key save's body: a key of at most 512 characters, an entry name of at most 64 bytes and the
 /// version always fit.
 const MAX_KEY_BODY: usize = 1024;
+/// The work-view's check's body (decision 117): its request's id can be a conversation's key, which
+/// wraps a session's id of up to `capture::MAX_FIELD_BYTES` in JSON, and the body's JSON escapes
+/// that again, to at most 7 bytes a byte the two together (Codex on #1107).
+const MAX_REVIEW_BODY: usize = 1024 * 1024;
 /// Head and body together: a slow sender holds its thread this long at most.
 const REQUEST_TIME: Duration = Duration::from_secs(5);
 /// The answer, all of it: a client that stops reading holds its thread this long at most.
@@ -1723,6 +1727,7 @@ impl Viewer {
         let (cap, save): (usize, Save) = match (method, target) {
             // Decision 117: the work-view's writes, each taken on its origin alone (`save_gate`).
             ("POST", "/api/work-view/refresh") => (MAX_BODY, |v, b, _| v.work_view_refresh(b)),
+            ("POST", "/api/work-view/review") => (MAX_REVIEW_BODY, |v, b, _| v.work_view_review(b)),
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -2394,6 +2399,142 @@ impl Viewer {
         }
     }
 
+    /// A request's check on the work-view's pages, or its Undo (decision 117, docs/my-work.md rule
+    /// 6): `{requestId, expectedFingerprint, checked, expectedReviewHash?}` as the pages post it
+    /// (`setRequestChecked`). The request is the one the snapshot shows by `requestId`
+    /// (`work_view::named`); one whose version is not `expectedFingerprint`, a check of one not
+    /// ready, and an id two requests go by are refused with 409 and the snapshot, an id no request
+    /// goes by with 404. The answer is the snapshot after the write, read once the reviews' lock is
+    /// let go, as a purge holds the readers' hold while it waits for that lock; a check saved whose
+    /// snapshot does not read is answered 200 with its receipt alone, which the pages tell as
+    /// saved, to be read again.
+    fn work_view_review(&self, body: &[u8]) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Posted {
+            request_id: String,
+            expected_fingerprint: String,
+            checked: bool,
+            // A shared review's hash, which oboete's snapshot never gives: taken, and not read.
+            #[serde(default)]
+            #[allow(dead_code)]
+            expected_review_hash: Option<String>,
+        }
+        let hex =
+            |v: &str| v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        // The id has no bound of its own but the body's (`MAX_REVIEW_BODY`): a conversation's key
+        // wraps the id of the conversation in JSON, which can escape it to several times its
+        // length.
+        let posted = match serde_json::from_slice::<Posted>(body) {
+            Ok(p) if !p.request_id.is_empty() && hex(&p.expected_fingerprint) => p,
+            _ => {
+                return work_view_refused(
+                    400,
+                    "bad_request",
+                    "The check could not be read. Reload the page.",
+                );
+            }
+        };
+        let now = crate::db::now_ms();
+        let lock = match crate::my_work::reviews_lock_within(&self.home, crate::db::OPEN_WRITE_WAIT)
+        {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+            }
+            Err(e) => return work_view_failed(&e),
+        };
+        let posted = (
+            posted.request_id.as_str(),
+            posted.expected_fingerprint.as_str(),
+            posted.checked,
+        );
+        let checked = self.work_view_checked(&lock, posted, now);
+        // Let go before the snapshot is read: its readers' hold waits for a purge, which holds that
+        // hold while it waits for this lock.
+        drop(lock);
+        match checked {
+            Ok(None) => {
+                #[cfg(test)]
+                if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
+                match self.snapshot_after_check() {
+                    Some(snapshot) => Response::json(&snapshot),
+                    // claude-mem's receipt (`readSaveReceipt`): the pages tell it as saved.
+                    None => Response::json(&json!({"save": {"scope": "local", "state": "saved"}})),
+                }
+            }
+            Ok(Some((404, code, error))) => work_view_refused(404, code, error),
+            Ok(Some((status, code, error))) => {
+                let mut refusal = json!({"error": error, "code": code, "field": ""});
+                if let Some(snapshot) = self.snapshot_after_check() {
+                    refusal["snapshot"] = snapshot;
+                }
+                let body = serde_json::to_vec(&refusal).unwrap_or_default();
+                Response::new(status, "application/json", body)
+            }
+            Err(e) => work_view_failed(&e),
+        }
+    }
+
+    /// `work_view_review`'s part under the reviews' lock, from the read the check is tested against
+    /// to its write: none once written, else the refusal's status, code and sentence.
+    fn work_view_checked(
+        &self,
+        lock: &crate::my_work::ReviewsLock,
+        (id, version, checked): (&str, &str, bool),
+        now: i64,
+    ) -> Result<Option<(u16, &'static str, &'static str)>> {
+        use crate::work_view::Named;
+        let (request, i, held) = match crate::work_view::named(&self.home, now, id)? {
+            Named::One(request, i, held) => (request, i, held),
+            Named::Gone => {
+                let error = "This request is no longer in My Work. Reload the page.";
+                return Ok(Some((404, "not_found", error)));
+            }
+            Named::Shared => {
+                let error =
+                    "oboete cannot tell this request from another one, so nothing was saved.";
+                return Ok(Some((409, "ambiguous", error)));
+            }
+        };
+        if request["version"] != version {
+            let error = "This work changed while you were reading. Review the latest version before checking.";
+            return Ok(Some((409, "stale", error)));
+        }
+        if checked && request["status"] != "ready" {
+            let error = "This request has not been reported complete.";
+            return Ok(Some((409, "not_ready", error)));
+        }
+        crate::my_work::set_review((&self.home, lock), (&held[i], &held), version, checked, now)?;
+        Ok(None)
+    }
+
+    /// The work-view's snapshot (`GET /api/work-view`): one readers' hold from the first read to
+    /// the snapshot (#439), as one page's read takes: a forget registers before both answers or
+    /// after it. raw.db first, then the hold, the order a restore takes them in.
+    fn work_view_snapshot(&self) -> Result<Value> {
+        let now = crate::db::now_ms();
+        // No store yet: an empty home's snapshot, at once. A reader that opened a store made
+        // meanwhile would read outside the hold below (Codex on #1087).
+        let Some(_stores) = crate::search::b::stores(&self.home)? else {
+            return Ok(crate::work_view::empty(now));
+        };
+        let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
+        crate::work_view::answer(&self.home, now)
+    }
+
+    /// The snapshot a check's answer carries; none when it does not read, which the viewer's log
+    /// says.
+    fn snapshot_after_check(&self) -> Option<Value> {
+        (self.work_view_snapshot())
+            .map_err(|e| {
+                eprintln!("oboete: the work-view's snapshot after a check not read: {e:#}")
+            })
+            .ok()
+    }
+
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
     /// page has it; under its own lock and the readers' hold, from a fresh read to the write:
     /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
@@ -2909,30 +3050,21 @@ impl Viewer {
             // from the two answers above as their readers give them, the requests of the last 7
             // days, and the Build story's kept texts (`work_view::read`). Each text in it is one of
             // theirs, gated at its source, and the snapshot goes through the gate in one walk as it
-            // leaves (#1089). One readers'
-            // hold from the first read to the snapshot (#439), as one page's read takes: a forget
-            // registers before both answers or after it. raw.db first, then the hold, the order a
-            // restore takes them in. The goals' read and the story's take no hold of their own, so
-            // this one is theirs; My Work's read takes one more within it.
-            "work-view" => {
-                let now = crate::db::now_ms();
-                // No store yet: an empty home's snapshot, at once. A reader that opened a store
-                // made meanwhile would read outside the hold below (Codex on #1087).
-                let Some(_stores) = crate::search::b::stores(&self.home)? else {
-                    return Ok(Response::json(&crate::work_view::empty(now)));
-                };
-                let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
-                return Ok(Response::json(&crate::work_view::answer(&self.home, now)?));
-            }
+            // leaves (#1089), in one readers' hold (`work_view_snapshot`). The goals' read and the
+            // story's take no hold of their own, so that one is theirs; My Work's read takes one
+            // more within it.
+            "work-view" => return Ok(Response::json(&self.work_view_snapshot()?)),
             // The pages read the version alone (`local-api-token-client.ts`): the main page's
             // other fields, its curation and forget state among them, stay off their origin. Refresh
-            // now's request moves it too, as it is left, marked done and runs out (decision 117).
-            // It is counts, prints and times, no stored text, so it leaves outside the gate, whose
-            // rules could make two versions one (Codex on #1103).
+            // now's request moves it too, as it is left, marked done and runs out, and so do the
+            // checks, from either page (decision 117). It is counts, prints and times, no stored
+            // text, so it leaves outside the gate, whose rules could make two versions one (Codex on
+            // #1103).
             "work-view/version" => {
                 let base = version(&self.home)?.0;
                 let refresh = crate::my_work_run::refresh_version(&self.home, crate::db::now_ms());
-                let v = self.full_v(&format!("{base}:{refresh}"))?;
+                let reviews = crate::my_work::reviews_version(&self.home);
+                let v = self.full_v(&format!("{base}:{refresh}:{reviews}"))?;
                 return Ok(Response::json(&json!({ "v": v })));
             }
             // V3: the rule suggestions and the owner's rules, with the rules job's status line (V1).
@@ -3113,20 +3245,27 @@ fn again(e: &anyhow::Error) -> bool {
     })
 }
 
-/// A failure on the work-view's origin (decision 117): 503 to try again, as `failed` tells it, else
-/// 500, each in a sentence of the pages' own. The error's words can hold the configuration's
-/// values and the home's path, which the work-view's token does not reach; oboete's own page, whose
-/// token reaches the settings, still shows them (Codex on #1103).
+/// A failure on the work-view's origin (decision 117): 503 to try again, as `failed` tells it or as
+/// rules that kept changing while it read do (`work_view::Unsettled`), else 500, each in a
+/// sentence of the pages' own. The error's words can hold the configuration's values and the
+/// home's path, which the work-view's token does not reach; oboete's own page, whose token reaches
+/// the settings, still shows them (Codex on #1103). Nor does the 500 point to a page: oboete's own
+/// Refresh now shows its own notice for one (#1104).
 fn work_view_failed(e: &anyhow::Error) -> Response {
-    if again(e) {
+    let unsettled = e.chain().any(|c| c.is::<crate::work_view::Unsettled>());
+    if again(e) || unsettled {
         work_view_refused(503, "busy", "oboete is busy for a moment. Try again.")
     } else {
-        work_view_refused(
-            500,
-            "failed",
-            "oboete could not answer. Its own page shows why.",
-        )
+        work_view_refused(500, "failed", "oboete could not answer. Try again later.")
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot for this thread's next work-view check, run once its write is done and before the
+    /// snapshot after it is read: a test's way to make that read fail.
+    pub(crate) static CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `v` with every string through the outbound gate (spec 6.5), keys included.
