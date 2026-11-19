@@ -1,0 +1,305 @@
+diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
+index b87ccb2997402ca2c502cd53d1002b05ee041852..8de553468bd718cd12ff3cc96cb1055b0362512c 100644
+--- a/src/ui/my-work/src/live/local-source.ts
++++ b/src/ui/my-work/src/live/local-source.ts
+@@ -116,6 +116,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+   const MAX_CACHED_DETAILS = 8
+   /** The content of the last model handed to the screens, so an unchanged snapshot or a quiet minute is not sent again. */
+   let lastDeliveredSignature: string | null = null
++  // oboete (0006, #1108): how many models went to the screens, by an event or as an answer. A save
++  // keeps the live model in place of its answer only when one went while it was in flight: oboete
++  // polls in place of the event stream (0001), and a poll read before the write, its content the
++  // one on screen, reaches no screen and does not stand for the save.
++  let handedOut = 0
++  const handOut = (model: WorkModel) => { lastDeliveredSignature = modelSignature(model); handedOut++ }
+   // Accepted models are immutable. Connection-only wrappers share their content signature,
+   // so bootstrap and publication do not serialize the same request list again.
+   const modelSignatures = new WeakMap<object, string>()
+@@ -241,6 +247,11 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+     throw new Error('The worker returned an unreadable work view.')
+   }
+ 
++  /** oboete (0006, #1108): the work read once more after a write that answered its receipt alone, or the work on screen when that read fails. */
++  async function readAgain(): Promise<WorkModel | null> {
++    try { return await readOverview() } catch { return latestModel ? withConnection(latestModel) : null }
++  }
++
+   const isWorkViewSnapshot = (value: unknown): value is WorkViewSnapshot => {
+     const snapshot = value as WorkViewSnapshot | null
+     return !!snapshot && Array.isArray(snapshot.humanRequests) && typeof snapshot.source?.connected === 'boolean'
+@@ -248,7 +259,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+ 
+   /** POSTs to an origin-guarded work-view route that answers with the snapshot after the change. Anything else throws its reason. */
+   async function postForWorkModel(url: string, body: unknown, whatWasSaved: string, keepReceipt = false): Promise<RuleSaveResult> {
+-    const versionBeforeSave = modelVersion
++    const handedOutBeforeSave = handedOut
+     const syncBeforeSave = syncVersion
+     const generation = streamGeneration
+     const response = await fetchImpl(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+@@ -259,17 +270,24 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+       const message = `${whatWasSaved} was not saved: ${typeof reason === 'string' ? reason : `the worker answered ${response.status}`}`
+       // A 409 answers the snapshot the worker refused against, so the screen can show what changed.
+       if (isWorkViewSnapshot(snapshot)) {
+-        const model = latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration)
++        const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
+           ? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
+-        lastDeliveredSignature = modelSignature(model)
++        handOut(model)
+         throw new SaveRefusedError(message, model)
+       }
+       throw new Error(message)
+     }
+-    if (!isWorkViewSnapshot(answer)) throw new Error(`${whatWasSaved} was saved, but the worker sent back something that is not a work snapshot. Reload to see it.`)
+-    const newerModel = latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration) ? latestModel : null
++    if (!isWorkViewSnapshot(answer)) {
++      // oboete (0006, #1108): a write saved whose snapshot did not read answers its receipt alone.
++      const save = readSaveReceipt(answer)
++      const model = save ? await readAgain() : null
++      if (!save || !model) throw new Error(`${whatWasSaved} was saved, but the worker sent back something that is not a work snapshot. Reload to see it.`)
++      handOut(model)
++      return { model, savedRuleId: null, save }
++    }
++    const newerModel = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration) ? latestModel : null
+     const model = newerModel ? withConnection(newerModel) : acceptSnapshot(answer, false, syncBeforeSave)
+-    lastDeliveredSignature = modelSignature(model)
++    handOut(model)
+     // Undo needs this write's receipt, even if the live model has already moved on. Mapping the
+     // receipt separately must not replace the newer model used by the screen or detail reads.
+     const receipt = keepReceipt && newerModel ? withConnection(toWorkModel(answer, Date.now())) : model
+@@ -379,7 +397,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+             if (firstEvent === waiting) firstEvent = null
+           }
+           model ??= await readOverview()
+-          lastDeliveredSignature = modelSignature(model)
++          handOut(model)
+           return model
+         })().finally(() => { if (initialRead === pending) initialRead = null })
+         initialRead = pending
+@@ -455,7 +473,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+      */
+     async setRequestChecked(requestId, expectedFingerprint, checked, expectedReviewHash): Promise<ReviewResult> {
+       if (!CONTENT_FINGERPRINT_PATTERN.test(expectedFingerprint)) throw new Error(`Can't check ${requestId}: its recorded version (content fingerprint) is missing`)
+-      const versionBeforeSave = modelVersion
++      const handedOutBeforeSave = handedOut
+       const syncBeforeSave = syncVersion
+       const generation = streamGeneration
+       const response = await fetchImpl(WORK_VIEW_REVIEW_URL, {
+@@ -469,18 +487,26 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+       if (answer.kind === 'unavailable') return { outcome: 'unavailable', serverMessage: answer.serverMessage }
+       if (answer.kind === 'conflict') {
+         const latest = isWorkViewSnapshot(answer.snapshot)
+-          ? latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration)
++          ? latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
+             ? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
+           : await localSource.loadWorkModel()
++        // oboete (0006): this answer goes to the screen, whose signature claude-mem leaves as it was.
++        handedOut++
+         const latestFingerprint = latest.requests.find((request) => request.id === requestId)?.contentFingerprint
+         return conflictReason(expectedFingerprint, latestFingerprint) === 'refused'
+           ? { outcome: 'refused', serverMessage: answer.serverMessage, model: latest }
+           : { outcome: 'changed-while-reading', model: latest, serverMessage: answer.serverMessage }
+       }
+-      if (!isWorkViewSnapshot(answer.snapshot)) throw new Error('The local review was saved, but the worker sent back something that is not a work snapshot. Reload to see it.')
+-      const model = latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration)
++      if (!isWorkViewSnapshot(answer.snapshot)) {
++        // oboete (0006, #1108): a check saved whose snapshot did not read answers its receipt alone.
++        const model = answer.save ? await readAgain() : null
++        if (!answer.save || !model) throw new Error('The local review was saved, but the worker sent back something that is not a work snapshot. Reload to see it.')
++        handOut(model)
++        return { outcome: 'saved', model, save: answer.save }
++      }
++      const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
+         ? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
+-      lastDeliveredSignature = modelSignature(model)
++      handOut(model)
+       return { outcome: 'saved', model, ...(answer.save ? { save: answer.save } : {}) }
+     },
+ 
+@@ -521,6 +547,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+         const signature = modelSignature(model)
+         if (signature === lastDeliveredSignature) return
+         lastDeliveredSignature = signature
++        handedOut++
+         onWorkModel(model)
+       }
+       publishModel = sendIfChanged
+diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f372ce75af43fcbf61aecbc57b1468b06a6101cc
+--- /dev/null
++++ b/src/ui/my-work/src/live/oboete-saves.test.ts
+@@ -0,0 +1,174 @@
++// oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): a save's answer as the pages take it
++// on oboete's transport. oboete polls in place of claude-mem's event stream (0001), so a poll read
++// before a save can land while the save waits, its content the one on screen; and a write whose
++// snapshot did not read answers claude-mem's receipt alone.
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { afterEach, beforeEach, describe, it, mock } from 'node:test'
++import { createLocalSource } from './local-source.ts'
++import type { WorkViewSnapshot } from './work-view-api-types.ts'
++import { SaveRefusedError } from '../data.ts'
++
++const FIRST = 'a'.repeat(64)
++const SECOND = 'b'.repeat(64)
++const THIRD = 'c'.repeat(64)
++// One clock for every model, so that a snapshot read twice maps to one content.
++const NOW = Date.parse('2026-11-19T12:00:00.000Z')
++
++function snapshot(fingerprint = FIRST): WorkViewSnapshot {
++  const value: WorkViewSnapshot = JSON.parse(readFileSync(new URL('../../test-fixtures/work-view-snapshot.trimmed.json', import.meta.url), 'utf8'))
++  value.humanRequests = [{ ...value.humanRequests[0], id: 'request-a', contentFingerprint: fingerprint }]
++  return value
++}
++const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
++function deferred<T>() {
++  let resolve!: (value: T) => void
++  const promise = new Promise<T>((yes) => { resolve = yes })
++  return { promise, resolve }
++}
++class FakeStream {
++  readyState = 1
++  onopen: (() => void) | null = null
++  onerror: (() => void) | null = null
++  handlers = new Map<string, (event: { data: string }) => void>()
++  addEventListener(type: string, listener: (event: { data: string }) => void) { this.handlers.set(type, listener) }
++  emit(type: string, value: unknown) { this.handlers.get(type)?.({ data: JSON.stringify(value) }) }
++  close() { this.readyState = 2 }
++}
++/** A source whose POSTs wait for `held` and whose GETs `read` answers; each request is counted. */
++function harness(held: Promise<Response>, read: () => Promise<Response>) {
++  const streams: FakeStream[] = []
++  const calls = { posts: 0, gets: 0 }
++  const local = createLocalSource({
++    hostname: 'localhost',
++    fetchImpl: async (_url, init) => {
++      if (init?.method === 'POST') { calls.posts++; return held }
++      calls.gets++
++      return read()
++    },
++    eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
++  })
++  return { local, streams, calls }
++}
++
++describe('oboete: a save on the polling transport', () => {
++  beforeEach(() => { mock.method(Date, 'now', () => NOW) })
++  afterEach(() => { mock.restoreAll() })
++
++  it('a check answered while a poll of the content on screen lands shows the check', async () => {
++    const held = deferred<Response>()
++    const { local, streams } = harness(held.promise, async () => json(snapshot()))
++    const shown: string[] = []
++    const stop = local.subscribeToLiveUpdates((model) => shown.push(model.requests[0].contentFingerprint!), () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      const saving = local.setRequestChecked('request-a', FIRST, true)
++      // A poll read before the write: the content on screen, which reaches no screen again.
++      streams[0].emit('work-view', snapshot())
++      assert.deepEqual(shown, [FIRST])
++      held.resolve(json(snapshot(SECOND)))
++      const result = await saving
++      assert.equal(result.outcome, 'saved')
++      assert.equal('model' in result && result.model.requests[0].contentFingerprint, SECOND)
++    } finally { stop() }
++  })
++
++  it('a suggestion answered while a poll of the content on screen lands shows the answer', async () => {
++    const held = deferred<Response>()
++    const { local, streams } = harness(held.promise, async () => json(snapshot()))
++    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
++      const saving = local.answerRequestSuggestion!(suggestion, 'join')
++      streams[0].emit('work-view', snapshot())
++      held.resolve(json({ ...snapshot(SECOND), save: { scope: 'local', state: 'saved' } }))
++      const result = await saving
++      assert.equal(result.model.requests[0].contentFingerprint, SECOND)
++      assert.deepEqual(result.save, { scope: 'local', state: 'saved' })
++    } finally { stop() }
++  })
++
++  it('a save answered after a poll of new content reached the screens keeps that content', async () => {
++    const held = deferred<Response>()
++    const { local, streams } = harness(held.promise, async () => json(snapshot(THIRD)))
++    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      const saving = local.setRequestChecked('request-a', FIRST, true)
++      streams[0].emit('work-view', snapshot(THIRD))
++      held.resolve(json(snapshot(SECOND)))
++      const result = await saving
++      assert.equal('model' in result && result.model.requests[0].contentFingerprint, THIRD)
++    } finally { stop() }
++  })
++
++  it('a refusal answered after a read of the work reached the screen keeps that read', async () => {
++    const held = deferred<Response>()
++    const { local } = harness(held.promise, async () => json(snapshot(THIRD)))
++    const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
++    const saving = local.answerRequestSuggestion!(suggestion, 'not-this')
++    assert.equal((await local.loadWorkModel()).requests[0].contentFingerprint, THIRD)
++    held.resolve(json({ error: 'This suggestion changed while you were reading.', snapshot: snapshot(SECOND) }, 409))
++    await assert.rejects(saving, (error: unknown) => error instanceof SaveRefusedError && error.model.requests[0].contentFingerprint === THIRD)
++  })
++})
++
++describe('oboete: a receipt alone', () => {
++  beforeEach(() => { mock.method(Date, 'now', () => NOW) })
++  afterEach(() => { mock.restoreAll() })
++
++  for (const checked of [true, false]) {
++    it(`a ${checked ? 'check' : 'check undone'} answered with its receipt alone is saved, and the work read once`, async () => {
++      const receipt = { save: { scope: 'local', state: 'saved' } }
++      const { local, streams, calls } = harness(Promise.resolve(json(receipt)), async () => json(snapshot(SECOND)))
++      const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++      try {
++        streams[0].emit('work-view', snapshot())
++        const result = await local.setRequestChecked('request-a', FIRST, checked)
++        assert.equal(result.outcome, 'saved')
++        assert.deepEqual(result.outcome === 'saved' && result.save, { scope: 'local', state: 'saved' })
++        assert.equal(result.outcome === 'saved' && result.model.requests[0].contentFingerprint, SECOND)
++        assert.deepEqual(calls, { posts: 1, gets: 1 })
++      } finally { stop() }
++    })
++  }
++
++  it('a receipt whose read again fails is saved, with the work on screen', async () => {
++    const receipt = { save: { scope: 'local', state: 'saved' } }
++    const { local, streams, calls } = harness(Promise.resolve(json(receipt)), async () => { throw new TypeError('Failed to fetch') })
++    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      const result = await local.setRequestChecked('request-a', FIRST, true)
++      assert.equal(result.outcome, 'saved')
++      assert.equal(result.outcome === 'saved' && result.model.requests[0].contentFingerprint, FIRST)
++      assert.equal(calls.posts, 1)
++    } finally { stop() }
++  })
++
++  it('a suggestion answered with its receipt alone is saved, with its receipt', async () => {
++    const receipt = { save: { scope: 'local', state: 'saved', localMaterialization: 'pending' } }
++    const { local, streams, calls } = harness(Promise.resolve(json(receipt)), async () => json(snapshot(SECOND)))
++    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
++      const result = await local.answerRequestSuggestion!(suggestion, 'join')
++      assert.equal(result.model.requests[0].contentFingerprint, SECOND)
++      assert.deepEqual(result.save, { scope: 'local', state: 'saved', localMaterialization: 'pending' })
++      assert.deepEqual(calls, { posts: 1, gets: 1 })
++    } finally { stop() }
++  })
++
++  it('a 200 with neither a snapshot nor a receipt still says it was not shown', async () => {
++    const { local, streams } = harness(Promise.resolve(json({ ok: true })), async () => json(snapshot()))
++    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    try {
++      streams[0].emit('work-view', snapshot())
++      await assert.rejects(local.setRequestChecked('request-a', FIRST, true), /not a work snapshot/)
++      const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
++      await assert.rejects(local.answerRequestSuggestion!(suggestion, 'join'), /not a work snapshot/)
++    } finally { stop() }
++  })
++})

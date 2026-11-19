@@ -301,7 +301,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   pages directly too. Focus sharing and Team stay unbuilt (row 22). A control whose write oboete
   does not take yet is hidden until the pull request that takes it: adding a rule, and changing
   an area or a suggested one (#1085, #1102). Refresh now, and a request's check and its Undo, work
-  there (decision 117). claude-mem's installer is none
+  there (decision 117). A write the viewer saved is told as saved there, its answer a snapshot or
+  claude-mem's receipt alone, and no poll read before it stands for it (#1108). claude-mem's installer is none
   of the pages and is left out of the bundle: oboete's setup is `oboete setup` and its settings page.
 - The page's words are [GLOSSARY.md](../GLOSSARY.md)'s. In English a claim is a memory, and their list
   is Memories, since Learned is a summary's section, as in claude-mem (Claude; overrulable).
