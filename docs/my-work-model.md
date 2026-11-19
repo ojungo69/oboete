@@ -2257,9 +2257,11 @@ runs and leaves a run another live worker owns to it.
   windows takes every subject due now, not only those due an hour or more (`OVERDUE_MS`). It is
   still one call a round, so a refresh of n subjects takes n rounds, each ahead of the windows. A
   pass that finds no subject due now marks the request it read done, in a file of its own
-  (`my-work-refresh-done`, its time the request's; each marker is left in one step, a file of the
-  process's taking the time first, then replacing it, so no reader sees it at another time and a
-  failed mark leaves the one there: `my_work_run::mark`): the page only writes the request and the worker
+  (`my-work-refresh-done`, its time the request's; the mark is left in one step, a file of the
+  worker's taking the time first, then replacing it, so no reader sees it at another time and a
+  failed mark leaves the one there: `my_work_run::mark`; the request's own time is set once its
+  file is there, so a round begun meanwhile sees a request newer than its start, and a time that
+  cannot be set leaves no request): the page only writes the request and the worker
   only marks it, so neither removes what the other wrote, and a request the page leaves meanwhile
   stands. One 30 minutes old, or dated more than a minute ahead of the clock (a clock set back
   since), stands no more and changes nothing; a done mark dated that far ahead marks nothing done.

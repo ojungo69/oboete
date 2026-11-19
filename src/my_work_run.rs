@@ -37,7 +37,8 @@ pub(crate) fn refresh_done_path(home: &std::path::Path) -> std::path::PathBuf {
 
 /// Leaves `path` dated `at` in one step: a file of this process's takes the time, then replaces
 /// it, so that a reader never sees the marker at another time, and a mark that fails leaves the one
-/// there as it was (Codex on the work-view's writes).
+/// there as it was (Codex on the work-view's writes). The worker's done mark is left so: made first
+/// and dated after, it would be dated now for a moment, or for good, covering a newer request.
 fn mark(path: &std::path::Path, at: std::time::SystemTime) -> std::io::Result<()> {
     let own = path.with_extension(std::process::id().to_string());
     let marked = std::fs::File::create(&own)
@@ -1000,12 +1001,19 @@ fn refresh_with(
     std::fs::create_dir_all(path.parent().unwrap_or(home))?;
     // One write at a time, so a request's time never goes back under a later one's (cubic on
     // #827). The request is the file's time, set on a handle that writes (Windows refuses a
-    // read-only one), and left in one step (`mark`).
+    // read-only one) and taken once the file is there, so that a round begun meanwhile, which read
+    // no request, sees one newer than its start (Codex on #1103); a time that cannot be set leaves
+    // no request, as the page is told.
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    mark(&path, request_time(home, std::time::SystemTime::now()))?;
+    let file = std::fs::File::create(&path)?;
+    if let Err(e) = file.set_modified(request_time(home, std::time::SystemTime::now())) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(e.into());
+    }
     Ok(json!({"state": "started", "due": due}))
 }
 

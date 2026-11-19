@@ -3010,6 +3010,37 @@ fn the_work_views_version_leaves_outside_the_gate() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Decision 117, through the viewer with work due (Codex on #1103): a refresh over a home whose
+/// repository has a request to group answers `running` with its count, and leaves the request.
+#[test]
+fn the_work_views_refresh_leaves_a_request_when_work_is_due() {
+    let mut s = Store::new();
+    let home = s.home.path().to_owned();
+    let now = crate::db::now_ms();
+    s.said("s1", R, now - 10 * 60_000, "Fix the parser.");
+    s.run();
+    let config = "providers = []\n[my_work]\ncurate = true\n[summary]\ncurate = true\n";
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    let v = Viewer::new(&home, None, 4321, Token::Run("t0k".into()));
+    let made = work_view_token("t0k");
+    let headers = [
+        WV_HOST,
+        ("X-Oboete-Token", made.as_str()),
+        ("Origin", "http://work-view.localhost:4321"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", "2"),
+    ];
+    let answer = request(&v, "POST", "/api/work-view/refresh", &headers, b"{}");
+    let body = json_any(&answer);
+    assert_eq!(
+        (answer.status, &body["state"]),
+        (200, &json!("running")),
+        "{body}"
+    );
+    assert!(body["due"].as_u64().is_some_and(|n| n > 0), "{body}");
+    assert!(crate::my_work_run::refresh_request(&home, crate::db::now_ms()).is_some());
+}
+
 /// Decision 117: while a Refresh now request stands, the work-view's snapshot says it runs; the
 /// work-view's version moves as a request is left, marked done and runs out, never back to a value
 /// it had, so a snapshot read across a refresh is read again; the main page's version stays. A
