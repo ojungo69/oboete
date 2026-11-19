@@ -4074,7 +4074,15 @@ fn a_judge_answer_whose_token_is_replaced_while_it_waits_records_nothing() {
                 Head::File(_) => panic!("no link"),
             }
         });
-        at_lock.recv().unwrap();
+        if at_lock
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_err()
+        {
+            drop(held);
+            let _ = answer.join();
+            panic!("the answer never came to config.lock");
+        }
+        // A token asked before the lock (the regression) reads the old one in this time.
         std::thread::sleep(std::time::Duration::from_millis(200));
         write_token(&home).unwrap();
         drop(held);

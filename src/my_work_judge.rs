@@ -410,12 +410,10 @@ fn key((agent, session): &Key) -> Value {
 }
 
 /// Whether the my_work consumer has applied every op this device recorded, within
-/// `claims::applied_all`'s wait, under one deadline, for this device's newest op and the record
-/// index through this device's newest record (W3b-1: My Work finds a work state write's call
-/// there, which can be recorded after its op is applied): this device's newest op of a kind an
-/// answer reads (`Raw::answer_top`), read before both and so among what the wait took (the answer
-/// is appended only while it is still the newest), none only when the wait ran out; a worker or a
-/// store that failed is an error (#777).
+/// `claims::applied`'s wait for this device's newest op: this device's newest op of a kind an
+/// answer reads (`Raw::answer_top`), read before it and so among what the wait applied (W3b-1: the
+/// answer is appended only while it is still the newest), none only when the wait ran out; a
+/// worker or a store that failed is an error (#777).
 fn caught_up(home: &Path) -> Result<Option<i64>> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(Some(0));
@@ -423,13 +421,8 @@ fn caught_up(home: &Path) -> Result<Option<i64>> {
     let device = raw.device().to_owned();
     let read = raw.answer_top()?;
     let top = raw.max_op_seq_of(&device)?;
-    let records = raw.max_seq_of(&device)?;
     drop(raw);
-    let targets = [
-        (crate::knowledge::checkpoint::OPS, "my_work", top),
-        (crate::knowledge::checkpoint::SEQS, "fts", records),
-    ];
-    match crate::claims::applied_all(home, &k, &device, &targets, NAME) {
+    match crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")) {
         Ok(()) => Ok(Some(read)),
         Err(e) if e.is::<crate::claims::NotYet>() => Ok(None),
         Err(e) => Err(e),
@@ -451,11 +444,12 @@ struct Answer {
 /// request, into the request its pick is in now; Not this keeps them its own request, so a forget
 /// that takes the judge's op later leaves it so. Either closes the suggestion.
 ///
-/// W3b-1: it places what the request showed (its `Held`'s placement, checked against the groups
-/// read now, both anchors in their own groups), is appended only while this device has appended
-/// nothing since the newest op `caught_up` waited for and forget has denied nothing since its
-/// reading (`Raw::append_ops_at`), and only while `authorized` holds, which it asks under
-/// config.lock, where new tokens are made (R6): 401 with nothing recorded otherwise.
+/// W3b-1: it places what the request shows when it is checked (its `Held`'s placement, checked
+/// against the groups read now, both anchors in their own groups), is appended only while this
+/// device has appended no op of a kind an answer reads since `caught_up` read the newest
+/// (`Raw::answer_top`) and the forget fence of its reading is as it was (`Raw::append_ops_at`),
+/// and only while `authorized` holds, which it asks under config.lock, where new tokens are made
+/// (R6): 401 with nothing recorded otherwise.
 pub(crate) fn act(
     home: &Path,
     saving: &Mutex<()>,

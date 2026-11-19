@@ -1556,40 +1556,31 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
     assert_eq!(h.recorded(), before);
 }
 
-/// W3b-1 (Codex on #1113): a work state write whose op was applied, and whose call was recorded
-/// and not yet taken into the record index, before the answer: the answer is checked after the
-/// index takes it, which takes a conversation of the group into the request it names; refused,
-/// nothing recorded.
-#[test]
-fn an_answer_is_checked_after_the_record_index_takes_what_was_recorded() {
-    let mut h = Home::new();
-    let _served = suggested(&mut h);
-    h.said("s3", 10, "The trailing comma again.");
-    h.grouped(&["s2", "s3"], "");
-    let id = h.request_of("s3")["id"].clone();
-    let write = h.naming("B");
-    h.s.run();
-    h.called("s3", write);
-    let before = h.recorded();
-    let join = h.post(json!({"request": id, "action": "join"}));
-    assert_eq!(join, Err((409, "suggestion_changed")));
-    assert_eq!(h.recorded(), before);
-}
-
 /// Codex on #1113: a resident viewer an upgrade exec'd keeps the viewer's role and cannot run the
-/// worker's pass: an answer there, the record index behind by an agent's record, waits for the
-/// worker that runs, and lands.
+/// worker's pass: an answer there, with an op of this device the consumer has not applied yet,
+/// waits for the worker that runs, and lands.
 #[test]
 fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    /// Stops the worker's thread when the test ends, a failed one too.
+    struct Stop(std::sync::Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, SeqCst);
+        }
+    }
     let mut h = Home::new();
     let _served = suggested(&mut h);
     let id = h.request_of("s2")["id"].clone();
-    h.said("s5", 20, "Something else.");
+    h.grouped(&["s9"], "Unrelated");
     let home = h.s.home.path().to_owned();
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let running = std::sync::Arc::clone(&stop);
+    let stop = Stop(std::sync::Arc::new(AtomicBool::new(false)));
+    let running = std::sync::Arc::clone(&stop.0);
+    // Its first pass a while after the answer's start: the answer waits for the op, not finds it
+    // applied.
     let worker = std::thread::spawn(move || {
-        while !running.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(500));
+        while !running.load(SeqCst) {
             crate::worker::run_once(&home).unwrap();
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1597,28 +1588,22 @@ fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
     crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
     let answer = h.post(json!({"request": id, "action": "join"}));
     crate::executable::RESUMED_AS.set(None);
-    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(stop);
     worker.join().unwrap();
     assert_eq!(answer.unwrap()["state"], "applied");
     assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
 }
 
-/// Codex on #1113: the record index behind and this device's ops applied: a worker that fails is
-/// 503, and an index no worker moves, where none can run here, is 409 when the wait runs out;
-/// raw.db holds no answer after either.
+/// Codex on #1113: in a resident viewer an upgrade exec'd, an op of this device that no worker
+/// applies within the wait refuses the answer as pending (it cannot tell a worker that failed from
+/// one still busy), and raw.db holds no answer.
 #[test]
-fn a_record_index_that_does_not_catch_up_refuses_the_answer() {
+fn an_execd_viewers_answer_whose_op_no_worker_applies_is_pending() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
     let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
-    h.said("s5", 20, "Something else.");
+    h.grouped(&["s9"], "Unrelated");
     let before = h.recorded();
-    let lock = h.s.home.path().join("state").join("worker.lock");
-    std::fs::remove_file(&lock).unwrap();
-    std::fs::create_dir(&lock).unwrap();
-    assert_eq!(h.post(answer.clone()), Err((503, "my_work_unavailable")));
-    std::fs::remove_dir(&lock).unwrap();
-    assert_eq!(h.recorded(), before);
     crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
     crate::claims::WAIT.set(Some(Duration::from_millis(300)));
     let pending = h.post(answer);
@@ -1626,4 +1611,23 @@ fn a_record_index_that_does_not_catch_up_refuses_the_answer() {
     crate::executable::RESUMED_AS.set(None);
     assert_eq!(pending, Err((409, "my_work_pending")));
     assert_eq!(h.recorded(), before);
+}
+
+/// Codex on #1113: the worker busy (in a provider's call, which keeps it from the record index)
+/// and an agent's record not yet indexed: the answer is not held for the index, and is recorded,
+/// told as pending while the worker cannot apply it.
+#[test]
+fn an_answer_lands_while_the_worker_is_busy_and_the_record_index_is_behind() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    h.said("s5", 20, "Something else.");
+    let before = h.recorded();
+    let busy = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
+    crate::claims::WAIT.set(Some(Duration::from_millis(300)));
+    let landed = h.post(answer);
+    crate::claims::WAIT.set(None);
+    drop(busy);
+    assert_eq!(landed.unwrap()["state"], "pending");
+    assert_eq!(h.recorded(), before + 1);
 }

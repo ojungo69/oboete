@@ -592,7 +592,9 @@ fn correction_recorded(
 /// by the worker already running (which wakes on the new op). At once when `consumer` has them;
 /// else within 10 seconds, the worker's pass in this process among them (a pass begun ends
 /// first), else `NotYet`, which says the `what` is recorded (#777). A worker or a store that fails
-/// is an error of its own.
+/// is an error of its own. The pass runs here only where this process may run the worker
+/// (`executable::may_run_worker`: a resident viewer an upgrade exec'd keeps the viewer's role and
+/// cannot, #1113); there the wait is for the worker that runs.
 pub(crate) fn applied(
     home: &std::path::Path,
     k: &Connection,
@@ -601,33 +603,18 @@ pub(crate) fn applied(
     (what, consumer): (&str, &str),
 ) -> Result<()> {
     let at = seqs.last().copied().unwrap_or(0);
-    let ops = crate::knowledge::checkpoint::OPS;
-    applied_all(home, k, device, &[(ops, consumer, at)], what)
-}
-
-/// `applied` for several checkpoints of `device` at once, each `(table, consumer, at)` past `at`,
-/// under one deadline and one worker's pass (J4, W3b-1: the my_work consumer's ops and the record
-/// index My Work finds a work state write's call in). The pass runs in this process only where
-/// this process may run the worker (`executable::may_run_worker`: a resident viewer an upgrade
-/// exec'd cannot); else the worker that runs takes the work, and the wait is for it.
-pub(crate) fn applied_all(
-    home: &std::path::Path,
-    k: &Connection,
-    device: &str,
-    targets: &[(&str, &str, i64)],
-    what: &str,
-) -> Result<()> {
     let wait = std::time::Duration::from_secs(10);
     #[cfg(test)]
     let wait = WAIT.get().unwrap_or(wait);
     let deadline = std::time::Instant::now() + wait;
     let done = || -> Result<bool> {
-        for &(table, consumer, at) in targets {
-            if crate::knowledge::checkpoint::get_in(k, table, consumer, device)? < at {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        let got = crate::knowledge::checkpoint::get_in(
+            k,
+            crate::knowledge::checkpoint::OPS,
+            consumer,
+            device,
+        )?;
+        Ok(got >= at)
     };
     if done()? {
         return Ok(());
