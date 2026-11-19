@@ -174,9 +174,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    not reported complete, is refused with 409, and the page reloads the request. Undo is the same
    route with `checked: false`. The work-view's pages check on their own origin (decision 117):
    `POST /api/work-view/review` takes `{requestId, expectedFingerprint, checked}` as claude-mem's
-   pages post it, and finds the request by its id in their snapshot, read under the rules that
-   snapshot is made under, from every range; an id no request goes by is 404, and the answer is
-   the snapshot after the check, which a 409 carries too, read once the reviews' lock is let go.
+   pages post it (and their `expectedReviewHash`, a shared review's, which it takes and does not
+   read), and finds the request by its id in their snapshot, read under the rules that snapshot
+   is made under, from every range; an id no request goes by is 404, and the answer is the
+   snapshot after the check, read once the reviews' lock is let go, which a 409 carries too when
+   it reads (a 409 whose snapshot does not read comes without one, and the pages read it again).
    A check saved whose snapshot does not read is answered with claude-mem's receipt alone, and the
    work-view's version moves with the checks, from either page.
 7. **The page**: a My Work tab, first and opened by default, as claude-mem opens on My Work; the

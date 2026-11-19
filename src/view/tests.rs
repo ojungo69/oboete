@@ -9048,9 +9048,8 @@ fn checked_fixture() -> (Store, Viewer) {
 /// no request goes by 404, with no snapshot; a version not the current one and a check of a
 /// request not ready are 409 with the snapshot; none writes a check. A
 /// conversation's own request goes by its key, however long its id makes it, and a request that
-/// has left the week is still the one it was: its check is saved, and the snapshot no longer shows
-/// it (the pages then say it was saved for the version read). The fingerprint goes as it came,
-/// though a rule matches hex digits.
+/// has left the week is still the one it was: its Undo is taken, and the snapshot it answers with
+/// does not show it. The fingerprint goes as it came, though a rule matches hex digits.
 #[test]
 fn the_work_views_check_saves_a_version_and_refuses_the_rest() {
     if !in_child("view::tests::the_work_views_check_saves_a_version_and_refuses_the_rest") {
