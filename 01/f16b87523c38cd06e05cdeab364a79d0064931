@@ -1,0 +1,41 @@
+assets/work-view/assets/index-szPtshmY.js
+  s_52c3955e48bff4::t_8ff18af904ec50 1-2,39
+assets/work-view/assets/my-rules-DOfWaH5y.js
+  s_52c3955e48bff4::t_6406709a27b3f5 1
+assets/work-view/assets/past-focus-CMoIsI5R.js
+  s_52c3955e48bff4::t_4d236eaf3464c6 1
+assets/work-view/assets/request-detail-ByUrdt8L.js
+  s_52c3955e48bff4::t_346b5b3f2620cd 1
+assets/work-view/assets/suggested-areas-B9N8LVoY.js
+  s_52c3955e48bff4::t_ffbf3a0222757e 1
+assets/work-view/assets/swipe-to-decide-Y9qI6krk.js
+  s_52c3955e48bff4::t_e73790b707e1c2 1
+assets/work-view/assets/textarea-CGLLNm2X.js
+  s_52c3955e48bff4::t_fdd668861b7296 46
+assets/work-view/index.html
+  s_52c3955e48bff4::t_c93b8eb893554d 9-10
+docs/page.md
+  s_52c3955e48bff4::t_f1d20ab2745620 304-305
+docs/spike/work-view.md
+  s_52c3955e48bff4::t_50f97f7b77ab3a 129-130
+ui/work-view/README.md
+  s_52c3955e48bff4::t_dac0d30c2434d9 14
+ui/work-view/patches/0006-saved-answers.patch
+  s_52c3955e48bff4::t_6095b64587ea06 1-305
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "01f16b87523c38cd06e05cdeab364a79d0064931",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
