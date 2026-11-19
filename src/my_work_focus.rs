@@ -560,6 +560,31 @@ fn write(home: &Path, ops: Vec<(String, Map<String, Value>)>) -> Result<Value, R
     Ok(json!({"state": if applied { "applied" } else { "pending" }}))
 }
 
+/// What J4 checks an answer against (W3b-1), from one read of My Work (`held_in`).
+pub(crate) struct Checked {
+    /// The request's held id.
+    pub(crate) held: String,
+    /// The conversations an answer to its suggestion places (`Held::placement`).
+    pub(crate) placement: Vec<(String, String)>,
+    /// The held ids of every request read.
+    pub(crate) current: std::collections::HashSet<String>,
+}
+
+/// `held_of` with what J4 checks an answer against, from the same read.
+pub(crate) fn held_in(home: &Path, shown: &str) -> Result<Option<Checked>> {
+    let (answer, held) = crate::my_work::reviewing(home, crate::db::now_ms())?;
+    let answer = crate::view::answered("my-work", answer);
+    let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
+    let Some(i) = requests.iter().position(|r| r["id"] == shown) else {
+        return Ok(None);
+    };
+    Ok(Some(Checked {
+        held: held[i].id().to_owned(),
+        placement: held[i].placement().to_vec(),
+        current: held.iter().map(|h| h.id().to_owned()).collect(),
+    }))
+}
+
 /// The held id of the request My Work shows as `shown`, read as the page reads it.
 pub(crate) fn held_of(home: &Path, shown: &str) -> Result<Option<String>> {
     let (answer, held) = crate::my_work::reviewing(home, crate::db::now_ms())?;

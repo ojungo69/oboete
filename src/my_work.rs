@@ -711,6 +711,10 @@ struct Request {
     /// J4: the held id of the request a judge's open suggestion on its anchor names, the one the
     /// picked anchor is in now.
     suggested: Option<String>,
+    /// J4: the conversations an answer to the judge's open suggestion on its anchor places, the
+    /// group's members as the fold has them; none when the answer would place others than it
+    /// shows (W3b-1).
+    placement: Vec<Key>,
 }
 
 impl Request {
@@ -724,6 +728,7 @@ impl Request {
             owns: Vec::new(),
             work: Vec::new(),
             suggested: None,
+            placement: Vec::new(),
         }
     }
 
@@ -1465,10 +1470,30 @@ fn build(
             r.group_ops = group
                 .map(|g| g.ops.iter().cloned().collect())
                 .unwrap_or_default();
+            // J4 (W3b-1): a suggestion is shown only when its answer places what this request
+            // shows (`regular`): the anchor in its own group, each of the group's members a
+            // conversation the request owns whole and no other; and the target's anchor in its own
+            // group. J4 writes both anchors, which the fold would otherwise take out of where they
+            // are now. The placement goes with a regular request's open suggestion whatever its
+            // target, which the answer checks itself.
+            let members = group.map(|g| g.members.clone()).unwrap_or_default();
+            let owned: HashSet<&Key> = (r.owns.iter())
+                .filter(|(_, own)| matches!(own, Owns::All))
+                .map(|(key, _)| key)
+                .collect();
+            let whole = owned.len() == r.owns.len()
+                && owned.len() == members.len()
+                && members.iter().all(|m| owned.contains(m));
+            let in_its_own = |anchor: &Key| grouped.of.get(anchor) == Some(anchor);
+            let regular = whole && in_its_own(anchor);
             r.suggested = (grouped.suggested.get(anchor))
                 .and_then(|picked| grouped.of.get(picked))
                 .filter(|target| *target != anchor)
+                .filter(|target| regular && in_its_own(target))
                 .map(|target| Id::Group(target.clone()).held());
+            if regular && grouped.suggested.contains_key(anchor) {
+                r.placement = members;
+            }
         }
     }
     Ok(Built {
@@ -1602,6 +1627,8 @@ pub(crate) struct Held {
     sources: Sources,
     /// The held id of the request the judge's open suggestion names (J4).
     suggested: Option<String>,
+    /// The conversations that suggestion's answer places (J4, W3b-1).
+    placement: Vec<Key>,
     /// The conversation that suggestion is about, as `sessions` shows it (its id and fingerprint),
     /// which a Join follows to where it went (#777).
     about: Option<Value>,
@@ -1614,6 +1641,12 @@ pub(crate) struct Held {
 impl Held {
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The conversations an answer to the judge's open suggestion on this request places (J4,
+    /// W3b-1); none when it has none, or when the answer would place others than it shows.
+    pub(crate) fn placement(&self) -> &[Key] {
+        &self.placement
     }
 }
 
@@ -2623,6 +2656,7 @@ fn answer(
         sessions: swept_by,
         sources,
         suggested: r.suggested.clone(),
+        placement: r.placement.clone(),
         about,
         sole: Vec::new(),
     };

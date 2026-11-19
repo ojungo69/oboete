@@ -1662,6 +1662,25 @@ pub(crate) fn max_seq_in(conn: &Connection, device: &str) -> Result<i64> {
     )?)
 }
 
+/// `device`'s newest op of a kind an owner's answer reads (J4, W3b-1): every kind but those
+/// curation writes all day, which move no conversation between requests, so that curation running
+/// does not refuse the answers (on this PC's store, 2026-11-20: 174 of a day's 3,951 appends hold
+/// an op of the kinds it reads; a check of 2 s meets one 0.39% of the time, and any op 9.1%). Read
+/// newest first, through the key, to the first (0.02 ms there).
+pub(crate) fn answer_top_in(conn: &Connection, device: &str) -> Result<i64> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT op_seq FROM ops WHERE device = ?1
+               AND type NOT IN ('claim', 'window', 'turn', 'digest', 'correction')
+             ORDER BY op_seq DESC LIMIT 1",
+            [device],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
 pub(crate) fn max_op_seq_in(conn: &Connection, device: &str) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
@@ -1908,6 +1927,20 @@ impl std::fmt::Display for HistoryCovered {
 }
 
 impl std::error::Error for HistoryCovered {}
+
+/// J4: an owner's answer refused inside its transaction, this device having appended an op the
+/// answer reads, or a forget having denied more, since the answer was checked (`append_ops_at`):
+/// nothing was written.
+#[derive(Debug)]
+pub struct OpsMoved;
+
+impl std::fmt::Display for OpsMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the stores moved since this answer was checked: it was not recorded")
+    }
+}
+
+impl std::error::Error for OpsMoved {}
 
 /// Every device's exclusion ops in time order, each entry set by the last op that names it: the
 /// repositories `oboete exclude` keeps from being sent, and what is never recorded (level
@@ -6746,6 +6779,45 @@ impl Raw {
         let now: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
         if now != fence {
             return Err(crate::curate::ListChanged.into());
+        }
+        for (kind, body) in ops {
+            anyhow::ensure!(
+                !forgotten_op(&tx, *kind, body)?,
+                "a forget request invalidated this derived batch; it was not recorded"
+            );
+        }
+        let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
+        tx.commit()?;
+        Ok(seqs)
+    }
+
+    /// This device's newest op of a kind an owner's answer reads (`answer_top_in`), which the
+    /// answer is appended against (`append_ops_at`).
+    pub fn answer_top(&self) -> Result<i64> {
+        answer_top_in(&self.conn, &self.device)
+    }
+
+    /// `append_ops` for an owner's answer checked against the stores as they stood at this device's
+    /// op `top` of a kind it reads (`answer_top`) and the forget fence `fence` (`fence_count`, J4):
+    /// only while this device has appended no such op since and forget denies what it denied
+    /// then, compared inside the write; else nothing is written and the error is `OpsMoved`. A
+    /// judge's or grouping's op, a work state write, an exclusion and a forget are all such ops or
+    /// denials here; curation's claims, windows, turns, digests and corrections are not.
+    pub fn append_ops_at(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        top: i64,
+        fence: i64,
+    ) -> Result<Vec<i64>> {
+        let bodies = within_batch_cap(ops)?;
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
+        let now: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
+        if now != fence || answer_top_in(&tx, &self.device)? != top {
+            return Err(OpsMoved.into());
         }
         for (kind, body) in ops {
             anyhow::ensure!(

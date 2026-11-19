@@ -2060,8 +2060,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   `not-this`, past the save gate as the other owner actions. Refused before it writes: 400
   `bad_request` (another shape, an id of no length or over 80 characters); 404
   `suggestion_not_found` (no such request, or no open suggestion on it); 409
-  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 503
-  `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
+  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 409
+  `suggestion_changed` and `my_work_pending`, and 401, when the answer would place other
+  conversations than the request shows, or the stores or the token moved before its write
+  (W3b-1, below); 503 `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
   My Work again and says what was done; a Join from the request's page shows the request it
   joined, whose id stays.
 - **The op**: one op of job `judge` by the owner (no entry), about the conversation's repository,
@@ -2095,12 +2097,55 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   placed takes none. The catch-up before an answer resolves at once when the consumer has applied
   what this device recorded; else the worker's pass in the viewer's process (when no other worker
   holds the lock) and the wait share the 10 seconds, a pass begun ending first. A worker or a store
-  that fails is 503 `my_work_unavailable`; only a wait that runs out is 409 `my_work_pending`. A
+  that fails is 503 `my_work_unavailable`; of the catch-up, only a wait that runs out is 409
+  `my_work_pending` (the append's guard is the other, W3b-1 below). A
   suggestion names the conversation it is about, by the id the page has it, which a Join follows to
   where it went, not the request's member active last. The poll after an answer whose read
   succeeded finds nothing new. A redraw keeps the search field the owner types in, with its caret.
   A move applied and not read is drawn where the store has it, so that a later move's Undo goes
   back there.
+- **Checked to its write** (W3b-1, 2026-11-20): My Work shows a suggestion only when its answer
+  places what the request shows: the conversation's anchor in its own group, every conversation of
+  that group one the request owns whole (none of them taken by a request a work state names), and
+  the anchor of the request the pick is in in its own group too, as J4 writes both anchors, which
+  the fold would otherwise take out of where they are. The request's `Held` keeps the
+  conversations an answer places. The route checks the answer against them, from one read of My
+  Work and the fold after the catch-up: 409 `suggestion_changed` when the fold's conversations are
+  other than those (a page read before they moved, or a suggestion the page did not show); a Join
+  whose pick's request's anchor (`of` of the pick, the anchor J4 writes first; the request the
+  suggestion names, the one the pick is in now) is not in its own group, or whose request is no
+  request now (a work state took its conversations), 409 `suggestion_target_gone`. The op is
+  appended only while this device has appended no op of a kind the answer reads since the
+  catch-up read it (every kind but
+  curation's claims, windows, turns, digests and corrections, which move no conversation between
+  requests: on this PC, 174 of a day's 3,951 appends hold one of the others, so that a check of
+  2 seconds meets one 0.39% of the time, where any op would refuse 9.1%) and the forget fence of
+  the answer's reading is as it was (`Raw::append_ops_at` against `FENCE_COUNT`: forget's denials
+  and ops, history forgets, masked ranges): else 409 `my_work_pending`, nothing written, as for a
+  catch-up that runs out (the page says My Work is still taking in a change). A resident viewer an
+  upgrade exec'd keeps the viewer's role and runs no pass of the worker itself
+  (`executable::may_run_worker`, in every owner action's wait, `claims::applied`): it waits for
+  the worker that runs, and a wait that runs out there is 409 whether that worker failed or is
+  still busy. The page's token is asked again under config.lock, where new
+  tokens are made, before the append: a token replaced while the answer waited is 401, nothing
+  written. The page posts the request and the action, not the suggestion it read: the answer is
+  checked against My Work as read when it is answered (as before), and a card read before a member
+  joined the group answers for the group as it is (the binding to the card read: W3b-2, #1114).
+  Known limits (#1114): what changes My Work's requests without an op of the kinds fenced, between
+  the check and the write, is not fenced: a hook record (agents record all day: the call record of
+  a work state write that names a request, arriving after its op, can take a conversation of the
+  group into that request after the check, and the answer then places it in the fold, where the
+  request the work state names outranks the group), and in the same way such a call recorded
+  before the answer that the record index has not taken yet (the answer does not wait for the
+  index: the worker indexes records between its calls to a provider, and on this PC on
+  2026-11-19 a day held 4,628 calls, 7.6 hours of them, 608 longer than the answer's wait of 10
+  seconds); curation's summaries and cards, which move My Work's bounded reads; retention's expiry
+  of a record a request is made from. The catch-up waits for the my_work consumer alone: an op it
+  applied that another consumer My Work reads (cards, turns) has not applied yet, a hide among
+  them, can take a request away after the check. A store replaced between the check and the
+  append is not fenced: knowledge.db rebuilt, whose replay can show a suggestion open before an
+  earlier answer to it, and raw.db restored, whose op sequence can be reused. Another device's ops
+  are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).

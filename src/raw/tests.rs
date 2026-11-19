@@ -3731,3 +3731,59 @@ fn a_store_whose_write_lock_is_held_opens_at_once() {
     assert!(opened.is_ok(), "{:?}", opened.err());
     assert!(took < std::time::Duration::from_millis(500), "{took:?}");
 }
+
+/// J4 (W3b-1): an owner's answer is appended only on the stores it was checked on: this device's
+/// newest op of a kind the answer reads and the forget fence; else nothing is written. Curation's
+/// ops in between leave it be.
+#[test]
+fn an_answer_is_appended_only_on_the_stores_it_was_checked_on() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let answer = || [(OpKind::MyWork, serde_json::json!({"text": "an answer"}))];
+    let curated = || [(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))];
+    let checked = |raw: &Raw| (raw.answer_top().unwrap(), raw.fence_count().unwrap());
+    let written = |raw: &Raw| raw.max_op_seq_of(raw.device()).unwrap();
+    raw.append_ops(&answer()).unwrap();
+    raw.append_ops(&curated()).unwrap();
+    let (top, fence) = checked(&raw);
+    assert_eq!(top, 1, "the newest op it reads, not curation's");
+    // Curation since the check: appended.
+    raw.append_ops(&curated()).unwrap();
+    let seqs = raw.append_ops_at(&answer(), top, fence).unwrap();
+    assert_eq!(seqs, vec![4]);
+    // An op it reads since the check: a regroup, an exclusion.
+    let moves: [fn(&mut Raw); 2] = [
+        |raw| {
+            raw.append_ops(&[(OpKind::MyWork, serde_json::json!({}))])
+                .unwrap();
+        },
+        |raw| {
+            raw.exclude_capture(("repo", "github.com/x/other"), false)
+                .unwrap();
+        },
+    ];
+    for moved in moves {
+        let (top, fence) = checked(&raw);
+        moved(&mut raw);
+        let before = written(&raw);
+        let refused = raw.append_ops_at(&answer(), top, fence).unwrap_err();
+        assert!(refused.is::<OpsMoved>(), "{refused:#}");
+        assert_eq!(written(&raw), before, "nothing written");
+    }
+    // A forget's denial since the check, with no op.
+    let (top, fence) = checked(&raw);
+    let device = raw.device().to_owned();
+    raw.conn
+        .execute(
+            "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+             VALUES ('o', ?1, 1, 0, 's', 'j')",
+            [&device],
+        )
+        .unwrap();
+    let before = written(&raw);
+    let refused = raw.append_ops_at(&answer(), top, fence).unwrap_err();
+    assert!(refused.is::<OpsMoved>(), "{refused:#}");
+    assert_eq!(written(&raw), before, "nothing written");
+    let (top, fence) = checked(&raw);
+    raw.append_ops_at(&answer(), top, fence).unwrap();
+}

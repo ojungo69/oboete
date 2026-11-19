@@ -2988,6 +2988,7 @@ fn a_copy_joins_the_request_that_holds_its_call() {
             files: Vec::new(),
         },
         suggested: None,
+        placement: Vec::new(),
         about: None,
         sole: if sole { vec![key.clone()] } else { Vec::new() },
     };

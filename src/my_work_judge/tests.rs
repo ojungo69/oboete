@@ -913,7 +913,7 @@ impl Home {
 
     fn post(&self, body: Value) -> std::result::Result<Value, (u16, &str)> {
         let body = serde_json::to_vec(&body).unwrap();
-        act(self.s.home.path(), &Mutex::new(()), &body).map_err(|r| (r.status, r.code))
+        act(self.s.home.path(), &Mutex::new(()), &body, &|| true).map_err(|r| (r.status, r.code))
     }
 
     /// A grouping op that leaves `session` out of every request, as the model's.
@@ -937,6 +937,51 @@ impl Home {
         };
         let op = serde_json::to_value(op).unwrap();
         self.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    }
+
+    /// A work state write in `session` naming request `id`, as the server appends it and the
+    /// agent's call records it 20 ms after (W3b-1).
+    fn named(&mut self, session: &str, id: &str) {
+        let write = self.naming(id);
+        self.called(session, write);
+    }
+
+    /// A work state write naming request `id`, as the server appends it: its time and fields.
+    fn naming(&mut self, id: &str) -> (i64, serde_json::Map<String, Value>) {
+        let fields = json!({"task": "notes", "request_id": id, "request": "Write the notes",
+            "status": "doing"});
+        let fields = fields.as_object().unwrap().clone();
+        let seq = (self.s.raw.work_state(R, "notes", &fields, None)).unwrap();
+        let ts: i64 = Connection::open(self.s.home.path().join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT ts FROM ops WHERE device = ?1 AND op_seq = ?2",
+                rusqlite::params![self.s.raw.device(), seq],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (ts, fields)
+    }
+
+    /// The agent's call in `session` that sent the write `naming` made, recorded 20 ms after it.
+    fn called(&mut self, session: &str, (ts, fields): (i64, serde_json::Map<String, Value>)) {
+        let input = json!({"list": "notes", "fields": fields}).to_string();
+        let body = json!({"tool": "mcp__oboete__work_state_write", "input": input,
+            "output": "Saved.", "failed": false});
+        self.s.event("tool", session, (R, "main"), ts + 20, body);
+    }
+
+    /// The judge's ops raw.db holds, applied or not (W3b-1: what an answer wrote, if any).
+    fn recorded(&self) -> i64 {
+        Connection::open(self.s.home.path().join("raw.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ops WHERE type = 'my_work'
+                   AND json_extract(body, '$.job') = 'judge'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
     }
 
     /// The home after the record `seq` of this device was forgotten and purged.
@@ -1216,7 +1261,7 @@ fn catch_up_does_not_wait_for_unrelated_work_after_its_checkpoint_is_applied() {
     let _served = suggested(&mut h);
     let _held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
     let started = std::time::Instant::now();
-    assert!(caught_up(h.s.home.path()).unwrap());
+    assert!(caught_up(h.s.home.path()).unwrap().is_some());
     let took = started.elapsed();
     assert!(took < Duration::from_secs(1), "{took:?}");
 }
@@ -1295,4 +1340,294 @@ fn the_judges_evidence_is_in_the_notes_language() {
     for (language, ja) in [("Japanese", true), ("English", false), ("French", false)] {
         assert_eq!(config::notes_japanese(language), ja, "{language}");
     }
+}
+
+/// W3b-1: a suggestion whose answer would take an anchor out of where it is now is not shown: the
+/// carrier's anchor moved into another request since, or the target's; a Join to it is refused
+/// then, recording nothing, and Not this, which moves only its own conversations, closes it.
+#[test]
+fn a_suggestion_whose_answer_would_move_an_anchor_is_not_shown() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s3", 10, "The trailing comma again.");
+    h.grouped(&["s2", "s3"], "");
+    assert!(
+        h.request_of("s3").get("suggestion").is_some(),
+        "shown while it places what it shows"
+    );
+    h.said("s4", 12, "Another thing entirely.");
+    h.grouped(&["s4", "s2"], "Other");
+    let carrier = h.request_of("s3");
+    assert!(carrier.get("suggestion").is_none(), "{carrier}");
+
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s7", -5, "Seven.");
+    h.grouped(&["s7", "s1"], "Seven");
+    assert_eq!(h.request_of("s2")["suggestion"]["title"], "Seven");
+    h.said("s8", -8, "Eight.");
+    h.grouped(&["s8", "s7"], "Eight");
+    let own = h.request_of("s2");
+    assert!(own.get("suggestion").is_none(), "{own}");
+    let before = h.recorded();
+    let join = h.post(json!({"request": own["id"], "action": "join"}));
+    assert_eq!(join, Err((409, "suggestion_target_gone")));
+    assert_eq!(h.recorded(), before);
+    let not_this = h.post(json!({"request": own["id"], "action": "not-this"}));
+    assert_eq!(not_this.unwrap()["state"], "applied");
+}
+
+/// W3b-1: an answer from a page read before the carrier's anchor moved is refused for either
+/// action, and nothing is recorded.
+#[test]
+fn an_answer_whose_placement_changed_is_refused_and_records_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s3", 10, "The trailing comma again.");
+    h.grouped(&["s2", "s3"], "");
+    let id = h.request_of("s3")["id"].clone();
+    h.said("s4", 12, "Another thing entirely.");
+    h.grouped(&["s4", "s2"], "Other");
+    let before = h.recorded();
+    for action in ["join", "not-this"] {
+        let answer = h.post(json!({"request": id, "action": action}));
+        assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
+    }
+    assert_eq!(h.recorded(), before);
+}
+
+/// W3b-1: an op this device appends of a kind the answer reads (a regroup, here of another
+/// conversation), or a forget's denial, between the answer's check and its write refuses it, and
+/// nothing is recorded.
+#[test]
+fn the_stores_moving_between_the_check_and_the_write_refuse_the_answer() {
+    /// What moves the stores, by its name.
+    type Moved = (&'static str, fn(&std::path::Path));
+    let moves: [Moved; 2] = [
+        ("a regroup", |home| {
+            let mut raw = crate::raw::open(home).unwrap();
+            let op = MyWorkOp {
+                job: "group".into(),
+                about: R.into(),
+                entry: "fake".into(),
+                ts: crate::db::now_ms(),
+                read: Read::default(),
+                removed: vec![],
+                fields: BTreeMap::from([
+                    (
+                        "groups".to_owned(),
+                        json!([{"conversations": [["claude", "s9"]], "title": "Elsewhere",
+                            "links": []}]),
+                    ),
+                    ("ignored".to_owned(), json!([])),
+                ]),
+                skipped: false,
+                forgotten: None,
+            };
+            let op = serde_json::to_value(op).unwrap();
+            raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        }),
+        ("a forget's denial", |home| {
+            let raw = Connection::open(home.join("raw.db")).unwrap();
+            raw.execute(
+                "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+                 VALUES ('o', 'd', 1, 0, 's', 'j')",
+                [],
+            )
+            .unwrap();
+        }),
+    ];
+    for (what, move_) in moves {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        let home = h.s.home.path().to_owned();
+        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || move_(&home))));
+        let before = h.recorded();
+        assert_eq!(
+            h.answer_on("s2", "join"),
+            Err((409, "my_work_pending")),
+            "{what}"
+        );
+        assert_eq!(h.recorded(), before, "{what}");
+        assert!(
+            h.request_of("s2").get("suggestion").is_some(),
+            "{what}: still open"
+        );
+    }
+}
+
+/// W3b-1, R6: an answer whose token was replaced while it waited records nothing.
+#[test]
+fn an_answer_whose_token_was_replaced_records_nothing() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let body = json!({"request": h.request_of("s2")["id"], "action": "join"});
+    let body = serde_json::to_vec(&body).unwrap();
+    let before = h.recorded();
+    let refused = act(h.s.home.path(), &Mutex::new(()), &body, &|| false).unwrap_err();
+    assert_eq!((refused.status, refused.code), (401, "token"));
+    assert_eq!(h.recorded(), before);
+    assert!(h.request_of("s2").get("suggestion").is_some(), "still open");
+}
+
+/// W3b-1: curation's op between the answer's check and its write leaves it be: the worker writes
+/// claims, windows and turns all day, and an answer is not refused for them.
+#[test]
+fn curation_between_the_check_and_the_write_leaves_the_answer_be() {
+    let mut h = Home::new();
+    let (_served, ask) = suggested(&mut h);
+    let home = h.s.home.path().to_owned();
+    let curated = move || {
+        let mut raw = crate::raw::open(&home).unwrap();
+        let text = "Build the parser.";
+        let evidence = crate::claims::Evidence {
+            device: raw.device().to_owned(),
+            seq: ask,
+            offset: 0,
+            length: text.len() as i64,
+            sentence: 0,
+            quote: text.into(),
+            claim_at: None,
+        };
+        let op = crate::claims::ClaimOp {
+            id: format!("c{ask}"),
+            kind: "decision".into(),
+            status: "decided".into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: text.into(),
+            evidence: vec![evidence],
+            supersedes: Vec::new(),
+            recipe: "test".into(),
+            tier: 1,
+            why: String::new(),
+            tainted: false,
+            support: Vec::new(),
+        };
+        let op = serde_json::to_value(op).unwrap();
+        raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(curated)));
+    assert_eq!(h.answer_on("s2", "join").unwrap()["state"], "applied");
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
+}
+
+/// W3b-1: Join is refused when the request its pick is in is no request now (a work state took
+/// that conversation into a request it names: round 1 of the plan review), and nothing is
+/// recorded; Not this, which moves nothing into it, still closes the suggestion.
+#[test]
+fn join_refuses_when_its_pick_is_no_request_now() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.named("s1", "A");
+    let own = h.request_of("s2")["id"].clone();
+    let before = h.recorded();
+    let join = h.post(json!({"request": own, "action": "join"}));
+    assert_eq!(join, Err((409, "suggestion_target_gone")));
+    assert_eq!(h.recorded(), before);
+    let not_this = h.post(json!({"request": own, "action": "not-this"}));
+    assert_eq!(not_this.unwrap()["state"], "applied");
+}
+
+/// W3b-1: a request's `Held` carries the conversations its suggestion's answer places; when a
+/// work state takes one of them into a request it names, the suggestion is not shown, and an answer
+/// to it is refused for either action, recording nothing.
+#[test]
+fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s3", 10, "The trailing comma again.");
+    h.grouped(&["s2", "s3"], "");
+    let carrier = h.request_of("s3");
+    assert!(carrier.get("suggestion").is_some(), "{carrier}");
+    let shown = carrier["id"].as_str().unwrap();
+    let checked = crate::my_work_focus::held_in(h.s.home.path(), shown).unwrap();
+    let mut placement = checked.unwrap().placement;
+    placement.sort();
+    assert_eq!(placement, vec![key("s2"), key("s3")]);
+    h.named("s3", "B");
+    let carrier = h.request_of("s2");
+    assert!(carrier.get("suggestion").is_none(), "{carrier}");
+    let before = h.recorded();
+    for action in ["join", "not-this"] {
+        let answer = h.post(json!({"request": carrier["id"], "action": action}));
+        assert_eq!(answer, Err((409, "suggestion_changed")), "{action}");
+    }
+    assert_eq!(h.recorded(), before);
+}
+
+/// Codex on #1113: a resident viewer an upgrade exec'd keeps the viewer's role and cannot run the
+/// worker's pass: an answer there, with an op of this device the consumer has not applied yet,
+/// waits for the worker that runs, and lands.
+#[test]
+fn an_answer_in_an_execd_viewer_waits_for_the_worker_that_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    /// Stops the worker's thread when the test ends, a failed one too.
+    struct Stop(std::sync::Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, SeqCst);
+        }
+    }
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let id = h.request_of("s2")["id"].clone();
+    h.grouped(&["s9"], "Unrelated");
+    let home = h.s.home.path().to_owned();
+    let stop = Stop(std::sync::Arc::new(AtomicBool::new(false)));
+    let running = std::sync::Arc::clone(&stop.0);
+    // Its first pass a while after the answer's start: the answer waits for the op, not finds it
+    // applied.
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        while !running.load(SeqCst) {
+            crate::worker::run_once(&home).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
+    let answer = h.post(json!({"request": id, "action": "join"}));
+    crate::executable::RESUMED_AS.set(None);
+    drop(stop);
+    worker.join().unwrap();
+    assert_eq!(answer.unwrap()["state"], "applied");
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s1")["id"]);
+}
+
+/// Codex on #1113: in a resident viewer an upgrade exec'd, an op of this device that no worker
+/// applies within the wait refuses the answer as pending (it cannot tell a worker that failed from
+/// one still busy), and raw.db holds no answer.
+#[test]
+fn an_execd_viewers_answer_whose_op_no_worker_applies_is_pending() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    h.grouped(&["s9"], "Unrelated");
+    let before = h.recorded();
+    crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
+    crate::claims::WAIT.set(Some(Duration::from_millis(300)));
+    let pending = h.post(answer);
+    crate::claims::WAIT.set(None);
+    crate::executable::RESUMED_AS.set(None);
+    assert_eq!(pending, Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before);
+}
+
+/// Codex on #1113: the worker busy (in a provider's call, which keeps it from the record index)
+/// and an agent's record not yet indexed: the answer is not held for the index, and is recorded,
+/// told as pending while the worker cannot apply it.
+#[test]
+fn an_answer_lands_while_the_worker_is_busy_and_the_record_index_is_behind() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let answer = json!({"request": h.request_of("s2")["id"], "action": "not-this"});
+    h.said("s5", 20, "Something else.");
+    let before = h.recorded();
+    let busy = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
+    crate::claims::WAIT.set(Some(Duration::from_millis(300)));
+    let landed = h.post(answer);
+    crate::claims::WAIT.set(None);
+    drop(busy);
+    assert_eq!(landed.unwrap()["state"], "pending");
+    assert_eq!(h.recorded(), before + 1);
 }

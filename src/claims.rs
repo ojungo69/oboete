@@ -592,7 +592,9 @@ fn correction_recorded(
 /// by the worker already running (which wakes on the new op). At once when `consumer` has them;
 /// else within 10 seconds, the worker's pass in this process among them (a pass begun ends
 /// first), else `NotYet`, which says the `what` is recorded (#777). A worker or a store that fails
-/// is an error of its own.
+/// is an error of its own. The pass runs here only where this process may run the worker
+/// (`executable::may_run_worker`: a resident viewer an upgrade exec'd keeps the viewer's role and
+/// cannot, #1113); there the wait is for the worker that runs.
 pub(crate) fn applied(
     home: &std::path::Path,
     k: &Connection,
@@ -617,7 +619,9 @@ pub(crate) fn applied(
     if done()? {
         return Ok(());
     }
-    crate::worker::run_once(home)?;
+    if crate::executable::may_run_worker() {
+        crate::worker::run_once(home)?;
+    }
     #[cfg(test)]
     let passed = std::time::Instant::now();
     while !done()? {

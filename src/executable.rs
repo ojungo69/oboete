@@ -115,11 +115,33 @@ fn resumed() -> std::io::Result<Option<Home>> {
 
 /// The previous image's home remains the authority, including after the new lock is opened.
 pub(crate) fn expected(role: Option<Role>) -> std::io::Result<crate::worker::FileId> {
+    #[cfg(test)]
+    if let Some(resumed) = RESUMED_AS.get() {
+        return if role == Some(resumed) {
+            Ok(None)
+        } else {
+            Err(std::io::Error::other("resident exec changed its command"))
+        };
+    }
     match resumed()? {
         Some(home) if role == Some(home.role) => Ok(Some(home.identity)),
         Some(_) => Err(std::io::Error::other("resident exec changed its command")),
         None => Ok(None),
     }
+}
+
+/// Whether this process may run the worker's pass itself (J4, W3b-1): not a resident image of
+/// another role, as an upgrade's exec leaves the viewer (R9), which keeps its role (`expected`)
+/// and cannot take the worker's lock; the worker that runs takes the work then.
+pub(crate) fn may_run_worker() -> bool {
+    expected(Some(Role::Worker)).is_ok()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's resident image of this role, as an upgrade's exec leaves it (`expected`).
+    pub(crate) static RESUMED_AS: std::cell::Cell<Option<Role>> =
+        const { std::cell::Cell::new(None) };
 }
 
 pub(crate) fn check_home(home: &Path, role: Option<Role>) -> std::io::Result<()> {

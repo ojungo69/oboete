@@ -410,18 +410,21 @@ fn key((agent, session): &Key) -> Value {
 }
 
 /// Whether the my_work consumer has applied every op this device recorded, within
-/// `claims::applied`'s wait: `false` only when the wait ran out; a worker or a store that failed is
-/// an error (#777).
-fn caught_up(home: &Path) -> Result<bool> {
+/// `claims::applied`'s wait for this device's newest op: this device's newest op of a kind an
+/// answer reads (`Raw::answer_top`), read before it and so among what the wait applied (W3b-1: the
+/// answer is appended only while it is still the newest), none only when the wait ran out; a
+/// worker or a store that failed is an error (#777).
+fn caught_up(home: &Path) -> Result<Option<i64>> {
     let Some((raw, k)) = crate::search::b::stores(home)? else {
-        return Ok(true);
+        return Ok(Some(0));
     };
     let device = raw.device().to_owned();
+    let read = raw.answer_top()?;
     let top = raw.max_op_seq_of(&device)?;
     drop(raw);
     match crate::claims::applied(home, &k, &device, &[top], (NAME, "my_work")) {
-        Ok(()) => Ok(true),
-        Err(e) if e.is::<crate::claims::NotYet>() => Ok(false),
+        Ok(()) => Ok(Some(read)),
+        Err(e) if e.is::<crate::claims::NotYet>() => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -440,7 +443,19 @@ struct Answer {
 /// owner's move in My Focus is. Join moves the conversation, and every conversation of its own
 /// request, into the request its pick is in now; Not this keeps them its own request, so a forget
 /// that takes the judge's op later leaves it so. Either closes the suggestion.
-pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value, Refusal> {
+///
+/// W3b-1: it places what the request shows when it is checked (its `Held`'s placement, checked
+/// against the groups read now, both anchors in their own groups), is appended only while this
+/// device has appended no op of a kind an answer reads since `caught_up` read the newest
+/// (`Raw::answer_top`) and the forget fence of its reading is as it was (`Raw::append_ops_at`),
+/// and only while `authorized` holds, which it asks under config.lock, where new tokens are made
+/// (R6): 401 with nothing recorded otherwise.
+pub(crate) fn act(
+    home: &Path,
+    saving: &Mutex<()>,
+    body: &[u8],
+    authorized: &dyn Fn() -> bool,
+) -> Result<Value, Refusal> {
     let posted: Answer =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     let join = match posted.action.as_str() {
@@ -454,22 +469,32 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let unavailable = |_| refused(503, "my_work_unavailable", "");
+    let unavailable = || refused(503, "my_work_unavailable", "");
     // #775: what this device recorded before, an earlier answer among it, applied first, so that
     // this answer is resolved against it; still pending after the wait, it is refused.
-    if !caught_up(home).map_err(unavailable)? {
+    let Some(top) = caught_up(home).map_err(|_| unavailable())? else {
         return Err(refused(409, "my_work_pending", ""));
-    }
+    };
     let not_found = || refused(404, "suggestion_not_found", "request");
-    let held = crate::my_work_focus::held_of(home, &posted.request)
-        .map_err(unavailable)?
-        .ok_or_else(not_found)?;
-    let Some((raw, k)) = crate::search::b::stores(home).map_err(unavailable)? else {
+    // The reading, and with it the forget fence the op is appended against, before any read the
+    // answer is checked against.
+    let Some((raw, k)) = crate::search::b::stores(home).map_err(|_| unavailable())? else {
         return Err(not_found());
     };
     let reading =
-        crate::curate::Reading::now(&raw, crate::curate::Reads::Live).map_err(unavailable)?;
-    let groups = crate::my_work_group::groups(&raw, &k, &reading).map_err(unavailable)?;
+        crate::curate::Reading::now(&raw, crate::curate::Reads::Live).map_err(|_| unavailable())?;
+    drop((raw, k));
+    let crate::my_work_focus::Checked {
+        held,
+        placement,
+        current,
+    } = crate::my_work_focus::held_in(home, &posted.request)
+        .map_err(|_| unavailable())?
+        .ok_or_else(not_found)?;
+    let Some((raw, k)) = crate::search::b::stores(home).map_err(|_| unavailable())? else {
+        return Err(not_found());
+    };
+    let groups = crate::my_work_group::groups(&raw, &k, &reading).map_err(|_| unavailable())?;
     drop((raw, k));
     let Some((c, picked)) =
         (groups.suggested.iter()).find(|(c, _)| crate::my_work::anchored(c) == held)
@@ -479,11 +504,18 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
     let Some(group) = groups.groups.get(c) else {
         return Err(not_found());
     };
+    // W3b-1: the conversations placed are the ones the request showed, its anchor in its own
+    // group; anything else changed since (`my_work::read`'s check, made again here).
+    let in_its_own = |anchor: &Key| groups.of.get(anchor) == Some(anchor);
+    if !in_its_own(c) || group.members != placement {
+        return Err(refused(409, "suggestion_changed", "request"));
+    }
     // Its own request's other conversations come with it (claude-mem's `brought`).
-    let others = group.members.iter().filter(|m| *m != c).map(key);
+    let others = placement.iter().filter(|m| *m != c).map(key);
     let decision = if join {
         let target = (groups.of.get(picked))
-            .filter(|target| *target != c)
+            .filter(|target| *target != c && in_its_own(target))
+            .filter(|target| current.contains(&crate::my_work::anchored(target)))
             .ok_or_else(|| refused(409, "suggestion_target_gone", "request"))?;
         let ends = json!([key(target), key(c)]);
         let members: Vec<Value> = [key(target), key(c)].into_iter().chain(others).collect();
@@ -503,9 +535,34 @@ pub(crate) fn act(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value,
         json!([{"conversations": members, "title": null, "links": []}])
     };
     let fields = json!({"conversation": key(c), "action": posted.action, "groups": decision});
-    let applied = crate::my_work_ops::record(home, NAME, vec![(group.repo.clone(), fields)])
-        .map_err(unavailable)?;
+    let ops = vec![(group.repo.clone(), fields)];
+    #[cfg(test)]
+    if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let config = crate::settings::config_lock(home).map_err(|_| unavailable())?;
+    if !authorized() {
+        return Err(refused(401, "token", ""));
+    }
+    let appended = crate::my_work_ops::append_at(home, NAME, ops, (top, reading.fence));
+    drop(config);
+    let (k, device, seqs) = appended.map_err(|e| {
+        if e.is::<crate::raw::OpsMoved>() {
+            refused(409, "my_work_pending", "")
+        } else {
+            unavailable()
+        }
+    })?;
+    let applied = crate::my_work_ops::applied(home, &k, &device, &seqs, NAME);
     Ok(json!({"state": if applied { "applied" } else { "pending" }}))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot for this thread's next answer, run once it is checked and before it is written: a
+    /// test's way to move the stores between the two.
+    pub(crate) static CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
