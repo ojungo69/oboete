@@ -1,0 +1,37 @@
+assets/viewer/app.js
+  s_d52c2d995f51c6::t_17d5f484d4f94f 2780
+docs/my-work-model.md
+  s_52c3955e48bff4::t_d37941a5c36075 2121-2124,2126-2135
+src/claims.rs
+  s_52c3955e48bff4::t_a579a57418c5a8 604-627,633
+src/my_work_judge.rs
+  s_52c3955e48bff4::t_b0b1893b69a55d 413-418,426,428-430
+src/my_work_judge/tests.rs
+  s_52c3955e48bff4::t_41aaddfadf5409 945-950,963-967,1545-1564
+src/view/tests.rs
+  s_52c3955e48bff4::t_7358980b651d22 3993-4073
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f2845869bf174c82ced8722a2862a440c33ee5a2",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_d52c2d995f51c6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7db69c90-1ee6-4a9e-a4f5-24819169f3ce",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
