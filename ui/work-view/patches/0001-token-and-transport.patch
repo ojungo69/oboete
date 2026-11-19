@@ -1,8 +1,8 @@
 diff --git a/src/ui/local-api-token-client.ts b/src/ui/local-api-token-client.ts
-index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e7368312724 100644
+index bbaa813add34a4cd374a6f441903539ef278f3b6..565ad67d6272881a127101cd3c0a8629a5dee274 100644
 --- a/src/ui/local-api-token-client.ts
 +++ b/src/ui/local-api-token-client.ts
-@@ -1,96 +1,197 @@
+@@ -1,96 +1,233 @@
 -// Local API token mode (#5141), browser side.
 -//
 -// With CLAUDE_MEM_LOCAL_API_TOKEN set, the worker refuses a request that does not carry
@@ -36,8 +36,9 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +// Modified by oboete: this file replaces claude-mem 15.19.0's src/ui/local-api-token-client.ts
 +// (ui/work-view/patches/0001-token-and-transport.patch; decision 114, docs/page.md).
 +// The token comes from #t= or the one this browser kept for these pages, and goes in the
-+// X-Oboete-Token header. oboete's viewer holds no event streams (one thread per connection), so
-+// window.EventSource for /api/work-view/events becomes a poll that hands the page the same events.
++// X-Oboete-Token header with the requests to the work-view's paths alone. oboete's viewer holds no
++// event streams (one thread per connection), so window.EventSource for /api/work-view/events becomes
++// a poll that hands the page the same events.
  
 -/** The token for this tab: the page URL's single `token`, else the one kept from earlier. */
 -function readToken(win: TokenWindow): string {
@@ -68,6 +69,8 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +const WORK_VIEW_PATH = '/api/work-view';
 +const POLL_MS = 3000; // app.js:11119
 +const REREAD_MS = 60_000; // app.js:11026-11027: `v` ignores tool calls and replies
++// A poll's deadline, its answers' bodies included: claude-mem's own for a request (local-source.ts:56).
++const DEADLINE_MS = 20_000;
 +// Reports oboete keeps no record of: answered here, never sent.
 +const NOT_SENT = new Set(['/api/work-view/usage', '/api/viewer-usage', '/api/work-view/activity']);
 +// claude-mem's setup probe. oboete has no setup page, and these pages' token reaches only the
@@ -85,6 +88,17 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 -  const sameOrigin = (target: string | URL): URL | null => {
 -    const url = new URL(String(target), win.location.href);
 -    return url.origin === win.location.origin ? url : null;
++// The paths the token goes to, the work-view's and no other; only their 401 refuses it.
++const scoped = (path: string): boolean => path === WORK_VIEW_PATH || path.startsWith(`${WORK_VIEW_PATH}/`);
++
++// The check local-source.ts:244-247 makes before it takes a snapshot. One it would drop moves no
++// version and no minute here, so the next poll reads the page again.
++type Checked = { source: { connected: boolean; error?: unknown } };
++const isSnapshot = (value: unknown): value is Checked => {
++  const snapshot = value as { humanRequests?: unknown; source?: { connected?: unknown } } | null;
++  return !!snapshot && Array.isArray(snapshot.humanRequests) && typeof snapshot.source?.connected === 'boolean';
++};
++
 +export function installLocalApiToken(
 +  win: Window & typeof globalThis = globalThis as unknown as Window & typeof globalThis,
 +): string {
@@ -101,13 +115,17 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +    const rest = address.toString();
 +    win.history.replaceState(win.history.state, '', `${win.location.pathname}${win.location.search}${rest ? `#${rest}` : ''}`);
 +  }
-+  const token = fromAddress || recall();
++  let token = fromAddress || recall();
 +  let kept = fromAddress === '';
 +
 +  const refused = (): void => {
 +    if (refusedOnce) return;
 +    refusedOnce = true;
-+    try { if (fromAddress === '' && recall() === token) win.localStorage.removeItem(STORAGE_KEY); } catch { /* blocked */ }
++    // The refused token leaves memory, and this browser's storage when it is the one kept there,
++    // whether it came from the address or from storage.
++    const dropped = token;
++    token = '';
++    try { if (dropped !== '' && recall() === dropped) win.localStorage.removeItem(STORAGE_KEY); } catch { /* blocked */ }
 +    const bar = win.document.createElement('div');
 +    bar.setAttribute('role', 'alert');
 +    bar.textContent = REFUSED;
@@ -127,19 +145,25 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +    if (url.origin !== win.location.origin) throw new TypeError(`oboete: no address but its own (${url.origin})`);
 +    if (NOT_SENT.has(url.pathname)) return new Response(null, { status: 204 });
 +    if (url.pathname === SETUP_PROBE) return new Response('not found', { status: 404 });
++    const ours = scoped(url.pathname);
 +    const withPolicy = {
 +      ...init,
 +      referrerPolicy: (init?.referrerPolicy || (typeof given === 'string' ? '' : given.referrerPolicy) || 'same-origin') as ReferrerPolicy,
 +      // The token goes to this origin alone: a redirect elsewhere fails rather than carry the header.
 +      mode: 'same-origin' as RequestMode,
++      // A request with the token follows no redirect at all, which would carry it to a path it names.
++      ...(ours ? { redirect: 'error' as RequestRedirect } : {}),
 +    };
 +    // The address checked above, not the string: a <base> element would resolve that elsewhere.
 +    const request = new Request(typeof given === 'string' ? url.href : given, withPolicy);
-+    if (token !== '' && !request.headers.has(LOCAL_API_TOKEN_HEADER)) request.headers.set(LOCAL_API_TOKEN_HEADER, token);
++    // The header is this client's alone: one a caller set leaves too.
++    request.headers.delete(LOCAL_API_TOKEN_HEADER);
++    if (ours && token !== '') request.headers.set(LOCAL_API_TOKEN_HEADER, token);
 +    const answer = await nativeFetch(request);
-+    if (url.pathname.startsWith('/api/')) {
++    if (ours) {
 +      if (answer.status === 401) refused();
-+      else if (answer.ok && !kept) {
++      // Kept once the viewer took it, unless it was refused while this request was out.
++      else if (answer.ok && !kept && !refusedOnce) {
 +        kept = true;
 +        try { win.localStorage.setItem(STORAGE_KEY, token); } catch { /* blocked */ }
 +      }
@@ -206,8 +230,8 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +      this.close();
 +    }
 +
-+    private async get(path: string): Promise<Response | null> {
-+      const answer = await win.fetch(path, { cache: 'no-store', signal: this.abort.signal });
++    private async get(path: string, signal: AbortSignal): Promise<Response | null> {
++      const answer = await win.fetch(path, { cache: 'no-store', signal });
 +      // Closed while the request was out: nothing more happens on it.
 +      if (this.readyState === 2) return null;
 +      if (answer.status !== 401) return answer;
@@ -220,8 +244,14 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +      if (refusedOnce) { this.refuse(); return; }
 +      if (this.readyState === 1 && win.document.visibilityState === 'hidden') { this.next(); return; }
 +      this.busy = true;
++      // The poll's own deadline covers the bodies too, so a stalled answer cannot hold the polling;
++      // closing still cancels it at once.
++      const poll = new AbortController();
++      const stop = (): void => poll.abort(this.abort.signal.reason);
++      this.abort.signal.addEventListener('abort', stop);
++      const deadline = setTimeout(() => poll.abort(new DOMException('The viewer took too long to answer.', 'TimeoutError')), DEADLINE_MS);
 +      try {
-+        const head = await this.get(VERSION_PATH);
++        const head = await this.get(VERSION_PATH, poll.signal);
 +        if (head === null) return;
 +        if (!head.ok) throw new Error(`HTTP ${head.status}`);
 +        const { v } = (await head.json()) as { v?: unknown };
@@ -229,18 +259,22 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +        if (this.readyState !== 1) { this.readyState = 1; this.dispatchEvent(new Event('open')); }
 +        const now = Date.now();
 +        if (String(v) !== this.seen || now - this.readAt >= REREAD_MS) {
-+          const page = await this.get(WORK_VIEW_PATH);
++          const page = await this.get(WORK_VIEW_PATH, poll.signal);
 +          if (page === null) return;
 +          if (page.ok) {
 +            const data = await page.text();
 +            if (this.readyState === 2) return;
-+            this.seen = String(v);
-+            this.readAt = now;
-+            try {
-+              const { source } = JSON.parse(data) as { source?: { connected?: unknown; error?: unknown } };
-+              this.source = { kind: 'oboete', connected: source?.connected !== false, error: typeof source?.error === 'string' ? source.error : null };
-+            } catch { /* the page drops an unreadable frame too */ }
-+            this.dispatchEvent(new MessageEvent('work-view', { data }));
++            let snapshot: unknown = null;
++            try { snapshot = JSON.parse(data); } catch { /* checked below */ }
++            if (isSnapshot(snapshot)) {
++              this.seen = String(v);
++              this.readAt = now;
++              this.source = { kind: 'oboete', connected: snapshot.source.connected, error: typeof snapshot.source.error === 'string' ? snapshot.source.error : null };
++              this.dispatchEvent(new MessageEvent('work-view', { data }));
++            } else {
++              // The page says why it shows nothing new, as for an answer that is not 200.
++              this.source = { kind: 'oboete', connected: false, error: 'The viewer sent something that is not a work view.' };
++            }
 +          } else {
 +            this.source = { kind: 'oboete', connected: false, error: `HTTP ${page.status}` };
 +          }
@@ -250,6 +284,8 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 +      } catch {
 +        if (this.readyState !== 2) { this.readyState = 0; this.seen = undefined; this.dispatchEvent(new Event('error')); }
 +      } finally {
++        clearTimeout(deadline);
++        this.abort.signal.removeEventListener('abort', stop);
 +        this.busy = false;
 +        this.next();
        }
@@ -279,3 +315,394 @@ index bbaa813add34a4cd374a6f441903539ef278f3b6..fdeef75580062f729494c6c2a4565e73
 -  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(installedToken)}`;
 +  return url;
  }
+diff --git a/src/ui/my-work/src/live/oboete-token-client.test.ts b/src/ui/my-work/src/live/oboete-token-client.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2eb4496dfbcb649f2aaea83056ced608d1336ea7
+--- /dev/null
++++ b/src/ui/my-work/src/live/oboete-token-client.test.ts
+@@ -0,0 +1,370 @@
++// Added by oboete (ui/work-view/patches/0001-token-and-transport.patch): the token client and the
++// polling transport that replace claude-mem's (src/ui/local-api-token-client.ts), run against a fake
++// window. claude-mem's `npm test` runs this file with its own (issue #1085).
++import assert from 'node:assert/strict'
++import { afterEach, beforeEach, describe, it, mock } from 'node:test'
++
++const ORIGIN = 'http://work-view.localhost:17373'
++const KEY = 'oboete-work-view-token'
++const SNAPSHOT = { humanRequests: [], source: { connected: true } }
++
++type Answer = (request: Request) => Response | Promise<Response>
++// The polling stream the client puts in the window's EventSource, as this file reads it.
++type PollingSource = EventTarget & { readyState: number; close(): void }
++type FakeWindow = ReturnType<typeof fakeWindow>['win']
++// The client as this file calls it. Typed here, not imported: the test files are type-checked without the DOM's
++// types (tsconfig.node.json), which the client's own signature names.
++type Client = { installLocalApiToken(win: FakeWindow): string }
++
++// The client keeps whether its token was refused for the page's life: a page of its own per test.
++let pages = 0
++async function client(): Promise<Client> {
++  pages += 1
++  return (await import(`../../../local-api-token-client.ts?page=${pages}`)) as Client
++}
++
++const json = (value: unknown, status = 200): Response =>
++  new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
++
++// An answer that never comes, as a stalled viewer's: it fails only when its request is aborted.
++const stalled = (request: Request): Promise<Response> =>
++  new Promise((_resolve, reject) => request.signal.addEventListener('abort', () => reject(request.signal.reason)))
++
++// Headers that come and a body that never ends, until the request is aborted, as fetch does.
++const stalledBody = (request: Request): Response =>
++  new Response(new ReadableStream({ start(controller) { request.signal.addEventListener('abort', () => controller.error(request.signal.reason)) } }))
++
++function fakeWindow({ hash = '', stored = {}, answer }: { hash?: string; stored?: Record<string, string>; answer: Answer }) {
++  const storage = new Map<string, string>(Object.entries(stored))
++  const sent: { path: string; token: string | null; request: Request }[] = []
++  const banners: string[] = []
++  const document = Object.assign(new EventTarget(), {
++    visibilityState: 'visible' as 'visible' | 'hidden',
++    createElement: () => ({ setAttribute() {}, style: {}, textContent: '' }),
++    body: { prepend: (bar: { textContent: string }) => { banners.push(bar.textContent) } },
++  })
++  const location = { href: `${ORIGIN}/work-view/${hash}`, origin: ORIGIN, hash, pathname: '/work-view/', search: '', reload() {} }
++  const win = Object.assign(new EventTarget(), {
++    document,
++    location,
++    history: {
++      state: null,
++      replaceState(_state: unknown, _title: string, next: string) {
++        const url = new URL(next, ORIGIN)
++        location.href = url.href
++        location.hash = url.hash
++      },
++    },
++    localStorage: {
++      getItem: (key: string) => storage.get(key) ?? null,
++      setItem: (key: string, value: string) => { storage.set(key, String(value)) },
++      removeItem: (key: string) => { storage.delete(key) },
++    },
++    fetch: async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
++      const request = input instanceof Request ? input : new Request(input, init)
++      sent.push({ path: new URL(request.url).pathname, token: request.headers.get('X-Oboete-Token'), request })
++      return answer(request)
++    },
++    EventSource: class {} as unknown as new (url: string) => PollingSource,
++  })
++  return { win, storage, sent, banners, document }
++}
++
++// The viewer's two paths, with the version and the snapshot the test sets; any other path is 404.
++function viewer(state: { v: number; snapshot?: unknown; version?: Answer; page?: Answer }): Answer {
++  return (request) => {
++    const path = new URL(request.url).pathname
++    if (path === '/api/work-view/version') return state.version ? state.version(request) : json({ v: state.v })
++    if (path === '/api/work-view') return state.page ? state.page(request) : json(state.snapshot ?? SNAPSHOT)
++    return new Response('not found', { status: 404 })
++  }
++}
++
++// Lets the awaits a timer started run to their end; setImmediate is not mocked.
++async function settle(): Promise<void> {
++  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve))
++}
++
++async function advance(ms: number): Promise<void> {
++  mock.timers.tick(ms)
++  await settle()
++}
++
++function stream(win: FakeWindow) {
++  const events: { type: string; readyState: number }[] = []
++  const source = new win.EventSource('/api/work-view/events')
++  for (const type of ['open', 'error', 'work-view', 'heartbeat']) {
++    source.addEventListener(type, () => events.push({ type, readyState: source.readyState }))
++  }
++  return { source, events, count: (type: string) => events.filter((event) => event.type === type).length }
++}
++
++describe('oboete token client', () => {
++  it('refuses an address of another origin', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: () => json({}) })
++    installLocalApiToken(win)
++    await assert.rejects(win.fetch('http://localhost:17373/api/settings'), TypeError)
++    await assert.rejects(win.fetch('http://127.0.0.1:17373/api/work-view'), TypeError)
++    assert.equal(sent.length, 0)
++  })
++
++  it('sends the token with the work-view paths alone, and no header a caller set', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: () => json({}) })
++    installLocalApiToken(win)
++    for (const path of ['/api/work-view', '/api/work-view/version', '/api/work-view/focus/x', '/api/work-viewer', '/api/settings', '/work-view/assets/a.js']) {
++      await win.fetch(path)
++    }
++    await win.fetch('/api/settings', { headers: { 'X-Oboete-Token': 'chosen-by-the-caller' } })
++    // A request with the token follows no redirect, which would carry it to another path.
++    assert.deepEqual(sent.map((s) => [s.path, s.token, s.request.redirect]), [
++      ['/api/work-view', 'abc', 'error'],
++      ['/api/work-view/version', 'abc', 'error'],
++      ['/api/work-view/focus/x', 'abc', 'error'],
++      ['/api/work-viewer', null, 'follow'],
++      ['/api/settings', null, 'follow'],
++      ['/work-view/assets/a.js', null, 'follow'],
++      ['/api/settings', null, 'follow'],
++    ])
++  })
++
++  it('answers the setup probe and the reports oboete keeps no record of without asking', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: () => json({}) })
++    installLocalApiToken(win)
++    assert.equal((await win.fetch('/api/setup/state')).status, 404)
++    assert.equal((await win.fetch('/api/work-view/usage')).status, 204)
++    assert.equal(sent.length, 0)
++  })
++
++  it('keeps the token through a 401 on a path that is not the work-view\'s', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent, banners, storage } = fakeWindow({
++      stored: { [KEY]: 'kept' },
++      answer: (request) => new URL(request.url).pathname === '/api/settings' ? new Response('', { status: 401 }) : json({}),
++    })
++    installLocalApiToken(win)
++    assert.equal((await win.fetch('/api/settings')).status, 401)
++    await win.fetch('/api/work-view')
++    assert.equal(sent.at(-1)?.token, 'kept')
++    assert.deepEqual(banners, [])
++    assert.equal(storage.get(KEY), 'kept')
++  })
++
++  it('drops a refused token kept in storage, from memory and from storage', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent, banners, storage } = fakeWindow({ stored: { [KEY]: 'old' }, answer: () => new Response('', { status: 401 }) })
++    installLocalApiToken(win)
++    await win.fetch('/api/work-view')
++    assert.equal(banners.length, 1)
++    assert.equal(storage.has(KEY), false)
++    await win.fetch('/api/work-view')
++    assert.equal(sent.at(-1)?.token, null)
++  })
++
++  it('drops a refused token from the address that storage kept since', async () => {
++    const { installLocalApiToken } = await client()
++    let status = 200
++    const { win, sent, storage } = fakeWindow({ hash: '#t=new', answer: () => new Response('{}', { status }) })
++    installLocalApiToken(win)
++    await win.fetch('/api/work-view')
++    assert.equal(storage.get(KEY), 'new')
++    status = 401
++    await win.fetch('/api/work-view')
++    assert.equal(storage.has(KEY), false)
++    await win.fetch('/api/work-view')
++    assert.equal(sent.at(-1)?.token, null)
++  })
++
++  it('leaves a stored token that is not the refused one', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, storage } = fakeWindow({ hash: '#t=new', stored: { [KEY]: 'other' }, answer: () => new Response('', { status: 401 }) })
++    installLocalApiToken(win)
++    await win.fetch('/api/work-view')
++    assert.equal(storage.get(KEY), 'other')
++  })
++
++  it('saves nothing from an answer that comes after the token was refused', async () => {
++    const { installLocalApiToken } = await client()
++    let release: (answer: Response) => void = () => {}
++    const late = new Promise<Response>((resolve) => { release = resolve })
++    let first = true
++    const { win, storage } = fakeWindow({
++      hash: '#t=new',
++      answer: () => { if (first) { first = false; return late } return new Response('', { status: 401 }) },
++    })
++    installLocalApiToken(win)
++    const out = win.fetch('/api/work-view')
++    await win.fetch('/api/work-view/version')
++    release(json(SNAPSHOT))
++    assert.equal((await out).status, 200)
++    assert.equal(storage.has(KEY), false)
++  })
++})
++
++describe('where oboete serves the pages', () => {
++  it('is this computer at work-view.localhost, as at every name under .localhost', async () => {
++    const { isServedFromCloud } = await import('./served-from.ts')
++    for (const host of ['work-view.localhost', 'work-view.localhost.', 'a.b.localhost', 'localhost', 'localhost.', '127.0.0.1']) assert.equal(isServedFromCloud(host), false, host)
++    for (const host of ['localhost.example.com', 'work.cmem.ai', 'notlocalhost']) assert.equal(isServedFromCloud(host), true, host)
++  })
++})
++
++describe('oboete polling transport', () => {
++  beforeEach(() => mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 }))
++  afterEach(() => mock.timers.reset())
++
++  it('errors at readyState 0 on a 401, and polls no more', async () => {
++    const { installLocalApiToken } = await client()
++    const state = { v: 1, version: () => new Response('', { status: 401 }) }
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer(state) })
++    installLocalApiToken(win)
++    const { source, events } = stream(win)
++    await advance(0)
++    assert.deepEqual(events, [{ type: 'error', readyState: 0 }])
++    assert.equal(source.readyState, 2)
++    const asked = sent.length
++    await advance(120_000)
++    assert.equal(sent.length, asked)
++  })
++
++  it('cancels the poll in flight when it is closed', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer({ v: 1, version: stalled }) })
++    installLocalApiToken(win)
++    const { source, count } = stream(win)
++    await advance(0)
++    assert.equal(sent.length, 1)
++    source.close()
++    await settle()
++    assert.equal(sent[0].request.signal.aborted, true)
++    assert.equal(count('error'), 0)
++    await advance(60_000)
++    assert.equal(sent.length, 1)
++  })
++
++  it('gives up a stalled answer at its deadline and asks again at the next tick', async () => {
++    const { installLocalApiToken } = await client()
++    const state: { v: number; version?: Answer } = { v: 1, version: stalled }
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer(state) })
++    installLocalApiToken(win)
++    const { events, count } = stream(win)
++    await advance(0)
++    await advance(19_999)
++    assert.equal(count('error'), 0)
++    await advance(1)
++    assert.deepEqual(events.at(-1), { type: 'error', readyState: 0 })
++    assert.equal(sent[0].request.signal.aborted, true)
++    state.version = undefined
++    await advance(3000)
++    assert.equal(sent.filter((s) => s.path === '/api/work-view/version').length, 2)
++    assert.equal(count('open'), 1)
++  })
++
++  it('gives up a body that stops coming at the deadline the poll started with', async () => {
++    const { installLocalApiToken } = await client()
++    // The version takes 15 s of the 20: the snapshot's body has the 5 s left, not 20 of its own.
++    const slow: Answer = () => new Promise((resolve) => { setTimeout(() => resolve(json({ v: 1 })), 15_000) })
++    const state: { v: number; version?: Answer; page?: Answer } = { v: 1, version: slow, page: stalledBody }
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer(state) })
++    installLocalApiToken(win)
++    const { events, count } = stream(win)
++    await advance(0)
++    await advance(15_000)
++    assert.equal(count('open'), 1)
++    await advance(4_999)
++    assert.equal(count('error'), 0)
++    await advance(1)
++    assert.deepEqual(events.at(-1), { type: 'error', readyState: 0 })
++    state.version = undefined
++    state.page = undefined
++    await advance(3000)
++    assert.equal(count('work-view'), 1)
++    assert.equal(sent.filter((s) => s.path === '/api/work-view').length, 2)
++  })
++
++  it('polls no more while the tab is hidden, and at once when it shows again', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent, document } = fakeWindow({ hash: '#t=abc', answer: viewer({ v: 1 }) })
++    installLocalApiToken(win)
++    stream(win)
++    await advance(0)
++    const asked = sent.length
++    document.visibilityState = 'hidden'
++    await advance(9000)
++    assert.equal(sent.length, asked)
++    document.visibilityState = 'visible'
++    document.dispatchEvent(new Event('visibilitychange'))
++    await settle()
++    assert.equal(sent.length, asked + 1)
++  })
++
++  it('reads the page again for a version that did not move only at the minute', async () => {
++    const { installLocalApiToken } = await client()
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer({ v: 1 }) })
++    installLocalApiToken(win)
++    const { count } = stream(win)
++    const pages = () => sent.filter((s) => s.path === '/api/work-view').length
++    await advance(0)
++    assert.equal(pages(), 1)
++    for (let tick = 0; tick < 19; tick += 1) await advance(3000)
++    assert.equal(pages(), 1)
++    await advance(3000)
++    assert.equal(pages(), 2)
++    assert.equal(count('work-view'), 2)
++  })
++
++  it('reads the page again for a moved version at the next tick', async () => {
++    const { installLocalApiToken } = await client()
++    const state = { v: 1 }
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer(state) })
++    installLocalApiToken(win)
++    stream(win)
++    await advance(0)
++    state.v = 2
++    await advance(3000)
++    assert.equal(sent.filter((s) => s.path === '/api/work-view').length, 2)
++  })
++
++  it('moves neither the version nor the minute for a snapshot the page would drop, and says why', async () => {
++    const { installLocalApiToken } = await client()
++    const state: { v: number; page?: Answer } = { v: 1 }
++    const { win, sent } = fakeWindow({ hash: '#t=abc', answer: viewer(state) })
++    installLocalApiToken(win)
++    const { source, count } = stream(win)
++    const beats: { connected: boolean; error: string | null }[] = []
++    source.addEventListener('heartbeat', (event) => beats.push(JSON.parse((event as unknown as { data: string }).data).source))
++    const pages = () => sent.filter((s) => s.path === '/api/work-view').length
++    await advance(0)
++    assert.equal(count('work-view'), 1)
++    // A moved version whose answer is no JSON at all: dropped, said, and read again at the next tick.
++    state.v = 2
++    state.page = () => new Response('<html>not a work view', { status: 200 })
++    await advance(3000)
++    assert.equal(count('work-view'), 1)
++    assert.deepEqual(beats.at(-1), { ...beats.at(-1), connected: false, error: 'The viewer sent something that is not a work view.' })
++    await advance(3000)
++    assert.equal(pages(), 3)
++    // A moved version whose snapshot has its requests but says nothing true or false of its source.
++    state.page = () => json({ humanRequests: [], source: { connected: 'yes' } })
++    await advance(3000)
++    assert.equal(count('work-view'), 1)
++    assert.equal(beats.at(-1)?.connected, false)
++    state.page = undefined
++    await advance(3000)
++    assert.equal(count('work-view'), 2)
++    assert.equal(beats.at(-1)?.connected, true)
++    // The same version at the minute, with a snapshot claude-mem's check drops: read again at the next tick, not a
++    // minute later.
++    state.page = () => json({ source: { connected: true } })
++    const taken = pages()
++    for (let tick = 0; tick < 19; tick += 1) await advance(3000)
++    assert.equal(pages(), taken)
++    await advance(3000)
++    assert.equal(pages(), taken + 1)
++    await advance(3000)
++    assert.equal(pages(), taken + 2)
++    assert.equal(count('work-view'), 2)
++  })
++})
+diff --git a/src/ui/my-work/src/live/served-from.ts b/src/ui/my-work/src/live/served-from.ts
+index 8615a251013e3e4bb431404d7a657d1ab82d2bcd..cbb1542bebbedc3a7cfd96ccf683ac61ac5bbdb9 100644
+--- a/src/ui/my-work/src/live/served-from.ts
++++ b/src/ui/my-work/src/live/served-from.ts
+@@ -2,7 +2,9 @@ const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+ 
+ /** Served by the cloud viewer (claude-mem services/viewer-host) rather than the worker on this computer. */
+ export function isServedFromCloud(hostname: string | undefined): boolean {
+-  return typeof hostname === 'string' && hostname.length > 0 && !LOOPBACK_HOSTNAMES.has(hostname)
++  // Modified by oboete (ui/work-view/patches/0001-token-and-transport.patch): oboete serves these pages at
++  // work-view.localhost, and every name under .localhost is this computer (RFC 6761), written with its final dot too.
++  return typeof hostname === 'string' && hostname.length > 0 && !LOOPBACK_HOSTNAMES.has(hostname) && !/(^|\.)localhost\.?$/.test(hostname)
+ }
+ 
+ /** The part of `document` that says whether the tab is on screen. */

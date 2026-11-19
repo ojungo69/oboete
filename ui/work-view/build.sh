@@ -125,7 +125,20 @@ app="$work/src/ui/my-work"
 # The tools come from the lockfile alone: dev dependencies installed whatever npm's settings say,
 # and run from node_modules/.bin rather than fetched by npx. --sourcemap hidden: maps for the
 # notices, with no reference to them in the files served.
-(cd "$app" && npm ci --ignore-scripts --include=dev --no-audit --no-fund \
+# Before the build, claude-mem's own tests run on the patched tree, oboete's beside them (#1085):
+# package.json's test command, run by node with each test held to a minute and the run to 15
+# minutes, so a test that never ends fails by its name rather than holding the job. A test command
+# package.json no longer names, or a folder of it with no test left (failglob), would leave tests
+# out: the build stops instead. NODE_TEST_CONTEXT and NODE_OPTIONS go: a build a Node test runs
+# inherits the first, and the second can hold the runner's own options (a shard, a pattern,
+# --test-only); with either, node --test skips files or tests and passes.
+tests='node --test src/live/*.test.ts src/setup/*.test.ts src/store/*.test.ts'
+(cd "$app" && shopt -s failglob && npm ci --ignore-scripts --include=dev --no-audit --no-fund \
+  && if [ "$(env -u NODE_OPTIONS node -p "require('./package.json').scripts.test")" != "$tests" ]; then
+    echo "build.sh: package.json's test command is no longer $tests" >&2
+    exit 1
+  fi \
+  && env -u NODE_TEST_CONTEXT -u NODE_OPTIONS timeout 900 node --test --test-timeout=60000 ${tests#node --test } \
   && ./node_modules/.bin/tsc -b && ./node_modules/.bin/vite build --sourcemap hidden)
 node "$here/notices.mjs" "$work" "$here/licences" > "$app/dist/THIRD-PARTY-NOTICES.md"
 find "$app/dist" -name '*.map' -delete
