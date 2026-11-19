@@ -1,8 +1,8 @@
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
-index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d264164858121c364 100644
+index b87ccb2997402ca2c502cd53d1002b05ee041852..2ca30db836460e33947d7bf87fe9648019cf88ba 100644
 --- a/src/ui/my-work/src/live/local-source.ts
 +++ b/src/ui/my-work/src/live/local-source.ts
-@@ -116,6 +116,18 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -116,6 +116,21 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    const MAX_CACHED_DETAILS = 8
    /** The content of the last model handed to the screens, so an unchanged snapshot or a quiet minute is not sent again. */
    let lastDeliveredSignature: string | null = null
@@ -12,16 +12,19 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
 +  // one was shown while it was in flight, as the store reads the work again then (`showSaved`):
 +  // oboete polls in place of the event stream (0001), and a poll read before the write, its content
 +  // the one on screen, is shown nothing and does not stand for the save. A model the source hands
-+  // back is not taken as shown until the store shows it. When a save answers with the work on screen,
-+  // it hands back `displayed` itself, which the store does not show again: shown again, it would
-+  // count as a newer model for another save in flight, which would set its own answer aside.
++  // back is not taken as shown until the store shows it. A save or a read that answers with the work
++  // on screen, or with its content, hands back `displayed` itself (`orOnScreen`), which the store does
++  // not show again: shown again, it would count as a newer model for another save in flight, which
++  // would set its own answer aside.
 +  let handedOut = 0
 +  let displayed: WorkModel | null = null
 +  const shown = (model: WorkModel) => { lastDeliveredSignature = modelSignature(model); handedOut++; displayed = model }
++  const orOnScreen = (model: WorkModel): WorkModel =>
++    displayed && modelSignature(model) === modelSignature(displayed) ? displayed : model
    // Accepted models are immutable. Connection-only wrappers share their content signature,
    // so bootstrap and publication do not serialize the same request list again.
    const modelSignatures = new WeakMap<object, string>()
-@@ -222,7 +234,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -222,7 +237,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
      }
    }
  
@@ -30,7 +33,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
      const versionBeforeRead = modelVersion
      const syncBeforeRead = syncVersion
      lastOverviewReadAt = performance.now()
-@@ -234,21 +246,37 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -234,21 +249,37 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        assertOwnership?.()
      }
      if (!answer.response.ok) throw new Error(`The worker answered ${answer.response.status} ${answer.response.statusText}`.trim())
@@ -55,7 +58,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
 +    const kept = () => handedOut !== handedOutBeforeRead
 +    try {
 +      const model = await readOverview(undefined, undefined, kept)
-+      return kept() ? displayed : model
++      return kept() ? displayed : orOnScreen(model)
 +    } catch { return displayed }
 +  }
 +
@@ -72,7 +75,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
      const syncBeforeSave = syncVersion
      const generation = streamGeneration
      const response = await fetchImpl(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-@@ -259,17 +287,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -259,17 +290,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        const message = `${whatWasSaved} was not saved: ${typeof reason === 'string' ? reason : `the worker answered ${response.status}`}`
        // A 409 answers the snapshot the worker refused against, so the screen can show what changed.
        if (isWorkViewSnapshot(snapshot)) {
@@ -80,7 +83,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
 -          ? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
 -        lastDeliveredSignature = modelSignature(model)
 +        const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+          ? displayed ?? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
++          ? displayed ?? withConnection(latestModel) : orOnScreen(acceptSnapshot(snapshot, false, syncBeforeSave))
          throw new SaveRefusedError(message, model)
        }
        throw new Error(message)
@@ -99,11 +102,11 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
 +    }
 +    const newerModel = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration) ? latestModel : null
 +    // oboete (0006): the model on screen, which the minute timer may have aged past `latestModel`.
-+    const model = newerModel ? displayed ?? withConnection(newerModel) : acceptSnapshot(answer, false, syncBeforeSave)
++    const model = newerModel ? displayed ?? withConnection(newerModel) : orOnScreen(acceptSnapshot(answer, false, syncBeforeSave))
      // Undo needs this write's receipt, even if the live model has already moved on. Mapping the
      // receipt separately must not replace the newer model used by the screen or detail reads.
      const receipt = keepReceipt && newerModel ? withConnection(toWorkModel(answer, Date.now())) : model
-@@ -361,6 +395,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -361,6 +398,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
  
    const localSource: WorkDataSource = {
      sourceKind: SOURCE_KIND,
@@ -111,15 +114,18 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
      ...conversationContinuation,
  
      /** app.js `refresh`: when an SSE snapshot arrived while this read was in flight, the event's newer model wins. */
-@@ -379,7 +414,6 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -378,8 +416,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+             if (generation !== streamGeneration) throw abortError()
              if (firstEvent === waiting) firstEvent = null
            }
-           model ??= await readOverview()
+-          model ??= await readOverview()
 -          lastDeliveredSignature = modelSignature(model)
++          // oboete (0006): a read with the content on screen hands back the model shown (none at the first).
++          model ??= orOnScreen(await readOverview())
            return model
          })().finally(() => { if (initialRead === pending) initialRead = null })
          initialRead = pending
-@@ -451,11 +485,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -451,11 +489,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
  
      /**
       * app.js `saveReview`: POST the version on screen. 409 → read the latest model (the worker refused a stale or
@@ -134,14 +140,14 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
        const syncBeforeSave = syncVersion
        const generation = streamGeneration
        const response = await fetchImpl(WORK_VIEW_REVIEW_URL, {
-@@ -469,18 +504,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -469,18 +508,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        if (answer.kind === 'unavailable') return { outcome: 'unavailable', serverMessage: answer.serverMessage }
        if (answer.kind === 'conflict') {
          const latest = isWorkViewSnapshot(answer.snapshot)
 -          ? latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration)
 -            ? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
 +          ? latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+            ? displayed ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
++            ? displayed ?? withConnection(latestModel) : orOnScreen(acceptSnapshot(answer.snapshot, false, syncBeforeSave))
            : await localSource.loadWorkModel()
          const latestFingerprint = latest.requests.find((request) => request.id === requestId)?.contentFingerprint
          return conflictReason(expectedFingerprint, latestFingerprint) === 'refused'
@@ -160,11 +166,11 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
 +        return { outcome: 'saved', model, save: answer.save }
 +      }
 +      const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+        ? displayed ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
++        ? displayed ?? withConnection(latestModel) : orOnScreen(acceptSnapshot(answer.snapshot, false, syncBeforeSave))
        return { outcome: 'saved', model, ...(answer.save ? { save: answer.save } : {}) }
      },
  
-@@ -520,7 +560,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -520,7 +564,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        const sendIfChanged = (model: WorkModel) => {
          const signature = modelSignature(model)
          if (signature === lastDeliveredSignature) return
@@ -175,10 +181,10 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..55cc6c206bf374c92efcf71d26416485
        publishModel = sendIfChanged
 diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d57561baecd0496696c754f5ac38b235f251366
+index 0000000000000000000000000000000000000000..0737a855bdfa5390605133464868c32fb3f6a60f
 --- /dev/null
 +++ b/src/ui/my-work/src/live/oboete-saves.test.ts
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,578 @@
 +// oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): a save's answer as the pages take it
 +// on oboete's transport. oboete polls in place of claude-mem's event stream (0001), so a poll read
 +// before a save can land while the save waits, its content the one on screen; and a write whose
@@ -420,8 +426,8 @@ index 0000000000000000000000000000000000000000..3d57561baecd0496696c754f5ac38b23
 +    } finally { stop() }
 +  })
 +
-+  /** A source on the polling transport whose every read fails; its saves wait for `held`, by route. */
-+  function failingReads(held: { suggestion?: Promise<Response>, a?: Promise<Response>, b: Promise<Response> }) {
++  /** A source on the polling transport whose reads answer `reads`, in order, and then fail; its saves wait for `held`, by route. */
++  function failingReads(held: { suggestion?: Promise<Response>, a?: Promise<Response>, b: Promise<Response> }, reads: Response[] = []) {
 +    const streams: FakeStream[] = []
 +    const local = createLocalSource({
 +      hostname: 'localhost',
@@ -431,6 +437,8 @@ index 0000000000000000000000000000000000000000..3d57561baecd0496696c754f5ac38b23
 +          if (String(url).includes('suggestion')) return held.suggestion!
 +          return JSON.parse(String(init.body)).requestId === 'request-a' ? held.a! : held.b
 +        }
++        const read = reads.shift()
++        if (read) return read
 +        throw new TypeError('Failed to fetch')
 +      },
 +      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
@@ -457,6 +465,64 @@ index 0000000000000000000000000000000000000000..3d57561baecd0496696c754f5ac38b23
 +      assert.equal((await b).outcome, 'saved')
 +      // Every read fails here: the second check shows from its own answer, or not at all.
 +      assert.notEqual(request('request-b')?.checkedAt, undefined, 'the second check shown')
++    } finally { stop() }
++  })
++
++  for (const first of ['its receipt alone, its read again finding the content on screen', 'the content on screen'] as const) {
++    it(`on the screen: two checks before any poll, the first answered with ${first}, the second shows its own answer`, async () => {
++      const held = { a: deferred<Response>(), b: deferred<Response>() }
++      const receipt = first === 'the content on screen' ? json(two(false, false)) : json({ save: { scope: 'local', state: 'saved' } })
++      const { store, stop, streams, load, request } = failingReads({ a: held.a.promise, b: held.b.promise }, [json(two(false, false))])
++      try {
++        streams[0].emit('work-view', two(false, false))
++        await until(() => load().state === 'loaded')
++        const a = store.getState().setRequestChecked('request-a', false, FIRST, null)
++        const b = store.getState().setRequestChecked('request-b', true, SECOND, null)
++        const before = load()
++        held.a.resolve(receipt)
++        assert.equal((await a).outcome, 'saved')
++        assert.equal(load(), before, 'the content on screen, not shown again')
++        held.b.resolve(json(two(false, true)))
++        assert.equal((await b).outcome, 'saved')
++        assert.notEqual(request('request-b')?.checkedAt, undefined, 'the second check shown')
++      } finally { stop() }
++    })
++  }
++
++  it('on the screen: a check its own poll showed first, read again to the content on screen, leaves a later check its answer', async () => {
++    const held = { a: deferred<Response>(), b: deferred<Response>() }
++    const { store, stop, streams, load, request } = failingReads({ a: held.a.promise, b: held.b.promise }, [json(two(true, false))])
++    try {
++      streams[0].emit('work-view', two(false, false))
++      await until(() => load().state === 'loaded')
++      const a = store.getState().setRequestChecked('request-a', true, FIRST, null)
++      // A poll shows the first check before its answer; the second check starts after it.
++      streams[0].emit('work-view', two(true, false))
++      await until(() => request('request-a')?.checkedAt !== undefined)
++      const b = store.getState().setRequestChecked('request-b', true, SECOND, null)
++      const before = load()
++      held.a.resolve(json(two(true, false)))
++      assert.equal((await a).outcome, 'saved')
++      assert.equal(load(), before, 'the store read again, and the content on screen is not shown again')
++      held.b.resolve(json(two(true, true)))
++      assert.equal((await b).outcome, 'saved')
++      assert.notEqual(request('request-b')?.checkedAt, undefined, 'the second check shown')
++    } finally { stop() }
++  })
++
++  it('on the screen: a read tried again while a check is in flight, finding the content on screen, leaves the check its answer', async () => {
++    const held = { b: deferred<Response>() }
++    const { store, stop, streams, load, request } = failingReads({ b: held.b.promise }, [json(two(false, false))])
++    try {
++      streams[0].emit('work-view', two(false, false))
++      await until(() => load().state === 'loaded')
++      const b = store.getState().setRequestChecked('request-b', true, SECOND, null)
++      const before = load()
++      await store.getState().retryWorkRead()
++      assert.equal(load(), before, 'the content on screen, not shown again')
++      held.b.resolve(json(two(false, true)))
++      assert.equal((await b).outcome, 'saved')
++      assert.notEqual(request('request-b')?.checkedAt, undefined, 'the check shown')
 +    } finally { stop() }
 +  })
 +
@@ -715,7 +781,7 @@ index 207baf1074d4c8797ce5f54fa97413d54dcf11e7..99b090a0ea2bd5c831d9f9c1e6c36905
     * Marks one version of a request checked, or undoes that. `expectedFingerprint` is the version on screen: the
     * worker refuses a check for any other version. Rejects when the save fails for a reason it can't name.
 diff --git a/src/ui/my-work/src/store/slices/work-slice.ts b/src/ui/my-work/src/store/slices/work-slice.ts
-index 67a1e1cdb0230417435f70f29a24f127eb0ea114..2fe89a8b4fdab0b571cd295147fbbe2924763793 100644
+index 67a1e1cdb0230417435f70f29a24f127eb0ea114..4ba59aad7881cc1bb4e7e25a1707859a79c89b0f 100644
 --- a/src/ui/my-work/src/store/slices/work-slice.ts
 +++ b/src/ui/my-work/src/store/slices/work-slice.ts
 @@ -29,6 +29,8 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
@@ -727,12 +793,13 @@ index 67a1e1cdb0230417435f70f29a24f127eb0ea114..2fe89a8b4fdab0b571cd295147fbbe29
      set((state) => {
        state.work.load = { state: 'loaded', model }
        state.work.connection = model.connection
-@@ -45,6 +47,13 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+@@ -45,6 +47,14 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
      get().reconcileOpenRequest()
    }
  
-+  // Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): a save that answers with the work on
-+  // screen hands back the model shown; shown again, it would count as a newer model for another save in flight.
++  // Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): a save or a read that answers with the
++  // work on screen, or its content, hands back the model shown; shown again, it would count as a newer model for a save
++  // in flight, which would then set its own answer aside.
 +  const onScreen = (model: WorkModel) => {
 +    const load = get().work.load
 +    return load.state === 'loaded' && load.model === model
@@ -741,7 +808,16 @@ index 67a1e1cdb0230417435f70f29a24f127eb0ea114..2fe89a8b4fdab0b571cd295147fbbe29
    const activeSource = (what: string) => {
      if (!source) throw new Error(`No data source to ${what}`)
      return source
-@@ -70,7 +79,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+@@ -57,7 +67,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+     const shownBefore = modelsShown
+     try {
+       const model = await reading.loadWorkModel()
+-      if (session === thisSession && modelsShown === shownBefore) showModel(model)
++      if (session === thisSession && modelsShown === shownBefore && !onScreen(model)) showModel(model)
+     } catch (error) {
+       if (session !== thisSession || get().work.load.state === 'loaded') return
+       set((state) => { state.work.load = { state: 'failed', error: messageOf(error) } })
+@@ -70,7 +80,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
     */
    const showSaved = async (saved: WorkModel, shownBeforeSave: number) => {
      if (modelsShown === shownBeforeSave) {
@@ -750,7 +826,16 @@ index 67a1e1cdb0230417435f70f29a24f127eb0ea114..2fe89a8b4fdab0b571cd295147fbbe29
        set((state) => { state.work.refreshError = null })
        return
      }
-@@ -96,7 +105,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+@@ -79,7 +89,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+     try {
+       const model = await activeSource('read work from').loadWorkModel()
+       if (session !== thisSession) return
+-      if (modelsShown === shownBeforeRead) showModel(model)
++      if (modelsShown === shownBeforeRead && !onScreen(model)) showModel(model)
+       set((state) => { state.work.refreshError = null })
+     } catch (error) {
+       if (session !== thisSession) return
+@@ -96,7 +106,7 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
      try {
        result = await save(saveTo)
      } catch (error) {
