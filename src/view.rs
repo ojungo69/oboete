@@ -1759,7 +1759,9 @@ impl Viewer {
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
             ("POST", "/api/my-work/finished") => (MAX_BODY, |v, b, _| v.my_work_finished(b)),
             ("POST", "/api/my-work/refresh") => (MAX_BODY, |v, b, _| v.my_work_refresh(b)),
-            ("POST", "/api/my-work/suggestion") => (MAX_BODY, |v, b, _| v.my_work_suggestion(b)),
+            ("POST", "/api/my-work/suggestion") => {
+                (MAX_BODY, |v, b, given| v.my_work_suggestion(b, given))
+            }
             ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
             ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
@@ -2339,9 +2341,14 @@ impl Viewer {
         saved(crate::my_work_focus::act(&self.home, &self.saving, body))
     }
 
-    /// J4: the owner's Join or Not this on a judge's suggestion.
-    fn my_work_suggestion(&self, body: &[u8]) -> Response {
-        saved(crate::my_work_judge::act(&self.home, &self.saving, body))
+    /// J4: the owner's Join or Not this on a judge's suggestion, only while the token its request
+    /// brought is the page's (R6): asked again under config.lock, and refused as `take` refuses one.
+    fn my_work_suggestion(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        match crate::my_work_judge::act(&self.home, &self.saving, body, &authorized) {
+            Err(r) if r.status == 401 => Response::text(401, "missing or wrong token"),
+            answer => saved(answer),
+        }
     }
 
     /// Parity row 3: what forgetting an item the page shows takes, and the key its start brings.

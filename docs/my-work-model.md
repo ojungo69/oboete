@@ -2060,8 +2060,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   `not-this`, past the save gate as the other owner actions. Refused before it writes: 400
   `bad_request` (another shape, an id of no length or over 80 characters); 404
   `suggestion_not_found` (no such request, or no open suggestion on it); 409
-  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 503
-  `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
+  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 409
+  `suggestion_changed` and `my_work_pending`, and 401, when the answer would place other
+  conversations than the request shows, or the stores or the token moved before its write
+  (W3b-1, below); 503 `my_work_unavailable`. It answers `applied` or `pending`, as My Focus does, and the page reads
   My Work again and says what was done; a Join from the request's page shows the request it
   joined, whose id stays.
 - **The op**: one op of job `judge` by the owner (no entry), about the conversation's repository,
@@ -2101,6 +2103,28 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   succeeded finds nothing new. A redraw keeps the search field the owner types in, with its caret.
   A move applied and not read is drawn where the store has it, so that a later move's Undo goes
   back there.
+- **Checked to its write** (W3b-1, 2026-11-20): My Work shows a suggestion only when its answer
+  places what the request shows: the conversation's anchor in its own group, every conversation of
+  that group one the request owns whole (none of them taken by a request a work state names), and
+  the anchor of the request the pick is in in its own group too, as J4 writes both anchors, which
+  the fold would otherwise take out of where they are. The request's `Held` keeps the
+  conversations an answer places. The route checks the answer against them, from one read of My
+  Work and the fold after the catch-up: 409 `suggestion_changed` when the fold's conversations are
+  other than those (a page read before they moved, or a suggestion the page did not show); a Join
+  whose pick's anchor is not in its own group, or whose request is no request now (a work state
+  took its conversations), 409 `suggestion_target_gone`. The op is appended only while this device
+  has appended no op of a kind the answer reads since the catch-up read it (every kind but
+  curation's claims, windows, turns, digests and corrections, which move no conversation between
+  requests: on this PC, 174 of a day's 3,951 appends hold one of the others, so that a check of
+  2 seconds meets one 0.39% of the time, where any op would refuse 9.1%) and forget has denied
+  nothing since the answer's reading (`Raw::append_ops_at`, against the forget fence): else 409
+  `my_work_pending`, nothing written. The page's token is asked again under config.lock, where new
+  tokens are made, before the append: a token replaced while the answer waited is 401, nothing
+  written. Known limits: a hook record that arrives between the check and the write is not fenced
+  (agents record all day): the call record of a work state write that names a request, arriving
+  after its op, can take a conversation of the group into that request after the check, and the
+  answer then places it in the fold, where the request the work state names outranks the group;
+  another device's ops are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).

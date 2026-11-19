@@ -5460,6 +5460,10 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   joined=null;refuse=[404,'suggestion_not_found'];set(rows());
   answerOf(card('s2'),'join').click();await ticks();
   assert.equal(document.getElementById('status').textContent,'That suggestion is no longer waiting for an answer. The page has been read again.');
+  // W3b-1: an answer whose conversations are no longer the ones its request showed.
+  joined=null;refuse=[409,'suggestion_changed'];set(rows());
+  answerOf(card('s2'),'not-this').click();await ticks();
+  assert.equal(document.getElementById('status').textContent,'That suggestion no longer matches its requests as they are now. The page has been read again.');
   refuse=null;
   ctx.ui.setLang('ja');run('myWorkDraw()');
   assert.equal(text(line(card('s2')).querySelector('p')),'「Parser」の一部のようです。');

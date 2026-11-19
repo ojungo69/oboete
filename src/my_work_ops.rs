@@ -264,6 +264,47 @@ pub(crate) fn record(home: &std::path::Path, job: &str, ops: Vec<(String, Value)
     let rules = crate::capture::Settings::load(home)?.rules;
     let mut raw = crate::raw::open(home)?;
     let k = crate::knowledge::open(home)?;
+    let bodies = bodies(job, ops)?;
+    raw.gates_with(&rules);
+    let seqs = raw.append_ops(&bodies)?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    Ok(applied(home, &k, &device, &seqs, job))
+}
+
+/// `record`'s append for an owner's answer checked against the stores at this device's newest op
+/// `top` of a kind the answer reads and the forget fence `fence` (J4, `Raw::append_ops_at`, which
+/// refuses with `raw::OpsMoved`):
+/// knowledge.db opened before it, as `record` opens it, and handed back with what the wait for the
+/// consumer takes (`applied`), so that the caller lets go of its locks before that wait.
+pub(crate) fn append_at(
+    home: &std::path::Path,
+    job: &str,
+    ops: Vec<(String, Value)>,
+    (top, fence): (i64, i64),
+) -> Result<(Connection, String, Vec<i64>)> {
+    let rules = crate::capture::Settings::load(home)?.rules;
+    let mut raw = crate::raw::open(home)?;
+    let k = crate::knowledge::open(home)?;
+    let bodies = bodies(job, ops)?;
+    raw.gates_with(&rules);
+    let seqs = raw.append_ops_at(&bodies, top, fence)?;
+    Ok((k, raw.device().to_owned(), seqs))
+}
+
+/// Whether the my_work consumer applied `device`'s ops `seqs` of `job` within 10 seconds.
+pub(crate) fn applied(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    seqs: &[i64],
+    job: &str,
+) -> bool {
+    crate::claims::applied(home, k, device, seqs, (job, "my_work")).is_ok()
+}
+
+/// The owner's ops of `job` as raw.db takes them.
+fn bodies(job: &str, ops: Vec<(String, Value)>) -> Result<Vec<(crate::raw::OpKind, Value)>> {
     let ts = crate::db::now_ms();
     let mut bodies = Vec::new();
     for (about, fields) in ops {
@@ -285,11 +326,7 @@ pub(crate) fn record(home: &std::path::Path, job: &str, ops: Vec<(String, Value)
         };
         bodies.push((crate::raw::OpKind::MyWork, serde_json::to_value(op)?));
     }
-    raw.gates_with(&rules);
-    let seqs = raw.append_ops(&bodies)?;
-    let device = raw.device().to_owned();
-    drop(raw);
-    Ok(crate::claims::applied(home, &k, &device, &seqs, (job, "my_work")).is_ok())
+    Ok(bodies)
 }
 
 /// `newest` of `device`'s ops when one is named (a job shows only its own device's, S2), passing
