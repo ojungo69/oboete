@@ -1,23 +1,27 @@
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
-index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9101ce201 100644
+index b87ccb2997402ca2c502cd53d1002b05ee041852..aa42fe4d1975e95e82cd56cf645b425bbc013e28 100644
 --- a/src/ui/my-work/src/live/local-source.ts
 +++ b/src/ui/my-work/src/live/local-source.ts
-@@ -116,6 +116,14 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -116,6 +116,18 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    const MAX_CACHED_DETAILS = 8
    /** The content of the last model handed to the screens, so an unchanged snapshot or a quiet minute is not sent again. */
    let lastDeliveredSignature: string | null = null
-+  // Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): how many models went to
-+  // the screens, by an event or as an answer, and the last of them. A save keeps the live model in
-+  // place of its answer only when one went while it was in flight: oboete polls in place of the
-+  // event stream (0001), and a poll read before the write, its content the one on screen, reaches no
-+  // screen and does not stand for the save.
++  // Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): how many models the
++  // screens were shown, by the stream or by the store (`modelShown`), and the last of them, which is
++  // what `lastDeliveredSignature` names. A save keeps the live model in place of its answer only when
++  // one was shown while it was in flight, as the store reads the work again then (`showSaved`):
++  // oboete polls in place of the event stream (0001), and a poll read before the write, its content
++  // the one on screen, is shown nothing and does not stand for the save. A model the source hands
++  // back is not taken as shown until the store shows it.
 +  let handedOut = 0
 +  let displayed: WorkModel | null = null
-+  const handOut = (model: WorkModel) => { lastDeliveredSignature = modelSignature(model); handedOut++; displayed = model }
++  const shown = (model: WorkModel) => { lastDeliveredSignature = modelSignature(model); handedOut++; displayed = model }
++  /** The model on screen, with the connection as it is now. */
++  const onScreen = (): WorkModel | null => displayed ? withConnection(displayed) : null
    // Accepted models are immutable. Connection-only wrappers share their content signature,
    // so bootstrap and publication do not serialize the same request list again.
    const modelSignatures = new WeakMap<object, string>()
-@@ -222,7 +230,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -222,7 +234,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
      }
    }
  
@@ -26,7 +30,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
      const versionBeforeRead = modelVersion
      const syncBeforeRead = syncVersion
      lastOverviewReadAt = performance.now()
-@@ -234,21 +242,37 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -234,21 +246,37 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        assertOwnership?.()
      }
      if (!answer.response.ok) throw new Error(`The worker answered ${answer.response.status} ${answer.response.statusText}`.trim())
@@ -51,8 +55,8 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
 +    const kept = () => handedOut !== handedOutBeforeRead
 +    try {
 +      const model = await readOverview(undefined, undefined, kept)
-+      return kept() ? displayed : model
-+    } catch { return displayed }
++      return kept() ? onScreen() : model
++    } catch { return onScreen() }
 +  }
 +
    const isWorkViewSnapshot = (value: unknown): value is WorkViewSnapshot => {
@@ -68,7 +72,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
      const syncBeforeSave = syncVersion
      const generation = streamGeneration
      const response = await fetchImpl(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-@@ -259,17 +283,26 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -259,17 +287,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        const message = `${whatWasSaved} was not saved: ${typeof reason === 'string' ? reason : `the worker answered ${response.status}`}`
        // A 409 answers the snapshot the worker refused against, so the screen can show what changed.
        if (isWorkViewSnapshot(snapshot)) {
@@ -76,8 +80,7 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
 -          ? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
 -        lastDeliveredSignature = modelSignature(model)
 +        const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+          ? displayed ?? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
-+        handOut(model)
++          ? onScreen() ?? withConnection(latestModel) : acceptSnapshot(snapshot, false, syncBeforeSave)
          throw new SaveRefusedError(message, model)
        }
        throw new Error(message)
@@ -90,28 +93,33 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
 +      // oboete (0006, #1108): a write saved whose snapshot did not read answers its receipt alone.
 +      const save = readSaveReceipt(answer)
 +      const kept = handedOut !== handedOutBeforeSave || generation !== streamGeneration
-+      const model = save ? (kept ? displayed : null) ?? await readAgain() : null
++      const model = save ? (kept ? onScreen() : null) ?? await readAgain() : null
 +      if (!save || !model) throw new Error(`${whatWasSaved} was saved, but the worker sent back something that is not a work snapshot. Reload to see it.`)
-+      handOut(model)
 +      return { model, savedRuleId: null, save }
 +    }
 +    const newerModel = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration) ? latestModel : null
 +    // oboete (0006): the model on screen, which the minute timer may have aged past `latestModel`.
-+    const model = newerModel ? displayed ?? withConnection(newerModel) : acceptSnapshot(answer, false, syncBeforeSave)
-+    handOut(model)
++    const model = newerModel ? onScreen() ?? withConnection(newerModel) : acceptSnapshot(answer, false, syncBeforeSave)
      // Undo needs this write's receipt, even if the live model has already moved on. Mapping the
      // receipt separately must not replace the newer model used by the screen or detail reads.
      const receipt = keepReceipt && newerModel ? withConnection(toWorkModel(answer, Date.now())) : model
-@@ -379,7 +412,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -361,6 +395,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+ 
+   const localSource: WorkDataSource = {
+     sourceKind: SOURCE_KIND,
++    modelShown: shown,
+     ...conversationContinuation,
+ 
+     /** app.js `refresh`: when an SSE snapshot arrived while this read was in flight, the event's newer model wins. */
+@@ -379,7 +414,6 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
              if (firstEvent === waiting) firstEvent = null
            }
            model ??= await readOverview()
 -          lastDeliveredSignature = modelSignature(model)
-+          handOut(model)
            return model
          })().finally(() => { if (initialRead === pending) initialRead = null })
          initialRead = pending
-@@ -451,11 +484,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -451,11 +485,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
  
      /**
       * app.js `saveReview`: POST the version on screen. 409 → read the latest model (the worker refused a stale or
@@ -126,17 +134,15 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
        const syncBeforeSave = syncVersion
        const generation = streamGeneration
        const response = await fetchImpl(WORK_VIEW_REVIEW_URL, {
-@@ -469,18 +503,27 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -469,18 +504,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        if (answer.kind === 'unavailable') return { outcome: 'unavailable', serverMessage: answer.serverMessage }
        if (answer.kind === 'conflict') {
          const latest = isWorkViewSnapshot(answer.snapshot)
 -          ? latestModel && (modelVersion !== versionBeforeSave || generation !== streamGeneration)
 -            ? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
 +          ? latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+            ? displayed ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
++            ? onScreen() ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
            : await localSource.loadWorkModel()
-+        // oboete (0006): this answer goes to the screen too.
-+        handOut(latest)
          const latestFingerprint = latest.requests.find((request) => request.id === requestId)?.contentFingerprint
          return conflictReason(expectedFingerprint, latestFingerprint) === 'refused'
            ? { outcome: 'refused', serverMessage: answer.serverMessage, model: latest }
@@ -149,32 +155,30 @@ index b87ccb2997402ca2c502cd53d1002b05ee041852..b15d2edca385e69f5f4d00e3c8d27cf9
 +      if (!isWorkViewSnapshot(answer.snapshot)) {
 +        // oboete (0006, #1108): a check saved whose snapshot did not read answers its receipt alone.
 +        const kept = handedOut !== handedOutBeforeSave || generation !== streamGeneration
-+        const model = answer.save ? (kept ? displayed : null) ?? await readAgain() : null
++        const model = answer.save ? (kept ? onScreen() : null) ?? await readAgain() : null
 +        if (!answer.save || !model) throw new Error('The local review was saved, but the worker sent back something that is not a work snapshot. Reload to see it.')
-+        handOut(model)
 +        return { outcome: 'saved', model, save: answer.save }
 +      }
 +      const model = latestModel && (handedOut !== handedOutBeforeSave || generation !== streamGeneration)
-+        ? displayed ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
-+      handOut(model)
++        ? onScreen() ?? withConnection(latestModel) : acceptSnapshot(answer.snapshot, false, syncBeforeSave)
        return { outcome: 'saved', model, ...(answer.save ? { save: answer.save } : {}) }
      },
  
-@@ -521,6 +564,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -520,7 +560,7 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+       const sendIfChanged = (model: WorkModel) => {
          const signature = modelSignature(model)
          if (signature === lastDeliveredSignature) return
-         lastDeliveredSignature = signature
-+        handedOut++
-+        displayed = model
+-        lastDeliveredSignature = signature
++        shown(model)
          onWorkModel(model)
        }
        publishModel = sendIfChanged
 diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7bd948cab
+index 0000000000000000000000000000000000000000..1e182138dbb78023ee4307ab41921bd84ae1d5b9
 --- /dev/null
 +++ b/src/ui/my-work/src/live/oboete-saves.test.ts
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,456 @@
 +// oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): a save's answer as the pages take it
 +// on oboete's transport. oboete polls in place of claude-mem's event stream (0001), so a poll read
 +// before a save can land while the save waits, its content the one on screen; and a write whose
@@ -221,6 +225,7 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +  const calls = { posts: 0, gets: 0 }
 +  const local = createLocalSource({
 +    hostname: 'localhost',
++    bootstrapTimeoutMs: 10,
 +    fetchImpl: async (_url, init) => {
 +      if (init?.method === 'POST') { calls.posts++; return held }
 +      calls.gets++
@@ -229,6 +234,21 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +    eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
 +  })
 +  return { local, streams, calls }
++}
++/** Until `done` holds, or a second: the store's reads run on the source's own timers. */
++async function until(done: () => boolean) {
++  for (let i = 0; i < 200 && !done(); i++) await new Promise<void>((resolve) => setTimeout(resolve, 5))
++}
++/** Two requests, each checked or not, at one version each. */
++function two(a: boolean, b: boolean, bAt = SECOND): WorkViewSnapshot {
++  const value = snapshot()
++  const base = value.humanRequests[0]
++  const at = (checked: boolean) => ({ ...base.review, checked, checkedAtEpoch: checked ? NOW : null })
++  value.humanRequests = [
++    { ...base, id: 'request-a', contentFingerprint: FIRST, review: at(a) } as typeof base,
++    { ...base, id: 'request-b', contentFingerprint: bAt, review: at(b) } as typeof base,
++  ]
++  return value
 +}
 +const settle = () => new Promise<void>((resolve) => setImmediate(resolve))
 +/** The store the pages use, on `local`. */
@@ -297,14 +317,107 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +    } finally { stop() }
 +  })
 +
-+  it('a refusal answered after a read of the work reached the screen keeps that read', async () => {
++  it('on the screen: a refusal answered after the store showed a read of the work keeps that read', async () => {
 +    const held = deferred<Response>()
-+    const { local } = harness(held.promise, async () => json(snapshot(THIRD)))
-+    const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
-+    const saving = local.answerRequestSuggestion!(suggestion, 'not-this')
-+    assert.equal((await local.loadWorkModel()).requests[0].contentFingerprint, THIRD)
-+    held.resolve(json({ error: 'This suggestion changed while you were reading.', snapshot: snapshot(SECOND) }, 409))
-+    await assert.rejects(saving, (error: unknown) => error instanceof SaveRefusedError && error.model.requests[0].contentFingerprint === THIRD)
++    const read = deferred<Response>()
++    const { local, calls } = harness(held.promise, async () => read.promise)
++    const { store, stop, shown } = storeOn(local)
++    try {
++      const suggestion = { conversationKey: 'g:1', requestId: 'g:2', requestTitle: 'A', evidence: '', expectedSuggestionHash: 'h' }
++      const saving = store.getState().answerRequestSuggestion(suggestion, 'not-this')
++      await until(() => calls.gets === 1)
++      read.resolve(json(snapshot(THIRD)))
++      await until(() => shown() === THIRD)
++      assert.equal(shown(), THIRD)
++      held.resolve(json({ error: 'This suggestion changed while you were reading.', snapshot: snapshot(SECOND) }, 409))
++      await assert.rejects(saving, (error: unknown) => error instanceof SaveRefusedError && error.model.requests[0].contentFingerprint === THIRD)
++      assert.equal(shown(), THIRD)
++    } finally { stop() }
++  })
++
++  for (const order of ['in the order they were asked', 'the second first'] as const) {
++    it(`on the screen: two checks in flight together both show, answered ${order}`, async () => {
++      const held = { a: deferred<Response>(), b: deferred<Response>() }
++      const streams: FakeStream[] = []
++      const local = createLocalSource({
++        hostname: 'localhost',
++        bootstrapTimeoutMs: 10,
++        fetchImpl: async (_url, init) => {
++          if (init?.method === 'POST') return JSON.parse(String(init.body)).requestId === 'request-a' ? held.a.promise : held.b.promise
++          return json(two(true, true))
++        },
++        eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
++      })
++      const { store, stop } = storeOn(local)
++      const checked = (id: string) => {
++        const load = store.getState().work.load
++        return load.state === 'loaded' && load.model.requests.find((r) => r.id === id)?.checkedAt !== undefined
++      }
++      try {
++        streams[0].emit('work-view', two(false, false))
++        await until(() => store.getState().work.load.state === 'loaded')
++        const a = store.getState().setRequestChecked('request-a', true, FIRST, null)
++        const b = store.getState().setRequestChecked('request-b', true, SECOND, null)
++        if (order === 'in the order they were asked') {
++          held.a.resolve(json(two(true, false)))
++          await a
++          held.b.resolve(json(two(true, true)))
++          await b
++        } else {
++          held.b.resolve(json(two(false, true)))
++          await b
++          held.a.resolve(json(two(true, false)))
++          await a
++        }
++        await until(() => checked('request-a') && checked('request-b'))
++        assert.ok(checked('request-a') && checked('request-b'), 'both checks shown')
++        // A poll of the work as it is now: nothing more to show, and nothing taken for one shown.
++        streams[0].emit('work-view', two(true, true))
++        assert.ok(checked('request-a') && checked('request-b'))
++      } finally { stop() }
++    })
++  }
++
++  it('on the screen: a check that gave way to new work, and a second check answered while the store reads again after the first', async () => {
++    const held = { a: deferred<Response>(), b: deferred<Response>() }
++    const reads: ReturnType<typeof deferred<Response>>[] = []
++    const streams: FakeStream[] = []
++    const local = createLocalSource({
++      hostname: 'localhost',
++      bootstrapTimeoutMs: 10,
++      fetchImpl: async (_url, init) => {
++        if (init?.method === 'POST') return JSON.parse(String(init.body)).requestId === 'request-a' ? held.a.promise : held.b.promise
++        const read = deferred<Response>()
++        reads.push(read)
++        return read.promise
++      },
++      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
++    })
++    const { store, stop } = storeOn(local)
++    const checked = (id: string) => {
++      const load = store.getState().work.load
++      return load.state === 'loaded' && load.model.requests.find((r) => r.id === id)?.checkedAt !== undefined
++    }
++    try {
++      streams[0].emit('work-view', two(false, false))
++      await until(() => store.getState().work.load.state === 'loaded')
++      const a = store.getState().setRequestChecked('request-a', true, FIRST, null)
++      // New work reaches the screen while the first check is in flight.
++      streams[0].emit('work-view', two(false, false, THIRD))
++      const b = store.getState().setRequestChecked('request-b', true, THIRD, null)
++      held.a.resolve(json(two(true, false)))
++      // The store reads the work again after the first check, which waits for that read; the second
++      // check is answered meanwhile.
++      await until(() => reads.length === 1)
++      held.b.resolve(json(two(true, true, THIRD)))
++      await b
++      reads[0].resolve(json(two(true, true, THIRD)))
++      await a
++      await until(() => checked('request-a') && checked('request-b'))
++      // And a poll of the work as it is now shows both, if they were not.
++      streams[0].emit('work-view', two(true, true, THIRD))
++      assert.ok(checked('request-a') && checked('request-b'), 'both checks shown')
++    } finally { stop() }
 +  })
 +})
 +
@@ -438,21 +551,25 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +    } finally { stop() }
 +  })
 +
-+  it('a receipt whose read again fails after a refusal showed newer work stands on that work', async () => {
++  it('on the screen: a receipt whose read again fails after a refusal showed newer work stands on that work', async () => {
 +    const posts = [json({ error: 'This work changed while you were reading.', snapshot: snapshot(THIRD) }, 409), json({ save: { scope: 'local', state: 'saved' } })]
 +    const streams: FakeStream[] = []
 +    const local = createLocalSource({
 +      hostname: 'localhost',
++      bootstrapTimeoutMs: 10,
 +      fetchImpl: async (_url, init) => { if (init?.method === 'POST') return posts.shift()!; throw new TypeError('Failed to fetch') },
 +      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
 +    })
-+    const stop = local.subscribeToLiveUpdates(() => {}, () => {})
++    const { store, stop, shown } = storeOn(local)
 +    try {
 +      streams[0].emit('work-view', snapshot())
-+      const refused = await local.setRequestChecked('request-a', FIRST, true)
++      await until(() => shown() === FIRST)
++      const refused = await store.getState().setRequestChecked('request-a', true, FIRST, null)
 +      assert.equal(refused.outcome, 'changed-while-reading')
-+      const result = await local.setRequestChecked('request-a', THIRD, true)
++      assert.equal(shown(), THIRD)
++      const result = await store.getState().setRequestChecked('request-a', true, THIRD, null)
 +      assert.equal(result.outcome === 'saved' && result.model.requests[0].contentFingerprint, THIRD)
++      assert.equal(shown(), THIRD)
 +    } finally { stop() }
 +  })
 +
@@ -493,7 +610,7 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +        assert.ok(shown.length >= 2, 'the minute timer sent the work again, aged')
 +        held.resolve(json({ ...snapshot(SECOND), save: { scope: 'local', state: 'saved' } }))
 +        const result = await saving
-+        assert.equal('model' in result && result.model, shown.at(-1))
++        assert.equal('model' in result && result.model.requests, shown.at(-1)!.requests)
 +      } finally { stop() }
 +    })
 +  }
@@ -514,7 +631,33 @@ index 0000000000000000000000000000000000000000..d5c7dccbc495aceff8ba8df5d82e39c7
 +      assert.ok(shown.length >= 2, 'the minute timer sent the work again, aged')
 +      const result = await local.setRequestChecked('request-a', FIRST, true)
 +      assert.equal(result.outcome, 'saved')
-+      assert.equal(result.outcome === 'saved' && result.model, shown.at(-1))
++      assert.equal(result.outcome === 'saved' && result.model.requests, shown.at(-1)!.requests)
 +    } finally { stop(); performance.now = originalNow }
 +  })
 +})
+diff --git a/src/ui/my-work/src/live/work-data-source.ts b/src/ui/my-work/src/live/work-data-source.ts
+index 207baf1074d4c8797ce5f54fa97413d54dcf11e7..a61346b34ba2e76f7ced747192f51fd0af396c8f 100644
+--- a/src/ui/my-work/src/live/work-data-source.ts
++++ b/src/ui/my-work/src/live/work-data-source.ts
+@@ -93,6 +93,8 @@ export interface WorkDataSource {
+   loadRequestDetail?(requestId: string, expectedFingerprint?: string, options?: { signal?: AbortSignal }): Promise<Request>
+   /** Streams new models and connection changes until the returned function is called. */
+   subscribeToLiveUpdates(onWorkModel: (model: WorkModel) => void, onConnectionChange: (status: ConnectionStatus) => void): () => void
++  /** Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): the store showed `model`, so that the source knows what the screens show. */
++  modelShown?(model: WorkModel): void
+   /**
+    * Marks one version of a request checked, or undoes that. `expectedFingerprint` is the version on screen: the
+    * worker refuses a check for any other version. Rejects when the save fails for a reason it can't name.
+diff --git a/src/ui/my-work/src/store/slices/work-slice.ts b/src/ui/my-work/src/store/slices/work-slice.ts
+index 67a1e1cdb0230417435f70f29a24f127eb0ea114..8ae6bdda234b0b039770ce68a0652c49456ba497 100644
+--- a/src/ui/my-work/src/store/slices/work-slice.ts
++++ b/src/ui/my-work/src/store/slices/work-slice.ts
+@@ -29,6 +29,8 @@ export const createWorkSlice: SliceCreator<WorkSlice> = (set, get) => {
+     // A state move is an update too, even where the source carries no fingerprint (the sample).
+     for (const change of changes) changedIds.add(change.requestId)
+     modelsShown++
++    // Modified by oboete (ui/work-view/patches/0006-saved-answers.patch, #1108): the source learns what the screen shows.
++    source?.modelShown?.(model)
+     set((state) => {
+       state.work.load = { state: 'loaded', model }
+       state.work.connection = model.connection
