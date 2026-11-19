@@ -640,7 +640,9 @@ pub(crate) fn applied_by(
     if let Some(hook) = WAITING.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    if crate::executable::may_run_worker() {
+    // A pass begun ends first; none begins once the deadline the waits share has run out (W3b-2:
+    // CodeRabbit and Codex on #1115), which another pass, of no bound, would overrun.
+    if crate::executable::may_run_worker() && std::time::Instant::now() < deadline {
         crate::worker::run_once(home)?;
     }
     #[cfg(test)]

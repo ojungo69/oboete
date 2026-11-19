@@ -2056,12 +2056,14 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   anchor is in now (`of`), its id and title as this answer shows them: `suggestion {id, title}`;
   none when the answer shows no such request. Its id leaves the gate's walk and comes back, as a
   request's own does (S6).
-- **The route**: `POST /api/my-work/suggestion`, `{request, action, binding}` with `action`
-  `join` or `not-this` and `binding` the suggestion's (W3b-2, below), past the save gate as the
-  other owner actions. Refused before it writes: 400 `bad_request` (another shape, an id of no
-  length or over 80 characters, no binding or one of another shape); 404
-  `suggestion_not_found` (no such request, or no open suggestion on it); 409
-  `suggestion_target_gone` (Join, when the picked anchor is in no request any more); 409
+- **The route**: `POST /api/my-work/suggestion`, `{request, action, binding, target}` with
+  `action` `join` or `not-this`, and `binding` and `target` the suggestion's binding and the id of
+  the request it names (W3b-2, below), past the save gate as the other owner actions. Refused
+  before it writes: 400 `bad_request` (another shape; a request id of no length or over 80 bytes,
+  as UTF-8; no binding, or one of other than 64 ASCII hex digits; a target of no length or over 80
+  bytes); 404 `suggestion_not_found` (no such request, or no open suggestion on it); 409
+  `suggestion_target_gone` (Join, when the request the pick is in is no request My Work shows the
+  suggestion to, holds the pick no more, or there is none); 409
   `suggestion_changed` and `my_work_pending`, and 401, when the answer would place other
   conversations than the request shows, or the stores or the token moved before its write
   (W3b-1, W3b-2, below); 503 `my_work_unavailable`. It answers `applied` or `pending`, as My
@@ -2117,8 +2119,8 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   whose pick's request's anchor (`of` of the pick, the anchor J4 writes first; the request the
   suggestion names, the one the pick is in now) is not in its own group, or whose request is no
   request now (a work state took its conversations), 409 `suggestion_target_gone`. The op is
-  appended only while this device has appended no op of a kind the answer reads since the
-  catch-up read it (every kind but
+  appended only while this device has appended no op of a kind the answer reads since the check
+  read the newest under config.lock (W3b-2; the catch-up before it in W3b-1) (every kind but
   curation's claims, windows, turns, digests and corrections, which move no conversation between
   requests: on this PC, 174 of a day's 3,951 appends hold one of the others, so that a check of
   2 seconds meets one 0.39% of the time, where any op would refuse 9.1%) and the forget fence of
@@ -2132,14 +2134,19 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   saved write as pending. The page's token is asked again under config.lock, where new tokens are
   made, before the append: a token replaced while the answer waited is 401, nothing written.
 - **Bound to its card** (W3b-2, 2026-11-20): a suggestion My Work shows carries its `binding`, the
-  keyed hash (`my_work::binding`, the whole of `keyed`) of the carrier's held id, the target's
-  (the request the pick is in now) and the conversations an answer places, in their order; the
+  keyed hash (`my_work::binding`, the whole of `keyed`) of the carrier's held id, the id the
+  answer shows the target by (the request the pick is in now: `g:` and the keyed print of its
+  anchor, `my_work::shown_group`) and the conversations an answer places, in their order; the
   route's gate takes it out of its walk and puts it back, so that no rule's mask breaks it. The
-  page posts it with the answer; a body without it is 400 `bad_request`, which a page opened
-  before the binding words as "Please reload the page", and the reloaded page's posts carry it.
-  A suggestion is shown only while the target's group request owns the pick whole (a work state
-  that names another request for the pick takes it: then 409 `suggestion_target_gone` for a Join;
-  a Not this, which places nothing there, still closes it). The answer is checked under
+  page posts it with the answer, and the suggestion's `id` as `target`; a body without the
+  binding is 400 `bad_request`, which a page opened before the binding words as "Please reload
+  the page", and the reloaded page's posts carry it. A suggestion is shown only while the
+  target's group request owns the pick whole (a work state that names another request for the
+  pick takes it: then 409 `suggestion_target_gone` for a Join; a Not this, which places nothing
+  there, still closes it). A grouping that leaves the pick out of every request after the card
+  was read takes the target away: a Join is 409 `suggestion_target_gone`; a Not this is checked
+  with the posted target, which the binding proves the card named, and closes the suggestion, as
+  it did before the binding; with no target posted, or another, it is 409 `suggestion_changed`. The answer is checked under
   config.lock, which a rebuild and a restore hold for their run, through one raw.db and one
   knowledge.db handle opened there (an open handle reads the file it opened, whatever is put in
   place at its path since): the fence's newest op read on that raw.db; the my_work, cards and

@@ -5379,15 +5379,13 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   const rows=()=>[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:S})];
   // After a Join, the request that holds the conversation: Parser, or (#775) the one it went to.
   const both=(id,title)=>req(id,{title,sessions:[{agent:'claude',id:`c:claude:${id}`},{agent:'claude',id:'c:claude:s2'}]});
-  let sent=[],refuse=null,joined=null,unread=false,overtake=false;
+  let sent=[],refuse=null,joined=null,unread=false;
   ctx.fetch=(url,options)=>{
     if(options?.method==='POST'){
       sent.push([url,JSON.parse(options.body)]);
       return Promise.resolve(refuse?posted(refuse[0],{code:refuse[1]}):posted(200,{state:'applied'}));
     }
     if(unread)return Promise.resolve({ok:false,status:503,json:async()=>({})});
-    // W3b-2: a newer read (a poll's, held behind "Show updates") takes the page before this one.
-    if(overtake){overtake=false;run('mw.taken=mw.reads+1');}
     return Promise.resolve(response({requests:joined?[joined].flat():rows(),unlinked:0}));
   };
   set(rows());run('mw.range="all";myWorkDraw()');
@@ -5409,7 +5407,7 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
     ctx.fetch=kept;
   }
   answerOf(card('s2'),'not-this').click();await ticks();
-  assert.deepEqual(sent,[['/api/my-work/suggestion',{request:'s2',action:'not-this',binding:S.binding}]],'Not this names the request and its suggestion');
+  assert.deepEqual(sent,[['/api/my-work/suggestion',{request:'s2',action:'not-this',binding:S.binding,target:'p1'}]],'Not this names the request, its suggestion and the request it names');
   assert.equal(document.getElementById('status').textContent,'Kept as a request of its own.');
   run('mw.layout="list";myWorkDraw()');
   const tableRow=panel.querySelectorAll('tr').find(n=>n.dataset.id==='s2');
@@ -5419,7 +5417,7 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   assert(answerOf(panel,'join'),'the request page has it');
   joined=both('p1','Parser');
   answerOf(panel,'join').click();await ticks();
-  assert.deepEqual(sent[1],['/api/my-work/suggestion',{request:'s2',action:'join',binding:S.binding}],'Join names the request and its suggestion');
+  assert.deepEqual(sent[1],['/api/my-work/suggestion',{request:'s2',action:'join',binding:S.binding,target:'p1'}],'Join names the request, its suggestion and the request it names');
   assert.equal(run('mw.request'),'p1','the request it joined is shown');
   assert.equal(document.getElementById('status').textContent,'Joined to “Parser”.');
   // #777 (an_unchanged_poll_after_an_answer_does_not_offer_show_updates): the poll after it reads
@@ -5473,15 +5471,49 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   answerOf(card('s2'),'not-this').click();await ticks();
   unread=false;
   assert.equal(document.getElementById('status').textContent,'That suggestion no longer matches its requests as they are now. The page couldn’t be read again. Reload it to see My Work as it is now.');
-  // W3b-2: a newer read takes the page first: the refusal alone is said, not a read the page did
-  // not draw.
-  set(rows());overtake=true;
-  answerOf(card('s2'),'not-this').click();await ticks();
-  assert.equal(document.getElementById('status').textContent,'That suggestion no longer matches its requests as they are now.');
-  // W3b-2: an answer without its binding (a page from before it) is 400, which asks for a reload.
-  refuse=[400,'bad_request'];set(rows());
+  // W3b-2 (CodeRabbit on #1115): a poll's read, begun while the read after the refusal is on its
+  // way, lands first and takes the page: the refusal alone is said, not a read the page did not
+  // draw, and the poll's rows are the page's, drawn or held behind "Show updates".
+  {
+    set(rows());
+    const kept=ctx.fetch;
+    let release=null;
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'||release)return kept(url,options);
+      return new Promise(r=>{release=()=>r(response({requests:rows(),unlinked:0}));});
+    };
+    answerOf(card('s2'),'not-this').click();await ticks();
+    assert(release,'the read after the refusal is on its way');
+    joined=[req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma'})];
+    await run('myWorkLive()');
+    release();await ticks();
+    ctx.fetch=kept;
+    assert.equal(document.getElementById('status').textContent,'That suggestion no longer matches its requests as they are now.');
+    assert(run('mw.pending')||!line(card('s2')),'the poll\'s rows, not the refused read\'s');
+    joined=null;run('mw.pending=null');
+  }
+  // W3b-2 (CodeRabbit on #1115): a card whose suggestion has no binding, as a page from before it
+  // posts, posts none; the answer is 400, which asks for a reload.
+  {
+    const bare={...S};delete bare.binding;
+    set([req('p1',{title:'Parser'}),req('s2',{title:'Trailing comma',suggestion:bare})]);
+    const kept=ctx.fetch;
+    ctx.fetch=(url,options)=>{
+      const body=options?.method==='POST'&&JSON.parse(options.body);
+      if(!body||'binding' in body)return kept(url,options);
+      sent.push([url,body]);
+      return Promise.resolve(posted(400,{code:'bad_request'}));
+    };
+    refuse=null;
+    answerOf(card('s2'),'join').click();await ticks();
+    ctx.fetch=kept;
+    assert.deepEqual(sent.at(-1)[1],{request:'s2',action:'join',target:'p1'},'no binding posted');
+    assert.equal(document.getElementById('status').textContent,'The request was not understood. Please reload the page.');
+  }
+  // W3b-2: a Join whose request the pick is in no more is refused in its own words.
+  refuse=[409,'suggestion_target_gone'];set(rows());
   answerOf(card('s2'),'join').click();await ticks();
-  assert.equal(document.getElementById('status').textContent,'The request was not understood. Please reload the page.');
+  assert.equal(document.getElementById('status').textContent,'That request can no longer be joined from this suggestion. The page has been read again.');
   ctx.ui.setLang('ja');refuse=[404,'suggestion_not_found'];set(rows());
   answerOf(card('s2'),'join').click();await ticks();
   assert.equal(document.getElementById('status').textContent,'その提案は、もう答えを待っていません。ページを読み直しました。');

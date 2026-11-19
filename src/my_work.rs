@@ -1106,7 +1106,9 @@ fn read_held_on(
             continue;
         };
         let t = &answers[t];
-        let target = h.suggested.as_deref().unwrap_or_default();
+        // The request it names by the id the page has it (C6), which a Not this whose pick is in
+        // no group when it is answered posts back (W3b-2).
+        let target = t["id"].as_str().unwrap_or_default();
         let binding = binding((h.id(), target), h.placement(), home, &mut key)?;
         let suggestion = json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"],
             "conversation": h.about, "binding": binding});
@@ -2344,8 +2346,9 @@ fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
 }
 
 /// J4 (W3b-2): a suggestion's binding, `keyed` (the whole hash) of the carrier's held id, the
-/// target's and the conversations an answer places, in their order: the page posts it back with
-/// its answer, which lands only on the suggestion its card showed (`my_work_judge::act`).
+/// target's id as the answer shows it (`shown_group`) and the conversations an answer places, in
+/// their order: the page posts it back with its answer, which lands only on the suggestion its
+/// card showed (`my_work_judge::act`).
 pub(crate) fn binding(
     (carrier, target): (&str, &str),
     placement: &[Key],
@@ -2356,6 +2359,12 @@ pub(crate) fn binding(
         .map(|(agent, session)| [agent.as_str(), session.as_str()])
         .collect();
     keyed(&json!([carrier, target, placed]).to_string(), home, key)
+}
+
+/// A group's request id as the answer shows it (C6, `shown_id`): `g:` and the keyed print of its
+/// anchor.
+pub(crate) fn shown_group(anchor: &Key, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+    Ok(format!("g:{}", keyed_print(&anchored(anchor), home, key)?))
 }
 
 /// `keyed`'s first 12 hex digits: the fingerprint of a stored text the gate masks.

@@ -18,6 +18,9 @@ use crate::search::b::fixture::Store;
 const R: &str = "github.com/o/r";
 const MINUTE: i64 = 60_000;
 
+/// What an answer gets: the route's answer, or its refusal's status and code.
+type Answered = std::result::Result<Value, (u16, &'static str)>;
+
 /// A home whose records start an hour ago, with a judge whose key is set.
 struct Home {
     s: Store,
@@ -909,29 +912,29 @@ impl Home {
     }
 
     /// The owner's `action` on the request the page shows `session` in, as the page posts it:
-    /// with the binding of the suggestion it shows (W3b-2).
-    fn answer_on(&self, session: &str, action: &str) -> std::result::Result<Value, (u16, &str)> {
-        let shown = self.request_of(session);
-        let body = json!({"request": shown["id"], "action": action,
-            "binding": shown["suggestion"]["binding"]});
-        self.post(body)
+    /// with the binding of the suggestion it shows and the request it names (W3b-2).
+    fn answer_on(&self, session: &str, action: &str) -> Answered {
+        self.answer(&self.card(session), action)
     }
 
-    /// The card the page shows conversation `session`'s request as (W3b-2): its id and its
-    /// suggestion's binding, which an answer read from it posts, whatever has changed since.
+    /// The card the page shows conversation `session`'s request as (W3b-2): its id, its
+    /// suggestion's binding and the request that suggestion names, which an answer read from it
+    /// posts, whatever has changed since.
     fn card(&self, session: &str) -> Value {
         let shown = self.request_of(session);
-        json!({"request": shown["id"], "binding": shown["suggestion"]["binding"]})
+        let suggestion = &shown["suggestion"];
+        json!({"request": shown["id"], "binding": suggestion["binding"],
+            "target": suggestion["id"]})
     }
 
     /// The owner's `action` on `card`, as the page posts it.
-    fn answer(&self, card: &Value, action: &str) -> std::result::Result<Value, (u16, &str)> {
+    fn answer(&self, card: &Value, action: &str) -> Answered {
         let mut body = card.clone();
         body["action"] = json!(action);
         self.post(body)
     }
 
-    fn post(&self, body: Value) -> std::result::Result<Value, (u16, &str)> {
+    fn post(&self, body: Value) -> Answered {
         let body = serde_json::to_vec(&body).unwrap();
         act(self.s.home.path(), &Mutex::new(()), &body, &|| true).map_err(|r| (r.status, r.code))
     }
@@ -1137,6 +1140,16 @@ fn an_answer_is_refused_before_it_writes() {
         ),
         (
             json!({"request": own, "action": "join", "binding": "f00"}),
+            (400, "bad_request"),
+        ),
+        // The request a suggestion names is an id like the request's own.
+        (
+            json!({"request": own, "action": "not-this", "binding": ANY, "target": ""}),
+            (400, "bad_request"),
+        ),
+        (
+            json!({"request": own, "action": "not-this", "binding": ANY,
+                "target": "g".repeat(81)}),
             (400, "bad_request"),
         ),
         (
@@ -1733,7 +1746,7 @@ impl Home {
     }
 
     /// An answer with `card` while the worker is held, within `WAIT`'s 300 ms.
-    fn held_answer(&self, card: &Value, action: &str) -> std::result::Result<Value, (u16, &str)> {
+    fn held_answer(&self, card: &Value, action: &str) -> Answered {
         let held = crate::worker::lock(self.s.home.path()).unwrap().unwrap();
         crate::claims::WAIT.set(Some(Duration::from_millis(300)));
         let answer = self.answer(card, action);
@@ -1915,7 +1928,7 @@ fn a_knowledge_db_replaced_after_the_check_keeps_the_answer() {
 
 /// W3b-2 (#1114: the restore): raw.db put in place after the check as a restore leaves it, the
 /// same device and the same ops in another file: the answer is refused, and the new raw.db holds
-/// none. (A restore itself refuses while this test's store keeps raw.db open.)
+/// none. (A restore itself refuses while a handle has raw.db open, so this one is made by hand.)
 #[test]
 fn a_raw_db_restored_after_the_check_records_nothing() {
     let mut h = Home::new();
@@ -1923,6 +1936,9 @@ fn a_raw_db_restored_after_the_check_records_nothing() {
     let card = h.card("s2");
     let home = h.s.home.path().to_owned();
     let device = h.s.raw.device().to_owned();
+    // The test's own handle closed while the answer runs, as a restore needs every handle closed:
+    // Windows refuses to replace a file one has open, and an open handle's WAL would shadow the
+    // raw.db put in place.
     let restore = move || {
         let (path, copy) = (home.join("raw.db"), home.join("raw.db.restored"));
         Connection::open(&path)
@@ -1944,7 +1960,8 @@ fn a_raw_db_restored_after_the_check_records_nothing() {
     };
     CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(restore)));
     let before = h.recorded();
-    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    let answer = h.closed(|h| h.answer(&card, "join"));
+    assert_eq!(answer, Err((409, "my_work_pending")));
     let raw = crate::raw::open(h.s.home.path()).unwrap();
     assert_eq!(raw.device(), device, "the restore kept the device");
     drop(raw);
@@ -2009,4 +2026,75 @@ fn a_join_whose_pick_left_a_group_that_stays_is_refused() {
     );
     assert_eq!(h.recorded(), before);
     assert_eq!(h.answer(&card, "not-this").unwrap()["state"], "applied");
+}
+
+impl Home {
+    /// `f` run with the test's own raw.db handle closed, and opened again after.
+    fn closed<T>(&mut self, f: impl FnOnce(&Self) -> T) -> T {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let open = crate::raw::open(elsewhere.path()).unwrap();
+        drop(std::mem::replace(&mut self.s.raw, open));
+        let out = f(self);
+        let open = crate::raw::open(self.s.home.path()).unwrap();
+        drop(std::mem::replace(&mut self.s.raw, open));
+        out
+    }
+}
+
+/// W3b-2 (CodeRabbit on #1115): a grouping that leaves the pick out of every request after the
+/// card was read: a Join on the card is refused, nothing recorded; a Not this is checked with the
+/// request the card named, which its binding proves, and closes the suggestion, as before the
+/// binding; with no request named, or another, it is refused.
+#[test]
+fn a_not_this_closes_a_suggestion_whose_pick_left_every_request() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    assert_eq!(card["target"], h.request_of("s1")["id"]);
+    h.ignored("s1");
+    assert!(h.request_of("s2").get("suggestion").is_none());
+    let before = h.recorded();
+    assert_eq!(
+        h.answer(&card, "join"),
+        Err((409, "suggestion_target_gone"))
+    );
+    let mut unnamed = card.clone();
+    unnamed.as_object_mut().unwrap().remove("target");
+    assert_eq!(
+        h.answer(&unnamed, "not-this"),
+        Err((409, "suggestion_changed"))
+    );
+    let mut other = card.clone();
+    other["target"] = json!("g:000000000000");
+    assert_eq!(
+        h.answer(&other, "not-this"),
+        Err((409, "suggestion_changed"))
+    );
+    assert_eq!(h.recorded(), before);
+    assert_eq!(h.answer(&card, "not-this").unwrap()["state"], "applied");
+    assert_eq!(h.recorded(), before + 1);
+    assert!(!h.groups().suggested.contains_key(&key("s2")), "closed");
+}
+
+/// W3b-2 (CodeRabbit and Codex on #1115): the catch-up's waits share one deadline; a wait begun
+/// after it ran out starts no worker pass, which would keep the answer past it, and is refused,
+/// the op left for the worker.
+#[test]
+fn a_wait_after_the_shared_deadline_starts_no_pass() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.grouped(&["s9"], "Unrelated");
+    let home = h.s.home.path();
+    let device = h.s.raw.device().to_owned();
+    let op = h.s.raw.answer_top().unwrap();
+    let k = crate::knowledge::open(home).unwrap();
+    let at = |k: &Connection| {
+        let ops = crate::knowledge::checkpoint::OPS;
+        crate::knowledge::checkpoint::get_in(k, ops, "my_work", &device).unwrap()
+    };
+    assert!(at(&k) < op, "the op is not applied yet");
+    let ran_out = std::time::Instant::now();
+    let wait = crate::claims::applied_by(home, &k, &device, &[op], (NAME, "my_work"), ran_out);
+    assert!(wait.unwrap_err().is::<crate::claims::NotYet>());
+    assert!(at(&k) < op, "no pass ran");
 }

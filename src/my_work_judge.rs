@@ -472,6 +472,9 @@ struct Answer {
     action: String,
     /// W3b-2: the binding of the suggestion the card showed (`my_work::binding`).
     binding: Option<String>,
+    /// The request the card's suggestion named, by the id the page has it (`suggestion.id`), which
+    /// its binding proves: a Not this whose pick is in no group now is checked with it.
+    target: Option<String>,
 }
 
 /// What an answer appends and what its append is fenced against: this device's newest op of a
@@ -508,6 +511,9 @@ pub(crate) fn act(
     };
     if !(1..=80).contains(&posted.request.len()) {
         return Err(refused(400, "bad_request", "request"));
+    }
+    if (posted.target.as_ref()).is_some_and(|t| !(1..=80).contains(&t.len())) {
+        return Err(refused(400, "bad_request", "target"));
     }
     let bound = (posted.binding.as_deref())
         .is_some_and(|b| b.len() == 64 && b.bytes().all(|c| c.is_ascii_hexdigit()));
@@ -596,26 +602,34 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
     if !in_its_own(c) || group.members != placement {
         return Err(changed());
     }
-    // W3b-2: the descriptor's binding is the posted one.
-    let target = groups.of.get(picked).ok_or_else(gone)?;
-    let now = crate::my_work::binding(
-        (&held, &crate::my_work::anchored(target)),
-        &placement,
-        home,
-        &mut None,
-    )
-    .map_err(|_| unavailable())?;
+    // W3b-2: the descriptor's binding is the posted one. A Not this whose pick is in no group now
+    // (a grouping that left it out since the card was read) is bound by the request the card named,
+    // which the binding proves, as Not this places nothing there; a Join needs the request the pick
+    // is in.
+    let target = groups.of.get(picked);
+    let mut mask = None;
+    let named = match (target, join) {
+        (Some(target), _) => {
+            crate::my_work::shown_group(target, home, &mut mask).map_err(|_| unavailable())?
+        }
+        (None, false) => posted.target.clone().ok_or_else(changed)?,
+        (None, true) => return Err(gone()),
+    };
+    let now = crate::my_work::binding((&held, &named), &placement, home, &mut mask)
+        .map_err(|_| unavailable())?;
     if posted.binding.as_deref() != Some(now.as_str()) {
         return Err(changed());
-    }
-    // A Join places them in the target, which must be a request My Work shows the suggestion to.
-    let current_target = current.contains(&crate::my_work::anchored(target));
-    if join && (target == c || !in_its_own(target) || !current_target || shown.is_none()) {
-        return Err(gone());
     }
     // Its own request's other conversations come with it (claude-mem's `brought`).
     let others = placement.iter().filter(|m| *m != c).map(key);
     let decision = if join {
+        // A Join places them in the target, which must be a request My Work shows the suggestion
+        // to.
+        let target = target.ok_or_else(gone)?;
+        let current_target = current.contains(&crate::my_work::anchored(target));
+        if target == c || !in_its_own(target) || !current_target || shown.is_none() {
+            return Err(gone());
+        }
         let ends = json!([key(target), key(c)]);
         let members: Vec<Value> = [key(target), key(c)].into_iter().chain(others).collect();
         let ja = crate::config::load(home).map_or_else(

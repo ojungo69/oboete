@@ -2775,7 +2775,7 @@ const TEXT = {
   focus_restore: ['An area you wrote can’t be put back in Suggested.', 'あなたが作った分野は、提案に戻せません。'],
   focus_unavailable: ['My Focus can’t be saved right now. Try again in a moment.', '今は保存できません。少し待ってから、もう一度お試しください。'],
   suggestion_not_found: ['That suggestion is no longer waiting for an answer.', 'その提案は、もう答えを待っていません。'],
-  suggestion_target_gone: ['The request it suggested is no longer there.', '提案された依頼は、もうありません。'],
+  suggestion_target_gone: ['That request can no longer be joined from this suggestion.', 'この提案からは、もうその依頼にまとめられません。'],
   suggestion_changed: ['That suggestion no longer matches its requests as they are now.', 'その提案は、今の依頼と合わなくなっています。'],
   my_work_reread_done: ['{text} The page has been read again.', '{text}ページを読み直しました。'],
   my_work_reread_failed: ['{text} The page couldn’t be read again. Reload it to see My Work as it is now.', '{text}ページを読み直せませんでした。今のマイワークを見るには、ページを読み込み直してください。'],
@@ -9452,8 +9452,9 @@ function myWorkSuggestion(row) {
 // wait, as a review's do, since drawing clears the status line; a save the server took stays said
 // as taken when the read after it fails (#602). A Join names, and from the request's page shows,
 // the request the conversation is in as the read after it has it. W3b-2: the answer names the
-// suggestion the card shows by its binding; a refusal says the page was read again only when the
-// rows read are the ones drawn, and asks for a reload when the read failed.
+// suggestion the card shows by its binding and the request it names; a refusal says the page was
+// read again only when the rows read are the ones drawn, and asks for a reload when the read
+// failed.
 async function myWorkAnswer(row, action) {
   if (mw.answering) return;
   mw.answering = true;
@@ -9462,7 +9463,7 @@ async function myWorkAnswer(row, action) {
   let failed = true;
   let applied = false;
   try {
-    const body = { request: row.id, action, binding: row.suggestion?.binding };
+    const body = { request: row.id, action, binding: row.suggestion?.binding, target: row.suggestion?.id };
     const { res, answer } = await memoryWrite('my-work/suggestion', body);
     if (!res.ok) message = memoryFailure(res, answer);
     else {
