@@ -1,0 +1,51 @@
+assets/work-view/assets/index-gEd-Ejfg.js
+  s_52c3955e48bff4::t_10aa9f1024d7b1 1-2,4,7,9-10,18,22,37-39
+assets/work-view/assets/my-rules-IU0rpL78.js
+  s_52c3955e48bff4::t_915e997c7c17d0 1-2
+assets/work-view/assets/past-focus-CkBG46la.js
+  s_52c3955e48bff4::t_80e2f8671e0373 1
+assets/work-view/assets/request-detail-Cs1j_9BM.js
+  s_52c3955e48bff4::t_8660a6e168457b 1
+assets/work-view/assets/suggested-areas-DLUMuUXq.js
+  s_52c3955e48bff4::t_830b396ba2d8ea 1
+assets/work-view/assets/swipe-to-decide-C02d_5UU.js
+  s_52c3955e48bff4::t_d4e1c6ce3f8781 1
+assets/work-view/assets/textarea-Be7ySbVh.js
+  s_52c3955e48bff4::t_4c434a7b260022 46-47,51
+assets/work-view/index.html
+  s_52c3955e48bff4::t_7e22cd2ce14b56 9-10
+docs/my-work.md
+  s_52c3955e48bff4::t_b672d3eca5fa87 175-181
+docs/page.md
+  s_52c3955e48bff4::t_e729ace7a3bb5c 302-304
+docs/spike/work-view.md
+  s_52c3955e48bff4::t_bff634e65ffb2d 129-130
+src/view/tests.rs
+  s_52c3955e48bff4::t_c75b78af56102c 2655-2662,2770-2776,2779-2810,2814,2832-2851,2994-2999,8993-9277
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_b79a86f08f7c14 1611-1744
+ui/work-view/README.md
+  s_52c3955e48bff4::t_136e1ef1fab36e 11
+src/my_work.rs
+  s_52c3955e48bff4::t_def83665db5cbb 787-793,1970-1985
+src/view.rs
+  s_52c3955e48bff4::t_ecfdb414033ed2 1726,2398-2532,3048-3051,3054-3057,3061-3062,3243-3248,3250-3251,3254,3258-3265
+src/work_view.rs
+  s_52c3955e48bff4::t_2e7b8922b31a65 30-31,34-55,59,63,67-133,902-924,934,955-956
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9396f265a719f8170f07fa7afbae6a5937165d02",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
