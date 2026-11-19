@@ -203,3 +203,59 @@ test('--whitespace=nowarn still lets git apply say it skipped a file', () => {
     assert.match(r.stderr, /^Skipped patch 'f\.txt'\.$/m)
   })
 })
+
+// A PATH whose npm installs nothing and succeeds, so that a build goes on to claude-mem's tests.
+function npmPasses(root) {
+  const bin = join(root, 'bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'npm'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  return `${bin}:${process.env.PATH}`
+}
+
+const TESTS = 'node --test src/live/*.test.ts src/setup/*.test.ts src/store/*.test.ts'
+// An app whose package.json names `command` as its test, with one test in each of `folders`, which
+// fails in `failing`, and a plain patch.
+function app(command, folders, failing = '') {
+  const files = {
+    'upstream/f.txt': 'a\n',
+    'patches/0001-a.patch': '--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n a\n+b\n',
+    'upstream/src/ui/my-work/package.json': JSON.stringify({ scripts: { test: command } }),
+  }
+  for (const folder of folders) {
+    files[`upstream/src/ui/my-work/src/${folder}/a.test.ts`] = `import { test } from 'node:test'\ntest('${folder}', () => { if (${folder === failing}) throw new Error('failed in ${folder}') })\n`
+  }
+  return files
+}
+
+test('a test folder with no test left stops the build before it type-checks', () => {
+  checkout(app(TESTS, ['live', 'store']), ({ root, view }) => {
+    const { status, stderr } = run(view, 'build.sh', [], npmPasses(root))
+    assert.notEqual(status, 0, stderr)
+    assert.match(stderr, /no match: src\/setup\/\*\.test\.ts/)
+    assert.doesNotMatch(stderr, /node_modules\/\.bin\/tsc/)
+    assert.equal(existsSync(join(view, '.lock')), false)
+  })
+})
+
+test('a test command package.json no longer names stops the build before it type-checks', () => {
+  checkout(app('node --test src/live/*.test.ts', ['live', 'setup', 'store']), ({ root, view }) => {
+    const { status, stderr } = run(view, 'build.sh', [], npmPasses(root))
+    assert.equal(status, 1, stderr)
+    assert.match(stderr, /package\.json's test command is no longer node --test src\/live/)
+    assert.doesNotMatch(stderr, /node_modules\/\.bin\/tsc/)
+  })
+})
+
+test('a failing test stops the build before it type-checks, and passing ones let it go on', () => {
+  checkout(app(TESTS, ['live', 'setup', 'store'], 'store'), ({ root, view }) => {
+    const { status, stderr } = run(view, 'build.sh', [], npmPasses(root))
+    assert.notEqual(status, 0, stderr)
+    assert.doesNotMatch(stderr, /node_modules\/\.bin\/tsc/)
+  })
+  checkout(app(TESTS, ['live', 'setup', 'store']), ({ root, view }) => {
+    // The tests pass and the build reaches the type check, which the stub installed nothing for.
+    const { status, stderr } = run(view, 'build.sh', [], npmPasses(root))
+    assert.notEqual(status, 0, stderr)
+    assert.match(stderr, /node_modules\/\.bin\/tsc/)
+  })
+})

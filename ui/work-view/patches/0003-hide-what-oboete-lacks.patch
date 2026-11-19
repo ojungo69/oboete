@@ -113,10 +113,10 @@ index 5a759a0eddc7c4f8edd43d69e258699e160531a6..39483543b87d0861d64a78f29b06f874
            <OpenFollowUps request={request} />
  
 diff --git a/src/ui/my-work/src/live/conversation-continuation.test.ts b/src/ui/my-work/src/live/conversation-continuation.test.ts
-index 6b0085c41507f7755f6089cfadf05faee9130176..07cf9c50fa5cd4224fb53e17db42460eba39d089 100644
+index 6b0085c41507f7755f6089cfadf05faee9130176..d2567709aabe99da58dd0e7986fe444250316694 100644
 --- a/src/ui/my-work/src/live/conversation-continuation.test.ts
 +++ b/src/ui/my-work/src/live/conversation-continuation.test.ts
-@@ -43,8 +43,10 @@ const failed = (fields: Partial<ConversationContinuation> = {}) => exchange({ st
+@@ -43,14 +43,20 @@ const failed = (fields: Partial<ConversationContinuation> = {}) => exchange({ st
  describe('which sources can continue a conversation', () => {
    const fetchNothing = (() => Promise.reject(new Error('No call is made here.'))) as typeof fetch
  
@@ -129,6 +129,17 @@ index 6b0085c41507f7755f6089cfadf05faee9130176..07cf9c50fa5cd4224fb53e17db42460e
    })
  
    it('not sample data, a cloud-served page, or a source without one of the four calls', () => {
+     assert.equal(canContinueConversations(sampleSource), false)
+     assert.equal(canContinueConversations(createLocalSource({ hostname: 'work.cmem.ai', fetchImpl: fetchNothing })), false)
+-    const local = createLocalSource({ hostname: 'localhost', fetchImpl: fetchNothing })
++    // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete's source has none of the four
++    // calls, so the check is read on one that has them all, as claude-mem's has, and on it with each taken away.
++    const noCall = () => { throw new Error('No call is made here.') }
++    const local = { ...createLocalSource({ hostname: 'localhost', fetchImpl: fetchNothing }), loadConversationContinuation: noCall, continueConversation: noCall, stopConversationContinuation: noCall, subscribeToConversationContinuations: noCall }
++    assert.equal(canContinueConversations(local), true)
+     for (const call of ['loadConversationContinuation', 'continueConversation', 'stopConversationContinuation', 'subscribeToConversationContinuations'] as const) {
+       assert.equal(canContinueConversations({ ...local, [call]: undefined }), false, `without ${call}`)
+     }
 diff --git a/src/ui/my-work/src/live/local-source.test.ts b/src/ui/my-work/src/live/local-source.test.ts
 index 872e681c26e693b29c180952667ab369a485b6e9..f3c78f00e5621ede6639a8732eac17226ea2a050 100644
 --- a/src/ui/my-work/src/live/local-source.test.ts
@@ -576,10 +587,22 @@ index e6e1b818520cedbc0a6c60fe76303cdac4aeeff7..428f554f7ccda120d96b663b5de492e7
  }
  
 diff --git a/src/ui/my-work/src/pages/my-rules.tsx b/src/ui/my-work/src/pages/my-rules.tsx
-index d21f2bf02a9201e572c7e8d6007d8db664dbe6dd..e9991f7da9b4c12eb109354d1ab516dc076f700f 100644
+index d21f2bf02a9201e572c7e8d6007d8db664dbe6dd..2a4fefa01520a7a3cfa0a19bca7b2b39fa523193 100644
 --- a/src/ui/my-work/src/pages/my-rules.tsx
 +++ b/src/ui/my-work/src/pages/my-rules.tsx
-@@ -706,7 +706,8 @@ export function NoRulesYet({ onAdd, readError, refresh }: { onAdd: () => void; r
+@@ -696,8 +696,9 @@ function RuleEditor({ draft, error, saving, onChange, onClose, onSave }: { draft
+ export function NoRulesYet({ onAdd, readError, refresh }: { onAdd: () => void; readError: string | null; refresh: AutoRefresh | null }) {
+   const waiting = refresh?.state === 'waiting-for-agent'
+   const description = waiting
+-    ? t('Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine, or add a rule yourself.')
+-    : t('claude-mem learns how you like to work from your requests on its own. You can also add one.')
++    // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no rule yet, so the page offers none to add (#1083, #1085).
++    ? t('Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.')
++    : t('claude-mem learns how you like to work from your requests on its own.')
+   return (
+     <Req ids={['R12.1']}>
+       <Empty className="border bg-card/60">
+@@ -706,7 +707,8 @@ export function NoRulesYet({ onAdd, readError, refresh }: { onAdd: () => void; r
            <EmptyDescription>{readError ?? description}</EmptyDescription>
            {!readError && waiting && <RefreshStatus refresh={refresh} run={null} ids={['R14.13']} />}
          </EmptyHeader>
@@ -589,7 +612,7 @@ index d21f2bf02a9201e572c7e8d6007d8db664dbe6dd..e9991f7da9b4c12eb109354d1ab516dc
            <EmptyContent className="flex-row justify-center gap-2">
              <Button size="sm" className="h-11 md:h-8" onClick={onAdd}><PlusIcon />{t("Add rule")}</Button>
            </EmptyContent>
-@@ -826,7 +827,8 @@ export function MyRules() {
+@@ -826,7 +828,8 @@ export function MyRules() {
              </div>
            </Req>
            <div className="flex flex-wrap items-center gap-2">
@@ -627,7 +650,7 @@ index 811017b6246fe8cc4898781adb271f9c01a419a1..70995c7e9d089e816b4129df0c914df5
          <DoneAreas onOpenFocus={onOpenFocus} />
          {currentPeriod ? <MonthByMonth onOpenFocus={onOpenFocus} /> : !hasDone && (
 diff --git a/src/ui/my-work/src/pages/suggested-areas.tsx b/src/ui/my-work/src/pages/suggested-areas.tsx
-index 12a1d2959c4dce016e34903facdcf7a021665073..688d7b6aa7df38624f3a8ed818c46fc8ce9dfc46 100644
+index 12a1d2959c4dce016e34903facdcf7a021665073..6ce18cf644d5440d41a0c046f27169bbf35651cb 100644
 --- a/src/ui/my-work/src/pages/suggested-areas.tsx
 +++ b/src/ui/my-work/src/pages/suggested-areas.tsx
 @@ -48,7 +48,8 @@ function SuggestionCard({ area, requests, decision, saving, onKeep, onDismiss, o
@@ -649,6 +672,23 @@ index 12a1d2959c4dce016e34903facdcf7a021665073..688d7b6aa7df38624f3a8ed818c46fc8
          <ConfirmationAccepted>
            <div className="relative flex flex-wrap items-center justify-between gap-x-3">
              {/* Keeping an area is a choice of focus, so it gets the launch screen's sparkles; a merge or dismissal doesn't. */}
+@@ -130,13 +131,14 @@ export function SuggestedAreas({ onOpenFocus }: { onOpenFocus: (focusAreaId: str
+           </Req>
+         ) : (
+           <DraggableCardContainer className="space-y-3">
+-            {isPhone && waiting > 0 && <p className="text-xs text-muted-foreground">{t("Swipe a card right to keep it, left to dismiss it.")}</p>}
++            {/* Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no change to an area yet, so a card neither swipes nor says it does (#1085). */}
++            {false && isPhone && waiting > 0 && <p className="text-xs text-muted-foreground">{t("Swipe a card right to keep it, left to dismiss it.")}</p>}
+             {suggestions.map((area) => {
+               const card = <SuggestionCard area={area} requests={inArea(area)} decision={decisions[area.id]} saving={changes.saving}
+                 onKeep={() => decide(area, 'kept')} onDismiss={() => decide(area, 'dismissed')} onEdit={setEdit} onUndo={() => undo(area)}
+                 onShow={() => onOpenFocus(area.mergedInto ?? area.id)} />
+               // On phones an undecided card swipes, through the same handlers as its buttons.
+-              return isPhone && !decisions[area.id]
++              return false && isPhone && !decisions[area.id]
+                 ? <DraggableCardBody key={area.id} dragAxis="x" disabled={changes.saving} onDragRelease={swipeToDecide(() => decide(area, 'kept'), () => decide(area, 'dismissed'))} className="min-h-0 w-full rounded-xl bg-transparent p-0 shadow-none dark:bg-transparent">{card}</DraggableCardBody>
+                 : <div key={area.id}>{card}</div>
+             })}
 diff --git a/src/ui/my-work/src/store/index.ts b/src/ui/my-work/src/store/index.ts
 index 5e9f77b0ee91e0ed3afd2e59244e92fcf8ad5f95..d23b5ecc0b415f4db5cf770928f2b01b7402f62b 100644
 --- a/src/ui/my-work/src/store/index.ts
@@ -683,10 +723,16 @@ index 0000000000000000000000000000000000000000..d3c0009d96cce5ae6796195633ae8744
 +  })
 +})
 diff --git a/src/ui/my-work/src/store/slices/view-slice.ts b/src/ui/my-work/src/store/slices/view-slice.ts
-index 78cc587ffd11a89520cb1d72ac4e9d40a7838f31..a0563d504e84ebe0fc6303c98a1034a4761e8d09 100644
+index 78cc587ffd11a89520cb1d72ac4e9d40a7838f31..7801e04154144ccd97d373423a6c7a619d675fda 100644
 --- a/src/ui/my-work/src/store/slices/view-slice.ts
 +++ b/src/ui/my-work/src/store/slices/view-slice.ts
-@@ -15,7 +15,8 @@ export function readRoute(url: URL): Route {
+@@ -10,12 +10,13 @@ const SECTIONS: readonly Section[] = ['work', 'rules', 'suggested', 'past-focus'
+ 
+ interface Route { page: Page; section: Section; focusChoice: string | null; requestId: string | null; theme: boolean | null }
+ 
+-/** `?setup=1` is the installer handoff; `?view=` a page other than My Work; `?focus=` an area; `?request=` the open drawer. */
++/** `?view=` a page other than My Work; `?focus=` an area; `?request=` the open drawer. `?setup=1` was claude-mem's installer handoff (see `page`). */
+ export function readRoute(url: URL): Route {
    const view = url.searchParams.get('view') as Section | null
    const section = view && SECTIONS.includes(view) ? view : 'work'
    return {
