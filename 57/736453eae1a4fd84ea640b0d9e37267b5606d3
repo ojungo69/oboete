@@ -1,0 +1,45 @@
+assets/work-view/assets/index-BsgrUk68.js
+  s_52c3955e48bff4::t_b459e54dfcf67c 1-2,39
+assets/work-view/assets/my-rules-yMcWBgvf.js
+  s_52c3955e48bff4::t_18bcdef4610185 1-2
+assets/work-view/assets/past-focus-CV9i8IVo.js
+  s_52c3955e48bff4::t_989017d93234d2 1
+assets/work-view/assets/request-detail-BPoUTR5n.js
+  s_52c3955e48bff4::t_dc5475f82d38af 1
+assets/work-view/assets/suggested-areas-CpncXScD.js
+  s_52c3955e48bff4::t_f2ae1242b031f1 1
+assets/work-view/assets/swipe-to-decide-Bria7c58.js
+  s_52c3955e48bff4::t_92239e9eb47412 1
+assets/work-view/assets/textarea-C-IiP8QL.js
+  s_52c3955e48bff4::t_ab31a4ef6672d6 46
+assets/work-view/index.html
+  s_52c3955e48bff4::t_a1e7ea3efd726c 9-10
+ui/work-view/README.md
+  s_52c3955e48bff4::t_07dfa209c43186 17,23
+ui/work-view/build.sh
+  s_52c3955e48bff4::t_3be8d155111d8f 131-132,134,139
+ui/work-view/bundle.test.mjs
+  s_52c3955e48bff4::t_ad6b719b1611c8 5,15-19
+ui/work-view/patches/0001-token-and-transport.patch
+  s_52c3955e48bff4::t_54a2f929f21ab3 2,5,148,154-155,274-276,320,323,443-451,532,647,649,652-654,657-660,662-663,666,668-677,679-680,684,693-694
+ui/work-view/patches/0003-hide-what-oboete-lacks.patch
+  s_52c3955e48bff4::t_97a5260c9fe223 116,119,132-142,590,593-605,615,653,675-691,726,729-735
+ui/work-view/scripts.test.mjs
+  s_52c3955e48bff4::t_5ffbd719fcf1c1 206-261
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "57736453eae1a4fd84ea640b0d9e37267b5606d3",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
