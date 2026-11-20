@@ -1,0 +1,35 @@
+assets/work-view/assets/index-CUr6ThED.js
+  s_52c3955e48bff4::t_55e2878957ae26 1,39
+assets/work-view/assets/my-rules-xS4RIWNl.js
+  s_52c3955e48bff4::t_f71af73a219bfb 1
+assets/work-view/assets/past-focus-ZiqQt95w.js
+  s_52c3955e48bff4::t_0b7115b1a87f28 1
+assets/work-view/assets/request-detail-Dcy7lXWB.js
+  s_52c3955e48bff4::t_2be870a19b1d95 1
+assets/work-view/assets/suggested-areas-BVS81WbH.js
+  s_52c3955e48bff4::t_e09e0a03f14c08 1
+assets/work-view/assets/swipe-to-decide-DX_wc2FW.js
+  s_52c3955e48bff4::t_c15de3a12f1b20 1
+assets/work-view/index.html
+  s_52c3955e48bff4::t_18f91d4c590061 9
+ui/work-view/patches/0007-suggestion-answer.patch
+  s_52c3955e48bff4::t_2877da9ee1eeb1 2,5-11,15-18,24,33-38
+ui/work-view/README.md
+  s_52c3955e48bff4::t_dc549d47998502 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6866a707a9bb0a488e2c25970f08c37ddff70719",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
