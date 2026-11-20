@@ -1,8 +1,8 @@
 //! claude-mem 15.19.0's work-view snapshot (decision 114, docs/page.md): the answer of
 //! `GET /api/work-view`, which the vendored pages read in claude-mem's legacy mode
-//! (`ui/work-view/`). It is made from oboete's My Work and goals answers as their readers give
-//! them, each text gated at its source, and the Build story's kept texts (`read`), and reads
-//! nothing else: each text in it is one of theirs or a word of this file's. It goes through the
+//! (`ui/work-view/`). It is made from oboete's My Work, goals and My Rules answers as their
+//! readers give them, each text gated at its source, and the Build story's kept texts (`read`), and
+//! reads nothing else: each text in it is one of theirs or a word of this file's. It goes through the
 //! gate in one walk as it leaves (`leaving`, #1089). The names follow claude-mem's `live/work-view-api-types.ts`. The contract test runs
 //! claude-mem's own mapper, `live/to-work-model.ts`, over the answer of a synthetic home
 //! (`ui/work-view/contract/`).
@@ -182,7 +182,8 @@ where
 }
 
 /// What the snapshot is made of, read as `GET /api/work-view` reads it, in the readers' hold
-/// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
+/// (#1089): My Work's requests of the last 7 days, the goals and My Rules (#1083) as their readers
+/// give them, each
 /// text gated at its source and none of their keys, so that the counts, days and times the pages
 /// need are read by the keys this file names whatever a rule finds in a key; and the Build story's
 /// texts as they were kept (`build_story` gates the story it makes of them). Both gate their texts
@@ -209,10 +210,11 @@ fn everywhere() -> Value {
 /// #1083 (R1): My Rules as claude-mem's pages read it (`WorkViewRule`, `work-view-api-types.ts`),
 /// from `my_work_rules::page`'s answer, its texts gated already: the suggestions waiting, and the
 /// owner's rules, an approved one by its suggestion; the scopes, Everywhere and each repository a
-/// rule is for, one per repository. Each rule and scope goes by a keyed print (`l:` a learned
-/// suggestion's, `u:` a rule the owner wrote, `r:` a repository's): 12 hex, or 24 for keys of one
-/// kind whose 12 are one, so no key, uid or suggestion id leaves and no two share an id. The
-/// rejected and removed suggestions wait for the writes that bring their Undo (#1083's R2).
+/// rule is for, one per repository. Each rule and scope goes by the whole keyed hash of its key
+/// (`l:` a learned suggestion's id, `u:` the uid of a rule the owner wrote, `r:` a repository's
+/// key), the same in every read whatever else is read with it, so no key, uid or suggestion id
+/// leaves and no two share an id. The rejected and removed suggestions wait for the writes that
+/// bring their Undo (#1083's R2).
 fn my_rules(home: &Path, page: &Value) -> anyhow::Result<Value> {
     let mut key: Option<Vec<u8>> = None;
     let waiting = arr(&page["waiting"]);
@@ -236,10 +238,17 @@ fn my_rules(home: &Path, page: &Value) -> anyhow::Result<Value> {
         }
     }
     let keys: Vec<String> = repos.iter().map(|(r, _)| r.clone()).collect();
-    let mut hash = |held: &str| crate::my_work::keyed(held, home, &mut key);
-    let sg = prints(&mut hash, "suggestion", &suggestions)?;
-    let up = prints(&mut hash, "claim", &uids)?;
-    let rp = prints(&mut hash, "repo", &keys)?;
+    let mut prints = |kind: &str, keys: &[String]| -> anyhow::Result<HashMap<String, String>> {
+        let mut out = HashMap::new();
+        for k in keys {
+            let held = format!("rule\u{0}{kind}\u{0}{k}");
+            out.insert(k.clone(), crate::my_work::keyed(&held, home, &mut key)?);
+        }
+        Ok(out)
+    };
+    let sg = prints("suggestion", &suggestions)?;
+    let up = prints("claim", &uids)?;
+    let rp = prints("repo", &keys)?;
     let mut scopes = vec![everywhere()];
     for (repo, name) in &repos {
         scopes.push(json!({"id": format!("r:{}", rp[repo]), "tier": "project", "name": name}));
@@ -298,29 +307,6 @@ fn my_rules(home: &Path, page: &Value) -> anyhow::Result<Value> {
         }
     }
     Ok(json!({"rules": rules, "ruleScopes": scopes}))
-}
-
-/// Each of `keys`' print of `kind` (`my_rules`): 12 hex of its keyed hash (`hash`), or 24 for
-/// those whose 12 another key of `kind` shares.
-fn prints(
-    hash: &mut dyn FnMut(&str) -> anyhow::Result<String>,
-    kind: &str,
-    keys: &[String],
-) -> anyhow::Result<HashMap<String, String>> {
-    let mut full = Vec::new();
-    for k in keys {
-        full.push((k, hash(&format!("rule\u{0}{kind}\u{0}{k}"))?));
-    }
-    let mut short: HashMap<String, usize> = HashMap::new();
-    for (_, f) in &full {
-        *short.entry(f[..12].to_owned()).or_default() += 1;
-    }
-    Ok((full.into_iter())
-        .map(|(k, f)| {
-            let n = if short[&f[..12]] > 1 { 24 } else { 12 };
-            (k.clone(), f[..n].to_owned())
-        })
-        .collect())
 }
 
 /// The snapshot of a home with no store yet.

@@ -890,7 +890,7 @@ fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
             let reference = regex::Regex::new(r"\bm:[0-9a-f]{12}\b").unwrap();
-            let group = regex::Regex::new(r"\b[gslur]:[0-9a-f]{12}\b").unwrap();
+            let group = regex::Regex::new(r"\b(?:[gs]:[0-9a-f]{12}|[lur]:[0-9a-f]{64})\b").unwrap();
             let s = iso.replace_all(s, "<iso>");
             let s = stamp.replace_all(&s, "<day>");
             let s = month.replace_all(&s, "<month>");
@@ -2323,7 +2323,7 @@ fn my_rules_go_by_keyed_prints_with_who_set_them_and_their_states() {
         (Some("project"), Some("proj"))
     );
     assert_eq!(theirs["scopeName"], "proj");
-    let print = |prefix: &str| Regex::new(&format!("^{prefix}:[0-9a-f]{{12}}$")).unwrap();
+    let print = |prefix: &str| Regex::new(&format!("^{prefix}:[0-9a-f]{{64}}$")).unwrap();
     for (r, prefix) in [
         (waiting, "l"),
         (approved, "l"),
@@ -2406,26 +2406,6 @@ fn two_repositories_of_one_name_keep_it_and_ids_of_their_own() {
     assert!(!snapshot["ruleScopes"].to_string().contains("none"), "{c}");
 }
 
-/// #1083 (R1): keys of one kind whose 12 hex are one take 24, so no two share an id; the others
-/// keep 12.
-#[test]
-fn prints_that_share_their_12_hex_take_24() {
-    let mut hash = |held: &str| -> anyhow::Result<String> {
-        let tail = if held.ends_with("one") { "1" } else { "2" };
-        Ok(format!("{}{tail}{}", "a".repeat(12), "b".repeat(51)))
-    };
-    let keys = ["one".to_owned(), "two".to_owned()];
-    let got = prints(&mut hash, "repo", &keys).unwrap();
-    assert_eq!(got["one"].len(), 24);
-    assert_ne!(got["one"], got["two"]);
-    let mut apart = |held: &str| -> anyhow::Result<String> {
-        let head = if held.ends_with("one") { "1" } else { "2" };
-        Ok(format!("{head:0<64}"))
-    };
-    let got = prints(&mut apart, "repo", &keys).unwrap();
-    assert!(got.values().all(|p| p.len() == 12), "{got:?}");
-}
-
 /// #1083 (R1): with the gate failing closed, a rule's texts are masked whole and the fields
 /// oboete writes stay as written, its empty condition among them, so the pages show no condition.
 #[test]
@@ -2444,12 +2424,11 @@ fn a_gate_failing_closed_leaves_a_rules_own_fields_and_its_empty_condition() {
 }
 
 /// #1083 (R1): a redaction rule on oboete's own words of a rule (who set it, its state, its source,
-/// its kind) leaves them, and one on a statement masks it; one saved while the work view is read
-/// makes it read My Rules again under it.
+/// its kind) leaves them; one saved in the home's rules while the work view is read makes it read My
+/// Rules again under them, though the gate the snapshot leaves through has none.
 #[test]
-fn a_rule_on_oboetes_words_leaves_them_and_one_on_a_statement_masks_it() {
-    let name =
-        "work_view::tests::a_rule_on_oboetes_words_leaves_them_and_one_on_a_statement_masks_it";
+fn a_rule_on_oboetes_words_leaves_them_and_one_saved_during_the_read_is_read_under() {
+    let name = "work_view::tests::a_rule_on_oboetes_words_leaves_them_and_one_saved_during_the_read_is_read_under";
     if !crate::view::tests::in_child(name) {
         return;
     }
@@ -2468,21 +2447,34 @@ fn a_rule_on_oboetes_words_leaves_them_and_one_on_a_statement_masks_it() {
     assert_eq!(approved["quotes"][0]["kind"], "correction");
     let theirs = rule_of(&snapshot, "Write the changelog.");
     assert_eq!(theirs["scopeTier"], "project");
-    // A rule on a statement, saved once the first rules were read.
-    let statement = "[redaction]\nextra_rules = [{ id = 'commits', regex = 'commits' }]\n";
+    // A rule on a repository's name, saved in the home's rules once the first were read, and none in
+    // the gate's: My Rules is read again under it, as the walk alone would leave the name.
+    let gate = tempfile::tempdir().unwrap();
+    std::fs::write(gate.path().join("config.toml"), "").unwrap();
+    std::fs::write(home.join("config.toml"), "").unwrap();
+    crate::redact::set_home(gate.path()).unwrap();
+    let name = "[redaction]\nextra_rules = [{ id = 'proj', regex = 'proj' }]\n";
     let mut reads = 0;
     let snapshot = answered(home, now, || {
         reads += 1;
         if reads == 2 {
-            std::fs::write(home.join("config.toml"), statement).unwrap();
+            std::fs::write(home.join("config.toml"), name).unwrap();
         }
         Gate::now()
     })
     .unwrap();
     assert_eq!(reads, 3);
-    let text = snapshot["rules"].to_string();
-    assert!(!text.contains("commits"), "{text}");
-    assert!(text.contains("Run the tests before a push."), "{text}");
+    let theirs = rule_of(&snapshot, "Write the changelog.");
+    let scope = one(
+        &snapshot["ruleScopes"],
+        "id",
+        theirs["scopeId"].as_str().unwrap(),
+    );
+    assert!(!scope["name"].to_string().contains("proj"), "{scope}");
+    assert!(
+        !theirs["scopeName"].to_string().contains("proj"),
+        "{theirs}"
+    );
 }
 
 /// The contract of My Rules (#1083, R1): `ui/work-view/contract/ruled.json` is the rules home's

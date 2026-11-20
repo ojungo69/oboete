@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-20T12:55:12.753Z",
-  "revision": "1795179312753",
+  "generatedAt": "2026-11-20T13:53:49.754Z",
+  "revision": "1795182829754",
   "source": {
     "kind": "oboete",
     "connected": true,
     "error": null,
-    "lastCheckedAt": "2026-11-20T12:55:12.753Z"
+    "lastCheckedAt": "2026-11-20T13:53:49.754Z"
   },
   "agents": [],
   "humanRequests": [],
@@ -21,14 +21,14 @@
       "name": "Everywhere"
     },
     {
-      "id": "r:aa625f0d22d9",
+      "id": "r:8eba55b55c2b0d2e55045beed6c6dc24dfbd0f4387684bf7352b5b6208e0c241",
       "tier": "project",
       "name": "proj"
     }
   ],
   "rules": [
     {
-      "ruleId": "l:cb7fa889848a",
+      "ruleId": "l:a8f4691eaf35cc3ced36d9dd37883f80511e75caec0479a449530fa2aac010f5",
       "scopeId": "everywhere",
       "scopeTier": "everywhere",
       "scopeName": "Everywhere",
@@ -39,10 +39,10 @@
       "kind": "preference",
       "source": "request-progress",
       "timesSeen": 2,
-      "latestAt": "2026-11-20T12:52:12.753Z",
+      "latestAt": "2026-11-20T13:50:49.754Z",
       "quotes": [
         {
-          "at": "2026-11-20T12:52:12.753Z",
+          "at": "2026-11-20T13:50:49.754Z",
           "quote": "Quoted for s1.",
           "kind": "correction"
         }
@@ -52,7 +52,7 @@
       "savedAt": null
     },
     {
-      "ruleId": "l:244ea0beec0e",
+      "ruleId": "l:c14556729cdc739a7880f30f26939f2d450b5ad27d03af06b3bff95624c90628",
       "scopeId": "everywhere",
       "scopeTier": "everywhere",
       "scopeName": "Everywhere",
@@ -63,20 +63,20 @@
       "kind": "preference",
       "source": "request-progress",
       "timesSeen": 2,
-      "latestAt": "2026-11-20T12:53:12.753Z",
+      "latestAt": "2026-11-20T13:51:49.754Z",
       "quotes": [
         {
-          "at": "2026-11-20T12:53:12.753Z",
+          "at": "2026-11-20T13:51:49.754Z",
           "quote": "Quoted for s2.",
           "kind": "correction"
         }
       ],
       "replacedBy": null,
       "replacedAt": null,
-      "savedAt": "2026-11-20T12:55:12.858Z"
+      "savedAt": "2026-11-20T13:53:49.849Z"
     },
     {
-      "ruleId": "u:2463a212a00b",
+      "ruleId": "u:3458bccdac79056f734a6b72d24af7c906ba351f347135a53605912cec63fb8d",
       "scopeId": "everywhere",
       "scopeTier": "everywhere",
       "scopeName": "Everywhere",
@@ -87,15 +87,15 @@
       "kind": "preference",
       "source": "you",
       "timesSeen": 1,
-      "latestAt": "2026-11-20T12:55:13.042Z",
+      "latestAt": "2026-11-20T13:53:49.981Z",
       "quotes": [],
       "replacedBy": null,
       "replacedAt": null,
-      "savedAt": "2026-11-20T12:55:13.042Z"
+      "savedAt": "2026-11-20T13:53:49.981Z"
     },
     {
-      "ruleId": "u:8473df120a90",
-      "scopeId": "r:aa625f0d22d9",
+      "ruleId": "u:5ba9476407eee3e64c2f204518ad9a88785f05669b94f44210ed25cc1eb246be",
+      "scopeId": "r:8eba55b55c2b0d2e55045beed6c6dc24dfbd0f4387684bf7352b5b6208e0c241",
       "scopeTier": "project",
       "scopeName": "proj",
       "when": "",
@@ -105,11 +105,11 @@
       "kind": "preference",
       "source": "you",
       "timesSeen": 1,
-      "latestAt": "2026-11-20T12:55:12.996Z",
+      "latestAt": "2026-11-20T13:53:49.946Z",
       "quotes": [],
       "replacedBy": null,
       "replacedAt": null,
-      "savedAt": "2026-11-20T12:55:12.996Z"
+      "savedAt": "2026-11-20T13:53:49.946Z"
     }
   ],
   "story": null,
@@ -119,7 +119,7 @@
     "state": "unconfigured",
     "mode": "disabled",
     "checkedAt": null,
-    "observedAt": 1795179312753,
+    "observedAt": 1795182829754,
     "message": "oboete keeps your work on this computer only.",
     "download": null,
     "projection": {

@@ -249,9 +249,9 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   bundle is built with install scripts off), and the advisories against it. The page may reach no
   address but oboete's own.
 - The pages read `GET /api/work-view`, claude-mem's snapshot of the work (`src/work_view.rs`). It is
-  made from the answers of `/api/my-work` (the requests of the last 7 days) and `/api/my-goals` as
-  their readers give them, each text gated at its source, and from the Build story's kept texts,
-  and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
+  made from the answers of `/api/my-work` (the requests of the last 7 days), `/api/my-goals` and
+  `/api/my-rules` as their readers give them, each text gated at its source, and from the Build
+  story's kept texts, and reads nothing else. It goes through the gate in one walk as it leaves (#1089): each text as
   it is sent, and the Build story whole, read before any mask: each kept text as it was kept, as
   the gate reads a stored text; and the views the pages receive and show (the kept texts joined,
   each block of both as the pages split it, whole and with a heading's `#` marks off, and the story
@@ -284,19 +284,21 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   (oboete's own page shows them), the evidence links (X37) and continuing a conversation (X36).
   My Rules carries oboete's (#1083): the suggestions waiting, and the owner's rules, an approved
   one by its suggestion, each under Everywhere or the repository it is for, the repositories a
-  rule is for being the scopes. Each goes by a keyed print: a suggestion's rule by `l:` and the
-  print of its id, one the owner wrote by `u:` and its uid's, a repository's scope by `r:` and its
-  key's, 12 hex digits, or 24 for two keys of one kind whose 12 are one, so that no key, uid or
-  suggestion id leaves. The walk leaves these ids, who set a rule, its tier, its condition (always
+  rule is for being the scopes. Each goes by the whole keyed hash of its key: a suggestion's rule
+  by `l:` and its id's, one the owner wrote by `u:` and its uid's, a repository's scope by `r:` and
+  its key's, the same whatever else a read holds, so that no key, uid or suggestion id leaves. The walk leaves these ids, who set a rule, its tier, its condition (always
   empty: X38) and its times whole, as the code's own words, and gates its statement, its scope's
   name and its quotes; two scopes whose names the gate leaves alike read apart on the page by as
   much of their ids as tells them apart. My Rules is read under the rules My Work is read under,
   in the same readers' hold. The rejected suggestions, and the approved ones whose rule was
   retracted or forgotten since, wait for the writes that bring their Undo. The pages show the
-  rules with no control that writes one (below); a quote's source record is named `Your prompt`,
-  the quote itself shown whole, and a suggestion as learned by oboete. claude-mem's rules file
-  and where its edits go are not shown: oboete writes no such file, and gives the rules to Claude
-  Code, Codex and Grok at the start of each session. A request with a judge's open grouping suggestion carries
+  rules with no control that writes one (below); a quote's source record is named as a prompt a review quoted, dated by
+  that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is
+  learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
+  such file, and gives the rules that are on to Claude Code, Codex and Grok as a session starts, a
+  repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
+  whole days in what the pages compare to tell new work from the work on screen, so the same
+  snapshot mapped a minute later is the work on screen, and a save in flight keeps its answer. A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after
