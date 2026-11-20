@@ -2778,6 +2778,12 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
             "bad_request",
             MAX_REVIEW_BODY,
         ),
+        (
+            "/api/work-view/agents/mark-finished",
+            400,
+            "bad_request",
+            MAX_BODY,
+        ),
     ] {
         let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(
@@ -2842,6 +2848,7 @@ fn a_work_view_save_is_refused_when_its_token_is_replaced_before_its_body() {
         "/api/work-view/refresh",
         "/api/work-view/review",
         "/api/work-view/suggestions",
+        "/api/work-view/agents/mark-finished",
     ] {
         let made = work_view_token(&file_token(home.path()).unwrap());
         let headers = [
@@ -9936,4 +9943,544 @@ fn the_work_views_answer_waits_for_saving_a_bounded_time() {
         answer["save"],
         json!({"scope": "local", "state": "saved", "localMaterialization": "pending"})
     );
+}
+
+/// W4: a subagent's step as Claude Code's hook records it, in `cwd`.
+fn mark_step(session: &str, ts: i64, cwd: &Path, id: &str) -> crate::raw::Event {
+    let body = json!({"tool": "Read", "agent_id": id, "agent_type": "Explore"});
+    crate::raw::Event {
+        kind: "tool".into(),
+        session: session.into(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        ts,
+        ..crate::raw::test_event(&body.to_string())
+    }
+}
+
+/// W4: conversation s1 of this hour with subagents a1 and a2, quiet (their last steps 20 minutes
+/// back, no stop), each stepped in a folder of its own; read by a viewer of `token`. The folders'
+/// tempdir goes with the store.
+fn mark_fixture(token: Token) -> (Store, Viewer, tempfile::TempDir) {
+    let mut s = Store::new();
+    std::fs::create_dir_all(s.home.path().join("state")).unwrap();
+    let v = Viewer::new(s.home.path(), Some(s.home.path().to_owned()), 4321, token);
+    let place = tempfile::tempdir().unwrap();
+    let now = crate::db::now_ms();
+    s.said("s1", R, now - 3_600_000, "Fix the parser.");
+    for id in ["a1", "a2"] {
+        let folder = place.path().join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        (s.raw)
+            .append(&mark_step("s1", now - 20 * 60_000, &folder, id))
+            .unwrap();
+    }
+    s.run();
+    (s, v, place)
+}
+
+/// The subagents of a work-view snapshot.
+fn subagents_in(snapshot: &Value) -> Vec<Value> {
+    (snapshot["agents"].as_array().unwrap().iter())
+        .filter(|a| a["isSubagent"] == true)
+        .cloned()
+        .collect()
+}
+
+/// The stops the store holds, and the hook calls the spool keeps.
+fn stops_and_kept(s: &Store) -> (usize, usize) {
+    let raw = crate::raw::open(s.home.path()).unwrap();
+    let stops = raw.stops_after(raw.device(), 0).unwrap().len();
+    (stops, crate::unwritten::counts(s.home.path()).unwrap().0)
+}
+
+/// oboete's page's Mark finished with this viewer's token, `t0k`.
+fn post_finished(v: &Viewer, id: &Value) -> (u16, Value) {
+    let body = serde_json::to_vec(&json!({ "id": id })).unwrap();
+    let len = body.len().to_string();
+    let h = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        ("X-Oboete-Token", "t0k"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let r = match v.head("POST", "/api/my-work/finished", &h) {
+        Head::Body(_, save, given, site) => v.take(save, &body, &given, site),
+        Head::Answer(r) => r,
+        Head::File(_) => panic!("no link"),
+    };
+    let answer = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+    (r.status, answer)
+}
+
+const MARK: &str = "/api/work-view/agents/mark-finished";
+
+/// What the pages post for Mark finished on the agent of `id`.
+fn agent_body(id: &Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "agentGroupId": id })).unwrap()
+}
+
+/// The next click's store waits bounded (`Raw::wait_until`), so an append to a raw.db whose write
+/// lock another connection holds fails at once.
+fn bound_the_next_click() {
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|raw: &mut crate::raw::Raw| {
+            raw.wait_until(std::time::Instant::now()).unwrap();
+        }));
+    });
+}
+
+/// W4 (decision 117): the work-view's Mark finished marks the subagent its card showed: 200, the
+/// snapshot shows it finished with no Mark finished, one stop more, the worker asked; the same
+/// again is 409 `finished` with the snapshot; an id no subagent has 404; a folder gone 409
+/// `not_recorded`; an unreadable body 400 with no snapshot; none of those records anything.
+#[test]
+fn the_work_views_mark_finished_marks_the_subagent_its_card_showed() {
+    let (s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert!(
+        subs.iter().all(|a| a["canMarkFinished"] == true),
+        "{subs:?}"
+    );
+    let (first, second) = (subs[0]["id"].clone(), subs[1]["id"].clone());
+    let (stops, kept) = stops_and_kept(&s);
+    let asked = crate::hook::WORKER_ASKED.get();
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["save"], json!({"scope": "local", "state": "saved"}));
+    let marked = (subagents_in(&answer).into_iter())
+        .find(|a| a["id"] == first)
+        .expect("shown finished");
+    assert_eq!(marked["presence"]["status"], "finished", "{marked}");
+    assert_eq!(marked["canMarkFinished"], false);
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+    assert_eq!(crate::hook::WORKER_ASKED.get(), asked + 1);
+    let code = |answer: &Value| answer["code"].as_str().map(str::to_owned);
+    let (status, again) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(
+        (status, code(&again)),
+        (409, Some("finished".into())),
+        "{again}"
+    );
+    assert_eq!(
+        again["error"],
+        "This agent is already recorded as finished."
+    );
+    assert!(again["snapshot"]["humanRequests"].is_array(), "{again}");
+    let none = json!("s:000000000000");
+    let (status, gone) = post_work_view(&v, MARK, "t0k", &agent_body(&none));
+    assert_eq!(
+        (status, code(&gone)),
+        (404, Some("not_found".into())),
+        "{gone}"
+    );
+    assert_eq!(gone["error"], "That agent is not in the loaded work.");
+    assert!(gone["snapshot"]["humanRequests"].is_array(), "{gone}");
+    let long = format!("s:{}", "0".repeat(63));
+    for body in [
+        json!({}),
+        json!({"agentGroupId": null}),
+        json!({"agentGroupId": "claude:c:claude:s1"}),
+        json!({ "agentGroupId": long }),
+        json!({"agentGroupId": second, "more": 1}),
+    ] {
+        let posted = serde_json::to_vec(&body).unwrap();
+        let (status, answer) = post_work_view(&v, MARK, "t0k", &posted);
+        assert_eq!(
+            (status, code(&answer)),
+            (400, Some("bad_request".into())),
+            "{body}"
+        );
+        assert_eq!(
+            answer["error"],
+            "The request could not be read. Reload the page."
+        );
+        assert!(answer.get("snapshot").is_none(), "{answer}");
+    }
+    for id in ["a1", "a2"] {
+        std::fs::remove_dir_all(place.path().join(id)).unwrap();
+    }
+    let (status, unrecorded) = post_work_view(&v, MARK, "t0k", &agent_body(&second));
+    assert_eq!(
+        (status, code(&unrecorded)),
+        (409, Some("not_recorded".into())),
+        "{unrecorded}"
+    );
+    assert!(unrecorded["snapshot"]["humanRequests"].is_array());
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+}
+
+/// W4 (#1102 item 2): an id two subagents share names neither: 409 `ambiguous` on both routes,
+/// though one of them is below the 300 the page lists, and nothing is appended or kept.
+#[test]
+fn a_mark_finished_whose_id_two_subagents_share_records_nothing() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let many = place.path().join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    let now = crate::db::now_ms();
+    for i in 0..300 {
+        let step = mark_step("s1", now - 10 * 60_000 + i, &many, &format!("n{i}"));
+        s.raw.append(&step).unwrap();
+    }
+    s.run();
+    crate::my_work::PRINTED.with_borrow_mut(|p| {
+        *p = Some(Box::new(|sub: &crate::my_work_subagents::Subagent| {
+            ["a1", "n299"]
+                .contains(&sub.agent_id.as_str())
+                .then(|| "s:collide".to_owned())
+        }));
+    });
+    let (stops, kept) = stops_and_kept(&s);
+    let shared = json!("s:collide");
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&shared));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (409, Some("ambiguous")),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["error"],
+        "oboete cannot tell this subagent from another one, so nothing was marked."
+    );
+    let (status, main) = post_finished(&v, &shared);
+    assert_eq!(
+        (status, main["code"].as_str()),
+        (409, Some("ambiguous")),
+        "{main}"
+    );
+    crate::my_work::PRINTED.with_borrow_mut(|p| *p = None);
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (#1102 item 1): a stop whose append fails is kept and answered as saved and pending, and the
+/// worker is asked; a second click while it waits records nothing on either route, a write-back
+/// tried meanwhile writing nothing (Mark finished holds write-back's lock); a stop whose keep fails
+/// too is the error, nothing kept; once a hook writes the kept stop back, its subagent is finished
+/// and a click is 409.
+#[test]
+fn a_kept_stop_is_saved_and_waits_alone() {
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (first, second) = (subs[0]["id"].clone(), subs[1]["id"].clone());
+    let (stops, _) = stops_and_kept(&s);
+    let held = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    bound_the_next_click();
+    let asked = crate::hook::WORKER_ASKED.get();
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(status, 200, "{answer}");
+    let pending = json!({"scope": "local", "state": "saved", "localMaterialization": "pending"});
+    assert_eq!(answer["save"], pending, "{answer}");
+    assert_eq!(stops_and_kept(&s), (stops, 1));
+    assert_eq!(crate::hook::WORKER_ASKED.get(), asked + 1);
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let (during, during_settings) = (home.clone(), settings.clone());
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |raw: &mut crate::raw::Raw| {
+            let (written, back) = crate::unwritten::write_back(&during, raw, &during_settings);
+            back.unwrap();
+            assert_eq!(
+                written, 0,
+                "a write-back while Mark finished holds its lock"
+            );
+        }));
+    });
+    let (status, again) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["save"], pending, "{again}");
+    assert_eq!(post_finished(&v, &first).0, 200);
+    assert_eq!(stops_and_kept(&s), (stops, 1));
+    let lock = (std::fs::OpenOptions::new().read(true).write(true))
+        .open(home.join("unwritten").join("keep.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    bound_the_next_click();
+    let (status, failed) = post_work_view(&v, MARK, "t0k", &agent_body(&second));
+    assert!(status >= 500, "{status} {failed}");
+    lock.unlock().unwrap();
+    drop(lock);
+    assert_eq!(stops_and_kept(&s), (stops, 1));
+    held.execute_batch("ROLLBACK").unwrap();
+    drop(held);
+    let mut raw = crate::raw::open(&home).unwrap();
+    let payload = json!({"session_id": "s9", "cwd": home, "prompt": "Next."});
+    let (mut failed_at, mut back) = (0, 0);
+    let now = crate::db::now_ms();
+    let next = crate::hook::record(
+        &home,
+        &mut raw,
+        "claude",
+        "UserPromptSubmit",
+        &payload,
+        now,
+        &settings,
+        &mut failed_at,
+        &mut back,
+    );
+    next.unwrap();
+    drop(raw);
+    assert_eq!(stops_and_kept(&s), (stops + 1, 0));
+    let (status, done) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(
+        (status, done["code"].as_str()),
+        (409, Some("finished")),
+        "{done}"
+    );
+}
+
+/// W4 (the plan review's round 3): the stop is sent from the folder of the subagent's newest step,
+/// so that checkout's capture setting governs it: a newer step in a checkout that records nothing
+/// is 409 `not_recorded`, and nothing is recorded.
+#[test]
+fn mark_finished_sends_the_stop_from_the_newest_steps_folder() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let off = place.path().join("off");
+    std::fs::create_dir_all(off.join(".git")).unwrap();
+    std::fs::write(off.join(".oboete.toml"), "capture = false\n").unwrap();
+    let now = crate::db::now_ms();
+    for id in ["a1", "a2"] {
+        s.raw
+            .append(&mark_step("s1", now - 60_000, &off, id))
+            .unwrap();
+    }
+    s.run();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (stops, kept) = stops_and_kept(&s);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (409, Some("not_recorded")),
+        "{answer}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (the plan review's round 2): a kept file Mark finished cannot read is an error on either
+/// route, as what it holds is not known: nothing is appended or kept.
+#[test]
+fn a_kept_file_mark_finished_cannot_read_is_an_error() {
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path();
+    let settings = crate::capture::Settings::default();
+    let payload = json!({"session_id": "s9", "cwd": home, "prompt": "Kept."});
+    let other = crate::capture::events("claude", "UserPromptSubmit", &payload, 1, &settings);
+    crate::unwritten::keep(home, &other, "r").unwrap();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (stops, kept) = stops_and_kept(&s);
+    crate::unwritten::UNREADABLE.set(true);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    let (main, _) = post_finished(&v, &subs[0]["id"]);
+    crate::unwritten::UNREADABLE.set(false);
+    assert!(status >= 500, "{status} {answer}");
+    assert!(main >= 500, "{main}");
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (the plan review's rounds 2 and 3): a retry after a newer step of the subagent finds the
+/// stop that waits, whatever its time and though a rule masks the owner's mark in it: 200 pending,
+/// and nothing more is recorded.
+#[test]
+fn a_retry_after_a_newer_step_finds_the_stop_that_waits() {
+    let name = "view::tests::a_retry_after_a_newer_step_finds_the_stop_that_waits";
+    if !in_child(name) {
+        return;
+    }
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let rules = "[redaction]\nextra_rules = [{ id = 'marked', regex = '^marked$' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    redact::set_home(&home).unwrap();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let first = subs[0]["id"].clone();
+    let (stops, _) = stops_and_kept(&s);
+    let held = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    bound_the_next_click();
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(
+        (status, answer["save"]["localMaterialization"].as_str()),
+        (200, Some("pending"))
+    );
+    held.execute_batch("ROLLBACK").unwrap();
+    drop(held);
+    // The rule masked the owner's mark in the kept stop.
+    let raw = crate::raw::open(&home).unwrap();
+    let marked = |e: &crate::raw::Event| {
+        serde_json::from_str::<Value>(&e.body).is_ok_and(|b| b["marked"] == true)
+    };
+    assert!(
+        !crate::unwritten::holds(&home, &raw, &marked).unwrap(),
+        "the mark masked"
+    );
+    drop(raw);
+    let now = crate::db::now_ms();
+    for id in ["a1", "a2"] {
+        s.raw
+            .append(&mark_step("s1", now, &place.path().join(id), id))
+            .unwrap();
+    }
+    s.run();
+    let (status, again) = post_work_view(&v, MARK, "t0k", &agent_body(&first));
+    assert_eq!(
+        (status, again["save"]["localMaterialization"].as_str()),
+        (200, Some("pending")),
+        "{again}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, 1));
+}
+
+/// W4 (the plan review's round 2): the stop's time is read after Mark finished's waits: a step
+/// recorded and indexed while the click waits for `finished_lock` is before it, and the subagent
+/// reads finished.
+#[test]
+fn a_step_recorded_while_mark_finished_waits_is_before_its_stop() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let body = agent_body(&subs[0]["id"]);
+    let wait = crate::db::OPEN_WRITE_WAIT;
+    let hold = crate::my_work::finished_lock(&home, wait).unwrap().unwrap();
+    let (told, waits) = std::sync::mpsc::channel::<()>();
+    let (status, answer) = std::thread::scope(|scope| {
+        let posting = scope.spawn(|| {
+            let told = told.clone();
+            crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || told.send(()).unwrap()));
+            });
+            let answer = post_work_view(&v, MARK, "t0k", &body);
+            crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| *hook = None);
+            answer
+        });
+        waits.recv().unwrap();
+        let now = crate::db::now_ms();
+        for id in ["a1", "a2"] {
+            s.raw
+                .append(&mark_step("s1", now, &place.path().join(id), id))
+                .unwrap();
+        }
+        s.run();
+        drop(hold);
+        posting.join().unwrap()
+    });
+    assert_eq!(status, 200, "{answer}");
+    let marked = (subagents_in(&answer).into_iter())
+        .find(|a| a["id"] == subs[0]["id"])
+        .expect("shown");
+    assert_eq!(marked["presence"]["status"], "finished", "{marked}");
+}
+
+/// W4: a token replaced once Mark finished has its locks records nothing (401); one replaced while
+/// the snapshot after it is read leaves the receipt alone after a write and 401 after a refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_no_snapshot() {
+    let (s, v, _place) = mark_fixture(Token::File);
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let token = || file_token(&home).unwrap();
+    let replace = {
+        let home = home.clone();
+        move || write_token(&home).unwrap()
+    };
+    let subs = subagents_in(&work_view_of(&v, &token()));
+    let first = subs[0]["id"].clone();
+    let (stops, kept) = stops_and_kept(&s);
+    let again = replace.clone();
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| again()));
+    });
+    let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&first));
+    assert_eq!(status, 401);
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+    let again = replace.clone();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, answer) = post_work_view(&v, MARK, &token(), &agent_body(&first));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"save": {"scope": "local", "state": "saved"}})
+    );
+    let again = replace.clone();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&first));
+    assert_eq!(status, 401);
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+}
+
+/// W4 (the plan review's round 1): a stop made while older calls wait in kept files is kept behind
+/// them, so that the seqs follow the events' order: 200 pending, the worker asked; a hook's
+/// write-back then writes it after them.
+#[test]
+fn a_stop_made_behind_kept_files_is_kept_behind_them() {
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let prompt = json!({"session_id": "s9", "cwd": home, "prompt": "Kept before."});
+    let earlier = crate::capture::events("claude", "UserPromptSubmit", &prompt, 1, &settings);
+    crate::unwritten::keep(&home, &earlier, settings.rules.version()).unwrap();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (stops, _) = stops_and_kept(&s);
+    let asked = crate::hook::WORKER_ASKED.get();
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["save"]["localMaterialization"], "pending",
+        "{answer}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, 2));
+    assert_eq!(crate::hook::WORKER_ASKED.get(), asked + 1);
+    let mut raw = crate::raw::open(&home).unwrap();
+    let (_, back) = crate::unwritten::write_back(&home, &mut raw, &settings);
+    back.unwrap();
+    drop(raw);
+    assert_eq!(stops_and_kept(&s), (stops + 1, 0));
+}
+
+/// W4: a Mark finished that cannot wait for `finished_lock` (four clicks already wait for it) is
+/// 503 `busy` on the work-view's route, at once and with no snapshot, and records nothing.
+#[test]
+fn a_work_view_mark_finished_that_cannot_wait_is_busy() {
+    if !in_child("view::tests::a_work_view_mark_finished_that_cannot_wait_is_busy") {
+        return;
+    }
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (stops, kept) = stops_and_kept(&s);
+    let wait = std::time::Duration::from_secs(5);
+    let hold = crate::my_work::finished_lock(&home, wait).unwrap().unwrap();
+    let (told, waits) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let waiting: Vec<_> = (0..4)
+            .map(|_| {
+                let (told, home) = (told.clone(), &home);
+                scope.spawn(move || {
+                    crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| {
+                        *hook = Some(Box::new(move || told.send(()).unwrap()));
+                    });
+                    crate::my_work::finished_lock(home, wait).unwrap().is_some()
+                })
+            })
+            .collect();
+        for _ in 0..4 {
+            waits.recv().unwrap();
+        }
+        let at = std::time::Instant::now();
+        let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+        assert!(at.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (503, Some("busy")),
+            "{answer}"
+        );
+        assert_eq!(answer["error"], "oboete is busy for a moment. Try again.");
+        assert!(answer.get("snapshot").is_none(), "{answer}");
+        drop(hold);
+        for one in waiting {
+            assert!(one.join().unwrap());
+        }
+    });
+    assert_eq!(stops_and_kept(&s), (stops, kept));
 }

@@ -1762,6 +1762,9 @@ impl Viewer {
             ("POST", "/api/work-view/suggestions") => (MAX_REVIEW_BODY, |v, b, given| {
                 v.work_view_suggestion(b, given)
             }),
+            ("POST", "/api/work-view/agents/mark-finished") => {
+                (MAX_BODY, |v, b, given| v.work_view_mark_finished(b, given))
+            }
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -2601,6 +2604,72 @@ impl Viewer {
         }
     }
 
+    /// W4: a subagent's Mark finished from the work-view's pages (`markAgentFinished`,
+    /// `{agentGroupId}`, its `s:` id), through the core oboete's page's route shares
+    /// (`my_work_subagents::finish`), the work-view's token asked again once its locks are had. Then
+    /// the snapshot after it, which goes only while the request's token is still the work-view's
+    /// (`carried`). A stop kept, or one that already waits, is saved, and its receipt says the local
+    /// copy is still updating. A refusal has its sentence, claude-mem's where its worker has the
+    /// case.
+    fn work_view_mark_finished(&self, body: &[u8], given: &str) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Posted {
+            agent_group_id: String,
+        }
+        use crate::my_work_subagents::Finish;
+        let id = match serde_json::from_slice::<Posted>(body) {
+            Ok(p) if p.agent_group_id.starts_with("s:") && p.agent_group_id.len() <= 64 => {
+                p.agent_group_id
+            }
+            _ => {
+                let error = "The request could not be read. Reload the page.";
+                return work_view_refused(400, "bad_request", error);
+            }
+        };
+        let refusal = |status, code, error| self.refusal_carrying(given, status, code, error);
+        let authorized = || self.work_view_token_ok(Some(given));
+        let pending = match crate::my_work_subagents::finish(&self.home, &id, &authorized) {
+            Ok(Finish::Appended) => false,
+            Ok(Finish::Kept | Finish::Pending) => true,
+            Ok(Finish::NotFound) => {
+                return refusal(404, "not_found", "That agent is not in the loaded work.");
+            }
+            Ok(Finish::Shared) => {
+                let error =
+                    "oboete cannot tell this subagent from another one, so nothing was marked.";
+                return refusal(409, "ambiguous", error);
+            }
+            Ok(Finish::Finished) => {
+                return refusal(
+                    409,
+                    "finished",
+                    "This agent is already recorded as finished.",
+                );
+            }
+            Ok(Finish::NotRecorded) => {
+                let error = "Its conversation\u{2019}s folder is gone, or it records nothing now.";
+                return refusal(409, "not_recorded", error);
+            }
+            Ok(Finish::Busy) => {
+                return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+            }
+            Ok(Finish::Unauthorized) => return Response::text(401, "missing or wrong token"),
+            Err(e) => return work_view_failed(&e),
+        };
+        let mut save = json!({"scope": "local", "state": "saved"});
+        if pending {
+            save["localMaterialization"] = json!("pending");
+        }
+        match self.carried(given) {
+            Carried::Read(mut snapshot) => {
+                snapshot["save"] = save;
+                Response::json(&snapshot)
+            }
+            Carried::Unread | Carried::Replaced => Response::json(&json!({"save": save})),
+        }
+    }
+
     /// `saving` as the work-view's writes take it (W3b-3): waited for `wait` at most and by
     /// `my_work::WAITERS` at most at once, none past either, so that a settings save holding it
     /// keeps no more of the viewer's connections waiting than the reviews' lock does; a poisoned
@@ -2733,53 +2802,16 @@ impl Viewer {
             Ok(p) if p.id.starts_with("s:") && p.id.len() <= 64 => p,
             _ => return refused(400, "bad_request", ""),
         };
-        let _lock = match crate::my_work::finished_lock(&self.home, crate::db::OPEN_WRITE_WAIT) {
-            Ok(Some(lock)) => lock,
-            Ok(None) => return refused(503, "busy", ""),
-            Err(e) => return failed(&e),
-        };
-        // raw.db first, then the readers' hold, the order a restore takes them in (Codex on
-        // slice 2); the same handle reads and appends.
-        let (mut raw, k) = match crate::search::b::stores(&self.home) {
-            Ok(Some(stores)) => stores,
-            Ok(None) => return refused(404, "not_found", ""),
-            Err(e) => return failed(&e),
-        };
-        let _read = match crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT) {
-            Ok(hold) => hold,
-            Err(e) => return failed(&e),
-        };
-        let (found, folder) = match crate::my_work::subagent(&self.home, (&raw, &k), &posted.id) {
-            Ok(Some(found)) => found,
-            Ok(None) => return refused(404, "not_found", ""),
-            Err(e) => return failed(&e),
-        };
-        if found.finished.is_some() {
-            return refused(409, "finished", "");
-        }
-        let Some(folder) = folder else {
-            return refused(409, "not_recorded", "");
-        };
-        match crate::my_work_subagents::mark(
-            &self.home,
-            &mut raw,
-            &found,
-            &folder,
-            crate::db::now_ms(),
-        ) {
-            Ok(true) => {
-                // As a hook starts one after it writes (Codex and cubic on #850), reaped when it
-                // leaves, or it sits as a zombie for as long as the viewer runs (cubic on #850).
-                match crate::hook::start_worker(&self.home) {
-                    Ok(Some(mut child)) => {
-                        std::thread::spawn(move || child.wait());
-                    }
-                    Ok(None) => {}
-                    Err(e) => eprintln!("oboete: worker not started: {e:#}"),
-                }
-                Response::json(&json!({}))
-            }
-            Ok(false) => refused(409, "not_recorded", ""),
+        use crate::my_work_subagents::Finish;
+        // W4: the core the work-view's route shares; this page's token was asked by `save_gate`.
+        match crate::my_work_subagents::finish(&self.home, &posted.id, &|| true) {
+            Ok(Finish::Appended | Finish::Kept | Finish::Pending) => Response::json(&json!({})),
+            Ok(Finish::Busy) => refused(503, "busy", ""),
+            Ok(Finish::NotFound) => refused(404, "not_found", ""),
+            Ok(Finish::Shared) => refused(409, "ambiguous", ""),
+            Ok(Finish::Finished) => refused(409, "finished", ""),
+            Ok(Finish::NotRecorded) => refused(409, "not_recorded", ""),
+            Ok(Finish::Unauthorized) => Response::text(401, "missing or wrong token"),
             Err(e) => failed(&e),
         }
     }

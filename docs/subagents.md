@@ -151,7 +151,8 @@ claude-mem at `origin/main` 4f88958cf (15.10.0 and 26 fixes after it):
     retention takes it with its record), gated;
   - whether Mark finished is offered: when it is not Finished.
   A subagent is listed from its first `step`: a stop or a launch with no step makes none. All of a
-  conversation's subagents are listed, as claude-mem lists them (a Workflow turn can start forty).
+  conversation's subagents are listed, as claude-mem lists them (a Workflow turn can start forty;
+  as built, at most 300: below).
   `view::answered` keeps `conversation` and `id` as it keeps the `sessions` ids, and gates the rest.
 - **Imported rows.** claude-mem's `agent-lifecycle` rows, which `oboete import claude-mem` (run by
   hand, not by the worker) brings in as work state ops of its source, are stops of the same
@@ -280,7 +281,8 @@ Slice 2:
 - Mark finished is offered only to a subagent that is not Finished and appends the owner's stop
   (`marked`, the server's time, source `hook`) through the gate, which a session forget, a record
   forget and a backup's purge then take as any record; the answer shows it Finished. Two clicks at
-  once append one stop (the second is 409); a hook's stop before the fresh read makes it 409, one
+  once append one stop (the second is 409, or, while the first waits kept, 200 recording nothing:
+  W4); a hook's stop before the fresh read makes it 409, one
   after it stands beside the owner's; an id that names no listed subagent is 404; a recorded
   folder that is missing, masked or no directory, a checkout with `capture = false`, an excluded
   folder or pattern, and an exclusion committed during the append are 409 `not_recorded` and append
@@ -429,8 +431,8 @@ Slice 3:
   then appends and keeps nothing). After a stop is recorded the worker is started, as a hook starts
   it, and reaped when it leaves; a stop kept behind older kept files (`hook::Recorded::kept`) is
   recorded when they are written back, and counts. **Not as planned**: the answer is `{}`, and the
-  page reads My Work again (`myWorkReread`), which counts the new stop at once, as it is past the
-  consumer's checkpoint.
+  page reads My Work again (`myWorkReread`), which counts an appended stop at once, as it is past
+  the consumer's checkpoint; a kept one counts once a hook writes it back (W4, below).
 - **The page** (`myWorkAgents`, `myWorkSubagent`, `myWorkFinish`): after each conversation's card,
   one per subagent whose `conversation.id` is the card's: "Claude Code · " and the type (else
   "Subagent"), "Subagent · " and the conversation's newest request's title (else its projects), the
@@ -560,3 +562,73 @@ Slice 3:
   `deliverables::tests::a_restored_record_of_no_kind_ends_a_turn_and_a_gap`. My Work
   links a stop's copy to the request whose prompt span holds its call (`my_work::copies_of`, as for
   a turn's copy, `my_work::tests::a_requests_copies_join_its_work_product`).
+
+### The work-view's Mark finished (W4, 2026-11-20)
+
+- **The work-view's read** (decision 118): `my_work_subagents::read_picked` with `Pick::Window(now)`
+  over the conversations of the requests the work-view's answer gives (`my_work::read_held_on`, in
+  its read alone): the subagents not finished or finished within `RECENT_MS`, then the newest
+  `MAX_LISTED` of those, so a quiet one stays though 300 newer ones finished. oboete's page reads
+  `Pick::Newest` as before; Mark finished looks a subagent up over `Pick::All`.
+- **The snapshot** (`work_view::subagents`): each as an agent of the request session whose shown id
+  and fingerprint are both its conversation's (a masked id can be another conversation's literal
+  one), after every conversation's agent, with that agent's label, platform, title, project and
+  content session id; `isSubagent`, `canMarkFinished` (My Work's `can_mark`) and `presence`
+  (`finished`, `recent` for working, else `quiet`; `finishedAt` its stop's time as an ISO time,
+  which `OWN` leaves whole). One whose conversation no request carries goes nowhere.
+- **The core** (`my_work_subagents::finish`, both routes): `finished_lock`; raw.db, then the readers'
+  hold; then write-back's lock (`unwritten::hold`, waited for 10 s at most), held to the end, so no
+  kept file is written back between the look and the record (a `write_back` meanwhile takes the lock
+  with `try_lock` and writes nothing); the only subagent the id names among every request's
+  conversations' subagents, before any cap (`my_work::subagent`; `Lookup::Shared` when two share
+  it, #1102 item 2); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
+  events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session and
+  `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
+  step's folder is gone or masked; the caller's token asked again; then the stop, at the time read
+  then (`mark`: `Marked::{Appended, Kept, Refused}`, `record_if` saying when its error path kept the
+  call's events, which `hook::record` reads nothing of). The locks let go, an appended or kept stop
+  starts the worker.
+- **The work-view's route** (`POST /api/work-view/agents/mark-finished`,
+  `view::work_view_mark_finished`, through `save_gate` on the work-view's origin): `{agentGroupId}`
+  alone (`s:`, at most 64 bytes, else 400 `bad_request`); 200 with the snapshot after it and
+  `save` (`localMaterialization: "pending"` for a kept or pending stop), the receipt alone when the
+  snapshot cannot be read or the token was replaced while it was read; refusals with the snapshot
+  and claude-mem's sentences where its worker has the case: 404 `not_found`, 409 `finished`, 409
+  `ambiguous`, 409 `not_recorded`; 503 `busy` with none.
+- **oboete's page's route** takes the same core: a kept or pending stop is 200 `{}`, two subagents
+  of one id 409 `ambiguous`, which the page words as its generic sentence before it reads My Work
+  again.
+- **Known limits**: a kept or pending stop changes nothing on the work-view's card until a hook
+  writes it back, as the pages keep their model and drop the receipt, and its button records
+  nothing more; two subagents of one conversation read alike in 15.19.0's pages; more than 300
+  within the window leave the oldest out; a subagent's folder is looked at only when it is marked.
+- **Reviewed** (the plan, a local Codex review in three rounds): a second click racing a
+  write-back, a kept stop answered as not recorded, a partly written-back file's consumed events
+  counted, the id's uniqueness taken over the capped list, the worker not started for a kept stop,
+  a subagent joined to its conversation by its id alone, the window taken after the cap and its
+  stop's time sent in milliseconds; then an empty keep counted as kept, the stop's time read
+  before the waits, a retry after a newer step let through by the stop's time, and a kept file
+  that cannot be read passed over; then the owner's mark, which a rule can mask, read to find the
+  waiting stop, and a write-back between the look and the record. Each is designed out as above,
+  with a test.
+- **Tests:** `my_work_subagents::tests::a_pick_keeps_its_subagents_before_the_cap`,
+  `unwritten::tests::holds_reads_the_events_a_write_back_has_not_written`,
+  `hook::tests::record_if_on_a_damaged_store_with_nothing_kept_says_none_was_kept`,
+  `work_view::tests::a_carried_conversations_subagents_go_while_not_finished_or_lately_finished`,
+  `work_view::tests::a_subagent_goes_with_the_session_its_id_and_fingerprint_name`,
+  `work_view::tests::a_subagents_label_is_gated_as_its_conversations`,
+  `work_view::tests::the_contract_subagents_are_a_subagent_homes_answer` (with the Node test over
+  `ui/work-view/contract/subagented.json`),
+  `work_view::tests::the_suggestions_and_subagents_keys_are_theirs_alone`,
+  `view::tests::the_work_views_mark_finished_marks_the_subagent_its_card_showed`,
+  `view::tests::a_mark_finished_whose_id_two_subagents_share_records_nothing`,
+  `view::tests::a_kept_stop_is_saved_and_waits_alone`,
+  `view::tests::a_stop_made_behind_kept_files_is_kept_behind_them`,
+  `view::tests::a_retry_after_a_newer_step_finds_the_stop_that_waits`,
+  `view::tests::a_step_recorded_while_mark_finished_waits_is_before_its_stop`,
+  `view::tests::mark_finished_sends_the_stop_from_the_newest_steps_folder`,
+  `view::tests::a_kept_file_mark_finished_cannot_read_is_an_error`,
+  `view::tests::a_work_view_mark_finished_that_cannot_wait_is_busy`,
+  `view::tests::a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_no_snapshot`,
+  the gate's tests of the work-view's writes, and the page's `ambiguous` case in
+  `src/testdata/viewer-readiness/test.mjs`.

@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-20T06:35:26.752Z",
+  "revision": "1795156526752",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-20T06:35:26.752Z"
+  },
+  "agents": [
+    {
+      "id": "claude:c:claude:s1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1"
+    },
+    {
+      "id": "s:fdd484202faf",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": false,
+      "presence": {
+        "status": "finished",
+        "finishedAt": "2026-11-20T06:30:26.752Z"
+      }
+    },
+    {
+      "id": "s:cf956bbee663",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": true,
+      "presence": {
+        "status": "quiet",
+        "finishedAt": null
+      }
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
+      "contentFingerprint": "22757ac6bd3341f136e717594d3a4c28bc223773fe27dd14af52c2feae3a11be",
+      "title": "Fix the parser.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Fix the parser.",
+        "summary": "Fix the parser.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Fix the parser.",
+        "atEpoch": 1795153826752
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "claude:c:claude:s1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795153826752,
+      "updatedAtEpoch": 1795153826752,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [],
+  "goals": null,
+  "goalHistory": [],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    }
+  ],
+  "rules": [],
+  "story": null,
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1795156526752,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}

@@ -35,6 +35,11 @@ fn launch(session: &str, ts: i64, mut launched: Value) -> Event {
     )
 }
 
+/// oboete's page's read: the newest `MAX_LISTED`.
+fn read(raw: &Raw, k: &Connection, convs: &[Key], rules: &Rules) -> Result<Vec<Subagent>> {
+    read_picked(raw, k, convs, rules, Pick::Newest)
+}
+
 fn drain(home: &Path, store: &Raw) -> Connection {
     let mut consumers: Vec<Box<dyn worker::Consumer>> = vec![Box::new(Subagents)];
     let mut k = crate::knowledge::open(home).unwrap();
@@ -127,6 +132,38 @@ fn a_subagents_state_follows_its_steps_stops_and_launch() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Decision 118 (W4): `Window` keeps the subagents not finished and those finished within
+/// `RECENT_MS` of its time, before the cap, so a quiet one older than `MAX_LISTED` newer finished
+/// ones stays; `All` keeps every one; `Newest` the newest `MAX_LISTED`, as `read` does.
+#[test]
+fn a_pick_keeps_its_subagents_before_the_cap() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = raw::open(home.path()).unwrap();
+    store.append(&step("s", "quiet", 0)).unwrap();
+    let n = MAX_LISTED as i64;
+    for i in 1..=n {
+        store.append(&step("s", &format!("f{i}"), i * MIN)).unwrap();
+        store.append(&stop("s", &format!("f{i}"), i * MIN)).unwrap();
+    }
+    let k = drain(home.path(), &store);
+    let picked = |pick| {
+        let found = read_picked(&store, &k, &[key("s")], &Rules::default(), pick).unwrap();
+        let mut ids: Vec<String> = found.into_iter().map(|s| s.agent_id).collect();
+        ids.sort();
+        ids
+    };
+    let newest = picked(Pick::Newest);
+    assert_eq!(newest.len(), MAX_LISTED);
+    assert!(!newest.contains(&"quiet".to_owned()), "{newest:?}");
+    assert_eq!(picked(Pick::All).len(), MAX_LISTED + 1);
+    // A minute after the last stop: the stops of the last 15 minutes are within the window.
+    let now = (n + 1) * MIN;
+    let mut within: Vec<String> = ((n - 14)..=n).map(|i| format!("f{i}")).collect();
+    within.push("quiet".to_owned());
+    within.sort();
+    assert_eq!(picked(Pick::Window(now)), within);
 }
 
 /// Slice 2: at most `MAX_LISTED` subagents, those with the newest last steps.

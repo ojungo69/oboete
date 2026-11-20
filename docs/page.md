@@ -280,10 +280,20 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   conversation, a request is complete when its newest status completed it (or, shipped by a review
   alone, on the review's day), a request's two newest reviews are its readings, from which the pages
   measure the pace oboete's page shows, and the goals' times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
-  (oboete's own page shows them), the evidence links (X37), the subagents (a later pull request),
-  the rules (they come with My Rules), and continuing a conversation (X36). A request with a
-  judge's open grouping suggestion carries it, with its binding, and its Join and Not this save
-  (W3b-3, docs/my-work-model.md slice 11b-2).
+  (oboete's own page shows them), the evidence links (X37), the rules (they come with My Rules),
+  and continuing a conversation (X36). A request with a judge's open grouping suggestion carries
+  it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
+  The subagents of a conversation a request of the answer carries go as agents of that
+  conversation, after every conversation's, while they have not finished and for 15 minutes after
+  they finished (decision 118; older ones stay on oboete's own page), each with its conversation's
+  label, title, project and content session id, and their Mark finished saves (W4,
+  [subagents.md](subagents.md), "The work-view's Mark finished"). Its known limits: a stop that is
+  kept, or that already waits to be written back, changes nothing on the card until a hook writes
+  it back (the pages keep the model and drop the receipt), and its button records nothing more;
+  two subagents of one conversation read alike in 15.19.0's pages (claude-mem 16 adds the launch
+  description); more than 300 within the window leave the oldest out; and a subagent's folder is
+  looked at only when it is marked, so a card can offer Mark finished that answers that its
+  conversation records nothing now.
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow

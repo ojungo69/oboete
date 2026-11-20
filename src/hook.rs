@@ -1487,6 +1487,8 @@ pub fn record(
     written_back: &mut usize,
 ) -> Result<Recorded> {
     let all = |_: &crate::raw::Event| true;
+    // Whether an error kept the call's events: Mark finished's to read (W4), not a hook's.
+    let mut kept = false;
     record_if(
         home,
         raw,
@@ -1494,14 +1496,16 @@ pub fn record(
         event,
         payload,
         (ts, settings),
-        (failed, written_back),
+        (failed, written_back, &mut kept),
         &all,
     )
 }
 
 /// `record`, appending and keeping nothing of the call unless every event it builds `keeps`: the
 /// viewer's Mark finished (slice 2 of docs/subagents.md) keeps the session and the subagent it
-/// names, which the gate's rules of now may change (Codex on slice 2).
+/// names, which the gate's rules of now may change (Codex on slice 2). `kept_on_error` is set when
+/// an error it returns came after it kept a call's events that were not none (W4: Mark finished
+/// answers that stop as kept).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_if(
     home: &Path,
@@ -1510,7 +1514,7 @@ pub(crate) fn record_if(
     event: &str,
     payload: &Value,
     (ts, settings): (i64, &crate::capture::Settings),
-    (failed, written_back): (&mut i64, &mut usize),
+    (failed, written_back, kept_on_error): (&mut i64, &mut usize, &mut bool),
     keeps: &dyn Fn(&crate::raw::Event) -> bool,
 ) -> Result<Recorded> {
     // Count and append together so overlapping SessionEnd hooks cannot recover the same turn.
@@ -1568,7 +1572,8 @@ pub(crate) fn record_if(
         // events wait behind the kept files (Codex on #440).
         Err(e) if crate::backup::corrupt(&e) => {
             *failed = crate::failure::now();
-            keep(home, agent, &built, settings, true);
+            // `keep` takes no event as done too: kept only when there was one (Codex on W4).
+            *kept_on_error = keep(home, agent, &built, settings, true) && !built.is_empty();
             return Err(e);
         }
         // The files written back before the error still count as this call's write (Greptile and
@@ -1602,7 +1607,7 @@ pub(crate) fn record_if(
             Err(e) => {
                 *failed = crate::failure::now();
                 if !spool_waited {
-                    keep(home, agent, &built[n..], settings, true);
+                    *kept_on_error = keep(home, agent, &built[n..], settings, true);
                 }
                 return Err(e);
             }

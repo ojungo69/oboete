@@ -5365,6 +5365,14 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
   refusal='finished';
   finish('s:2').click();await ticks();
   assert.equal(document.getElementById('status').textContent,'This subagent had already finished, or is no longer listed.');
+  // W4: an id two subagents share names neither (409 ambiguous): the generic sentence, and My Work read again.
+  refusal='ambiguous';
+  const fetching=ctx.fetch;let reads=0;
+  ctx.fetch=(url,options)=>{if(options?.method!=='POST')reads++;return fetching(url,options);};
+  finish('s:2').click();await ticks();
+  assert.equal(document.getElementById('status').textContent,'It could not be marked finished. Try again.');
+  assert(reads>0,'My Work is read again after an ambiguous id');
+  ctx.fetch=fetching;
   ctx.ui.setLang('ja');
   run('myWorkDraw()');
   assert(flat(of('s:2')).includes('サブエージェント · Fix the parser')&&text(finish('s:2'))==='完了にする',flat(of('s:2')));

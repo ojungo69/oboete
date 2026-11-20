@@ -62,14 +62,27 @@ impl Subagent {
     }
 }
 
-/// The subagents of `convs` (Claude Code conversations), the `MAX_LISTED` with the newest last steps,
-/// each conversation's newest step first. The caller holds the read fence: a forget registers before
-/// this read or after it.
-pub(crate) fn read(
+/// Which of the subagents `read_picked` keeps.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Pick {
+    /// The newest `MAX_LISTED` by last step: oboete's page's.
+    Newest,
+    /// Every one, with no task read: Mark finished's lookup (W4).
+    All,
+    /// Decision 118: those not finished, or finished within `RECENT_MS` of the time given, then
+    /// the newest `MAX_LISTED` of them: the work-view's.
+    Window(i64),
+}
+
+/// The subagents of `convs` (Claude Code conversations) that `pick` keeps, each conversation's
+/// newest step first. The caller holds the read fence: a forget registers before this read or
+/// after it.
+pub(crate) fn read_picked(
     raw: &Raw,
     k: &Connection,
     convs: &[Key],
     rules: &Rules,
+    pick: Pick,
 ) -> Result<Vec<Subagent>> {
     let convs: Vec<&Key> = convs.iter().filter(|(a, _)| a == "claude").collect();
     if convs.is_empty() || !crate::consumer::manifest::exists(k, "table", "subagent_facts")? {
@@ -188,30 +201,36 @@ pub(crate) fn read(
             }
         }
     }
-    // A subagent is listed from its first step: a stop or a launch with no step makes none. The
-    // newest last steps first, at most `MAX_LISTED`.
-    type Stepped = ((Key, String), Seen, (i64, (String, i64)));
-    let mut stepped: Vec<Stepped> = (seen.into_iter())
-        .filter_map(|(id, mut s)| s.last_step.take().map(|last| (id, s, last)))
-        .collect();
-    stepped.sort_by_key(|(.., (at, _))| std::cmp::Reverse(*at));
-    stepped.truncate(MAX_LISTED);
+    // A subagent is listed from its first step: a stop or a launch with no step makes none. Each
+    // one's finish first, which `Pick::Window` keeps by; then the newest last steps first, at most
+    // `MAX_LISTED` but for `Pick::All`, and the task of those kept.
+    type Stepped = ((Key, String), Seen, (i64, (String, i64)), Option<i64>);
     let imported = imported_stops(raw, &wanted)?;
+    let mut stepped: Vec<Stepped> = (seen.into_iter())
+        .filter_map(|(id, mut s)| {
+            let last = s.last_step.take()?;
+            let finished = (s.stops.iter())
+                .chain(imported.get(&id).into_iter().flatten())
+                .copied()
+                .filter(|&at| at >= last.0)
+                .max();
+            Some((id, s, last, finished))
+        })
+        .collect();
+    if let Pick::Window(now) = pick {
+        stepped.retain(|(.., finished)| finished.is_none_or(|at| now - at <= RECENT_MS));
+    }
+    stepped.sort_by_key(|(_, _, (at, _), _)| std::cmp::Reverse(*at));
+    if !matches!(pick, Pick::All) {
+        stepped.truncate(MAX_LISTED);
+    }
     let mut out = Vec::new();
-    for ((key, agent_id), s, (last_step, step_record)) in stepped {
-        let finished = (s.stops.iter())
-            .chain(
-                imported
-                    .get(&(key.clone(), agent_id.clone()))
-                    .into_iter()
-                    .flatten(),
-            )
-            .copied()
-            .filter(|&at| at >= last_step)
-            .max();
-        let task = match &s.launch {
-            Some((device, seq, _)) => task_of(raw, device, *seq, rules)?,
-            None => None,
+    for ((key, agent_id), s, (last_step, step_record), finished) in stepped {
+        let task = match (&s.launch, pick) {
+            (Some((device, seq, _)), Pick::Newest | Pick::Window(_)) => {
+                task_of(raw, device, *seq, rules)?
+            }
+            _ => None,
         };
         out.push(Subagent {
             conversation: key,
@@ -341,18 +360,30 @@ pub(crate) fn recorded_folder(raw: &Raw, s: &Subagent) -> Result<Option<String>>
     }))
 }
 
+/// What `mark` did with the owner's stop (W4, #1102 item 1).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Marked {
+    /// Appended to raw.db.
+    Appended,
+    /// Kept, to be written back by the next hook call whose store opens: behind older kept files,
+    /// or because its append failed and its keep did not.
+    Kept,
+    /// Neither: the checkout's capture setting, an exclusion, a forget or a rule of now takes it.
+    Refused,
+}
+
 /// Mark finished: the owner's stop of `s`, sent through the hook's own path as if Claude Code had
 /// sent it from `folder`, the conversation's recorded folder, at `now`, so the checkout's capture
 /// setting, the exclusions and the gate read it as they read the hook's. `raw` is the handle the
-/// caller read `s` with, opened before its readers' hold. True when it is recorded,
-/// or kept to be written back as a hook's stop would be.
+/// caller read `s` with, opened before its readers' hold. An error only when the stop is neither
+/// appended nor kept.
 pub(crate) fn mark(
     home: &Path,
     raw: &mut Raw,
     s: &Subagent,
     folder: &str,
     now: i64,
-) -> Result<bool> {
+) -> Result<Marked> {
     let settings = crate::capture::Settings::load(home)?;
     let mut payload = json!({"session_id": s.conversation.1, "cwd": folder,
         "hook_event_name": "SubagentStop", "agent_id": s.agent_id});
@@ -362,26 +393,141 @@ pub(crate) fn mark(
     payload[crate::capture::OWNER_MARK] = json!(true);
     // The stop is the listed conversation's and subagent's, or nothing is recorded: a rule of now
     // that masks the session or the id would make it another's (Codex on slice 2).
-    let keeps = |e: &crate::raw::Event| {
-        e.kind == SUBAGENT_STOP
-            && e.agent == s.conversation.0
-            && e.session == s.conversation.1
-            && serde_json::from_str::<Value>(&e.body)
-                .is_ok_and(|b| b["agent_id"] == s.agent_id.as_str())
-    };
-    let (mut failed, mut written_back) = (0, 0);
-    let recorded = crate::hook::record_if(
+    let keeps = stop_of(s);
+    let (mut failed, mut written_back, mut kept) = (0, 0, false);
+    let recorded = match crate::hook::record_if(
         home,
         raw,
         &s.conversation.0,
         "SubagentStop",
         &payload,
         (now, &settings),
-        (&mut failed, &mut written_back),
+        (&mut failed, &mut written_back, &mut kept),
         &keeps,
-    )?;
-    // A stop kept behind older kept files is recorded when they are written back, as the hook's.
-    Ok(recorded.kept || recorded.events.iter().any(|(_, e)| e.kind == SUBAGENT_STOP))
+    ) {
+        Ok(recorded) => recorded,
+        // The hook's error path kept it: written back by the next hook call, as a hook's stop is.
+        Err(e) if kept => {
+            eprintln!("oboete: Mark finished's stop kept to be written back: {e:#}");
+            return Ok(Marked::Kept);
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(if recorded.kept {
+        Marked::Kept
+    } else if recorded.events.iter().any(|(_, e)| e.kind == SUBAGENT_STOP) {
+        Marked::Appended
+    } else {
+        Marked::Refused
+    })
+}
+
+/// A stop of `s`: its conversation's and its id's, whatever its time and whoever sent it.
+fn stop_of(s: &Subagent) -> impl Fn(&crate::raw::Event) -> bool + '_ {
+    move |e| {
+        e.kind == SUBAGENT_STOP
+            && e.agent == s.conversation.0
+            && e.session == s.conversation.1
+            && serde_json::from_str::<Value>(&e.body)
+                .is_ok_and(|b| b["agent_id"] == s.agent_id.as_str())
+    }
+}
+
+/// What Mark finished did (W4), which both routes answer from.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Finish {
+    /// `finished_lock` or write-back's lock not had in time.
+    Busy,
+    /// No subagent has the id, or there is no store.
+    NotFound,
+    /// Two subagents have it (#1102 item 2): nothing is recorded.
+    Shared,
+    /// It has a stop at or after its last step.
+    Finished,
+    /// Its newest step's folder is gone or masked, or that checkout records nothing now.
+    NotRecorded,
+    /// A stop of it waits in a kept file (#1102 item 1): nothing is recorded again.
+    Pending,
+    /// Its stop is kept, to be written back by the next hook call.
+    Kept,
+    /// Its stop is appended.
+    Appended,
+    /// `authorized` said no once the locks were had: nothing is recorded.
+    Unauthorized,
+}
+
+/// W4 (docs/subagents.md): Mark finished, for both routes. Under `finished_lock`, then raw.db and
+/// the readers' hold, then write-back's lock, so that no kept file is written back meanwhile: the
+/// only subagent `id` names (`my_work::subagent`, read after the locks), refused when it finished;
+/// a stop of it that waits in a kept file is `Pending` and none more is recorded (#1102 item 1); its
+/// folder is the one its newest step was recorded in. `authorized` is asked last, before the stop is
+/// sent at the time read then. The locks let go, an appended or kept stop starts the worker, as a
+/// hook's write does.
+pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Result<Finish> {
+    let done = (|| -> Result<Finish> {
+        let Some(_finishing) = crate::my_work::finished_lock(home, crate::db::OPEN_WRITE_WAIT)?
+        else {
+            return Ok(Finish::Busy);
+        };
+        // raw.db first, then the readers' hold, the order a restore takes them in (Codex on slice
+        // 2); the same handle reads and appends.
+        let Some((mut raw, k)) = crate::search::b::stores(home)? else {
+            return Ok(Finish::NotFound);
+        };
+        let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+        let Some(_held) = crate::unwritten::hold(home, crate::db::OPEN_WRITE_WAIT)? else {
+            return Ok(Finish::Busy);
+        };
+        let (s, folder) = match crate::my_work::subagent(home, (&raw, &k), id)? {
+            crate::my_work::Lookup::None => return Ok(Finish::NotFound),
+            crate::my_work::Lookup::Shared => return Ok(Finish::Shared),
+            crate::my_work::Lookup::One(s, folder) => (s, folder),
+        };
+        #[cfg(test)]
+        if let Some(hook) = LOOKED_UP.with(|hook| hook.borrow_mut().take()) {
+            hook(&mut raw);
+        }
+        if s.finished.is_some() {
+            return Ok(Finish::Finished);
+        }
+        if crate::unwritten::holds(home, &raw, &stop_of(&s))? {
+            return Ok(Finish::Pending);
+        }
+        let Some(folder) = folder else {
+            return Ok(Finish::NotRecorded);
+        };
+        if !authorized() {
+            return Ok(Finish::Unauthorized);
+        }
+        Ok(
+            match mark(home, &mut raw, &s, &folder, crate::db::now_ms())? {
+                Marked::Appended => Finish::Appended,
+                Marked::Kept => Finish::Kept,
+                Marked::Refused => Finish::NotRecorded,
+            },
+        )
+    })()?;
+    if matches!(done, Finish::Appended | Finish::Kept) {
+        // As a hook starts one after it writes (Codex and cubic on #850), reaped when it leaves,
+        // or it sits as a zombie for as long as the viewer runs (cubic on #850).
+        match crate::hook::start_worker(home) {
+            Ok(Some(mut child)) => {
+                std::thread::spawn(move || child.wait());
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("oboete: worker not started: {e:#}"),
+        }
+    }
+    Ok(done)
+}
+
+/// W4's tests: run once in `finish` after its lookup, with its raw.db handle.
+#[cfg(test)]
+type LookedUp = Option<Box<dyn FnOnce(&mut Raw)>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOOKED_UP: std::cell::RefCell<LookedUp> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
