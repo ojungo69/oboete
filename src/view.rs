@@ -1794,7 +1794,9 @@ impl Viewer {
             ("POST", "/api/hide") => (MAX_BODY, |v, b, _| v.hide(b)),
             ("POST", "/api/preferences") => (MAX_BODY, |v, b, _| v.preference(b)),
             ("POST", "/api/my-work/review") => (MAX_BODY, |v, b, _| v.my_work_review(b)),
-            ("POST", "/api/my-work/finished") => (MAX_BODY, |v, b, _| v.my_work_finished(b)),
+            ("POST", "/api/my-work/finished") => {
+                (MAX_BODY, |v, b, given| v.my_work_finished(b, given))
+            }
             ("POST", "/api/my-work/refresh") => (MAX_BODY, |v, b, _| v.my_work_refresh(b)),
             ("POST", "/api/my-work/suggestion") => {
                 (MAX_BODY, |v, b, given| v.my_work_suggestion(b, given))
@@ -2768,22 +2770,22 @@ impl Viewer {
             return Ok(crate::work_view::empty(now));
         };
         let _read = crate::dispatch::reading(&self.home, crate::db::OPEN_WRITE_WAIT)?;
-        crate::work_view::answer(&self.home, now)
+        let answer = crate::work_view::answer(&self.home, now);
+        #[cfg(test)]
+        if let Some(hook) = SNAPSHOT_READ.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        answer
     }
 
     /// The snapshot a check's answer carries; none when it does not read, which the viewer's log
     /// says.
     fn snapshot_after_check(&self) -> Option<Value> {
-        let snapshot = (self.work_view_snapshot())
+        (self.work_view_snapshot())
             .map_err(|e| {
                 eprintln!("oboete: the work-view's snapshot after a check not read: {e:#}")
             })
-            .ok();
-        #[cfg(test)]
-        if let Some(hook) = SNAPSHOT_READ.with(|hook| hook.borrow_mut().take()) {
-            hook();
-        }
-        snapshot
+            .ok()
     }
 
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
@@ -2792,7 +2794,7 @@ impl Viewer {
     /// `not_recorded` when its conversation's folder is gone or masked or records nothing now,
     /// 503 `busy` when another Mark finished holds the lock past the wait.
     /// The page reads My Work again after it, which counts the new stop at once.
-    fn my_work_finished(&self, body: &[u8]) -> Response {
+    fn my_work_finished(&self, body: &[u8], given: &str) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Posted {
@@ -2803,8 +2805,10 @@ impl Viewer {
             _ => return refused(400, "bad_request", ""),
         };
         use crate::my_work_subagents::Finish;
-        // W4: the core the work-view's route shares; this page's token was asked by `save_gate`.
-        match crate::my_work_subagents::finish(&self.home, &posted.id, &|| true) {
+        // W4: the core the work-view's route shares, this page's token asked again under the lock
+        // a new token takes (Codex on #1121).
+        let authorized = || self.token_ok(Some(given));
+        match crate::my_work_subagents::finish(&self.home, &posted.id, &authorized) {
             Ok(Finish::Appended | Finish::Kept | Finish::Pending) => Response::json(&json!({})),
             Ok(Finish::Busy) => refused(503, "busy", ""),
             Ok(Finish::NotFound) => refused(404, "not_found", ""),
@@ -3129,7 +3133,13 @@ impl Viewer {
         if !self.work_view_token_ok(token) {
             return Response::text(401, "missing or wrong token").on_work_view();
         }
-        self.api(name, &params(query))
+        let answer = self.api(name, &params(query));
+        // A read can outlast a new token, whose pages alone may read it then, as after a write
+        // (`carried`; Codex on #1121).
+        if !self.work_view_token_ok(token) {
+            return Response::text(401, "missing or wrong token").on_work_view();
+        }
+        answer
             .unwrap_or_else(|e| work_view_failed(&e))
             .on_work_view()
     }

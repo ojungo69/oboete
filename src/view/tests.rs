@@ -9995,12 +9995,17 @@ fn stops_and_kept(s: &Store) -> (usize, usize) {
 
 /// oboete's page's Mark finished with this viewer's token, `t0k`.
 fn post_finished(v: &Viewer, id: &Value) -> (u16, Value) {
+    post_finished_as(v, id, "t0k")
+}
+
+/// oboete's page's Mark finished with `token`.
+fn post_finished_as(v: &Viewer, id: &Value, token: &str) -> (u16, Value) {
     let body = serde_json::to_vec(&json!({ "id": id })).unwrap();
     let len = body.len().to_string();
     let h = [
         HOST,
         ("Origin", "http://127.0.0.1:4321"),
-        ("X-Oboete-Token", "t0k"),
+        ("X-Oboete-Token", token),
         ("Content-Type", "application/json"),
         ("Content-Length", len.as_str()),
     ];
@@ -10354,7 +10359,8 @@ fn a_step_recorded_while_mark_finished_waits_is_before_its_stop() {
             crate::my_work::FINISHED_BLOCKED.with_borrow_mut(|hook| *hook = None);
             answer
         });
-        waits.recv().unwrap();
+        let wait = std::time::Duration::from_secs(30);
+        (waits.recv_timeout(wait)).expect("the click waits for finished_lock");
         // Past the millisecond the click began in, so a stop timed then would be before the step.
         std::thread::sleep(std::time::Duration::from_millis(5));
         let now = crate::db::now_ms();
@@ -10484,7 +10490,8 @@ fn a_work_view_mark_finished_that_cannot_wait_is_busy() {
             })
             .collect();
         for _ in 0..4 {
-            waits.recv().unwrap();
+            let wait = std::time::Duration::from_secs(30);
+            (waits.recv_timeout(wait)).expect("four clicks wait for finished_lock");
         }
         let at = std::time::Instant::now();
         let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
@@ -10502,4 +10509,73 @@ fn a_work_view_mark_finished_that_cannot_wait_is_busy() {
         }
     });
     assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (Codex on #1121): Mark finished holds config.lock, which a new token takes, from before its
+/// lookup to its record, so that the token it asks under it is the one its stop is made under.
+#[test]
+fn mark_finished_holds_config_lock_from_its_lookup_to_its_record() {
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let held = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = held.clone();
+    let lock = home.join("state").join("config.lock");
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| {
+            let file = (std::fs::OpenOptions::new().read(true).write(true))
+                .open(&lock)
+                .unwrap();
+            let busy = crate::worker::try_lock(&file);
+            seen.set(Some(matches!(busy, Err(std::fs::TryLockError::WouldBlock))));
+        }));
+    });
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(held.get(), Some(true), "config.lock held at the lookup");
+}
+
+/// W4 (Codex on #1121): oboete's page's Mark finished asks its own token again under config.lock: a
+/// token replaced once the locks are had records nothing (401).
+#[cfg(target_os = "linux")]
+#[test]
+fn oboetes_page_mark_finished_whose_token_is_replaced_records_nothing() {
+    let (s, v, _place) = mark_fixture(Token::File);
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let token = file_token(&home).unwrap();
+    let subs = subagents_in(&work_view_of(&v, &token));
+    let (stops, kept) = stops_and_kept(&s);
+    let again = home.clone();
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| {
+            write_token(&again).unwrap();
+        }));
+    });
+    let (status, _) = post_finished_as(&v, &subs[0]["id"], &token);
+    assert_eq!(status, 401);
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (Codex on #1121): the work-view's read asks its token again once the snapshot is read: a token
+/// replaced while it reads is 401, with no snapshot.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_work_view_read_whose_token_is_replaced_while_it_reads_is_refused() {
+    let (s, v, _place) = mark_fixture(Token::File);
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let made = work_view_token(&file_token(&home).unwrap());
+    let again = home.clone();
+    SNAPSHOT_READ
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_token(&again).unwrap())));
+    let answer = v.route(
+        "GET",
+        "/api/work-view",
+        &[WV_HOST, ("X-Oboete-Token", made.as_str())],
+    );
+    assert_eq!(answer.status, 401);
+    let body: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
+    assert!(body.get("agents").is_none(), "no snapshot: {body}");
+    drop(s);
 }

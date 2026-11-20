@@ -293,7 +293,13 @@ pub(crate) fn holds(
             Some(_) => raw.kept_progress(&crate::forget::hash(&bytes), kept.events.len())?,
             None => 0,
         };
-        if kept.events.iter().skip(from).any(|c| matches(&c.event)) {
+        // Each event's session as write-back writes it (`hook::own_session`; Codex on #1121).
+        let written = |c: &Captured| {
+            let mut event = c.event.clone();
+            event.session = crate::hook::own_session(std::mem::take(&mut event.session), raw);
+            matches(&event)
+        };
+        if kept.events.iter().skip(from).any(written) {
             return Ok(true);
         }
     }

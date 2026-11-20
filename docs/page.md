@@ -272,7 +272,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   new sets when either changed meanwhile, so that a rule saved during the reads is in force in each
   shape a text is gated in. The
   pages poll `GET /api/work-view/version`, the page's version, and read the snapshot again when it
-  moves. Both answer on the pages' own origin alone, with its token (decision 116). What
+  moves. Both answer on the pages' own origin alone, with its token (decision 116), asked again
+  once the answer is read, as after a write (W4). What
   oboete keeps in other shapes is mapped: a work list is a workstream (one per repository, known by its
   place in its request), the
   weekly chapters of the Build story follow its recap, a finished month of goals is a period of Past

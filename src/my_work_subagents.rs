@@ -203,7 +203,8 @@ pub(crate) fn read_picked(
     }
     // A subagent is listed from its first step: a stop or a launch with no step makes none. Each
     // one's finish first, which `Pick::Window` keeps by; then the newest last steps first, at most
-    // `MAX_LISTED` but for `Pick::All`, and the task of those kept.
+    // `MAX_LISTED` but for `Pick::All`, and, for oboete's page, the task of those kept (the
+    // work-view's pages show none: Codex on #1121).
     type Stepped = ((Key, String), Seen, (i64, (String, i64)), Option<i64>);
     let imported = imported_stops(raw, &wanted)?;
     let mut stepped: Vec<Stepped> = (seen.into_iter())
@@ -227,9 +228,7 @@ pub(crate) fn read_picked(
     let mut out = Vec::new();
     for ((key, agent_id), s, (last_step, step_record), finished) in stepped {
         let task = match (&s.launch, pick) {
-            (Some((device, seq, _)), Pick::Newest | Pick::Window(_)) => {
-                task_of(raw, device, *seq, rules)?
-            }
+            (Some((device, seq, _)), Pick::Newest) => task_of(raw, device, *seq, rules)?,
             _ => None,
         };
         out.push(Subagent {
@@ -456,8 +455,9 @@ pub(crate) enum Finish {
     Unauthorized,
 }
 
-/// W4 (docs/subagents.md): Mark finished, for both routes. Under `finished_lock`, then raw.db and
-/// the readers' hold, then write-back's lock, so that no kept file is written back meanwhile: the
+/// W4 (docs/subagents.md): Mark finished, for both routes. Under `finished_lock`, then config.lock,
+/// which a new token takes, then raw.db and the readers' hold, then write-back's lock, so that no
+/// kept file is written back meanwhile: the
 /// only subagent `id` names (`my_work::subagent`, read after the locks), refused when it finished;
 /// a stop of it that waits in a kept file is `Pending` and none more is recorded (#1102 item 1); its
 /// folder is the one its newest step was recorded in. `authorized` is asked last, before the stop is
@@ -467,6 +467,13 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
     let done = (|| -> Result<Finish> {
         let Some(_finishing) = crate::my_work::finished_lock(home, crate::db::OPEN_WRITE_WAIT)?
         else {
+            return Ok(Finish::Busy);
+        };
+        // config.lock, which a new token takes, from before the stores (as a restore takes it) to
+        // the record: the token asked under it below stays the one the stop is made under (Codex
+        // on #1121).
+        let wait = crate::db::OPEN_WRITE_WAIT;
+        let Some(_config) = crate::settings::config_lock_within(home, wait)? else {
             return Ok(Finish::Busy);
         };
         // raw.db first, then the readers' hold, the order a restore takes them in (Codex on slice

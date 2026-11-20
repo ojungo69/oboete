@@ -576,14 +576,15 @@ Slice 3:
   content session id; `isSubagent`, `canMarkFinished` (My Work's `can_mark`) and `presence`
   (`finished`, `recent` for working, else `quiet`; `finishedAt` its stop's time as an ISO time,
   which `OWN` leaves whole). One whose conversation no request carries goes nowhere.
-- **The core** (`my_work_subagents::finish`, both routes): `finished_lock`; raw.db, then the readers'
-  hold; then write-back's lock (`unwritten::hold`, waited for 10 s at most), held to the end, so no
+- **The core** (`my_work_subagents::finish`, both routes): `finished_lock`; config.lock (waited for
+  10 s at most), which a new token takes, held to the end, so that the token asked under it is the
+  one the stop is made under; raw.db, then the readers' hold; then write-back's lock (`unwritten::hold`, waited for 10 s at most), held to the end, so no
   kept file is written back between the look and the record (a `write_back` meanwhile takes the lock
   with `try_lock` and writes nothing); the only subagent the id names among every request's
   conversations' subagents, before any cap (`my_work::subagent`; `Lookup::Shared` when two share
   it, #1102 item 2); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
-  events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session and
-  `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
+  events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
+  write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
   step's folder is gone or masked; the caller's token asked again; then the stop, at the time read
   then (`mark`: `Marked::{Appended, Kept, Refused}`, `record_if` saying when its error path kept the
   call's events, which `hook::record` reads nothing of). The locks let go, an appended or kept stop
@@ -595,8 +596,8 @@ Slice 3:
   snapshot cannot be read or the token was replaced while it was read; refusals with the snapshot
   and claude-mem's sentences where its worker has the case: 404 `not_found`, 409 `finished`, 409
   `ambiguous`, 409 `not_recorded`; 503 `busy` with none.
-- **oboete's page's route** takes the same core: a kept or pending stop is 200 `{}`, two subagents
-  of one id 409 `ambiguous`, which the page words as its generic sentence before it reads My Work
+- **oboete's page's route** takes the same core, its own token asked again under config.lock: a
+  kept or pending stop is 200 `{}`, two subagents of one id 409 `ambiguous`, which the page words as its generic sentence before it reads My Work
   again.
 - **Known limits**: a kept or pending stop changes nothing on the work-view's card until a hook
   writes it back, as the pages keep their model and drop the receipt, and its button records
@@ -605,7 +606,9 @@ Slice 3:
   the pages read the snapshot again after a write of theirs or when the page's version moves (a
   prompt, a session started, an op appended or applied, a record hidden), which a subagent's steps,
   a stop a hook records and the passing of time do not move, so a card can stay as it was read
-  until then.
+  until then; a stop that waits is written back as it was made, at its time, so a step of the
+  subagent's after it leaves the subagent unfinished, as a step after any stop does, and its card
+  offers Mark finished again.
 - **Reviewed** (the plan, a local Codex review in three rounds): a second click racing a
   write-back, a kept stop answered as not recorded, a partly written-back file's consumed events
   counted, the id's uniqueness taken over the capped list, the worker not started for a kept stop,

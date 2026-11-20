@@ -602,3 +602,28 @@ fn holds_reads_the_events_a_write_back_has_not_written() {
     UNREADABLE.set(false);
     assert!(unreadable.is_err(), "{unreadable:?}");
 }
+
+/// W4 (Codex on #1121): `holds` reads a kept event's session as write-back writes it: a stop kept
+/// with no session of its own is this device's `unknown-<device>` conversation's, and not another
+/// conversation's though its subagent's id is the same.
+#[test]
+fn holds_reads_a_kept_events_session_as_write_back_writes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let raw = crate::raw::open(h).unwrap();
+    let mut stop = owner_stop("a1", 1);
+    stop.event.session = "unknown".into();
+    keep(h, &[stop], "r").unwrap();
+    let of = |session: String| {
+        move |e: &crate::raw::Event| e.kind == crate::raw::SUBAGENT_STOP && e.session == session
+    };
+    assert!(holds(h, &raw, &of(format!("unknown-{}", raw.device()))).unwrap());
+    assert!(
+        !holds(h, &raw, &of("unknown".into())).unwrap(),
+        "as it was kept"
+    );
+    assert!(
+        !holds(h, &raw, &of("s".into())).unwrap(),
+        "another conversation's"
+    );
+}
