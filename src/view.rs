@@ -1765,6 +1765,9 @@ impl Viewer {
             ("POST", "/api/work-view/agents/mark-finished") => {
                 (MAX_BODY, |v, b, given| v.work_view_mark_finished(b, given))
             }
+            ("POST", "/api/work-view/rules") => {
+                (MAX_BODY, |v, b, given| v.work_view_rules(b, given))
+            }
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -2670,6 +2673,118 @@ impl Viewer {
         match self.carried(given) {
             Carried::Read(mut snapshot) => {
                 snapshot["save"] = save;
+                Response::json(&snapshot)
+            }
+            Carried::Unread | Carried::Replaced => Response::json(&json!({"save": save})),
+        }
+    }
+
+    /// #1083 (R2a): a rule turned on or off from the work-view's pages (`saveRuleChange`,
+    /// `{action, ruleId, ruleVersion}`: `turn-on` or `turn-off`, the rule's `u:` or `l:` reference
+    /// and the version the pages read of it), with `saving` held from before the switch's locks to
+    /// its receipt (`work_view::switch`), let go before the snapshot after it, which goes only while
+    /// the request's token is still the work-view's (`carried`). Applied, the answer names the rule
+    /// (`savedRuleId`) and the version the switch left it at (`savedRuleVersion`), which the pages'
+    /// Undo posts back; none when a record came after the switch that also decides the rule. A
+    /// correction recorded and not applied yet is saved, and its receipt says the local copy is still
+    /// updating. The other actions wait for the writes that bring them (R2b, R2c).
+    fn work_view_rules(&self, body: &[u8], given: &str) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Posted {
+            action: String,
+            rule_id: String,
+            rule_version: String,
+        }
+        let unread = || {
+            let error = "The rule change could not be read. Reload the page.";
+            work_view_refused(400, "bad_request", error)
+        };
+        // An object only: serde takes a struct's fields from an array too.
+        let object = body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{');
+        let Some(posted) = object
+            .then(|| serde_json::from_slice::<Posted>(body).ok())
+            .flatten()
+        else {
+            return unread();
+        };
+        let muted = match posted.action.as_str() {
+            "turn-off" => true,
+            "turn-on" => false,
+            _ => return unread(),
+        };
+        let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let referenced = (posted.rule_id.strip_prefix("u:"))
+            .or_else(|| posted.rule_id.strip_prefix("l:"))
+            .is_some_and(hex);
+        if !referenced || !hex(&posted.rule_version) {
+            return unread();
+        }
+        let wait = crate::db::OPEN_WRITE_WAIT;
+        #[cfg(test)]
+        let wait = SAVING_WAIT.with(std::cell::Cell::get).unwrap_or(wait);
+        let Some(saving) = self.saving_within(wait) else {
+            return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+        };
+        let authorized = || self.work_view_token_ok(Some(given));
+        let reference = &posted.rule_id;
+        let switched = crate::work_view::switch(
+            &self.home,
+            reference,
+            &posted.rule_version,
+            muted,
+            &authorized,
+        );
+        drop(saving);
+        let refusal = |status, code, error| self.refusal_carrying(given, status, code, error);
+        use crate::work_view::Switched;
+        let (version, pending) = match switched {
+            Ok(Switched::Applied(version)) => (version, false),
+            Ok(Switched::Pending) => (None, true),
+            Ok(Switched::NotFound) => {
+                let error = "This rule is no longer in My Rules. Reload the page.";
+                return refusal(404, "not_found", error);
+            }
+            Ok(Switched::Ambiguous) => {
+                let error = "oboete cannot tell this rule from another one, so nothing was saved.";
+                return refusal(409, "ambiguous", error);
+            }
+            Ok(Switched::Suggestion) => {
+                let error = "A suggestion has no switch: approve it first.";
+                return refusal(409, "rule_state", error);
+            }
+            Ok(Switched::Already) => {
+                let error = if muted {
+                    "This rule is off already."
+                } else {
+                    "This rule is on already."
+                };
+                return refusal(409, "rule_state", error);
+            }
+            Ok(Switched::Stale) => {
+                let error = "This rule changed since you read it. Review its current version before changing it again.";
+                return refusal(409, "stale", error);
+            }
+            Ok(Switched::Behind) => {
+                let error = "oboete is still applying an earlier change. Try again in a moment.";
+                return refusal(409, "pending", error);
+            }
+            Ok(Switched::Busy) => {
+                return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+            }
+            Ok(Switched::Unauthorized) => return Response::text(401, "missing or wrong token"),
+            Err(e) => return work_view_failed(&e),
+        };
+        let mut save = json!({"scope": "local", "state": "saved"});
+        if pending {
+            save["localMaterialization"] = json!("pending");
+        }
+        match self.carried(given) {
+            Carried::Read(mut snapshot) => {
+                snapshot["save"] = save;
+                snapshot["savedRuleId"] = json!(reference);
+                // None, and the pages offer no Undo: one would undo more than this switch.
+                snapshot["savedRuleVersion"] = json!(version);
                 Response::json(&snapshot)
             }
             Carried::Unread | Carried::Replaced => Response::json(&json!({"save": save})),
