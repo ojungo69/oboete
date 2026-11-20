@@ -127,27 +127,79 @@ const RECURATE: &str = "CREATE TABLE IF NOT EXISTS recurate(
   PRIMARY KEY (op_device, op_seq, from_seq)
 )";
 
-/// Each field uses the newest correction that sets it, over the active derivation: of one device's
-/// corrections the one later in its op log, whatever its clock says; between devices the newer
-/// time (#162).
-const ACTIVE: &str = "CREATE VIEW active AS
+/// `what` of the correction of claim `c.uid` that `active` takes for its `field`: the newest that
+/// sets it, of one device's corrections the one later in its op log, whatever its clock says;
+/// between devices the newer time (#162). One text for the view and for `DECIDED_BY`, which names
+/// the correction the view takes.
+macro_rules! deciding {
+    ($what:literal, $field:literal) => {
+        concat!(
+            "(SELECT ",
+            $what,
+            " FROM corrections x WHERE x.uid = c.uid
+              AND x.",
+            $field,
+            " IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
+                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.",
+            $field,
+            " IS NOT NULL
+                  AND y.op_seq > x.op_seq)
+              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1)"
+        )
+    };
+}
+
+/// Each field uses the newest correction that sets it (`deciding!`), over the active derivation.
+const ACTIVE: &str = concat!(
+    "CREATE VIEW active AS
   SELECT c.uid, d.kind, d.speaker, d.scope, d.repo, d.valid_from, d.anchor_device, d.anchor_seq,
-    COALESCE((SELECT x.status FROM corrections x WHERE x.uid = c.uid
-              AND x.status IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
-                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.status IS NOT NULL
-                  AND y.op_seq > x.op_seq)
-              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.status) AS status,
-    COALESCE((SELECT x.body FROM corrections x WHERE x.uid = c.uid
-              AND x.body IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
-                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.body IS NOT NULL
-                  AND y.op_seq > x.op_seq)
-              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), d.body) AS body,
-    COALESCE((SELECT x.muted FROM corrections x WHERE x.uid = c.uid
-              AND x.muted IS NOT NULL AND NOT EXISTS (SELECT 1 FROM corrections y
-                WHERE y.uid = x.uid AND y.op_device = x.op_device AND y.muted IS NOT NULL
-                  AND y.op_seq > x.op_seq)
-              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1), 0) AS muted
-  FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq";
+    COALESCE(",
+    deciding!("x.status", "status"),
+    ", d.status) AS status,
+    COALESCE(",
+    deciding!("x.body", "body"),
+    ", d.body) AS body,
+    COALESCE(",
+    deciding!("x.muted", "muted"),
+    ", 0) AS muted
+  FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq"
+);
+
+/// #1083 (R2a): what decides claim `?1` as `active` reads it: its active derivation's op, what the
+/// view reads of its status, body and mute, and for each of them the correction the view takes
+/// (`deciding!`), none where the derivation's own stands.
+const DECIDED_BY: &str = concat!(
+    "SELECT c.op_device, c.op_seq, a.status, a.body, a.muted, ",
+    deciding!("json_array(x.op_device, x.op_seq)", "status"),
+    ", ",
+    deciding!("json_array(x.op_device, x.op_seq)", "body"),
+    ", ",
+    deciding!("json_array(x.op_device, x.op_seq)", "muted"),
+    "
+  FROM claims c JOIN active a ON a.uid = c.uid
+  WHERE c.uid = ?1"
+);
+
+/// What decides claim `uid` now (`DECIDED_BY`), as one value: none for a claim `active` has not.
+/// Two reads give the same value only while no derivation and no correction the view would take
+/// came between them, and what the view reads is the same.
+pub(crate) fn decided_by(k: &Connection, uid: &str) -> Result<Option<serde_json::Value>> {
+    use rusqlite::OptionalExtension;
+    let correction = |v: Option<String>| -> serde_json::Value {
+        v.and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    Ok(k.query_row(DECIDED_BY, [uid], |r| {
+        Ok(serde_json::json!({
+            "derivation": [r.get::<_, String>(0)?, r.get::<_, i64>(1)?],
+            "status": r.get::<_, Option<String>>(2)?,
+            "body": r.get::<_, Option<String>>(3)?,
+            "muted": r.get::<_, i64>(4)? != 0,
+            "by": [correction(r.get(5)?), correction(r.get(6)?), correction(r.get(7)?)],
+        }))
+    })
+    .optional()?)
+}
 
 /// Runs `change` when `needed` says so, asked again under the write lock: a worker and a command
 /// can open the same older knowledge.db at once, and the second to change it would fail or
@@ -553,13 +605,25 @@ fn correction_recorded(
         .map_err(OwnerRefusal::unavailable)?;
     let device = raw.device().to_owned();
     drop(raw);
-    // A search or a SessionStart right after never shows the old claim.
-    if let Err(cause) = applied(home, &k, &device, &seqs, ("correction", "claims")) {
-        return Ok(OwnerReceipt::Pending {
+    Ok(receipt_after(home, &k, &device, &seqs, uid))
+}
+
+/// The receipt of correction `seqs` of claim `uid`, appended on `device`: applied by the claims
+/// consumer before this returns (`applied`), so that a search or a SessionStart right after never
+/// shows the old claim, and kept; else pending, and why.
+pub(crate) fn receipt_after(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    seqs: &[i64],
+    uid: &str,
+) -> OwnerReceipt {
+    if let Err(cause) = applied(home, k, device, seqs, ("correction", "claims")) {
+        return OwnerReceipt::Pending {
             uid: uid.to_owned(),
             reason: PendingReason::Application,
             cause,
-        });
+        };
     }
     // A worker of an older oboete that still held the lock passes a correction it does not
     // understand; the next worker of this one keeps it (`consumer::claims::retry`).
@@ -568,7 +632,7 @@ fn correction_recorded(
         rusqlite::params![device, seqs.last()],
         |r| r.get::<_, bool>(0),
     );
-    Ok(match kept {
+    match kept {
         Ok(true) => OwnerReceipt::Applied {
             uid: uid.to_owned(),
         },
@@ -585,7 +649,26 @@ fn correction_recorded(
             reason: PendingReason::Application,
             cause: cause.into(),
         },
-    })
+    }
+}
+
+/// #1083 (R2a): the correction op that sets claim `uid`'s mute to `muted`, anchored on the record
+/// `active` anchors the claim on, read on `k`; none for a claim `active` has not.
+pub(crate) fn mute_op(k: &Connection, uid: &str, muted: bool) -> Result<Option<serde_json::Value>> {
+    let Some(anchor) = correction_anchor(k, uid)? else {
+        return Ok(None);
+    };
+    let op = CorrectionOp {
+        uid: uid.to_owned(),
+        anchor,
+        status: None,
+        body: None,
+        muted: Some(muted),
+    };
+    if let Some(why) = op.fault() {
+        anyhow::bail!("the correction is refused: {why}");
+    }
+    Ok(Some(serde_json::to_value(&op)?))
 }
 
 /// The owner's ops `seqs`, applied by `consumer` before the command returns: by this process or

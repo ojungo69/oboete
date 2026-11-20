@@ -2448,6 +2448,8 @@ fn a_save_from_the_work_views_origin_is_refused_and_leaves_the_opener() {
         "/api/my-work/suggestion",
         "/api/my-focus",
         "/api/my-rules",
+        "/api/claims/mute",
+        "/api/claims/correct",
         "/api/settings",
         "/api/key",
         "/api/providers/key",
@@ -2784,6 +2786,7 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
             "bad_request",
             MAX_BODY,
         ),
+        ("/api/work-view/rules", 400, "bad_request", MAX_BODY),
     ] {
         let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(
@@ -2826,7 +2829,10 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
         );
     }
     // No other write of the work-view's yet: refused as before, with its credentials too.
-    for target in ["/api/work-view/focus", "/api/work-view/rules"] {
+    for target in [
+        "/api/work-view/focus",
+        "/api/work-view/rules/load-in-claude-code",
+    ] {
         let answer = post(target, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(answer.status, 405, "{target}");
     }
@@ -2849,6 +2855,7 @@ fn a_work_view_save_is_refused_when_its_token_is_replaced_before_its_body() {
         "/api/work-view/review",
         "/api/work-view/suggestions",
         "/api/work-view/agents/mark-finished",
+        "/api/work-view/rules",
     ] {
         let made = work_view_token(&file_token(home.path()).unwrap());
         let headers = [
@@ -10811,4 +10818,117 @@ fn mark_finished_waits_out_a_rebuild_the_subagents_consumer_owes() {
     let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
     assert_eq!(status, 200, "{answer}");
     assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+}
+
+/// #1083 (R2a): a home of one rule the owner wrote for every repository, and a viewer over it.
+fn rules_fixture(token: Token) -> (Store, Viewer) {
+    let s = Store::new();
+    std::fs::create_dir_all(s.home.path().join("state")).unwrap();
+    s.run();
+    crate::claims::pref_add_recorded(s.home.path(), "Answer in Japanese.", None).unwrap();
+    s.run();
+    let v = Viewer::new(s.home.path(), Some(s.home.path().to_owned()), 4321, token);
+    (s, v)
+}
+
+const RULES: &str = "/api/work-view/rules";
+
+/// The body the pages post to switch `rule`, with `version`.
+fn switch_body(rule: &Value, action: &str, version: &Value) -> Vec<u8> {
+    let body = json!({"action": action, "ruleId": rule["ruleId"], "ruleVersion": version});
+    serde_json::to_vec(&body).unwrap()
+}
+
+/// The correction ops of `s`'s home.
+fn correction_ops(s: &Store) -> usize {
+    let device = s.raw.device().to_owned();
+    let ops = s.raw.ops_after(&device, 0, 100_000).unwrap();
+    (ops.iter())
+        .filter(|op| op.kind == crate::raw::OpKind::Correction)
+        .count()
+}
+
+/// #1083 (R2a): the work-view's switch turns a rule off and answers the snapshot after it, the
+/// rule it saved and the version it left the rule at, which its Undo posts back to turn it on
+/// again; the first read's version is refused then, with the snapshot it was refused against; and
+/// what is no switch of R2a's is 400. None of the refused ones records anything.
+#[test]
+fn the_work_views_switch_turns_a_rule_off_and_its_undo_on_again() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    let rule = work_view_of(&v, "t0k")["rules"][0].clone();
+    assert_eq!(rule["status"], "on", "{rule}");
+    let off = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &off);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["save"], json!({"scope": "local", "state": "saved"}));
+    assert_eq!(answer["savedRuleId"], rule["ruleId"]);
+    assert_eq!(answer["rules"][0]["status"], "off");
+    assert_eq!(
+        answer["savedRuleVersion"],
+        answer["rules"][0]["ruleVersion"]
+    );
+    let before = correction_ops(&s);
+    let stale = switch_body(&rule, "turn-on", &rule["ruleVersion"]);
+    let (status, refused) = post_work_view(&v, RULES, "t0k", &stale);
+    assert_eq!(
+        (status, refused["code"].as_str()),
+        (409, Some("stale")),
+        "{refused}"
+    );
+    assert_eq!(refused["snapshot"]["rules"][0]["status"], "off");
+    assert_eq!(correction_ops(&s), before);
+    let undo = switch_body(&rule, "turn-on", &answer["savedRuleVersion"]);
+    let (status, undone) = post_work_view(&v, RULES, "t0k", &undo);
+    assert_eq!(status, 200, "{undone}");
+    assert_eq!(undone["rules"][0]["status"], "on");
+    let version = &rule["ruleVersion"];
+    for body in [
+        json!({"action": "approve", "ruleId": rule["ruleId"], "ruleVersion": version}),
+        json!({"action": "turn-off", "ruleId": rule["ruleId"]}),
+        json!({"action": "turn-off", "ruleId": "u:nope", "ruleVersion": version}),
+        json!({"action": "turn-off", "ruleId": rule["ruleId"], "ruleVersion": "nope"}),
+        json!({"action": "turn-off", "ruleId": rule["ruleId"], "ruleVersion": version,
+            "rule": {"then": "Answer in English."}}),
+        json!(["turn-off", rule["ruleId"], version]),
+    ] {
+        let posted = serde_json::to_vec(&body).unwrap();
+        let (status, refused) = post_work_view(&v, RULES, "t0k", &posted);
+        assert_eq!(
+            (status, refused["code"].as_str()),
+            (400, Some("bad_request")),
+            "{body}"
+        );
+    }
+    assert_eq!(correction_ops(&s), before + 1);
+}
+
+/// #1083 (R2a): a switch whose token is replaced while it waits for config.lock records nothing;
+/// one whose token is replaced while the snapshot after it is read is saved, and answers the
+/// receipt alone, with no version for an Undo.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_work_view_switch_whose_token_is_replaced_records_nothing_or_sends_no_snapshot() {
+    let (s, v) = rules_fixture(Token::File);
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let token = || file_token(&home).unwrap();
+    let rule = work_view_of(&v, &token())["rules"][0].clone();
+    let off = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+    let before = correction_ops(&s);
+    let given = token();
+    let (status, _) = replaced_while_it_waits(&home, || post_work_view(&v, RULES, &given, &off));
+    assert_eq!(status, 401);
+    assert_eq!(correction_ops(&s), before);
+    let replace = {
+        let home = home.clone();
+        move || write_token(&home).unwrap()
+    };
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(replace)));
+    let (status, answer) = post_work_view(&v, RULES, &token(), &off);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"save": {"scope": "local", "state": "saved"}})
+    );
+    assert_eq!(correction_ops(&s), before + 1);
 }

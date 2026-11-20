@@ -1995,6 +1995,21 @@ pub struct AnswerFence {
     pub expired: i64,
 }
 
+/// #1083 (R2a): what a rule's write read before it found its rule, which its append compares in its
+/// write (`Raw::append_ops_ruled`): the raw.db file (`file_identity`), the forget fence
+/// (`fence_count`), this device's newest op and newest record, and the rows retention has made
+/// expired. Not every op since moves it: curation appends claims all day, so only an exclusion, an
+/// op whose body names the rule's claim (a correction of it, a claim that supersedes it) and a
+/// tombstone refuse the append.
+#[derive(Clone, Debug)]
+pub struct RuleFence {
+    pub file: Option<String>,
+    pub forget: i64,
+    pub top: i64,
+    pub records: i64,
+    pub expired: i64,
+}
+
 /// How many tool records recorded after J4's check its append decodes, under the writer's lock,
 /// to find a work state write's call among them; more than that refuses the answer undecoded.
 const CALLS_READ: i64 = 64;
@@ -6959,6 +6974,102 @@ impl Raw {
             || expired_rows_in(&tx)? != fence.expired
             || self.work_state_called_after(&tx, fence.records)?
         {
+            return Err(OpsMoved.into());
+        }
+        for (kind, body) in ops {
+            anyhow::ensure!(
+                !forgotten_op(&tx, *kind, body)?,
+                "a forget request invalidated this derived batch; it was not recorded"
+            );
+        }
+        let seqs = insert_ops(&tx, &self.device, &bodies)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
+        tx.commit()?;
+        Ok(seqs)
+    }
+
+    /// This device's newest correction op past `after`, none when there is none (#1083, R2a: what a
+    /// rule's switch waits for the claims consumer to have applied).
+    pub fn correction_after(&self, after: i64) -> Result<Option<i64>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT op_seq FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'correction'
+                 ORDER BY op_seq DESC LIMIT 1",
+                params![self.device, after],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Whether this device has a claim or correction op past `after` whose body names `uid` (#1083,
+    /// R2a: one the claims consumer has not applied to the rule a switch reads).
+    pub fn names_after(&self, after: i64, uid: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2
+               AND type IN ('claim', 'correction') AND instr(body, ?3) > 0)",
+            params![self.device, after, uid],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether this device has a tombstone past record `after` (#1083, R2a: one the anchors consumer
+    /// has not applied).
+    pub fn tombstone_after(&self, after: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2
+               AND type = 'tombstone')",
+            params![self.device, after],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// What a rule's write compares its append against (`RuleFence`), read now.
+    pub fn rule_fence(&self) -> Result<RuleFence> {
+        Ok(RuleFence {
+            file: self.file_identity().map(str::to_owned),
+            forget: self.fence_count()?,
+            top: max_op_seq_in(&self.conn, &self.device)?,
+            records: self.record_top()?,
+            expired: self.expired_rows()?,
+        })
+    }
+
+    /// `append_ops` for a rule's write on claim `uid` (#1083, R2a), only while the stores stand as
+    /// `fence` read them for it: the same raw.db file, forget denying what it denied, retention
+    /// having expired no row, and since its `top` this device having appended no exclusion and no op
+    /// whose body names `uid`, and since its `records` no tombstone, compared inside the write; else
+    /// nothing is written and the error is `OpsMoved`.
+    pub fn append_ops_ruled(
+        &mut self,
+        ops: &[(OpKind, serde_json::Value)],
+        fence: &RuleFence,
+        uid: &str,
+    ) -> Result<Vec<i64>> {
+        anyhow::ensure!(!uid.is_empty(), "a rule's write names its claim");
+        if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
+            return Err(OpsMoved.into());
+        }
+        let bodies = within_batch_cap(ops)?;
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
+        let forget: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
+        let named: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2
+               AND (type = 'exclusion' OR instr(body, ?3) > 0))",
+            params![self.device, fence.top, uid],
+            |r| r.get(0),
+        )?;
+        let tombstoned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2
+               AND type = 'tombstone')",
+            params![self.device, fence.records],
+            |r| r.get(0),
+        )?;
+        if forget != fence.forget || named || tombstoned || expired_rows_in(&tx)? != fence.expired {
             return Err(OpsMoved.into());
         }
         for (kind, body) in ops {

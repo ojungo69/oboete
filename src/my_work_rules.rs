@@ -166,10 +166,11 @@ pub(crate) fn decided(
     Ok(out)
 }
 
-/// What My Rules reads (V3): this device's newest answered rules op's suggestions, and the
-/// owner's decisions on them.
+/// What My Rules reads (V3): this device's newest answered rules op's suggestions, the op seq
+/// that kept each, and the owner's decisions on them.
 pub(crate) struct Shown {
     pub suggestions: Vec<Suggestion>,
+    pub seqs: BTreeMap<String, i64>,
     pub decided: BTreeMap<String, Decision>,
 }
 
@@ -177,10 +178,24 @@ pub(crate) fn shown(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<S
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let hidden = crate::my_work_ops::hidden(raw, k, &reading)?;
     let device = raw.device().to_owned();
+    let (suggestions, seqs, _) = carried(k, &device, &hidden)?;
     Ok(Shown {
-        suggestions: carried(k, &device, &hidden)?.0,
+        suggestions,
+        seqs,
         decided: decided(k, &device, &hidden)?,
     })
+}
+
+/// #1083 (R2a): what the page's rows were read from, of which the work-view makes each rule's
+/// version: the raw.db file read; each listed rule's claim by uid, what decides it
+/// (`claims::decided_by`); each suggestion's kept op by id; and each decision's op by its
+/// suggestion's id.
+#[derive(Default)]
+pub(crate) struct States {
+    pub file: Option<String>,
+    pub claims: BTreeMap<String, Value>,
+    pub kept: BTreeMap<String, i64>,
+    pub decisions: BTreeMap<String, i64>,
 }
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -208,14 +223,28 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
     page_under(home, now, &settings, &settings.rules)
 }
 
-/// `page`, each text gated under `rules`: the work-view's read (#1083), under its answer's rules.
+#[cfg(test)]
+thread_local! {
+    /// A test's hook, run once `page_on` has read a scope's claims, before what decides each.
+    pub(crate) static READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `page`, each text gated under `rules`, and what its rows were read from: the work-view's read
+/// (#1083), under its answer's rules, in one read of knowledge.db.
 pub(crate) fn page_with(
     home: &std::path::Path,
     now: i64,
     rules: &crate::redact::Rules,
-) -> Result<Value> {
+) -> Result<(Value, States)> {
     let settings = crate::capture::Settings::load(home)?;
-    page_under(home, now, &settings, rules)
+    let Some((raw, k)) = crate::search::b::stores(home)? else {
+        return page_on(now, &settings, rules, None);
+    };
+    // One read of knowledge.db, as a rule's write reads it (#1083, R2a): a rule's text and what its
+    // version is made of come from one state of it.
+    let read = k.unchecked_transaction()?;
+    page_on(now, &settings, rules, Some((&raw, &*read)))
 }
 
 /// `page`'s read, its texts and repository names gated under `rules`.
@@ -225,15 +254,40 @@ fn page_under(
     settings: &crate::capture::Settings,
     rules: &crate::redact::Rules,
 ) -> Result<Value> {
+    let stores = crate::search::b::stores(home)?;
+    Ok(page_on(
+        now,
+        settings,
+        rules,
+        stores.as_ref().map(|(raw, k)| (raw, k)),
+    )?
+    .0)
+}
+
+/// `page_under` on the stores the caller opened, none for a home with none yet (#1083, R2a: a rule's
+/// write reads the page on the handles it appends on, under its locks), and what its rows were read
+/// from (`States`).
+pub(crate) fn page_on(
+    now: i64,
+    settings: &crate::capture::Settings,
+    rules: &crate::redact::Rules,
+    stores: Option<(&crate::raw::Raw, &rusqlite::Connection)>,
+) -> Result<(Value, States)> {
     let gate = |t: &str| crate::redact::outbound_with(t, rules);
     type Rule = (crate::claims::Claim, bool);
     let mut scopes: Vec<(Option<String>, Vec<Rule>)> = vec![(None, Vec::new())];
     let mut offered = Vec::new();
-    let shown = match crate::search::b::stores(home)? {
+    let mut states = States::default();
+    let shown = match stores {
         None => None,
         Some((raw, k)) => {
-            let s = shown(&raw, &k)?;
-            let with_on = |claims: Vec<crate::claims::Claim>| -> Result<Vec<Rule>> {
+            states.file = raw.file_identity().map(str::to_owned);
+            let s = shown(raw, k)?;
+            let mut with_on = |claims: Vec<crate::claims::Claim>| -> Result<Vec<Rule>> {
+                #[cfg(test)]
+                if let Some(hook) = READ.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
                 let mut rules = Vec::new();
                 for c in claims {
                     // A forgotten rule is gone at once, as agents stop getting it: knowledge.db
@@ -241,14 +295,16 @@ fn page_under(
                     if raw.forgotten(&c.uid)? {
                         continue;
                     }
-                    let on = !crate::claims::muted(&k, &c.uid)?;
+                    let on = !crate::claims::muted(k, &c.uid)?;
+                    let by = crate::claims::decided_by(k, &c.uid)?.unwrap_or(Value::Null);
+                    states.claims.insert(c.uid.clone(), by);
                     rules.push((c, on));
                 }
                 Ok(rules)
             };
-            scopes[0].1 = with_on(crate::claims::global(&k)?)?;
-            for repo in crate::claims::owned_repos(&k)? {
-                let owned = with_on(crate::claims::owned(&k, &repo)?)?;
+            scopes[0].1 = with_on(crate::claims::global(k)?)?;
+            for repo in crate::claims::owned_repos(k)? {
+                let owned = with_on(crate::claims::owned(k, &repo)?)?;
                 if !owned.is_empty() {
                     scopes.push((Some(repo), owned));
                 }
@@ -256,7 +312,7 @@ fn page_under(
             // As every writer asks it (`CaptureExclusions::refuses`), with no index to build.
             let list = raw.capture_exclusions()?;
             let never = crate::capture::never_recorded(&list, settings);
-            let started = crate::consumer::manifest::exists(&k, "table", "session_start")?;
+            let started = crate::consumer::manifest::exists(k, "table", "session_start")?;
             let mut st = k.prepare(if started {
                 "SELECT repo FROM session_start GROUP BY repo ORDER BY MAX(ts) DESC, repo"
             } else {
@@ -276,11 +332,17 @@ fn page_under(
     };
     let Shown {
         suggestions,
+        seqs,
         decided,
     } = shown.unwrap_or(Shown {
         suggestions: Vec::new(),
+        seqs: BTreeMap::new(),
         decided: BTreeMap::new(),
     });
+    states.kept = seqs;
+    states.decisions = (decided.iter())
+        .map(|(id, d)| (id.clone(), d.seq))
+        .collect();
     let quotes = |sg: &Suggestion| -> Vec<Value> {
         (sg.quotes.iter())
             .map(|q| json!({"text": gate(&q.text), "at": q.at}))
@@ -334,7 +396,7 @@ fn page_under(
             }
         })
         .collect();
-    Ok(json!({
+    let page = json!({
         "waiting": waiting.into_iter().map(card).collect::<Vec<_>>(),
         "rejected": rejected.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
         "removed": removed.into_iter().map(|(sg, _)| card(sg)).collect::<Vec<_>>(),
@@ -342,7 +404,8 @@ fn page_under(
         "repos": (offered.iter())
             .map(|repo| json!({"repo": repo, "name": name(repo)}))
             .collect::<Vec<_>>(),
-    }))
+    });
+    Ok((page, states))
 }
 
 /// #739: whether a `rule` op of suggestion `id` is recorded but not applied yet, so the decision it

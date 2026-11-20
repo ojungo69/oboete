@@ -911,7 +911,9 @@ fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
                 .map(|(k, v)| match (k.as_str(), v.as_str()) {
                     // A version's keyed hash and the snapshot's time, each in its own shape: an
                     // empty or malformed one stays as it is and differs.
-                    ("contentFingerprint" | "expectedSuggestionHash", Some(t)) if hex(t, 64) => {
+                    ("contentFingerprint" | "expectedSuggestionHash" | "ruleVersion", Some(t))
+                        if hex(t, 64) =>
+                    {
                         (k.clone(), json!("<kept>"))
                     }
                     ("revision", Some(t))
@@ -1995,9 +1997,10 @@ fn the_keys_the_walk_leaves_whole_are_theirs_alone() {
                 "when",
                 "savedAt",
                 "replacedAt",
+                "ruleVersion",
             ][..],
-            r"^/rules/\d+/(ruleId|scopeId|replacedBy|setBy|scopeTier|when|savedAt|replacedAt)$|^/focusAreas/\d+/savedAt$",
-            ("ruled.json", 32),
+            r"^/rules/\d+/(ruleId|scopeId|replacedBy|setBy|scopeTier|when|savedAt|replacedAt|ruleVersion)$|^/focusAreas/\d+/savedAt$",
+            ("ruled.json", 36),
         ),
     ] {
         let own = Regex::new(own).unwrap();
@@ -2547,4 +2550,320 @@ fn a_home_of_a_removed_approval_alone_sends_no_rule() {
     let (work, goals) = answers(&h, now);
     let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     assert_eq!(snapshot["rules"], json!([]), "{snapshot}");
+}
+
+/// #1083 (R2a): the rule of `then` in the snapshot read now: its reference and version.
+fn read_rule(h: &Store, then: &str) -> (String, String, Value) {
+    let now = crate::db::now_ms();
+    let (work, goals) = answers(h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let rule = rule_of(&snapshot, then).clone();
+    let id = rule["ruleId"].as_str().unwrap().to_owned();
+    let version = rule["ruleVersion"].as_str().unwrap().to_owned();
+    (id, version, rule)
+}
+
+/// The correction ops the home's raw.db holds.
+fn corrections(h: &Store) -> usize {
+    let device = h.raw.device().to_owned();
+    let ops = h.raw.ops_after(&device, 0, 100_000).unwrap();
+    ops.iter()
+        .filter(|op| op.kind == OpKind::Correction)
+        .count()
+}
+
+/// `switch` on `h`'s home, its token asked and taken.
+fn switched(h: &Store, reference: &str, version: &str, muted: bool) -> Switched {
+    switch(h.home.path(), reference, version, muted, &|| true).unwrap()
+}
+
+/// The version an applied switch left its rule at.
+fn left(s: Switched) -> String {
+    match s {
+        Switched::Applied(Some(version)) => version,
+        other => panic!("not applied with a version: {other:?}"),
+    }
+}
+
+/// `uid`'s mute correction, appended on a raw.db handle of its own, as another writer appends one.
+fn muted_elsewhere(home: &Path, uid: &str, muted: bool) {
+    let k = crate::knowledge::open(home).unwrap();
+    let op = crate::claims::mute_op(&k, uid, muted).unwrap().unwrap();
+    let mut raw = crate::raw::open(home).unwrap();
+    raw.append_ops(&[(OpKind::Correction, op)]).unwrap();
+}
+
+/// #1083 (R2a): a rule the owner wrote turned off and on again from the pages: each switch is
+/// applied, the rule reads as it says, and each leaves the rule at a version of its own, the one the
+/// next read gives, another than any before it even where the state is one it had.
+#[test]
+fn a_rule_switched_off_and_on_reads_so_at_the_version_its_answer_gives() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, v0, rule) = read_rule(&h, "Write the changelog.");
+    assert_eq!(rule["status"], "on");
+    let v1 = left(switched(&h, &id, &v0, true));
+    let (again, version, rule) = read_rule(&h, "Write the changelog.");
+    assert_eq!(
+        (again.as_str(), rule["status"].as_str()),
+        (id.as_str(), Some("off"))
+    );
+    assert_eq!(version, v1);
+    assert_ne!(v1, v0);
+    let v2 = left(switched(&h, &id, &v1, false));
+    let (_, version, rule) = read_rule(&h, "Write the changelog.");
+    assert_eq!(
+        (rule["status"].as_str(), version.as_str()),
+        (Some("on"), v2.as_str())
+    );
+    assert_ne!(
+        v2, v0,
+        "the state is the one it had, at a version of its own"
+    );
+}
+
+/// An approved rule switches as one the owner wrote, and keeps its reference and who set it.
+#[test]
+fn an_approved_rule_switches_off_and_keeps_its_reference() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, v0, rule) = read_rule(&h, "Run the tests before a push.");
+    assert_eq!(
+        (rule["setBy"].as_str(), id.starts_with("l:")),
+        (Some("approved"), true)
+    );
+    let v1 = left(switched(&h, &id, &v0, true));
+    let (again, version, rule) = read_rule(&h, "Run the tests before a push.");
+    assert_eq!((again, version), (id, v1));
+    assert_eq!(
+        (rule["status"].as_str(), rule["setBy"].as_str()),
+        (Some("off"), Some("approved"))
+    );
+}
+
+/// A switch the rule cannot take records nothing: a suggestion waiting, a rule already as asked, a
+/// version not the rule's, and a reference no rule goes by.
+#[test]
+fn a_switch_its_rule_cannot_take_records_nothing() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let before = corrections(&h);
+    let (waiting, version, _) = read_rule(&h, "Keep commits small.");
+    assert_eq!(switched(&h, &waiting, &version, true), Switched::Suggestion);
+    let (off, version, _) = read_rule(&h, "Answer in Japanese.");
+    assert_eq!(switched(&h, &off, &version, true), Switched::Already);
+    let (on, _, _) = read_rule(&h, "Write the changelog.");
+    assert_eq!(switched(&h, &on, &"0".repeat(64), true), Switched::Stale);
+    let none = format!("u:{}", "0".repeat(64));
+    assert_eq!(switched(&h, &none, &version, true), Switched::NotFound);
+    assert_eq!(corrections(&h), before);
+}
+
+/// The Undo of a switch posts the version that switch left: once the rule was switched on and off
+/// again since, it is refused and records nothing, though the rule is off as that switch left it
+/// and the Undo would change it.
+#[test]
+fn an_undo_after_the_rule_was_switched_again_is_refused() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, v0, _) = read_rule(&h, "Write the changelog.");
+    let a = left(switched(&h, &id, &v0, true));
+    let b = left(switched(&h, &id, &a, false));
+    let c = left(switched(&h, &id, &b, true));
+    assert_ne!(a, c);
+    let before = corrections(&h);
+    assert_eq!(switched(&h, &id, &a, false), Switched::Stale);
+    assert_eq!(corrections(&h), before);
+}
+
+/// A correction of the rule's claim appended by another writer between the switch's check and its
+/// append moves its fence: nothing more is recorded. An exclusion op does too: this device's own
+/// exclusion waits for the readers' hold the switch keeps and is refused busy, and the fence
+/// refuses one appended there without that hold as well.
+#[test]
+fn a_correction_or_an_exclusion_between_the_check_and_the_append_refuses_the_switch() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let uid = crate::claims::owned(&crate::knowledge::open(h.home.path()).unwrap(), &repo)
+        .unwrap()
+        .remove(0)
+        .uid;
+    let before = corrections(&h);
+    let (home, named) = (h.home.path().to_owned(), uid.clone());
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || muted_elsewhere(&home, &named, true)))
+    });
+    assert_eq!(switched(&h, &id, &version, true), Switched::Behind);
+    assert_eq!(corrections(&h), before + 1, "the other writer's alone");
+    h.run();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let home = h.home.path().to_owned();
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut raw = crate::raw::open(&home).unwrap();
+            let busy = raw.exclude("github.com/o/elsewhere", false).unwrap_err();
+            assert!(busy.to_string().contains("busy"), "{busy:#}");
+            let op = json!({"repo": "github.com/o/elsewhere", "undo": false});
+            raw.append_ops(&[(OpKind::Exclusion, op)]).unwrap();
+        }))
+    });
+    assert_eq!(switched(&h, &id, &version, false), Switched::Behind);
+    assert_eq!(corrections(&h), before + 1);
+}
+
+/// A claim op of another claim between the check and the append, as curation appends them all day,
+/// leaves the switch its append.
+#[test]
+fn another_claim_between_the_check_and_the_append_leaves_the_switch_its_append() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let home = h.home.path().to_owned();
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let op = json!({"curated": "another claim"});
+            crate::raw::open(&home)
+                .unwrap()
+                .append_ops(&[(OpKind::Claim, op)])
+                .unwrap();
+        }))
+    });
+    assert!(matches!(
+        switched(&h, &id, &version, true),
+        Switched::Applied(Some(_))
+    ));
+}
+
+/// A correction of the rule appended once the switch's correction is, before its receipt reads the
+/// rule, leaves its answer no version: an Undo of it would undo that one too. Its body, or a mute
+/// as the switch's.
+#[test]
+fn a_correction_after_the_switchs_own_leaves_its_answer_no_version() {
+    for body in [true, false] {
+        let (h, _now, _place, repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Write the changelog.");
+        let k = crate::knowledge::open(h.home.path()).unwrap();
+        let uid = crate::claims::owned(&k, &repo).unwrap().remove(0).uid;
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if body {
+                    crate::claims::correct(&home, &uid, None, Some("Write the changelog first."))
+                        .unwrap();
+                } else {
+                    crate::claims::mute(&home, &uid, true).unwrap();
+                }
+            }))
+        });
+        assert_eq!(
+            switched(&h, &id, &version, true),
+            Switched::Applied(None),
+            "body: {body}"
+        );
+    }
+}
+
+/// A correction the claims consumer has not applied when the wait runs out is saved, and its
+/// answer says it is not applied yet: no version, so no Undo.
+#[test]
+fn a_switch_not_applied_in_time_is_recorded_and_pending() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let before = corrections(&h);
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = switched(&h, &id, &version, true);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    assert_eq!(got, Switched::Pending);
+    assert_eq!(corrections(&h), before + 1);
+}
+
+/// A claim op of this device naming the rule's claim that the claims consumer has not applied
+/// refuses the switch, which would read the rule as it was before it.
+#[test]
+fn a_correction_not_applied_yet_refuses_the_switch() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    let uid = crate::claims::owned(&k, &repo).unwrap().remove(0).uid;
+    // Not applied, and not waited for: the wait has no time.
+    muted_elsewhere(h.home.path(), &uid, false);
+    let before = corrections(&h);
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = switched(&h, &id, &version, true);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(corrections(&h), before);
+}
+
+/// A correction of the rule's claim recorded just before the switch, the claims consumer given its
+/// time, is waited for and applied first (`caught_up`): the switch is judged against it, so the
+/// version the pages read is stale and records nothing, and the one the next read gives switches the
+/// rule.
+#[test]
+fn a_switch_just_after_a_correction_of_its_rule_is_judged_against_it() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    let uid = crate::claims::owned(&k, &repo).unwrap().remove(0).uid;
+    muted_elsewhere(h.home.path(), &uid, false);
+    let before = corrections(&h);
+    assert_eq!(switched(&h, &id, &version, true), Switched::Stale);
+    assert_eq!(corrections(&h), before, "the stale switch records nothing");
+    let (again, now, _) = read_rule(&h, "Write the changelog.");
+    assert_eq!(again, id);
+    assert_ne!(now, version, "the correction moved the rule's version");
+    left(switched(&h, &id, &now, true));
+}
+
+/// A correction the claims consumer applies while the snapshot reads My Rules, between a rule's
+/// text and what decides it, reaches neither (#1083, R2a: one read of knowledge.db): the version
+/// the snapshot gives goes with the text it shows, so a switch at it is stale once the correction
+/// is applied, and the next read gives the corrected text at a version of its own.
+#[test]
+fn a_correction_applied_while_my_rules_is_read_reaches_neither_its_text_nor_its_version() {
+    let (h, now, _place, _repo, off) = ruled();
+    let (home, uid) = (h.home.path().to_owned(), off.clone());
+    crate::my_work_rules::READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let body = Some("Answer in Japanese, briefly.");
+            crate::claims::correct_recorded(&home, &uid, None, body).unwrap();
+        }))
+    });
+    let shown = answer(h.home.path(), now).unwrap();
+    assert!(
+        crate::my_work_rules::READ.with(|hook| hook.borrow().is_none()),
+        "the hook ran"
+    );
+    let rule = rule_of(&shown, "Answer in Japanese.");
+    let id = rule["ruleId"].as_str().unwrap().to_owned();
+    let version = rule["ruleVersion"].as_str().unwrap().to_owned();
+    let again = answer(h.home.path(), now).unwrap();
+    let corrected = rule_of(&again, "Answer in Japanese, briefly.");
+    assert_eq!(corrected["ruleId"], json!(id));
+    assert_ne!(
+        corrected["ruleVersion"],
+        json!(version),
+        "the text shown went with the version from before the correction"
+    );
+    assert_eq!(switched(&h, &id, &version, false), Switched::Stale);
+}
+
+/// Two rows of one reference, which only two keys of one keyed hash would make: the switch tells
+/// neither.
+#[test]
+fn two_rows_of_one_reference_are_neither() {
+    let row = |uid: &str| Row {
+        reference: "u:same".into(),
+        uid: Some(uid.into()),
+        on: Some(true),
+        version: "v".into(),
+        of: Value::Null,
+    };
+    assert_eq!(
+        the_one(vec![row("a"), row("b")], "u:same").err(),
+        Some(Switched::Ambiguous)
+    );
+    assert_eq!(
+        the_one(vec![row("a")], "u:other").err(),
+        Some(Switched::NotFound)
+    );
+    assert_eq!(
+        the_one(vec![row("a")], "u:same").map(|r| r.uid),
+        Ok(Some("a".into()))
+    );
 }

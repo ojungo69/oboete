@@ -291,8 +291,20 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   name and its quotes; two scopes whose names the gate leaves alike read apart on the page by as
   much of their ids as tells them apart. My Rules is read under the rules My Work is read under,
   in the same readers' hold. The rejected suggestions, and the approved ones whose rule was
-  retracted or forgotten since, wait for the writes that bring their Undo. The pages show the
-  rules with no control that writes one (below); a quote's source record is named as a prompt a review quoted, dated by
+  retracted or forgotten since, wait for the writes that bring their Undo. A rule's switch turns
+  it on or off from the pages (#1083's R2a, `POST /api/work-view/rules`, `{action, ruleId,
+  ruleVersion}`, `turn-on` or `turn-off`): each rule carries a version (`ruleVersion`), the keyed
+  hash of what its row was read from (its claim's derivation, the correction the `active` view takes
+  for each of its status, body and mute, an approved rule's decision, the raw.db file), and a switch
+  whose rule is not at the version it posts is refused (409 `stale`) and records nothing, so that an
+  Undo after another change of the rule undoes none. The switch takes the locks W4's Mark finished
+  takes (config.lock with the token asked again, raw.db and the readers' hold), reads My Rules on the
+  handles it appends on, and appends its correction against a fence of what it read of the rule (an
+  op naming its claim, an exclusion, a tombstone, a forget, another raw.db file; curation's other ops
+  leave it be). Applied and kept, its answer names the version it left the rule at
+  (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
+  also decides the rule, and the pages then offer no Undo; not applied yet, it is saved, and its
+  receipt says so, with no Undo. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by
   that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
   such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each
@@ -305,10 +317,11 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   content, are shown with their clock-made labels moved and are no newer work, so a save in flight
   keeps its answer when a rule's age passes a whole day or the date passes midnight, and a read in
   flight keeps its answer when the minute maps the work on screen again. A read still gives way to
-  any snapshot taken while it waited, as claude-mem orders reads, and a save's answer is shown over
+  any snapshot accepted while it waited, as claude-mem orders reads (handing back the mapping on screen when that snapshot's content is the one on screen, #1127), and a save's answer is shown over
   a poll of the content on screen that came after an Undo in another tab: neither knows which saw
-  the newer state, which a version taken with the state is to decide (#1126). A request with a judge's open grouping suggestion carries
-  it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
+  the newer state, which a version taken with the state is to decide (#1126).
+  A request with a judge's open grouping suggestion carries it, with its binding, and its Join and
+  Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after
   they finished (decision 118; older ones stay on oboete's own page), each with its conversation's
@@ -340,11 +353,11 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
 - What the pages have and oboete lacks is hidden until it is built: rows X36 to X38 of
   [claude-mem-parity.md](claude-mem-parity.md). Continuing a conversation will work from the new
   pages directly too. Focus sharing and Team stay unbuilt (row 22). A control whose write oboete
-  does not take yet is hidden until the pull request that takes it: every write of My Rules
-  (approving or rejecting a suggestion, by its buttons or a phone's swipe, editing a rule,
-  turning one on or off, Undo and adding one: #1083), and changing an area or a suggested one
-  (#1085, #1102). Refresh now, a request's check and its Undo, and
-  the Join and Not this of a grouping suggestion work there (decision 117). A write the viewer saved is told as saved there, its answer a snapshot or
+  does not take yet is hidden until the pull request that takes it: My Rules' writes but a rule's
+  switch (approving or rejecting a suggestion, by its buttons or a phone's swipe, editing a rule and
+  adding one: #1083), and changing an area or a suggested one (#1085, #1102). Refresh now, a
+  request's check and its Undo, the Join and Not this of a grouping suggestion (decision 117), and a
+  rule's switch with its receipt's Undo (decision 114, #1083's R2a) work there. A write the viewer saved is told as saved there, its answer a snapshot or
   claude-mem's receipt alone, and a poll of the content already on screen that lands while it waits
   does not stand for it (#1108). claude-mem's installer is none
   of the pages and is left out of the bundle: oboete's setup is `oboete setup` and its settings page.

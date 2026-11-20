@@ -3918,3 +3918,100 @@ fn an_answer_is_refused_after_retention_expires_a_row() {
     assert_eq!(raw.expire_owed(4_000).unwrap(), 0);
     assert_eq!(raw.expired_rows().unwrap(), 2);
 }
+
+/// #1083 (R2a): a rule's write is appended only while nothing it reads of its claim moved since its
+/// check (`rule_fence`): curation's ops in between, a correction of another claim among them,
+/// leave it be; an op naming its claim (a correction of it, a claim superseding it), an exclusion,
+/// a tombstone, a forget's denial, a row retention expired and another raw.db file refuse it, and
+/// nothing is written.
+#[test]
+fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let uid = "a".repeat(64);
+    let other = "b".repeat(64);
+    let write = || {
+        [(
+            OpKind::Correction,
+            serde_json::json!({"uid": "a".repeat(64), "muted": true}),
+        )]
+    };
+    let written = |raw: &Raw| raw.max_op_seq_of(raw.device()).unwrap();
+    raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "deploy notes"}))])
+        .unwrap();
+    let fence = raw.rule_fence().unwrap();
+    assert!(fence.file.is_some(), "a raw.db opened as one file");
+    raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "more notes"}))])
+        .unwrap();
+    raw.append_ops(&[(
+        OpKind::Correction,
+        serde_json::json!({"uid": other, "muted": true}),
+    )])
+    .unwrap();
+    assert_eq!(
+        raw.append_ops_ruled(&write(), &fence, &uid).unwrap(),
+        vec![4]
+    );
+    let device = raw.device().to_owned();
+    type Move = Box<dyn Fn(&mut Raw)>;
+    let moves: Vec<Move> = vec![
+        Box::new(|raw| {
+            let op = serde_json::json!({"uid": "a".repeat(64), "status": "retracted"});
+            raw.append_ops(&[(OpKind::Correction, op)]).unwrap();
+        }),
+        Box::new(|raw| {
+            let op = serde_json::json!({"supersedes": ["a".repeat(64)]});
+            raw.append_ops(&[(OpKind::Claim, op)]).unwrap();
+        }),
+        Box::new(|raw| {
+            raw.exclude_capture(("repo", "github.com/x/other"), false)
+                .unwrap();
+        }),
+        Box::new(move |raw| {
+            let seq = raw.record_top().unwrap() + 1;
+            raw.conn
+                .execute(
+                    "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq)
+                     VALUES(?1, ?2, 'tombstone', 0, 'forget', ?1, 1)",
+                    params![device, seq],
+                )
+                .unwrap();
+        }),
+        Box::new(|raw| {
+            let device = raw.device().to_owned();
+            raw.conn
+                .execute(
+                    "INSERT INTO denied_records(origin, device, seq, ts, session, job)
+                     VALUES ('o', ?1, 1, 0, 's', 'j')",
+                    [&device],
+                )
+                .unwrap();
+        }),
+    ];
+    for (n, moved) in moves.iter().enumerate() {
+        let fence = raw.rule_fence().unwrap();
+        moved(&mut raw);
+        let before = written(&raw);
+        let refused = raw.append_ops_ruled(&write(), &fence, &uid).unwrap_err();
+        assert!(refused.is::<OpsMoved>(), "move {n}: {refused:#}");
+        assert_eq!(written(&raw), before, "move {n}: nothing written");
+    }
+    let fence = raw.rule_fence().unwrap();
+    for file in [Some("0:0".to_owned()), None] {
+        let moved = RuleFence {
+            file,
+            ..fence.clone()
+        };
+        let before = written(&raw);
+        let refused = raw.append_ops_ruled(&write(), &moved, &uid).unwrap_err();
+        assert!(refused.is::<OpsMoved>(), "{refused:#}");
+        assert_eq!(written(&raw), before, "nothing written");
+    }
+    let expired = RuleFence {
+        expired: fence.expired - 1,
+        ..fence.clone()
+    };
+    let refused = raw.append_ops_ruled(&write(), &expired, &uid).unwrap_err();
+    assert!(refused.is::<OpsMoved>(), "{refused:#}");
+    assert!(raw.append_ops_ruled(&write(), &fence, &uid).is_ok());
+}

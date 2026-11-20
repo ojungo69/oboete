@@ -1,15 +1,17 @@
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
-index 2455739..bbbc41a 100644
+index 2455739..557ab73 100644
 --- a/src/ui/my-work/src/live/local-source.ts
 +++ b/src/ui/my-work/src/live/local-source.ts
-@@ -128,7 +128,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -128,7 +128,25 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    // would set its own answer aside.
    let handedOut = 0
    let displayed: WorkModel | null = null
 -  const shown = (model: WorkModel) => { lastDeliveredSignature = modelSignature(model); handedOut++; displayed = model }
 +  // Modified by oboete (ui/work-view/patches/0009-mappings-of-the-work-on-screen.patch, #1124): a model mapped from a
 +  // snapshot whose content is the one on screen (the minute timer's mapping of it, or a poll of it in a new envelope) is
-+  // shown, its clock-made labels moved, as no newer work: a save or a read in flight keeps its answer. `shown` says
++  // shown, its clock-made labels moved, as no newer work: a save in flight keeps its answer, and a read in flight keeps
++  // it when the minute timer maps the work on screen again (a snapshot accepted while it waits still sets it aside, as
++  // claude-mem orders reads: #1126). `shown` says
 +  // whether a model was newer, which the store counts by (`modelShown`): the stream's model, which the store is handed
 +  // next, is told the same both times.
 +  const snapshotKeys = new WeakMap<object, string>()
@@ -27,7 +29,7 @@ index 2455739..bbbc41a 100644
    const orOnScreen = (model: WorkModel): WorkModel =>
      displayed && modelSignature(model) === modelSignature(displayed) ? displayed : model
    // Accepted models are immutable. Connection-only wrappers share their content signature,
-@@ -153,9 +169,30 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -153,9 +171,30 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    const withConnection = (mapped: MappedWorkModel): WorkModel => {
      const model: WorkModel = { ...mapped, sourceKind: SOURCE_KIND, connection: currentConnectionStatus() }
      modelSignatures.set(model, modelSignature(mapped))
@@ -58,7 +60,7 @@ index 2455739..bbbc41a 100644
    /** app.js `health`: only a payload whose source read succeeded counts as a successful check. */
    function recordSourceHealth(source: WorkViewSource | undefined, serverAt?: string) {
      connectionEvidence.sourceConnected = typeof source?.connected === 'boolean' ? source.connected : null
-@@ -185,6 +222,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -185,6 +224,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
      latestSnapshot = snapshot
      latestOverviewSignature = null
      latestModel = toWorkModel(snapshot, Date.now())
@@ -67,7 +69,20 @@ index 2455739..bbbc41a 100644
      if (fromEvent || connectionEvidence.lastEventAt === null) recordSourceHealth(snapshot.source, snapshot.generatedAt)
      recordSync(snapshot.sync, expectedSyncVersion)
      return withConnection(latestModel)
-@@ -682,7 +721,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -255,7 +296,11 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+     if (!answer.response.ok) throw new Error(`The worker answered ${answer.response.status} ${answer.response.statusText}`.trim())
+     // A newer accepted event, read or save wins over this response; oboete's read again after a receipt
+     // (`kept`, 0006) gives way only to a model that went to the screens meanwhile.
+-    if ((kept ? kept() : modelVersion !== versionBeforeRead) && latestModel) return withConnection(latestModel)
++    // oboete (0009, #1127): set aside for a snapshot of the content on screen, the read hands back the mapping on screen,
++    // whose clock-made labels the minute timer may have moved past `latestModel`'s.
++    if ((kept ? kept() : modelVersion !== versionBeforeRead) && latestModel) {
++      return displayed && displayedKey !== undefined && displayedKey === latestSnapshotKey ? displayed : withConnection(latestModel)
++    }
+     if (isOverview(answer.body)) return acceptOverview(answer.body, false, syncBeforeRead)
+     if (isWorkViewSnapshot(answer.body)) return acceptSnapshot(answer.body, false, syncBeforeRead)
+     throw new Error('The worker returned an unreadable work view.')
+@@ -682,7 +727,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        // an HTTP fallback is only needed while the feed is unhealthy, at most once per cache window.
        const agingTimer = setInterval(() => {
          if (pageHidden()) return
@@ -82,7 +97,7 @@ index 2455739..bbbc41a 100644
            void readOverview().then((model) => { if (generation === streamGeneration) sendIfChanged(model) }).catch(() => { /* Keep the last model; event freshness remains independent. */ })
          }
 diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
-index ace3b7d..a83c9f8 100644
+index ace3b7d..3e36d8a 100644
 --- a/src/ui/my-work/src/live/oboete-saves.test.ts
 +++ b/src/ui/my-work/src/live/oboete-saves.test.ts
 @@ -553,8 +553,10 @@ describe('oboete: a receipt alone, with the minute timer', () => {
@@ -106,7 +121,7 @@ index ace3b7d..a83c9f8 100644
        } finally { stop() }
      })
    }
-@@ -628,3 +630,224 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
+@@ -628,3 +630,266 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
      } finally { stop() }
    })
  })
@@ -133,7 +148,7 @@ index ace3b7d..a83c9f8 100644
 +  }
 +  /**
 +   * `value` with a goals list and a past month of them as oboete writes them, each stamped with the time of the read, and
-+   * the snapshot with that time as oboete stamps it (`revision`).
++   * the snapshot with that time as oboete stamps it (`revision`, and its unconfigured `sync` block's `observedAt`).
 +   */
 +  const goaled = (value: WorkViewSnapshot, readAt: number, prompts: { current?: number; month?: number } = {}): WorkViewSnapshot => {
 +    const list = (id: string, history: boolean) => ({
@@ -143,8 +158,13 @@ index ace3b7d..a83c9f8 100644
 +      windowDays: history ? null : 7, sourcePromptCount: (history ? prompts.month : prompts.current) ?? 3, mapPath: null,
 +      areas: [], asks: [],
 +    })
++    const sync = {
++      configured: false, state: 'unconfigured', mode: 'disabled', checkedAt: null, observedAt: readAt,
++      message: 'oboete keeps your work on this computer only.', download: null, projection: { remaining: null },
++      completeness: { pushQuarantine: 0, pullQuarantine: 0, excludedNative: null, scope: 'unknown' },
++    }
 +    return {
-+      ...value, revision: String(readAt), goals: list('goals', false), goalHistory: [list('goals:2026-10', true)],
++      ...value, revision: String(readAt), goals: list('goals', false), goalHistory: [list('goals:2026-10', true)], sync,
 +    } as unknown as WorkViewSnapshot
 +  }
 +  /** Whether `store` shows both periods of the goals mapped. */
@@ -249,17 +269,54 @@ index ace3b7d..a83c9f8 100644
 +      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
 +    })
 +    const { store, stop, shown } = storeOn(local)
++    const rule = () => { const load = store.getState().work.load; return load.state === 'loaded' ? load.model.rules[0] : null }
 +    try {
 +      streams[0].emit('work-view', ruledAt(snapshot(FIRST), NOW))
 +      await settled()
 +      const reading = store.getState().retryWorkRead()
 +      await settled()
++      const before = rule()!
 +      t.mock.timers.tick(60_000)
 +      await settled()
++      assert.equal(Math.floor(rule()!.latestDaysAgo), Math.floor(before.latestDaysAgo) + 1, 'the timer showed the rule a day older')
 +      read.resolve(json(ruledAt(snapshot(THIRD), NOW)))
 +      await reading
 +      await settled()
 +      assert.equal(shown(), THIRD)
++    } finally { stop(); restore() }
++  })
++
++  it("on the screen: a read set aside for a poll of the content on screen keeps the minute timer's labels", async (t: TestContext) => {
++    const restore = clock(t, NOW)
++    const read = deferred<Response>()
++    const streams: FakeStream[] = []
++    const local = createLocalSource({
++      hostname: 'localhost',
++      bootstrapTimeoutMs: 10,
++      requestTimeoutMs: 10 * 60_000,
++      fetchImpl: async () => read.promise,
++      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
++    })
++    const { store, stop, shown } = storeOn(local)
++    const rule = () => { const load = store.getState().work.load; return load.state === 'loaded' ? load.model.rules[0] : null }
++    try {
++      streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW))
++      await settled()
++      const reading = store.getState().retryWorkRead()
++      await settled()
++      // The work on screen polled while the read waits, in a new envelope: the read gives way to it.
++      streams[0].emit('work-view', { ...goaled(ruledAt(snapshot(FIRST), NOW), NOW + 5_000), generatedAt: new Date(NOW + 5_000).toISOString() })
++      await settled()
++      const before = rule()!
++      t.mock.timers.tick(60_000)
++      await settled()
++      const aged = rule()!
++      assert.equal(Math.floor(aged.latestDaysAgo), Math.floor(before.latestDaysAgo) + 1, 'the timer showed the rule a day older')
++      read.resolve(json(goaled(ruledAt(snapshot(THIRD), NOW), NOW + 2_000)))
++      await reading
++      await settled()
++      assert.equal(shown(), FIRST, 'the read gave way to the poll')
++      assert.equal(Math.floor(rule()!.latestDaysAgo), Math.floor(aged.latestDaysAgo), "the timer's labels stay")
 +    } finally { stop(); restore() }
 +  })
 +
