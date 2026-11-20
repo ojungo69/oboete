@@ -5492,6 +5492,29 @@ assert(card('e1').className.includes('my-work-updated')&&text(card('e1')).includ
     assert(run('mw.pending')||!line(card('s2')),'the poll\'s rows, not the refused read\'s');
     joined=null;run('mw.pending=null');
   }
+  // W3b-2b (CodeRabbit on #1115): a Join from the request's page, answered applied, whose read
+  // after it a newer poll took, held behind "Show updates" while the page is open: where the Join
+  // put the conversation is not in the rows drawn, so it is said as saved and names no request.
+  {
+    set(rows());refuse=null;
+    card('s2').querySelector('button').click();
+    const kept=ctx.fetch;
+    let release=null;
+    ctx.fetch=(url,options)=>{
+      if(options?.method==='POST'||release)return kept(url,options);
+      return new Promise(r=>{release=()=>r(response({requests:rows(),unlinked:0}));});
+    };
+    answerOf(panel,'join').click();await ticks();
+    assert(release,'the read after the Join is on its way');
+    joined=both('p1','Parser');
+    await run('myWorkLive()');
+    assert(run('mw.pending'),'the poll\'s rows are held');
+    release();await ticks();
+    ctx.fetch=kept;
+    assert.deepEqual([document.getElementById('status').textContent,run('mw.request')],['Saved. The page shows it at its next read.','s2']);
+    joined=null;run('mw.pending=null');
+    panel.querySelectorAll('button').find(n=>text(n)==='← Back to My Work').click();
+  }
   // W3b-2 (CodeRabbit on #1115): a card whose suggestion has no binding, as a page from before it
   // posts, posts none; the answer is 400, which asks for a reload.
   {

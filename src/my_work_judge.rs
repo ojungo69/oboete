@@ -477,9 +477,8 @@ struct Answer {
     target: Option<String>,
 }
 
-/// What an answer appends and what its append is fenced against: this device's newest op of a
-/// kind an answer reads, the forget fence and the raw.db file (`Raw::append_ops_at`).
-type Decided = (Vec<(String, Value)>, (i64, i64, Option<String>));
+/// What an answer appends and what its append is fenced against (`Raw::append_ops_at`).
+type Decided = (Vec<(String, Value)>, crate::raw::AnswerFence);
 
 /// J4: the owner's Join or Not this on the request of a conversation the judge suggested, `POST
 /// /api/my-work/suggestion`, refused before it writes; an op of the job that reads nothing, as an
@@ -533,13 +532,13 @@ pub(crate) fn act(
     #[cfg(test)]
     hook(&CAUGHT_UP);
     let config = crate::settings::config_lock(home).map_err(|_| unavailable())?;
-    let (ops, (top, fence, file)) = check(home, &posted, join)?;
+    let (ops, fence) = check(home, &posted, join)?;
     #[cfg(test)]
     hook(&CHECKED);
     if !authorized() {
         return Err(refused(401, "token", ""));
     }
-    let appended = crate::my_work_ops::append_at(home, NAME, ops, (top, fence, file.as_deref()));
+    let appended = crate::my_work_ops::append_at(home, NAME, ops, &fence);
     drop(config);
     let (k, device, seqs) = appended.map_err(|e| {
         if e.is::<crate::raw::OpsMoved>() {
@@ -570,8 +569,12 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
     let Some((raw, k)) = crate::search::b::stores(home).map_err(|_| unavailable())? else {
         return Err(not_found());
     };
-    // What the append is fenced against, read on this raw.db, its consumers past what it owes.
+    // What the append is fenced against, read on this raw.db, its consumers past what it owes:
+    // this device's newest op an answer reads, and (W3b-2b) its newest record and the rows
+    // retention expired, before any read the answer is checked against.
     let top = raw.answer_top().map_err(|_| unavailable())?;
+    let records = raw.record_top().map_err(|_| unavailable())?;
+    let expired = raw.expired_rows().map_err(|_| unavailable())?;
     if !reached(&raw, &k).map_err(|_| unavailable())? {
         return Err(pending());
     }
@@ -615,7 +618,7 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
         (None, false) => posted.target.clone().ok_or_else(changed)?,
         (None, true) => return Err(gone()),
     };
-    let now = crate::my_work::binding((&held, &named), &placement, home, &mut mask)
+    let now = crate::my_work::binding((&held, picked, &named), &placement, home, &mut mask)
         .map_err(|_| unavailable())?;
     if posted.binding.as_deref() != Some(now.as_str()) {
         return Err(changed());
@@ -648,7 +651,13 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
         json!([{"conversations": members, "title": null, "links": []}])
     };
     let fields = json!({"conversation": key(c), "action": posted.action, "groups": decision});
-    let fence = (top, reading.fence, raw.file_identity().map(str::to_owned));
+    let fence = crate::raw::AnswerFence {
+        top,
+        forget: reading.fence,
+        file: raw.file_identity().map(str::to_owned),
+        records,
+        expired,
+    };
     Ok((vec![(group.repo.clone(), fields)], fence))
 }
 

@@ -2098,3 +2098,178 @@ fn a_wait_after_the_shared_deadline_starts_no_pass() {
     assert!(wait.unwrap_err().is::<crate::claims::NotYet>());
     assert!(at(&k) < op, "no pass ran");
 }
+
+/// The call of `session` that sent the work state write `naming` made, recorded through a raw.db
+/// handle of its own 20 ms after it, as an agent's hook records it while an answer runs.
+fn record_call(
+    home: &std::path::Path,
+    session: &str,
+    (ts, fields): (i64, serde_json::Map<String, Value>),
+) {
+    let input = json!({"list": "notes", "fields": fields}).to_string();
+    let body = json!({"tool": "mcp__oboete__work_state_write", "input": input,
+        "output": "Saved.", "failed": false});
+    let e = crate::raw::Event {
+        kind: "tool".into(),
+        session: session.into(),
+        repo: Some(R.into()),
+        branch: Some("main".into()),
+        ts: ts + 20,
+        ..crate::raw::test_event(&body.to_string())
+    };
+    crate::raw::open(home).unwrap().append(&e).unwrap();
+}
+
+/// The owner's answer the judge's ops end with: its conversation and the groups it placed.
+fn answered(h: &Home) -> (Value, Value) {
+    let op = h.judged().pop().unwrap();
+    assert!(op.fields.contains_key("action"), "the owner's answer");
+    (
+        op.fields["conversation"].clone(),
+        op.fields["groups"][0]["conversations"].clone(),
+    )
+}
+
+/// W3b-2b (#1114: a hook record): a work state write that names a request for the pick, its op
+/// appended before the answer and its call recorded after the check, as agents record calls all
+/// day: the call takes the pick into that request (My Work read after it), and the answer is
+/// refused, nothing recorded.
+#[test]
+fn a_work_state_call_recorded_after_the_check_refuses_the_answer() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let write = h.naming("A");
+    let card = h.card("s2");
+    assert!(
+        h.request_of("s2").get("suggestion").is_some(),
+        "its call not recorded yet"
+    );
+    let home = h.s.home.path().to_owned();
+    CHECKED
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || record_call(&home, "s1", write))));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before);
+    assert!(
+        h.request_of("s2").get("suggestion").is_none(),
+        "the call took the pick"
+    );
+}
+
+/// W3b-2b (#1114, R4: retention's expiry): the record the pick's request is made from expired
+/// after the check (the batch staged before the answer, its rows expired in `CHECKED`): the
+/// answer is refused, nothing recorded.
+#[test]
+fn an_expiry_after_the_check_refuses_the_answer() {
+    let mut h = Home::new();
+    let (_served, ask) = suggested(&mut h);
+    let card = h.card("s2");
+    let session = (Some("claude".to_owned()), Some("s1".to_owned()), ask);
+    assert!(h.s.raw.begin_expiry(&[(ask, h.t)], &[session]).unwrap());
+    let home = h.s.home.path().to_owned();
+    let expire = move || {
+        let mut raw = crate::raw::open(&home).unwrap();
+        assert_eq!(raw.expire_owed(crate::db::now_ms()).unwrap(), 1);
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(expire)));
+    let before = h.recorded();
+    assert_eq!(h.answer(&card, "join"), Err((409, "my_work_pending")));
+    assert_eq!(h.recorded(), before);
+    assert_eq!(h.s.raw.expired_rows().unwrap(), 1);
+}
+
+/// W3b-2b (#1114): a plain prompt of the pick's conversation, and curation's claim on it, made
+/// after the check leave the answer be, and it records what it was checked on.
+#[test]
+fn a_prompt_and_curation_after_the_check_leave_the_answer_as_checked() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let t = h.t;
+    let prompt = move || {
+        let e = crate::raw::Event {
+            session: "s1".into(),
+            repo: Some(R.into()),
+            ts: t + 20 * MINUTE,
+            ..crate::raw::test_event(&json!({"prompt": "And the trailing comma."}).to_string())
+        };
+        crate::raw::open(&home).unwrap().append(&e).unwrap();
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(prompt)));
+    assert_eq!(h.answer(&card, "join").unwrap()["state"], "applied");
+    let (conversation, placed) = answered(&h);
+    assert_eq!(conversation, json!(["claude", "s2"]));
+    assert_eq!(placed, json!([["claude", "s1"], ["claude", "s2"]]));
+}
+
+/// A judge's op, as the judge appends one: `conversation`'s suggestion to join the request
+/// `picked` is in.
+fn judged_again(h: &mut Home, conversation: &str, picked: &str) {
+    let fields = json!({"conversation": ["claude", conversation],
+        "suggestion": {"request": ["claude", picked], "confidence": 0.9}});
+    let op = MyWorkOp {
+        job: NAME.into(),
+        about: R.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: serde_json::from_value(fields).unwrap(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
+/// W3b-2b (Codex on #1115): the binding names the judge's pick. A card for s2's suggestion to
+/// Parser; the judge's later suggestion for s2 picks Reader's conversation, which then leaves every
+/// group: the old card's Not this is refused, nothing recorded, and the newer suggestion stays
+/// open.
+#[test]
+fn an_old_cards_not_this_leaves_a_newer_suggestion_open() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    h.said("s3", 6, "Ship the reader.");
+    h.grouped(&["s3"], "Reader");
+    judged_again(&mut h, "s2", "s3");
+    assert_eq!(h.request_of("s2")["suggestion"]["title"], "Reader");
+    h.ignored("s3");
+    let before = h.recorded();
+    assert_eq!(
+        h.answer(&card, "not-this"),
+        Err((409, "suggestion_changed"))
+    );
+    assert_eq!(h.recorded(), before);
+    assert_eq!(
+        h.groups().suggested.get(&key("s2")),
+        Some(&key("s3")),
+        "still open"
+    );
+}
+
+/// W3b-2b (Codex on #1115): a later suggestion with another pick in the same request is another
+/// suggestion: an older card's answer is refused, nothing recorded; read again, it lands.
+#[test]
+fn a_later_pick_in_the_same_request_refuses_an_older_card() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s4", 6, "The parser's errors.");
+    h.grouped(&["s1", "s4"], "Parser");
+    let card = h.card("s2");
+    judged_again(&mut h, "s2", "s4");
+    assert_eq!(h.request_of("s2")["suggestion"]["title"], "Parser");
+    let before = h.recorded();
+    for action in ["join", "not-this"] {
+        assert_eq!(
+            h.answer(&card, action),
+            Err((409, "suggestion_changed")),
+            "{action}"
+        );
+    }
+    assert_eq!(h.recorded(), before);
+    assert_eq!(h.answer_on("s2", "join").unwrap()["state"], "applied");
+    assert_eq!(h.request_of("s2")["id"], h.request_of("s4")["id"]);
+}

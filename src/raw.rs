@@ -1667,6 +1667,15 @@ pub(crate) fn max_seq_in(conn: &Connection, device: &str) -> Result<i64> {
 /// does not refuse the answers (on this PC's store, 2026-11-20: 174 of a day's 3,951 appends hold
 /// an op of the kinds it reads; a check of 2 s meets one 0.39% of the time, and any op 9.1%). Read
 /// newest first, through the key, to the first (0.02 ms there).
+/// `Raw::expired_rows` on `conn`.
+fn expired_rows_in(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'expired_rows'), 0)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 pub(crate) fn answer_top_in(conn: &Connection, device: &str) -> Result<i64> {
     use rusqlite::OptionalExtension;
     Ok(conn
@@ -1972,6 +1981,37 @@ impl std::error::Error for HistoryCovered {}
 /// nothing was written.
 #[derive(Debug)]
 pub struct OpsMoved;
+
+/// What J4's check read on its raw.db handle, which its append compares inside its write
+/// (`Raw::append_ops_at`): this device's newest op of a kind an answer reads (`answer_top`), the
+/// forget fence (`fence_count`), the raw.db file (`file_identity`), and (W3b-2b) this device's
+/// newest record (`record_top`) and the rows retention has made expired (`expired_rows`).
+#[derive(Clone, Debug)]
+pub struct AnswerFence {
+    pub top: i64,
+    pub forget: i64,
+    pub file: Option<String>,
+    pub records: i64,
+    pub expired: i64,
+}
+
+/// How many tool records recorded after J4's check its append decodes, under the writer's lock,
+/// to find a work state write's call among them; more than that refuses the answer undecoded.
+const CALLS_READ: i64 = 64;
+
+/// A live record of a call of oboete's `work_state_write`, under the name any agent gives it: the
+/// call `my_work::call` attributes a work state write by.
+pub(crate) fn is_work_state_call(e: &Event) -> bool {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&e.body) else {
+        return false;
+    };
+    is_live(&e.source)
+        && (body["tool"].as_str())
+            .and_then(crate::curate::served)
+            .is_some_and(|(server, name)| {
+                crate::curate::oboete(server) && name == "work_state_write"
+            })
+}
 
 impl std::fmt::Display for OpsMoved {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -5947,9 +5987,19 @@ impl Raw {
                      WHERE device = ?1 AND seq = ?2 AND ts = ?3 AND type = 'event'
                        AND expired IS NULL"
                 ))?;
+                let mut rows = 0;
                 for (device, seq, ts) in batch {
-                    expired += st.execute(params![device, seq, ts, at])?;
+                    rows += st.execute(params![device, seq, ts, at])?;
                 }
+                // W3b-2b: what J4's append compares, moved with the rows themselves.
+                if rows > 0 {
+                    tx.execute(
+                        "INSERT INTO meta(key, value) VALUES('expired_rows', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?1",
+                        [rows as i64],
+                    )?;
+                }
+                expired += rows;
             }
             tx.commit()?;
         }
@@ -6844,26 +6894,48 @@ impl Raw {
         answer_top_in(&self.conn, &self.device)
     }
 
-    /// `append_ops` for an owner's answer checked against the stores as they stood at this device's
-    /// op `top` of a kind it reads (`answer_top`) and the forget fence `fence` (`fence_count`, J4),
-    /// in the raw.db `file` (`file_identity`, W3b-2: none or another is a raw.db put in place since):
-    /// only while this device has appended no such op since and forget denies what it denied
-    /// then, compared inside the write; else nothing is written and the error is `OpsMoved`. A
-    /// judge's or grouping's op, a work state write, an exclusion and a forget are all such ops or
-    /// denials here; curation's claims, windows, turns, digests and corrections are not.
+    /// This device's newest record (W3b-2b: what J4's check read, past which its append looks for a
+    /// work state write's call).
+    pub fn record_top(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
+            [&self.device],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The rows retention has made expired on this raw.db (`expire_owed`; W3b-2b): none counted
+    /// before the count was kept.
+    pub fn expired_rows(&self) -> Result<i64> {
+        expired_rows_in(&self.conn)
+    }
+
+    /// `append_ops` for an owner's answer checked against the stores as `fence` says they stood
+    /// (J4): only while this device has appended no op of a kind an answer reads since its `top`,
+    /// forget denies what it denied then, the raw.db is the `file` it read (W3b-2: none or another is
+    /// a raw.db put in place since), and (W3b-2b) retention has expired no row since and this
+    /// device has recorded no call of oboete's `work_state_write` past its `records` (at most
+    /// `CALLS_READ` tool records decoded; more refuse it undecoded), compared inside the write; else
+    /// nothing is written and the error is `OpsMoved`. A judge's or grouping's op, a work state
+    /// write, an exclusion and a forget are all such ops or denials here; curation's claims,
+    /// windows, turns, digests and corrections are not, nor any record but a work state's call.
     pub fn append_ops_at(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
-        (top, fence, file): (i64, i64, Option<&str>),
+        fence: &AnswerFence,
     ) -> Result<Vec<i64>> {
-        if file.is_none() || self.file_identity() != file {
+        if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
             return Err(OpsMoved.into());
         }
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
         let now: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
-        if now != fence || answer_top_in(&tx, &self.device)? != top {
+        if now != fence.forget
+            || answer_top_in(&tx, &self.device)? != fence.top
+            || expired_rows_in(&tx)? != fence.expired
+            || self.work_state_called_after(&tx, fence.records)?
+        {
             return Err(OpsMoved.into());
         }
         for (kind, body) in ops {
@@ -6878,6 +6950,32 @@ impl Raw {
         }
         tx.commit()?;
         Ok(seqs)
+    }
+
+    /// Whether this device recorded a call of oboete's `work_state_write` past record `after`, read
+    /// inside `tx`: its tool records past it, at most `CALLS_READ` of them decoded, more counted as
+    /// one undecoded (W3b-2b).
+    fn work_state_called_after(&self, tx: &Connection, after: i64) -> Result<bool> {
+        let mut st = tx.prepare(
+            "SELECT seq FROM records
+             WHERE device = ?1 AND seq > ?2 AND type = 'event' AND kind = 'tool'
+             ORDER BY seq LIMIT ?3",
+        )?;
+        let seqs: Vec<i64> = st
+            .query_map(params![self.device, after, CALLS_READ + 1], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if seqs.len() as i64 > CALLS_READ {
+            return Ok(true);
+        }
+        for seq in seqs {
+            let record = self.after(&self.device, seq - 1, 1)?.pop();
+            if let Some(Item::Event(e)) = record.filter(|r| r.seq == seq).map(|r| r.item)
+                && is_work_state_call(&e)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// When `device`'s op `op_seq` was appended and the provider its body names, for a reader that

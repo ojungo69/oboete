@@ -501,16 +501,12 @@ fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
     else {
         return Ok(None);
     };
+    if !crate::raw::is_work_state_call(&e) {
+        return Ok(None);
+    }
     let Ok(body) = serde_json::from_str::<Value>(&e.body) else {
         return Ok(None);
     };
-    let ours = body["tool"]
-        .as_str()
-        .and_then(crate::curate::served)
-        .is_some_and(|(server, name)| crate::curate::oboete(server) && name == "work_state_write");
-    if !crate::raw::is_live(&e.source) || !ours {
-        return Ok(None);
-    }
     let sent: Option<Value> = match &body["input"] {
         Value::String(s) => serde_json::from_str(s).ok(),
         v => Some(v.clone()),
@@ -715,6 +711,8 @@ struct Request {
     /// group's members as the fold has them; none when the answer would place others than it
     /// shows (W3b-1).
     placement: Vec<Key>,
+    /// J4: the conversation that suggestion picked (W3b-2b: its binding names it).
+    picked: Option<Key>,
 }
 
 impl Request {
@@ -729,6 +727,7 @@ impl Request {
             work: Vec::new(),
             suggested: None,
             placement: Vec::new(),
+            picked: None,
         }
     }
 
@@ -1109,7 +1108,10 @@ fn read_held_on(
         // The request it names by the id the page has it (C6), which a Not this whose pick is in
         // no group when it is answered posts back (W3b-2).
         let target = t["id"].as_str().unwrap_or_default();
-        let binding = binding((h.id(), target), h.placement(), home, &mut key)?;
+        let Some(picked) = &h.picked else {
+            continue;
+        };
+        let binding = binding((h.id(), picked, target), h.placement(), home, &mut key)?;
         let suggestion = json!({"id": t["id"], "fingerprint": t["fingerprint"], "title": t["title"],
             "conversation": h.about, "binding": binding});
         answers[i]["suggestion"] = suggestion;
@@ -1531,6 +1533,7 @@ fn build(
                 .filter(|target| owner.get(picked) == Some(&Id::Group((*target).clone())))
                 .map(|target| Id::Group(target.clone()).held());
             r.placement = members.to_vec();
+            r.picked = Some(picked.clone());
         }
     }
     Ok(Built {
@@ -1666,6 +1669,8 @@ pub(crate) struct Held {
     suggested: Option<String>,
     /// The conversations that suggestion's answer places (J4, W3b-1).
     placement: Vec<Key>,
+    /// The conversation that suggestion picked (W3b-2b).
+    picked: Option<Key>,
     /// The conversation that suggestion is about, as `sessions` shows it (its id and fingerprint),
     /// which a Join follows to where it went (#777).
     about: Option<Value>,
@@ -2346,11 +2351,11 @@ fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
 }
 
 /// J4 (W3b-2): a suggestion's binding, `keyed` (the whole hash) of the carrier's held id, the
-/// target's id as the answer shows it (`shown_group`) and the conversations an answer places, in
-/// their order: the page posts it back with its answer, which lands only on the suggestion its
-/// card showed (`my_work_judge::act`).
+/// conversation the judge picked (W3b-2b), the target's id as the answer shows it
+/// (`shown_group`) and the conversations an answer places, in their order: the page posts it back
+/// with its answer, which lands only on the suggestion its card showed (`my_work_judge::act`).
 pub(crate) fn binding(
-    (carrier, target): (&str, &str),
+    (carrier, (agent, session), target): (&str, &Key, &str),
     placement: &[Key],
     home: &Path,
     key: &mut Option<Vec<u8>>,
@@ -2358,7 +2363,11 @@ pub(crate) fn binding(
     let placed: Vec<[&str; 2]> = (placement.iter())
         .map(|(agent, session)| [agent.as_str(), session.as_str()])
         .collect();
-    keyed(&json!([carrier, target, placed]).to_string(), home, key)
+    keyed(
+        &json!([carrier, [agent, session], target, placed]).to_string(),
+        home,
+        key,
+    )
 }
 
 /// A group's request id as the answer shows it (C6, `shown_id`): `g:` and the keyed print of its
@@ -2716,6 +2725,7 @@ fn answer(
         sources,
         suggested: r.suggested.clone(),
         placement: r.placement.clone(),
+        picked: r.picked.clone(),
         about,
         sole: Vec::new(),
     };

@@ -2136,7 +2136,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
 - **Bound to its card** (W3b-2, 2026-11-20): a suggestion My Work shows carries its `binding`, the
   keyed hash (`my_work::binding`, the whole of `keyed`) of the carrier's held id, the id the
   answer shows the target by (the request the pick is in now: `g:` and the keyed print of its
-  anchor, `my_work::shown_group`) and the conversations an answer places, in their order; the
+  anchor, `my_work::shown_group`) and the conversations an answer places, in their order, and
+  (W3b-2b, Codex on #1115) the conversation the judge picked: an answer to one pick is not an
+  answer to another, so a later suggestion with another pick, in the same request or none,
+  refuses an older card's answer (409 `suggestion_changed`; the card read again answers); the
   route's gate takes it out of its walk and puts it back, so that no rule's mask breaks it. The
   page posts it with the answer, and the suggestion's `id` as `target`; a body without the
   binding is 400 `bad_request`, which a page opened before the binding words as "Please reload
@@ -2164,17 +2167,27 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   commit's: a wait for the consumer that fails after it answers `pending`. The page says it read
   the work again after a refusal only when the rows it read are the ones it draws (a newer read, a
   poll's held behind "Show updates" among them, takes them otherwise), and asks for a reload when
-  that read failed.
-  Known limits (#1114): what changes My Work's requests without an op of the kinds fenced, between
-  the check and the write, is not fenced: a hook record (agents record all day: the call record of
-  a work state write that names a request, arriving after its op, can take a conversation of the
-  group into that request after the check, and the answer then places it in the fold, where the
-  request the work state names outranks the group), and in the same way such a call recorded
-  before the answer that the record index has not taken yet (the answer does not wait for the
-  index: the worker indexes records between its calls to a provider, and on this PC on
-  2026-11-19 a day held 4,628 calls, 7.6 hours of them, 608 longer than the answer's wait of 10
-  seconds); curation's summaries and cards, which move My Work's bounded reads; retention's expiry
-  of a record a request is made from. Another device's ops are not fenced (sync is not in use).
+  that read failed. A Join answered `applied` whose read after it a newer poll took says it was
+  saved and names no request, as a read that failed does (W3b-2b, CodeRabbit on #1115): where it
+  put the conversation is not in the rows drawn.
+- **Between the check and the write** (W3b-2b, 2026-11-20): the check also reads, on its raw.db
+  handle before any read the answer is checked against, this device's newest record and the rows
+  retention has made expired (`meta`'s `expired_rows`, moved by `expire_owed` in each batch's own
+  transaction, the only writer of an expired row on the live raw.db); the five values go to the
+  append as `raw::AnswerFence`. Inside the append's write: a record of a call of oboete's
+  `work_state_write` past that newest record (live, under any agent's name for the tool, as
+  `my_work::call` attributes a write by: `raw::is_work_state_call`), found among at most 64 tool
+  records decoded, more than that counted as one undecoded, is 409 `my_work_pending`, nothing
+  written: the call of a work state write that names a request, arriving after its op, can take a
+  conversation of the group into that request after the check, where the request the work state
+  names outranks the group. A row expired since is 409 the same way. Curation's summaries and
+  cards and a plain prompt made meanwhile are not refused: the answer records what it was checked
+  on, as the contract says.
+  Known limits (#1114): a work state write's call recorded before the answer that the record index
+  has not taken yet (the answer does not wait for the index: the worker indexes records between
+  its calls to a provider, and on this PC on 2026-11-19 a day held 4,628 calls, 7.6 hours of them,
+  608 longer than the answer's wait of 10 seconds): the next pull request (2c). Another device's
+  ops and records are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).
