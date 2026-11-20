@@ -1,0 +1,62 @@
+docs/page.md
+  s_52c3955e48bff4::t_57a7679f405305 284-299,332-335
+ui/work-view/contract/ruled.json
+  s_52c3955e48bff4::t_51867960ee9119 1-135
+src/my_work_rules.rs
+  s_d52c2d995f51c6::t_8cc0fc6cdbcedb 208-227,258
+ui/work-view/README.md
+  s_52c3955e48bff4::t_999128aadbaf20 16,25
+src/my_work.rs
+  s_52c3955e48bff4::t_179d26d0f93a76 2427
+assets/work-view/assets/request-detail-N6Vlgrqh.js
+  s_52c3955e48bff4::t_6634ee423bdef2 1
+assets/work-view/assets/my-rules-DEumQx_0.js
+  s_52c3955e48bff4::t_af8d0bc5c63e16 1
+assets/work-view/assets/swipe-to-decide-C6kBE2mf.js
+  s_52c3955e48bff4::t_46fadb6092fca4 1
+src/work_view.rs
+  s_d52c2d995f51c6::t_73707851690255 169-171,198,200,204-325,512-520
+assets/work-view/assets/suggested-areas-BNlsiM1d.js
+  s_52c3955e48bff4::t_d395ee0b78319f 1
+assets/work-view/index.html
+  s_52c3955e48bff4::t_bb41c6f727b4d4 9-11
+assets/work-view/assets/textarea-BFfl3gRZ.js
+  s_52c3955e48bff4::t_25edf824b64368 1
+src/work_view/tests.rs
+  s_d52c2d995f51c6::t_d526f1228451c6 881-883,893,2201-2499
+  s_52c3955e48bff4::t_f50f013bb746a1 1966-1967,1969,1975,1988-2001,2013-2021,2500-2558
+ui/work-view/contract/to-work-model.test.mjs
+  s_52c3955e48bff4::t_43eacdf78c14e9 324-353
+ui/work-view/patches/0008-my-rules-read.patch
+  s_52c3955e48bff4::t_07c5d81a491db9 1-353
+assets/work-view/assets/index-Me6NLXNV.js
+  s_52c3955e48bff4::t_2735a88b549b02 1-39
+assets/work-view/assets/index-fJf6bbVK.css
+  s_52c3955e48bff4::t_244d8a977244a4 2
+assets/work-view/assets/past-focus-CoszmPx3.js
+  s_52c3955e48bff4::t_2260bf11893495 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8176e5b1dca680f429f3f84a65f3ae252ecde0d0",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_d52c2d995f51c6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7db69c90-1ee6-4a9e-a4f5-24819169f3ce",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
