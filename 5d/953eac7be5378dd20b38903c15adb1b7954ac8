@@ -1,0 +1,55 @@
+docs/claude-mem-parity.md
+  s_52c3955e48bff4::t_8056b6f3609206 122
+docs/page.md
+  s_52c3955e48bff4::t_8fb54cde1bcd14 283-296
+docs/spec.md
+  s_52c3955e48bff4::t_4bd6d9d0f1ba56 145
+docs/subagents.md
+  s_52c3955e48bff4::t_7d445fdf1104b9 154-155,284-285,434-435,565-634
+src/hook.rs
+  s_52c3955e48bff4::t_063d4fe55f95bd 1490-1491,1499,1506-1508,1517,1575-1576,1610
+src/hook/tests.rs
+  s_52c3955e48bff4::t_26d4ba8595fa1b 9587-9617
+src/my_work.rs
+  s_52c3955e48bff4::t_a22e08a3ae1c2a 1058-1060,1072,1148-1164,1172-1173,1178,1182-1183,1205-1218,1226-1228,1233-1236,1238-1241,1244-1258,2151
+src/my_work_subagents.rs
+  s_52c3955e48bff4::t_b11a311a40363a 65-80,85,204-208,210-218,220-226,228-233,363-374,378-379,386,396-398,405,407-530
+src/my_work_subagents/tests.rs
+  s_52c3955e48bff4::t_b6a6b484fcbc56 38-42,137-168
+src/testdata/viewer-readiness/test.mjs
+  s_52c3955e48bff4::t_802c7a4d272630 5368-5375
+src/unwritten.rs
+  s_52c3955e48bff4::t_a59629b91a6cc4 263-333
+src/unwritten/tests.rs
+  s_52c3955e48bff4::t_02cc410a521d8d 518-604
+src/view.rs
+  s_52c3955e48bff4::t_3a47b2a65f8591 1765-1767,2607-2672,2805-2814
+src/view/tests.rs
+  s_52c3955e48bff4::t_598ef1dd144c99 2781-2786,2851,9947-10486
+src/work_view.rs
+  s_52c3955e48bff4::t_be39590184bbaf 159,287-330,387
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_343b7939a2c68f 881-883,893,905,1911-1919,1921,1931-1932,1936-1938,1941,1946,1949,1955-1985,1987-2066,2068,2070-2168
+ui/work-view/README.md
+  s_52c3955e48bff4::t_9ae504be3f5766 24
+ui/work-view/contract/subagented.json
+  s_52c3955e48bff4::t_9a69d4e190fb7a 1-126
+ui/work-view/contract/to-work-model.test.mjs
+  s_52c3955e48bff4::t_70d387a87f6c16 287-321
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d953eac7be5378dd20b38903c15adb1b7954ac8",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
