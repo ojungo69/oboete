@@ -272,11 +272,14 @@ pub(crate) fn holds(
     matches: &dyn Fn(&crate::raw::Event) -> bool,
 ) -> Result<bool> {
     for path in files(&home.join(DIR))? {
+        let read = std::fs::read(&path);
         #[cfg(test)]
-        if UNREADABLE.get() {
-            anyhow::bail!("a kept file cannot be read");
-        }
-        let bytes = match std::fs::read(&path) {
+        let read = if UNREADABLE.get() {
+            Err(std::io::Error::other("a kept file cannot be read"))
+        } else {
+            read
+        };
+        let bytes = match read {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e.into()),
@@ -307,6 +310,7 @@ pub(crate) struct Held(#[allow(dead_code)] std::fs::File);
 pub(crate) fn hold(home: &Path, wait: std::time::Duration) -> Result<Option<Held>> {
     let dir = home.join(DIR);
     std::fs::create_dir_all(&dir)?;
+    crate::db::private(&dir, 0o700);
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)

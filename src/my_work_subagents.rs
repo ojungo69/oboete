@@ -461,7 +461,7 @@ pub(crate) enum Finish {
 /// only subagent `id` names (`my_work::subagent`, read after the locks), refused when it finished;
 /// a stop of it that waits in a kept file is `Pending` and none more is recorded (#1102 item 1); its
 /// folder is the one its newest step was recorded in. `authorized` is asked last, before the stop is
-/// sent at the time read then. The locks let go, an appended or kept stop starts the worker, as a
+/// sent at the time read then, and before a waiting stop is answered as saved. The locks let go, an appended or kept stop starts the worker, as a
 /// hook's write does.
 pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Result<Finish> {
     let done = (|| -> Result<Finish> {
@@ -490,8 +490,13 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
         if s.finished.is_some() {
             return Ok(Finish::Finished);
         }
+        // A stop that waits is answered as saved, so the token is asked first, as before a write.
         if crate::unwritten::holds(home, &raw, &stop_of(&s))? {
-            return Ok(Finish::Pending);
+            return Ok(if authorized() {
+                Finish::Pending
+            } else {
+                Finish::Unauthorized
+            });
         }
         let Some(folder) = folder else {
             return Ok(Finish::NotRecorded);

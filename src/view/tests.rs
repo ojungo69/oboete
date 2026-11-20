@@ -10175,7 +10175,20 @@ fn a_kept_stop_is_saved_and_waits_alone() {
     assert_eq!(answer["save"], pending, "{answer}");
     assert_eq!(stops_and_kept(&s), (stops, 1));
     assert_eq!(crate::hook::WORKER_ASKED.get(), asked + 1);
+    let lock = (std::fs::OpenOptions::new().read(true).write(true))
+        .open(home.join("unwritten").join("keep.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    bound_the_next_click();
+    let (status, failed) = post_work_view(&v, MARK, "t0k", &agent_body(&second));
+    assert!(status >= 500, "{status} {failed}");
+    lock.unlock().unwrap();
+    drop(lock);
+    assert_eq!(stops_and_kept(&s), (stops, 1));
+    held.execute_batch("ROLLBACK").unwrap();
+    drop(held);
     let settings = crate::capture::Settings::load(&home).unwrap();
+    // raw.db is free now: a write-back that took write-back's lock would write the stop back.
     let (during, during_settings) = (home.clone(), settings.clone());
     crate::my_work_subagents::LOOKED_UP.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move |raw: &mut crate::raw::Raw| {
@@ -10192,18 +10205,6 @@ fn a_kept_stop_is_saved_and_waits_alone() {
     assert_eq!(again["save"], pending, "{again}");
     assert_eq!(post_finished(&v, &first).0, 200);
     assert_eq!(stops_and_kept(&s), (stops, 1));
-    let lock = (std::fs::OpenOptions::new().read(true).write(true))
-        .open(home.join("unwritten").join("keep.lock"))
-        .unwrap();
-    lock.lock().unwrap();
-    bound_the_next_click();
-    let (status, failed) = post_work_view(&v, MARK, "t0k", &agent_body(&second));
-    assert!(status >= 500, "{status} {failed}");
-    lock.unlock().unwrap();
-    drop(lock);
-    assert_eq!(stops_and_kept(&s), (stops, 1));
-    held.execute_batch("ROLLBACK").unwrap();
-    drop(held);
     let mut raw = crate::raw::open(&home).unwrap();
     let payload = json!({"session_id": "s9", "cwd": home, "prompt": "Next."});
     let (mut failed_at, mut back) = (0, 0);
@@ -10354,6 +10355,8 @@ fn a_step_recorded_while_mark_finished_waits_is_before_its_stop() {
             answer
         });
         waits.recv().unwrap();
+        // Past the millisecond the click began in, so a stop timed then would be before the step.
+        std::thread::sleep(std::time::Duration::from_millis(5));
         let now = crate::db::now_ms();
         for id in ["a1", "a2"] {
             s.raw
@@ -10407,6 +10410,22 @@ fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_n
     let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&first));
     assert_eq!(status, 401);
     assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+    // Replaced once a click whose stop waits kept has its locks: 401, not a saved receipt.
+    let second = subs[1]["id"].clone();
+    let held = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    bound_the_next_click();
+    let (status, answer) = post_work_view(&v, MARK, &token(), &agent_body(&second));
+    assert_eq!(status, 200, "{answer}");
+    held.execute_batch("ROLLBACK").unwrap();
+    drop(held);
+    let again = replace.clone();
+    crate::my_work_subagents::LOOKED_UP.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| again()));
+    });
+    let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&second));
+    assert_eq!(status, 401);
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept + 1));
 }
 
 /// W4 (the plan review's round 1): a stop made while older calls wait in kept files is kept behind
