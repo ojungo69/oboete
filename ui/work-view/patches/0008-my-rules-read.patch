@@ -1,0 +1,466 @@
+diff --git a/src/ui/i18n/mywork-fr.ts b/src/ui/i18n/mywork-fr.ts
+index 1f9e64e0079dfe75c70e949f3049d5a2869a9507..30e1a3be0c62042a8a0d3d27086ae44d28ce0f3d 100644
+--- a/src/ui/i18n/mywork-fr.ts
++++ b/src/ui/i18n/mywork-fr.ts
+@@ -422,7 +422,8 @@ export const myworkFr: Record<string, string> = {
+   'Replaced {count} earlier rules': '{count} règles antérieures remplacées',
+   'Replaced {count} earlier rule': '{count} règle antérieure remplacée',
+   'Why': 'Pourquoi',
+-  'You wrote this rule in My Rules, so there are no quotes behind it.': 'Vous avez écrit cette règle dans Mes règles ; elle ne s’appuie donc sur aucune citation.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a rule the owner wrote may come from `oboete pref add` (#1083).
++  'You wrote this rule, so there are no quotes behind it.': 'Vous avez écrit cette règle ; elle ne s’appuie donc sur aucune citation.',
+   'Earlier versions it replaced': 'Versions précédentes remplacées',
+   'until {time}': 'jusqu’à {time}',
+   'on {at} by': 'le {at} par',
+@@ -494,7 +495,8 @@ export const myworkFr: Record<string, string> = {
+   'Can’t read your rules right now': 'Impossible de lire vos règles pour le moment',
+   'No rules yet': 'Pas encore de règles',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+-  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem apprend automatiquement vos préférences de travail à partir de vos demandes.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns the rules (#1083).
++  'oboete learns how you like to work from your requests on its own.': 'oboete apprend automatiquement vos préférences de travail à partir de vos demandes.',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+   "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": 'L’apprentissage des règles attend qu’un agent soit disponible. Connectez-vous à un agent pris en charge sur la machine du processus en arrière-plan.',
+   'Add rule': 'Ajouter une règle',
+@@ -504,7 +506,8 @@ export const myworkFr: Record<string, string> = {
+   '{onCount} rules are on.': '{onCount} règles sont activées.',
+   '{onCount} rule is on.': '{onCount} règle est activée.',
+   'How you like to work, as if-then rules. ': 'Vos préférences de travail, sous forme de règles si-alors. ',
+-  'Rules you set or approve go in MY-RULES.md, loaded with your user-level instructions. Learned ones wait here until you decide.': 'Les règles que vous définissez ou approuvez sont enregistrées dans MY-RULES.md et chargées avec vos instructions utilisateur. Les règles apprises attendent ici votre décision.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file (#1083).
++  'Rules that are on go to Claude Code, Codex and Grok with the context oboete gives each session; a repository’s rules, only its sessions. Learned ones wait here until you decide.': 'Les règles activées sont transmises à Claude Code, Codex et Grok avec le contexte qu’oboete donne à chaque session ; celles d’un dépôt, à ses sessions seulement. Les règles apprises attendent ici votre décision.',
+   'View in MY-RULES.md': 'Afficher dans MY-RULES.md',
+   'Show the rule': 'Afficher la règle',
+   'Approved {name} under {scope}': '{name} approuvé dans {scope}',
+diff --git a/src/ui/i18n/mywork-ko.ts b/src/ui/i18n/mywork-ko.ts
+index ba6bd4ad20ba53a893b7f3ed3ce052cc530ee50c..63f75dbf11bcd7af9826058a1ef207826fd66859 100644
+--- a/src/ui/i18n/mywork-ko.ts
++++ b/src/ui/i18n/mywork-ko.ts
+@@ -405,7 +405,8 @@ export const myworkKo: Record<string, string> = {
+   'Replaced {count} earlier rules': '이전 규칙 {count}개를 대체함',
+   'Replaced {count} earlier rule': '이전 규칙 {count}개를 대체함',
+   'Why': '이유',
+-  'You wrote this rule in My Rules, so there are no quotes behind it.': '내 규칙에서 직접 작성한 규칙이라 근거가 되는 인용이 없습니다.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a rule the owner wrote may come from `oboete pref add` (#1083).
++  'You wrote this rule, so there are no quotes behind it.': '직접 작성한 규칙이라 근거가 되는 인용이 없습니다.',
+   'Earlier versions it replaced': '대체된 이전 버전',
+   'until {time}': '{time}까지',
+   'on {at} by': '{at}, 대체한 규칙:',
+@@ -477,7 +478,8 @@ export const myworkKo: Record<string, string> = {
+   'Can’t read your rules right now': '지금은 규칙을 읽을 수 없습니다',
+   'No rules yet': '아직 규칙이 없습니다',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+-  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem은 요청을 바탕으로 선호하는 작업 방식을 스스로 학습합니다.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns the rules (#1083).
++  'oboete learns how you like to work from your requests on its own.': 'oboete는 요청을 바탕으로 선호하는 작업 방식을 스스로 학습합니다.',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+   "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": "규칙 학습이 에이전트를 기다리고 있습니다. 워커가 실행되는 컴퓨터에서 지원되는 에이전트에 로그인하세요.",
+   'Add rule': '규칙 추가',
+@@ -487,7 +489,8 @@ export const myworkKo: Record<string, string> = {
+   '{onCount} rules are on.': '규칙 {onCount}개가 켜져 있습니다.',
+   '{onCount} rule is on.': '규칙 {onCount}개가 켜져 있습니다.',
+   'How you like to work, as if-then rules. ': '선호하는 작업 방식을 조건-동작 규칙으로 정리합니다. ',
+-  'Rules you set or approve go in MY-RULES.md, loaded with your user-level instructions. Learned ones wait here until you decide.': '직접 설정하거나 승인한 규칙은 MY-RULES.md에 들어가 사용자 수준 지침과 함께 불러옵니다. 학습된 규칙은 결정할 때까지 여기에서 기다립니다.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file (#1083).
++  'Rules that are on go to Claude Code, Codex and Grok with the context oboete gives each session; a repository’s rules, only its sessions. Learned ones wait here until you decide.': '켜져 있는 규칙은 oboete가 각 세션에 주는 맥락과 함께 Claude Code, Codex, Grok에 전달되며, 저장소의 규칙은 그 저장소의 세션에만 전달됩니다. 학습된 규칙은 결정할 때까지 여기에서 기다립니다.',
+   'View in MY-RULES.md': 'MY-RULES.md에서 보기',
+   'Show the rule': '규칙 보기',
+   'Approved {name} under {scope}': '{name} 규칙을 승인했습니다 (범위: {scope})',
+diff --git a/src/ui/i18n/mywork-tr.ts b/src/ui/i18n/mywork-tr.ts
+index a49a46307fbd4e95cdb256d705b181cccbe47b0c..153ca78f2ea839040cd087a134abe3a6dcd35007 100644
+--- a/src/ui/i18n/mywork-tr.ts
++++ b/src/ui/i18n/mywork-tr.ts
+@@ -405,7 +405,8 @@ export const myworkTr: Record<string, string> = {
+   'Replaced {count} earlier rules': 'Önceki {count} kuralın yerine geçti',
+   'Replaced {count} earlier rule': 'Önceki {count} kuralın yerine geçti',
+   'Why': 'Neden',
+-  'You wrote this rule in My Rules, so there are no quotes behind it.': 'Bu kuralı Kurallarım bölümünde siz yazdınız. Bu yüzden dayandığı alıntı yok.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a rule the owner wrote may come from `oboete pref add` (#1083).
++  'You wrote this rule, so there are no quotes behind it.': 'Bu kuralı siz yazdınız. Bu yüzden dayandığı alıntı yok.',
+   'Earlier versions it replaced': 'Yerine geçtiği eski sürümler',
+   'until {time}': '{time} tarihine kadar',
+   'on {at} by': '{at} tarihinde yerine geçen:',
+@@ -477,7 +478,8 @@ export const myworkTr: Record<string, string> = {
+   'Can’t read your rules right now': 'Kurallarınız şu anda okunamıyor',
+   'No rules yet': 'Henüz kural yok',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+-  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem çalışma tercihlerinizi isteklerinizden öğrenir.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns the rules (#1083).
++  'oboete learns how you like to work from your requests on its own.': 'oboete çalışma tercihlerinizi isteklerinizden öğrenir.',
+   'Add rule': 'Kural ekle',
+   '{waiting} learned rules are waiting for you. ': 'Öğrenilen {waiting} kural incelemenizi bekliyor. ',
+   '{waiting} learned rule is waiting for you. ': 'Öğrenilen {waiting} kural incelemenizi bekliyor. ',
+@@ -485,7 +487,8 @@ export const myworkTr: Record<string, string> = {
+   '{onCount} rules are on.': '{onCount} kural açık.',
+   '{onCount} rule is on.': '{onCount} kural açık.',
+   'How you like to work, as if-then rules. ': 'Çalışma tercihlerinizi koşul ve eylem kuralları olarak görün. ',
+-  'Rules you set or approve go in MY-RULES.md, loaded with your user-level instructions. Learned ones wait here until you decide.': 'Belirlediğiniz veya onayladığınız kurallar MY-RULES.md dosyasına yazılır ve kullanıcı düzeyindeki talimatlarınızla yüklenir. Öğrenilen kurallar siz karar verene kadar burada bekler.',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file (#1083).
++  'Rules that are on go to Claude Code, Codex and Grok with the context oboete gives each session; a repository’s rules, only its sessions. Learned ones wait here until you decide.': 'Açık kurallar, oboete’nin her oturuma verdiği bağlamla Claude Code, Codex ve Grok’a iletilir; bir deponun kuralları yalnızca o deponun oturumlarına. Öğrenilen kurallar siz karar verene kadar burada bekler.',
+   'View in MY-RULES.md': 'MY-RULES.md dosyasında göster',
+   'Show the rule': 'Kuralı göster',
+   'Approved {name} under {scope}': '“{name}” kuralı {scope} kapsamında onaylandı',
+diff --git a/src/ui/i18n/mywork-zh.ts b/src/ui/i18n/mywork-zh.ts
+index 88cc8de0f815866aa17a5c517c61634bc6f1d527..5bb87bc15675f552ac51032aad946b7da1623bc7 100644
+--- a/src/ui/i18n/mywork-zh.ts
++++ b/src/ui/i18n/mywork-zh.ts
+@@ -422,7 +422,8 @@ export const myworkZh: Record<string, string> = {
+   'Replaced {count} earlier rules': '替换了之前 {count} 条规则',
+   'Replaced {count} earlier rule': '替换了之前 {count} 条规则',
+   'Why': '原因',
+-  'You wrote this rule in My Rules, so there are no quotes behind it.': '该规则是在“我的规则”中由您编写的，因此没有引用的原话。',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a rule the owner wrote may come from `oboete pref add` (#1083).
++  'You wrote this rule, so there are no quotes behind it.': '该规则由您编写，因此没有引用的原话。',
+   'Earlier versions it replaced': '被替换的早期版本',
+   'until {time}': '直至 {time}',
+   'on {at} by': '替换于 {at}，由',
+@@ -494,7 +495,8 @@ export const myworkZh: Record<string, string> = {
+   'Can’t read your rules right now': '当前无法读取您的规则',
+   'No rules yet': '暂无规则',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+-  'claude-mem learns how you like to work from your requests on its own.': 'claude-mem 会从您的请求中自动学习工作偏好。',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns the rules (#1083).
++  'oboete learns how you like to work from your requests on its own.': 'oboete 会从您的请求中自动学习工作偏好。',
+   // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): My Rules offers no rule to add yet (#1083, #1085).
+   "Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.": "规则学习正在等待代理。请在工作进程所在的机器上登录受支持的代理。",
+   'Add rule': '添加规则',
+@@ -504,7 +506,8 @@ export const myworkZh: Record<string, string> = {
+   '{onCount} rules are on.': '{onCount} 条规则已启用。',
+   '{onCount} rule is on.': '{onCount} 条规则已启用。',
+   'How you like to work, as if-then rules. ': '将您的工作习惯沉淀为条件规则。',
+-  'Rules you set or approve go in MY-RULES.md, loaded with your user-level instructions. Learned ones wait here until you decide.': '您设置或批准的规则会存入 MY-RULES.md 并随用户级指示加载。新学到的规则在此处等待您裁决。',
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file (#1083).
++  'Rules that are on go to Claude Code, Codex and Grok with the context oboete gives each session; a repository’s rules, only its sessions. Learned ones wait here until you decide.': '已开启的规则会随 oboete 为每次会话提供的上下文一起提供给 Claude Code、Codex 和 Grok；某个仓库的规则只提供给该仓库的会话。新学到的规则在此处等待您裁决。',
+   'View in MY-RULES.md': '在 MY-RULES.md 中查看',
+   'Show the rule': '查看该规则',
+   'Approved {name} under {scope}': '已在 {scope} 下批准 {name}',
+diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
+index ae3f0972d663b55edf4a71c6b3d6365522d511ef..2455739eab31bc66e29248fdaed03dc919ed5708 100644
+--- a/src/ui/my-work/src/live/local-source.ts
++++ b/src/ui/my-work/src/live/local-source.ts
+@@ -134,10 +134,14 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+   // Accepted models are immutable. Connection-only wrappers share their content signature,
+   // so bootstrap and publication do not serialize the same request list again.
+   const modelSignatures = new WeakMap<object, string>()
++  // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a rule's age (`latestDaysAgo`, which
++  // orders rules by strength) moves with every mapping, so its content counts it in whole days: the
++  // same snapshot mapped a minute later is the content on screen, and a save in flight keeps its answer (#1083).
++  const ruleContent = (rule: WorkModel['rules'][number]) => ({ ...rule, latestDaysAgo: Math.floor(rule.latestDaysAgo) })
+   function modelSignature(model: MappedWorkModel | WorkViewOverviewModel): string {
+     let signature = modelSignatures.get(model)
+     if (signature === undefined) {
+-      signature = JSON.stringify([model.agents, model.devices, model.people, model.requests, model.requestReadErrors, model.unlinkedWorkCount, model.sourceHealth, model.focusAreas, model.otherAsks, model.currentPeriod, model.pastPeriods, model.goalsReadError, model.lastRuns, model.refresh, model.rules, model.ruleScopes, model.rulesLearning, model.rulesFile, model.rulesReadError, model.buildStory, model.sharedState])
++      signature = JSON.stringify([model.agents, model.devices, model.people, model.requests, model.requestReadErrors, model.unlinkedWorkCount, model.sourceHealth, model.focusAreas, model.otherAsks, model.currentPeriod, model.pastPeriods, model.goalsReadError, model.lastRuns, model.refresh, model.rules.map(ruleContent), model.ruleScopes, model.rulesLearning, model.rulesFile, model.rulesReadError, model.buildStory, model.sharedState])
+       modelSignatures.set(model, signature)
+     }
+     return signature
+diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
+index a9212ad5d0828a4406b5bc33f5dc9809b9fe6e6c..ace3b7db507943985db1786d9e689858db864076 100644
+--- a/src/ui/my-work/src/live/oboete-saves.test.ts
++++ b/src/ui/my-work/src/live/oboete-saves.test.ts
+@@ -591,3 +591,40 @@ describe('oboete: a receipt alone, with the minute timer', () => {
+     } finally { stop(); performance.now = originalNow }
+   })
+ })
++
++// Added by oboete (ui/work-view/patches/0008-my-rules-read.patch, #1083): a rule's age moves with every
++// mapping, so the same snapshot mapped a minute later is the same content.
++describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
++  let now = NOW
++  beforeEach(() => { now = NOW; mock.method(Date, 'now', () => now) })
++  afterEach(() => { mock.restoreAll() })
++  const ruled = (fingerprint = FIRST): WorkViewSnapshot => ({
++    ...snapshot(fingerprint),
++    ruleScopes: [{ id: 'everywhere', tier: 'everywhere', name: 'Everywhere' }],
++    rules: [{
++      ruleId: 'l:aaaaaaaaaaaa', scopeId: 'everywhere', scopeTier: 'everywhere', scopeName: 'Everywhere', when: '',
++      then: 'Keep commits small.', setBy: 'learned', status: 'suggested', kind: 'preference', source: 'request-progress',
++      timesSeen: 2, latestAt: '2026-11-18T09:30:00.000Z',
++      quotes: [{ at: '2026-11-18T09:30:00.000Z', quote: 'Make each commit one change.', kind: 'correction' }],
++      replacedBy: null, replacedAt: null, savedAt: null,
++    }],
++  }) as WorkViewSnapshot
++
++  it('reaches no screen again, so a check answered meanwhile shows the check though every read fails', async () => {
++    const held = deferred<Response>()
++    const { local, streams } = harness(held.promise, async () => json({ error: 'down' }, 503))
++    const shown: string[] = []
++    const stop = local.subscribeToLiveUpdates((model) => shown.push(model.requests[0].contentFingerprint!), () => {})
++    try {
++      streams[0].emit('work-view', ruled())
++      const saving = local.setRequestChecked('request-a', FIRST, true)
++      now = NOW + 60_000
++      streams[0].emit('work-view', ruled())
++      assert.deepEqual(shown, [FIRST])
++      held.resolve(json(ruled(SECOND)))
++      const result = await saving
++      assert.equal(result.outcome, 'saved')
++      assert.equal('model' in result && result.model.requests[0].contentFingerprint, SECOND)
++    } finally { stop() }
++  })
++})
+diff --git a/src/ui/my-work/src/pages/my-rules.tsx b/src/ui/my-work/src/pages/my-rules.tsx
+index 2a4fefa01520a7a3cfa0a19bca7b2b39fa523193..16926e25b32e365a1f495372383e44600b915069 100644
+--- a/src/ui/my-work/src/pages/my-rules.tsx
++++ b/src/ui/my-work/src/pages/my-rules.tsx
+@@ -27,6 +27,11 @@ import { RULE_TIERS, type OwnerRule, type RuleChange, type RuleQuote, type RuleS
+ import { addedRuleFromSave, currentRuleDecisions, ruleUndoIsCurrent, type RuleDecision } from '@/live/rule-actions'
+ import type { AutoRefresh, RuleSaveResult } from '@/live/work-data-source'
+ 
++// Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): these pages save no rule yet, so no
++// control that writes one shows: approving or rejecting a suggestion (and a phone's swipe), editing,
++// turning one on or off, Undo and the receipt of a save (#1083).
++const SAVES = false as boolean
++
+ // ---------- Derived facts ----------
+ 
+ /** A rule's scope from the loaded scopes. Fails fast: the mapper only lets through rules whose scope is listed. */
+@@ -36,7 +41,16 @@ function useRuleScope(scopeId: string): RuleScope {
+   return scope
+ }
+ const scopeHeading = (scope: RuleScope) => scope.tier === 'everywhere' ? 'Everywhere' : scope.tier === 'project' ? `In ${scope.name}` : scope.name
+-const displayScope = (scope: RuleScope) => scope.tier === 'everywhere' ? t('Everywhere') : scope.tier === 'project' ? interpolate(t('In {name}'), { name: scope.name }) : scope.name
++// Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): two scopes of one name (two repositories of one
++// name, or names the gate masks alike) read apart by as much of their ids as tells them apart (#1083).
++const scopeName = (scope: RuleScope, scopes: RuleScope[]) => {
++  const print = (entry: RuleScope) => entry.id.slice(entry.id.indexOf(':') + 1)
++  const alike = scopes.filter((other) => other.id !== scope.id && other.tier === scope.tier && other.name === scope.name)
++  let length = 4
++  while (length < print(scope).length && alike.some((other) => print(other).startsWith(print(scope).slice(0, length)))) length++
++  return alike.length ? `${scope.name} · ${print(scope).slice(0, length)}` : scope.name
++}
++const displayScope = (scope: RuleScope, scopes: RuleScope[]) => scope.tier === 'everywhere' ? t('Everywhere') : scope.tier === 'project' ? interpolate(t('In {name}'), { name: scopeName(scope, scopes) }) : scopeName(scope, scopes)
+ 
+ /** Strength (§14): times seen × how recent. Shown in words, never as a raw score. */
+ const strengthScore = (rule: OwnerRule) => rule.timesSeen / (1 + rule.latestDaysAgo / 7)
+@@ -44,7 +58,16 @@ const strengthLevel = (rule: OwnerRule) => { const score = strengthScore(rule);
+ const STRENGTH_WORD = ['', 'Light', 'Steady', 'Strong']
+ const byStrength = (a: OwnerRule, b: OwnerRule) => strengthScore(b) - strengthScore(a)
+ const setByText = (rule: OwnerRule) => t(rule.setBy === 'owner' ? 'Set by you' : rule.setBy === 'approved' ? 'Learned, approved by you' : 'Learned, not approved yet')
+-const sourceText = (rule: OwnerRule) => rule.source === 'you' ? t('From your own instructions.') : interpolate(t('Found by {source}.'), { source: rule.source })
++// Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns a rule, not the claude-mem skill the
++// snapshot names for the pages (#1083).
++const sourceText = (rule: OwnerRule) => rule.source === 'you' ? t('From your own instructions.') : interpolate(t('Found by {source}.'), { source: 'oboete' })
++// Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): a record says what it is in oboete's words. A
++// prompt's names none of the prompt, so that a quote shows only whole, as the gate passed it, and its
++// time is the review's that quoted it; a rule the owner wrote, on a page or with `oboete pref add`, is
++// theirs (#1083).
++const recordLabel = (record: OwnerRule['records'][number], rule: OwnerRule) => record.kind === 'Prompt' ? 'Your prompt, quoted in a review'
++  : record.kind === 'Review' ? 'oboete · the reviews of your requests'
++  : record.kind === 'Instructions' && rule.source === 'you' ? 'Written by you on this computer' : record.label
+ const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1)
+ const scrollToId = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' })
+ 
+@@ -121,8 +144,9 @@ function Quote({ quote, rule }: { quote: RuleQuote; rule: OwnerRule }) {
+           <InlineCitationCard>
+             <InlineCitationCardTrigger sources={[displayTime(quote.at)]} className="font-normal" />
+             <InlineCitationCardBody className="space-y-1.5 p-3 text-xs">
+-              <p className="font-medium capitalize">{t(quote.kind)} · {quote.where === 'prompt' ? t("typed by you") : t("your instructions file")}</p>
+-              {rule.records.map((record) => <p key={record.label} className="text-muted-foreground">{t(record.kind)}: {record.label} · {displayTime(record.at)}</p>)}
++              {/* Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete records no kind of quote, and two records can read alike (#1083). */}
++              <p className="font-medium first-letter:uppercase">{quote.where === 'prompt' ? t("typed by you") : t("your instructions file")}</p>
++              {rule.records.map((record, index) => <p key={index} className="text-muted-foreground">{t(record.kind)}: {recordLabel(record, rule)} · {displayTime(record.at)}</p>)}
+             </InlineCitationCardBody>
+           </InlineCitationCard>
+         </InlineCitation>
+@@ -142,9 +166,11 @@ export function RuleEvidenceNotice({ rule }: { rule: OwnerRule }) {
+ 
+ export function RuleEvidence({ rule }: { rule: OwnerRule }) {
+   return <div className="space-y-2">
+-    {rule.quotes.length ? rule.quotes.map((quote) => <Quote key={quote.quote} quote={quote} rule={rule} />)
++    {/* Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): two quotes the gate masks whole read alike, and a rule the owner wrote may come from
++       `oboete pref add` (#1083). */}
++    {rule.quotes.length ? rule.quotes.map((quote, index) => <Quote key={index} quote={quote} rule={rule} />)
+       : <p className="text-xs text-muted-foreground">{t(rule.source === 'you'
+-        ? 'You wrote this rule in My Rules, so there are no quotes behind it.'
++        ? 'You wrote this rule, so there are no quotes behind it.'
+         : 'No supporting quotes are available on this computer.')}</p>}
+   </div>
+ }
+@@ -156,7 +182,8 @@ function SourceRecords({ rule }: { rule: OwnerRule }) {
+       <div className="space-y-1">
+         <p className="text-[11px] font-medium text-muted-foreground uppercase">{t("Source records")}</p>
+         <ul className="space-y-0.5 text-xs text-muted-foreground">
+-          {rule.records.map((record) => <li key={record.label} className="flex gap-2"><span className="w-20 shrink-0 font-medium text-foreground/70">{t(record.kind)}</span><span className="min-w-0 truncate">{record.label}</span><span className="ml-auto shrink-0">{displayTime(record.at)}</span></li>)}
++          {/* Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete's words, keys by place (#1083). */}
++          {rule.records.map((record, index) => <li key={index} className="flex gap-2"><span className="w-20 shrink-0 font-medium text-foreground/70">{t(record.kind)}</span><span className="min-w-0 truncate">{recordLabel(record, rule)}</span><span className="ml-auto shrink-0">{displayTime(record.at)}</span></li>)}
+         </ul>
+       </div>
+     </Req>
+@@ -188,7 +215,7 @@ interface RuleActions {
+ /** An owner rule: the sentence first, then status and strength, then why (quotes) and source records on demand. */
+ function RuleBlock({ rule, replaces, justApproved, highlighted, actions }: { rule: OwnerRule; replaces: OwnerRule[]; justApproved: boolean; highlighted: boolean; actions: RuleActions }) {
+   const off = rule.status === 'off'
+-  const controls = (
++  const controls = SAVES && (
+     <Req ids={['R14.9', 'R11.1']}>
+       <div className="flex shrink-0 items-center">
+         <Button variant="ghost" size="icon" className="size-11 text-muted-foreground sm:size-9" aria-label={t("Edit rule")} onClick={() => actions.onEdit(rule)} disabled={actions.saving}><PencilIcon /></Button>
+@@ -294,18 +321,19 @@ type Decision = RuleDecision
+ /** One suggestion: the rule and Approve / Edit / Reject first, then strength and one quote, the rest on demand. */
+ function SuggestionCard({ rule, decision, saving, onDecide, onEdit, onUndo, onShow }: { rule: OwnerRule; decision: Decision | undefined; saving: boolean; onDecide: (decision: Decision) => void; onEdit: () => void; onUndo: () => void; onShow: () => void }) {
+   const scope = useRuleScope(rule.scopeId)
++  const { ruleScopes } = useWorkModel()
+   const approval = (decision ? { id: rule.id, approved: decision === 'approved' } : { id: rule.id }) as ConfirmationProps['approval']
+   const [first, ...more] = rule.quotes
+   return (
+     <Req ids={['R14.2', 'R14.3', 'R14.8', 'R14.9']}>
+       <Confirmation id={`decide-${rule.id}`} approval={approval} state={decision ? 'approval-responded' : 'approval-requested'}
+         className={cn('scroll-mt-36 gap-3 rounded-xl bg-card p-4 shadow-panel lg:scroll-mt-20', !decision ? 'border-review-border' : decision === 'approved' ? 'border-shipped-border' : 'border-dashed')}>
+-        <button type="button" onClick={() => scrollToId(`scope-${scope.id}`)} className="-my-2 inline-flex min-h-11 w-fit items-center text-xs text-muted-foreground hover:text-foreground sm:min-h-0 sm:my-0">{displayScope(scope)}</button>
++        <button type="button" onClick={() => scrollToId(`scope-${scope.id}`)} className="-my-2 inline-flex min-h-11 w-fit items-center text-xs text-muted-foreground hover:text-foreground sm:min-h-0 sm:my-0">{displayScope(scope, ruleScopes)}</button>
+ 
+         <div className={cn(decision === 'rejected' && 'line-through opacity-60')}><RuleSentence rule={rule} large /></div>
+         <RuleEvidenceNotice rule={rule} />
+ 
+-        <ConfirmationRequest>
++        {SAVES && <ConfirmationRequest>
+           <Req ids={['R11.1']}>
+             <ConfirmationActions className="grid w-full grid-cols-3 gap-2 self-stretch sm:flex sm:w-auto sm:self-start">
+               <ConfirmationAction className="order-last h-11 sm:order-first sm:h-9" onClick={() => onDecide('approved')} disabled={saving}><CheckIcon />{t("Approve")}</ConfirmationAction>
+@@ -313,30 +341,30 @@ function SuggestionCard({ rule, decision, saving, onDecide, onEdit, onUndo, onSh
+               <ConfirmationAction variant="ghost" className="order-first h-11 sm:order-last sm:h-9" onClick={() => onDecide('rejected')} disabled={saving}><XIcon />{t("Reject")}</ConfirmationAction>
+             </ConfirmationActions>
+           </Req>
+-        </ConfirmationRequest>
++        </ConfirmationRequest>}
+         <ConfirmationAccepted>
+           <div className="flex flex-wrap items-center justify-between gap-x-3">
+-            <ConfirmationTitle className="text-sm text-shipped-foreground">{interpolate(t('Approved. It’s now under {scope} and in MY-RULES.md.'), { scope: displayScope(scope) })}</ConfirmationTitle>
++            <ConfirmationTitle className="text-sm text-shipped-foreground">{interpolate(t('Approved. It’s now under {scope} and in MY-RULES.md.'), { scope: displayScope(scope, ruleScopes) })}</ConfirmationTitle>
+             <div className="flex">
+               <Button variant="ghost" size="sm" className="h-11 text-xs sm:h-8" onClick={onShow}>{t("Show it")}</Button>
+-              <Button variant="ghost" size="sm" className="h-11 text-xs sm:h-8" onClick={onUndo} disabled={saving}>{t("Undo")}</Button>
++              {SAVES && <Button variant="ghost" size="sm" className="h-11 text-xs sm:h-8" onClick={onUndo} disabled={saving}>{t("Undo")}</Button>}
+             </div>
+           </div>
+         </ConfirmationAccepted>
+         <ConfirmationRejected>
+           <div className="flex flex-wrap items-center justify-between gap-x-3">
+             <ConfirmationTitle className="text-sm text-muted-foreground">{t("Rejected. It won’t be suggested again unless you say it again.")}</ConfirmationTitle>
+-            <Button variant="ghost" size="sm" className="h-11 text-xs sm:h-8" onClick={onUndo} disabled={saving}>{t("Undo")}</Button>
++            {SAVES && <Button variant="ghost" size="sm" className="h-11 text-xs sm:h-8" onClick={onUndo} disabled={saving}>{t("Undo")}</Button>}
+           </div>
+         </ConfirmationRejected>
+ 
+         {!decision && (
+           <div className="space-y-2 border-t pt-3">
+-            <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><Strength rule={rule} /><span>{interpolate(t('learned by {source}'), { source: rule.source })}</span></p>
++            <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><Strength rule={rule} /><span>{interpolate(t('learned by {source}'), { source: 'oboete' })}</span></p>
+             {first && <Quote quote={first} rule={rule} />}
+             {more.length > 0 && (
+               <Collapsible>
+-                <CollapsibleContent className="space-y-2 pb-1">{more.map((quote) => <Quote key={quote.quote} quote={quote} rule={rule} />)}</CollapsibleContent>
++                <CollapsibleContent className="space-y-2 pb-1">{more.map((quote, index) => <Quote key={index} quote={quote} rule={rule} />)}</CollapsibleContent>
+                 <CollapsibleTrigger className="group flex min-h-11 items-center gap-1 text-xs text-muted-foreground hover:text-foreground sm:min-h-8">
+                   <ChevronDownIcon className="size-3.5 transition-transform group-data-[state=open]:rotate-180" /><span className="group-data-[state=open]:hidden">{interpolate(t(more.length === 1 ? '{count} more quote' : '{count} more quotes'), { count: more.length })}</span><span className="hidden group-data-[state=open]:inline">{t("Fewer quotes")}</span>
+                 </CollapsibleTrigger>
+@@ -366,10 +394,10 @@ function DecisionQueue({ suggestions, decisions, saving, onDecide, onEdit, onUnd
+           </Req>
+         ) : (
+           <DraggableCardContainer className="space-y-3">
+-            {isPhone && waiting > 0 && <p className="text-xs text-muted-foreground">{t("Swipe a card right to approve it, left to reject it.")}</p>}
++            {SAVES && isPhone && waiting > 0 && <p className="text-xs text-muted-foreground">{t("Swipe a card right to approve it, left to reject it.")}</p>}
+             {suggestions.map((rule) => {
+               const card = <SuggestionCard rule={rule} decision={decisions[rule.id]} saving={saving} onDecide={(decision) => onDecide(rule, decision)} onEdit={() => onEdit(rule)} onUndo={() => onUndo(rule)} onShow={() => onShow(rule)} />
+-              return isPhone && !decisions[rule.id]
++              return SAVES && isPhone && !decisions[rule.id]
+                 ? <DraggableCardBody key={rule.id} dragAxis="x" onDragRelease={swipeToDecide(() => onDecide(rule, 'approved'), () => onDecide(rule, 'rejected'))} className="min-h-0 w-full rounded-xl bg-transparent p-0 shadow-none dark:bg-transparent">{card}</DraggableCardBody>
+                 : <div key={rule.id}>{card}</div>
+             })}
+@@ -395,13 +423,14 @@ function ScopeSection({ scope, rules, counts, approvedNow, highlighted, actions
+   const rejected = rules.filter((rule) => rule.status === 'dismissed')
+   const replaced = rules.filter((rule) => rule.status === 'replaced').sort((a, b) => a.latestDaysAgo - b.latestDaysAgo)
+   const tierLabel = RULE_TIERS.find((tier) => tier.tier === scope.tier)!.label
++  const { ruleScopes } = useWorkModel()
+   return (
+     <Req ids={['R14.5', 'R14.6', 'R14.7']}>
+       <section id={`scope-${scope.id}`} className="scroll-mt-36 space-y-3 lg:scroll-mt-20">
+         <header className="flex flex-wrap items-baseline justify-between gap-x-3 border-b pb-2">
+           <div>
+             {scope.tier !== 'everywhere' && <p className="text-xs text-muted-foreground">{t(tierLabel)}</p>}
+-            <h2 className="text-base font-semibold">{displayScope(scope)}</h2>
++            <h2 className="text-base font-semibold">{displayScope(scope, ruleScopes)}</h2>
+           </div>
+           <p className="text-xs text-muted-foreground">{interpolate(t('{count} on'), { count: counts.on })}{counts.off ? interpolate(t(' · {count} off'), { count: counts.off }) : ''}{counts.suggested ? interpolate(t(' · {count} suggested'), { count: counts.suggested }) : ''}</p>
+         </header>
+@@ -464,7 +493,7 @@ function ScopeNav({ countsByScope, waiting }: { countsByScope: Map<string, Scope
+               return (
+                 <button key={scope.id} type="button" onClick={() => jump(`scope-${scope.id}`)} className="relative flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted">
+                   {jumpedTo === `scope-${scope.id}` && <ActivePill layoutId="scope-nav-active-pill" />}
+-                  <span className="relative truncate">{scope.tier === 'everywhere' ? t('Everywhere') : scope.name}</span>
++                  <span className="relative truncate">{scope.tier === 'everywhere' ? t('Everywhere') : scopeName(scope, ruleScopes)}</span>
+                   <span className="relative flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                     {counts.suggested > 0 && <span className="text-review-foreground">{interpolate(t('{count} new ·'), { count: counts.suggested })}</span>}
+                     {interpolate(t('{count} on'), { count: counts.on })}
+@@ -489,7 +518,7 @@ function ScopeChips({ countsByScope, waiting }: { countsByScope: Map<string, Sco
+         {waiting > 0 && <button type="button" onClick={() => scrollToId('decide')} className="h-11 shrink-0 rounded-full border border-attention-border px-4 text-sm font-medium text-attention-foreground">{interpolate(t('Decide · {count}'), { count: waiting })}</button>}
+         {ruleScopes.map((scope) => (
+           <button key={scope.id} type="button" onClick={() => scrollToId(`scope-${scope.id}`)} className="h-11 shrink-0 rounded-full border bg-card px-4 text-sm">
+-            {scope.tier === 'everywhere' ? t('Everywhere') : scope.name} <span className="text-muted-foreground">{countsByScope.get(scope.id)!.on}</span>
++            {scope.tier === 'everywhere' ? t('Everywhere') : scopeName(scope, ruleScopes)} <span className="text-muted-foreground">{countsByScope.get(scope.id)!.on}</span>
+           </button>
+         ))}
+       </nav>
+@@ -659,7 +688,7 @@ function RuleEditor({ draft, error, saving, onChange, onClose, onSave }: { draft
+                     {RULE_TIERS.map(({ tier, label }) => (
+                       <SelectGroup key={tier}>
+                         <SelectLabel>{t(label)}</SelectLabel>
+-                        {ruleScopes.filter((scope) => scope.tier === tier).map((scope) => <SelectItem key={scope.id} value={scope.id}>{scope.tier === 'everywhere' ? t('Everywhere') : scope.name}</SelectItem>)}
++                        {ruleScopes.filter((scope) => scope.tier === tier).map((scope) => <SelectItem key={scope.id} value={scope.id}>{scope.tier === 'everywhere' ? t('Everywhere') : scopeName(scope, ruleScopes)}</SelectItem>)}
+                         {tier !== 'everywhere' && <SelectItem value={`new:${tier}`}>{tier === 'project' ? t("A new repo…") : t("A new situation…")}</SelectItem>}
+                       </SelectGroup>
+                     ))}
+@@ -698,7 +727,8 @@ export function NoRulesYet({ onAdd, readError, refresh }: { onAdd: () => void; r
+   const description = waiting
+     // Modified by oboete (ui/work-view/patches/0003-hide-what-oboete-lacks.patch): oboete saves no rule yet, so the page offers none to add (#1083, #1085).
+     ? t('Rule learning is waiting for an agent. Sign in to a supported agent on the worker machine.')
+-    : t('claude-mem learns how you like to work from your requests on its own.')
++    // Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete learns the rules (#1083).
++    : t('oboete learns how you like to work from your requests on its own.')
+   return (
+     <Req ids={['R12.1']}>
+       <Empty className="border bg-card/60">
+@@ -756,7 +786,7 @@ export function MyRules() {
+     setTimeout(() => setHighlighted(null), 1800)
+   }
+   const ruleName = (rule: Pick<OwnerRule, 'then'>) => `“${lowerFirst(rule.then).replace(/\.$/, '')}”`
+-  const headingFor = (scopeId: string, scopes: RuleScope[]) => { const scope = scopes.find((entry) => entry.id === scopeId); return scope ? scope.tier === 'everywhere' ? uiMessage('Everywhere') : scope.name : uiMessage('its scope') }
++  const headingFor = (scopeId: string, scopes: RuleScope[]) => { const scope = scopes.find((entry) => entry.id === scopeId); return scope ? scope.tier === 'everywhere' ? uiMessage('Everywhere') : scopeName(scope, scopes) : uiMessage('its scope') }
+   const savedRule = (saved: RuleSaveResult, rule: OwnerRule) => saved.model.rules.find((entry) => entry.id === rule.id) ?? rule
+ 
+   const decide = (rule: OwnerRule, decision: Decision) => save({ action: decision === 'approved' ? 'approve' : 'dismiss', ruleId: rule.id }, (saved) => {
+@@ -824,7 +854,7 @@ export function MyRules() {
+                 {waiting > 0 ? interpolate(t(waiting === 1 ? '{waiting} learned rule is waiting for you.' : '{waiting} learned rules are waiting for you.'), { waiting }) : t('Nothing is waiting for you.')}{' '}
+                 {interpolate(t(onCount === 1 ? '{onCount} rule is on.' : '{onCount} rules are on.'), { onCount })}
+               </p>
+-              <p className="text-sm text-muted-foreground"><span className="hidden sm:inline">{t('How you like to work, as if-then rules.')}{' '}</span>{t("Rules you set or approve go in MY-RULES.md, loaded with your user-level instructions. Learned ones wait here until you decide.")}</p>
++              <p className="text-sm text-muted-foreground"><span className="hidden sm:inline">{t('How you like to work, as if-then rules.')}{' '}</span>{/* Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file; its agents get the rules as a session starts (#1083). */}{t("Rules that are on go to Claude Code, Codex and Grok with the context oboete gives each session; a repository’s rules, only its sessions. Learned ones wait here until you decide.")}</p>
+             </div>
+           </Req>
+           <div className="flex flex-wrap items-center gap-2">
+@@ -835,7 +865,7 @@ export function MyRules() {
+         </div>
+ 
+         {saveError && <p role="alert" className="border-l-2 border-attention-border py-1 pl-3 text-xs text-attention-foreground">{saveError}</p>}
+-        {lastChange && (
++        {SAVES && lastChange && (
+           <Req ids={['R13.7', 'D7']}>
+             <div role="status" className="space-y-1 border-l-2 border-shipped-border py-1 pl-3 text-xs">
+               <p className="flex items-start gap-1.5 font-medium text-shipped-foreground"><CheckIcon className="mt-px size-3.5 shrink-0" />{renderRuleReceipt(lastChange)}.</p>
+@@ -863,11 +893,12 @@ export function MyRules() {
+ 
+           <aside className="space-y-6 lg:sticky lg:top-20 lg:self-start">
+             <div className="hidden lg:block"><ScopeNav countsByScope={countsByScope} waiting={waiting} /></div>
+-            <AgentFile rules={rules} changed={changed} open={fileOpen} onOpenChange={setFileOpen} />
+-            <div className="space-y-6 rounded-xl border bg-card p-4 shadow-panel">
++            {/* Modified by oboete (ui/work-view/patches/0008-my-rules-read.patch): oboete writes no rules file, and these pages save no rule yet (#1083). */}
++            {false && <AgentFile rules={rules} changed={changed} open={fileOpen} onOpenChange={setFileOpen} />}
++            {false && <div className="space-y-6 rounded-xl border bg-card p-4 shadow-panel">
+               <WhereEditsGo />
+               <LearningRun />
+-            </div>
++            </div>}
+           </aside>
+         </div>
+ 

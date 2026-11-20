@@ -321,3 +321,33 @@ test("a carried conversation's subagents read as agents of their own, and leave 
   assert.equal(request.agentId, parent.id)
   assert.deepEqual(request.conversations.map((c) => c.title), ['Fix the parser.'])
 })
+
+const ruled = JSON.parse(readFileSync(new URL('./ruled.json', import.meta.url), 'utf8'))
+const ruledModel = toWorkModel(ruled, Number(ruled.revision))
+
+// The home of work_view::tests::ruled (#1083, R1): suggestion s1 waiting, s2 approved for every
+// repository, s3 rejected (not sent); a rule the owner wrote for every repository, turned off; and one
+// for the repository proj.
+test("My Rules reads oboete's rules: who set each, its state, its source and its scope", () => {
+  assert.equal(ruledModel.rulesReadError, null)
+  const rules = ruledModel.rules
+  assert.equal(rules.length, 4)
+  const by = (then) => {
+    const rule = rules.find((r) => r.then === then)
+    assert.ok(rule, then)
+    return rule
+  }
+  const waiting = by('Keep commits small.')
+  assert.deepEqual([waiting.setBy, waiting.status, waiting.source, waiting.scopeId], ['learned', 'suggested', 'request-progress', 'everywhere'])
+  assert.equal(waiting.quotes.length, 1)
+  const approved = by('Run the tests before a push.')
+  assert.deepEqual([approved.setBy, approved.status, approved.source], ['approved', 'on', 'request-progress'])
+  const off = by('Answer in Japanese.')
+  assert.deepEqual([off.setBy, off.status, off.source], ['owner', 'off', 'you'])
+  const theirs = by('Write the changelog.')
+  const scope = ruledModel.ruleScopes.find((s) => s.id === theirs.scopeId)
+  assert.deepEqual([scope.tier, scope.name], ['project', 'proj'])
+  assert.equal(ruledModel.ruleScopes[0].id, 'everywhere')
+  assert.ok(rules.every((r) => r.when === ''))
+  assert.equal(ruledModel.rulesFile, null)
+})

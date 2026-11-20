@@ -1,8 +1,8 @@
 //! claude-mem 15.19.0's work-view snapshot (decision 114, docs/page.md): the answer of
 //! `GET /api/work-view`, which the vendored pages read in claude-mem's legacy mode
-//! (`ui/work-view/`). It is made from oboete's My Work and goals answers as their readers give
-//! them, each text gated at its source, and the Build story's kept texts (`read`), and reads
-//! nothing else: each text in it is one of theirs or a word of this file's. It goes through the
+//! (`ui/work-view/`). It is made from oboete's My Work, goals and My Rules answers as their
+//! readers give them, each text gated at its source, and the Build story's kept texts (`read`), and
+//! reads nothing else: each text in it is one of theirs or a word of this file's. It goes through the
 //! gate in one walk as it leaves (`leaving`, #1089). The names follow claude-mem's `live/work-view-api-types.ts`. The contract test runs
 //! claude-mem's own mapper, `live/to-work-model.ts`, over the answer of a synthetic home
 //! (`ui/work-view/contract/`).
@@ -166,8 +166,9 @@ where
         "agents": agents, "humanRequests": requests, "unlinkedWork": vec![json!({}); unlinked],
         "focusAreas": areas, "goals": goals_list(work, goals, now, tz),
         "goalHistory": history(goals, now, tz),
-        "ruleScopes": [{"id": "everywhere", "tier": "everywhere", "name": "Everywhere"}],
-        "rules": [], "story": build_story(&work["story"], gate), "refresh": null,
+        "ruleScopes": work["myRules"].get("ruleScopes").cloned().unwrap_or_else(|| json!([everywhere()])),
+        "rules": work["myRules"].get("rules").cloned().unwrap_or_else(|| json!([])),
+        "story": build_story(&work["story"], gate), "refresh": null,
         // oboete has no cloud sync: a valid "unconfigured" block (`sync-presentation.ts:23-36`)
         // shows "Cloud sync off" where a missing one shows "Cloud freshness unknown".
         "sync": {"configured": false, "state": "unconfigured", "mode": "disabled",
@@ -181,7 +182,8 @@ where
 }
 
 /// What the snapshot is made of, read as `GET /api/work-view` reads it, in the readers' hold
-/// (#1089): My Work's requests of the last 7 days and the goals as their readers give them, each
+/// (#1089): My Work's requests of the last 7 days, the goals and My Rules (#1083) as their readers
+/// give them, each
 /// text gated at its source and none of their keys, so that the counts, days and times the pages
 /// need are read by the keys this file names whatever a rule finds in a key; and the Build story's
 /// texts as they were kept (`build_story` gates the story it makes of them). Both gate their texts
@@ -194,9 +196,117 @@ pub(crate) fn read(
     // The work-view shows no deliverables yet: their links are not made.
     let tag = |_: &crate::deliverables::Row| anyhow::Ok(String::new());
     let week = crate::my_work::Range::Week;
-    let work = crate::my_work::listed_kept(home, week, now, &tag, rules)?;
+    let mut work = crate::my_work::listed_kept(home, week, now, &tag, rules)?;
     let goals = crate::my_work_goals::page_with(home, now, rules)?;
+    work["myRules"] = my_rules(home, &crate::my_work_rules::page_with(home, now, rules)?)?;
     Ok((work, goals))
+}
+
+/// My Rules' scope of every repository.
+fn everywhere() -> Value {
+    json!({"id": "everywhere", "tier": "everywhere", "name": "Everywhere"})
+}
+
+/// #1083 (R1): My Rules as claude-mem's pages read it (`WorkViewRule`, `work-view-api-types.ts`),
+/// from `my_work_rules::page`'s answer, its texts gated already: the suggestions waiting, and the
+/// owner's rules, an approved one by its suggestion; the scopes, Everywhere and each repository a
+/// rule is for, one per repository. Each rule and scope goes by the whole keyed hash of its key
+/// (`l:` a learned suggestion's id, `u:` the uid of a rule the owner wrote, `r:` a repository's
+/// key), the same in every read whatever else is read with it, so no key, uid or suggestion id
+/// leaves and no two share an id. The rejected and removed suggestions wait for the writes that
+/// bring their Undo (#1083's R2).
+fn my_rules(home: &Path, page: &Value) -> anyhow::Result<Value> {
+    let mut key: Option<Vec<u8>> = None;
+    let waiting = arr(&page["waiting"]);
+    let yours = arr(&page["yours"]);
+    let from = |r: &Value| r["suggestion"].as_str().map(str::to_owned);
+    let suggestions: Vec<String> = (waiting.iter().filter_map(|c| c["id"].as_str()))
+        .map(str::to_owned)
+        .chain(yours.iter().flat_map(|g| arr(&g["rules"])).filter_map(from))
+        .collect();
+    let uids: Vec<String> = (yours.iter().flat_map(|g| arr(&g["rules"])))
+        .filter(|r| from(r).is_none())
+        .filter_map(|r| r["uid"].as_str().map(str::to_owned))
+        .collect();
+    let mut repos: Vec<(String, Value)> = Vec::new();
+    // The repositories a rule is for: the ones a rule can be made for wait for the editor (R2).
+    for g in yours.iter().filter(|g| g["scope"] == "repo") {
+        if let Some(repo) = g["repo"].as_str()
+            && !repos.iter().any(|(r, _)| r == repo)
+        {
+            repos.push((repo.to_owned(), g["name"].clone()));
+        }
+    }
+    let keys: Vec<String> = repos.iter().map(|(r, _)| r.clone()).collect();
+    let mut prints = |kind: &str, keys: &[String]| -> anyhow::Result<HashMap<String, String>> {
+        let mut out = HashMap::new();
+        for k in keys {
+            let held = format!("rule\u{0}{kind}\u{0}{k}");
+            out.insert(k.clone(), crate::my_work::keyed(&held, home, &mut key)?);
+        }
+        Ok(out)
+    };
+    let sg = prints("suggestion", &suggestions)?;
+    let up = prints("claim", &uids)?;
+    let rp = prints("repo", &keys)?;
+    let mut scopes = vec![everywhere()];
+    for (repo, name) in &repos {
+        scopes.push(json!({"id": format!("r:{}", rp[repo]), "tier": "project", "name": name}));
+    }
+    let quoted = |c: &Value| -> (Vec<Value>, Option<i64>) {
+        let quotes = arr(&c["quotes"]);
+        let newest = (quotes.iter().filter_map(|q| q["at"].as_i64()))
+            .filter(|&at| at > 0)
+            .max();
+        let quotes = (quotes.iter())
+            .map(|q| {
+                let at = q["at"]
+                    .as_i64()
+                    .filter(|&at| at > 0)
+                    .map_or(Value::Null, iso);
+                json!({"at": at, "quote": q["text"], "kind": "correction"})
+            })
+            .collect();
+        (quotes, newest)
+    };
+    let mut rules = Vec::new();
+    for c in waiting {
+        let (quotes, newest) = quoted(c);
+        let Some(id) = c["id"].as_str() else { continue };
+        rules.push(
+            json!({"ruleId": format!("l:{}", sg[id]), "scopeId": "everywhere",
+            "scopeTier": "everywhere", "scopeName": "Everywhere", "when": "",
+            "then": c["statement"], "setBy": "learned", "status": "suggested",
+            "kind": "preference", "source": "request-progress", "timesSeen": c["seen"],
+            "latestAt": newest.map_or(Value::Null, iso), "quotes": quotes,
+            "replacedBy": null, "replacedAt": null, "savedAt": null}),
+        );
+    }
+    for g in yours {
+        let (scope, tier, scope_name) = match g["repo"].as_str() {
+            Some(repo) if g["scope"] == "repo" => {
+                (format!("r:{}", rp[repo]), "project", g["name"].clone())
+            }
+            _ => ("everywhere".to_owned(), "everywhere", json!("Everywhere")),
+        };
+        for r in arr(&g["rules"]) {
+            let (quotes, newest) = quoted(r);
+            let since = r["since"].as_i64();
+            let (id, set_by, source) = match (from(r), r["uid"].as_str()) {
+                (Some(s), _) => (format!("l:{}", sg[&s]), "approved", "request-progress"),
+                (None, Some(uid)) => (format!("u:{}", up[uid]), "owner", "you"),
+                (None, None) => continue,
+            };
+            rules.push(json!({"ruleId": id, "scopeId": scope, "scopeTier": tier,
+                "scopeName": scope_name, "when": "", "then": r["text"], "setBy": set_by,
+                "status": if r["on"] == true { "on" } else { "off" }, "kind": "preference",
+                "source": source, "timesSeen": r["seen"].as_u64().unwrap_or(1),
+                "latestAt": newest.or(since).map_or(Value::Null, iso), "quotes": quotes,
+                "replacedBy": null, "replacedAt": null,
+                "savedAt": since.map_or(Value::Null, iso)}));
+        }
+    }
+    Ok(json!({"rules": rules, "ruleScopes": scopes}))
 }
 
 /// The snapshot of a home with no store yet.
@@ -385,6 +495,15 @@ const OWN: &[&str] = &[
     "periodEnd",
     "writtenAt",
     "finishedAt",
+    // My Rules' (#1083): a rule's and a scope's references, and the fields oboete writes itself.
+    "ruleId",
+    "scopeId",
+    "replacedBy",
+    "setBy",
+    "scopeTier",
+    "when",
+    "savedAt",
+    "replacedAt",
 ];
 
 /// `v` with each string under a key not in `OWN` through the gate as it is sent (#1089), and no

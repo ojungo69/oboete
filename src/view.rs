@@ -3280,7 +3280,7 @@ impl Viewer {
             }
             // Decision 114 (docs/page.md, "claude-mem's My Work pages"): claude-mem's work-view, made
             // from the two answers above as their readers give them, the requests of the last 7
-            // days, and the Build story's kept texts (`work_view::read`). Each text in it is one of
+            // days, My Rules' (#1083), and the Build story's kept texts (`work_view::read`). Each text in it is one of
             // theirs, gated at its source, and the snapshot goes through the gate in one walk as it
             // leaves (#1089), in one readers' hold (`work_view_snapshot`). The goals' read and the
             // story's take no hold of their own, so that one is theirs; My Work's read takes one
