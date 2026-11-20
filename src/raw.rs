@@ -1662,11 +1662,6 @@ pub(crate) fn max_seq_in(conn: &Connection, device: &str) -> Result<i64> {
     )?)
 }
 
-/// `device`'s newest op of a kind an owner's answer reads (J4, W3b-1): every kind but those
-/// curation writes all day, which move no conversation between requests, so that curation running
-/// does not refuse the answers (on this PC's store, 2026-11-20: 174 of a day's 3,951 appends hold
-/// an op of the kinds it reads; a check of 2 s meets one 0.39% of the time, and any op 9.1%). Read
-/// newest first, through the key, to the first (0.02 ms there).
 /// `Raw::expired_rows` on `conn`.
 fn expired_rows_in(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row(
@@ -1676,6 +1671,11 @@ fn expired_rows_in(conn: &Connection) -> Result<i64> {
     )?)
 }
 
+/// `device`'s newest op of a kind an owner's answer reads (J4, W3b-1): every kind but those
+/// curation writes all day, which move no conversation between requests, so that curation running
+/// does not refuse the answers (on this PC's store, 2026-11-20: 174 of a day's 3,951 appends hold
+/// an op of the kinds it reads; a check of 2 s meets one 0.39% of the time, and any op 9.1%). Read
+/// newest first, through the key, to the first (0.02 ms there).
 pub(crate) fn answer_top_in(conn: &Connection, device: &str) -> Result<i64> {
     use rusqlite::OptionalExtension;
     Ok(conn
@@ -6897,11 +6897,21 @@ impl Raw {
     /// This device's newest record (W3b-2b: what J4's check read, past which its append looks for a
     /// work state write's call).
     pub fn record_top(&self) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
-            [&self.device],
-            |r| r.get(0),
-        )?)
+        max_seq_in(&self.conn, &self.device)
+    }
+
+    /// This device's tool records past `seq`, each by its time and seq, in time order (W3b-2c: the
+    /// ones the record index has not taken yet, which My Work's attribution reads beside it).
+    pub(crate) fn tool_records_after(&self, seq: i64) -> Result<Vec<(i64, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT ts, seq FROM records
+             WHERE device = ?1 AND seq > ?2 AND type = 'event' AND kind = 'tool'",
+        )?;
+        let mut out: Vec<(i64, i64)> = st
+            .query_map(params![self.device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        out.sort_unstable();
+        Ok(out)
     }
 
     /// The rows retention has made expired on this raw.db (`expire_owed`; W3b-2b): none counted

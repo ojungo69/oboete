@@ -605,18 +605,20 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
     if !in_its_own(c) || group.members != placement {
         return Err(changed());
     }
-    // W3b-2: the descriptor's binding is the posted one. A Not this whose pick is in no group now
-    // (a grouping that left it out since the card was read) is bound by the request the card named,
-    // which the binding proves, as Not this places nothing there; a Join needs the request the pick
-    // is in.
+    // W3b-2: the descriptor's binding is the posted one. With the pick in no group now (a grouping
+    // that left it out since the card was read), the binding is checked with the request the card
+    // named, which it proves: another suggestion is `suggestion_changed`, and of the card's own, a
+    // Not this is taken, as it places nothing there, and a Join, which needs the request the pick
+    // is in, is `suggestion_target_gone`.
     let target = groups.of.get(picked);
     let mut mask = None;
-    let named = match (target, join) {
-        (Some(target), _) => {
+    let named = match target {
+        Some(target) => {
             crate::my_work::shown_group(target, home, &mut mask).map_err(|_| unavailable())?
         }
-        (None, false) => posted.target.clone().ok_or_else(changed)?,
-        (None, true) => return Err(gone()),
+        // W3b-2c (CodeRabbit on #1116): the card's own suggestion first, then its target; a Join
+        // to it is refused below.
+        None => posted.target.clone().ok_or_else(changed)?,
     };
     let now = crate::my_work::binding((&held, picked, &named), &placement, home, &mut mask)
         .map_err(|_| unavailable())?;

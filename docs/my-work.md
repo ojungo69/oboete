@@ -276,8 +276,11 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   `oboete.…`) sent the same repository, list and fields within 5 s, when exactly one did; an item
   is the work of its newest write that links, as claude-mem credits it. The calls are found by
   time through `raw_docs_tools`, a new index the fts consumer makes in knowledge.db, as it makes
-  `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it); before the worker
-  has made it, nothing links. An item no call ties to a session may be an excluded session's
+  `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it), and (W3b-2c,
+  #1114) among this device's tool records the index has not taken yet: those past the fts
+  consumer's checkpoint, read once for a read of My Work before the index is (a record indexed
+  between the two reads is found once), with no cutoff; before the worker has made the index,
+  nothing links. An item no call ties to a session may be an excluded session's
   write in a shown repository (capture refuses that session's later tool calls), so while a
   session is excluded it is neither shown nor counted, in every repository, and before the index
   no work is (Codex on #574). An item shows what each of its writes left, and a task the state of
