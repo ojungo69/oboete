@@ -295,8 +295,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   rules with no control that writes one (below); a quote's source record is named as a prompt a review quoted, dated by
   that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
-  such file, and gives the rules that are on to Claude Code, Codex and Grok as a session starts, a
-  repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
+  such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each
+  session (where `[inject]` gives one), a repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
   whole days in what the pages compare to tell new work from the work on screen, so the same
   snapshot mapped a minute later is the work on screen, and a save in flight keeps its answer. A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
