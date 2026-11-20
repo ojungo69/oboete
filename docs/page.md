@@ -297,14 +297,16 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
   such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each
   session (where `[inject]` gives one), a repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
-  whole days in the content the pages compare to decide whether a mapping is sent to the screens
-  again (0008). Whether a model the screens are shown is newer work, which a save or a read in flight
-  then gives way to, goes by the content of the snapshot it was mapped from (0009, #1124), without
-  what each read stamps on it (its times, its revision, each goals list's `updatedAt`) or what a
-  save adds to its answer: the minute's mapping of the snapshot on screen, and a poll of the same
-  content, are shown with their clock-made labels moved and are no newer work, so a save or a read
-  in flight keeps its answer when a rule's age passes a whole day or the date passes midnight, and a
-  read in flight is not set aside by a poll of the work on screen. A request with a judge's open grouping suggestion carries
+  whole days in the mapped content the pages compare to decide whether a mapping is sent to the
+  screens again (0008). Whether a model the screens are shown is newer work, which a save or a read in
+  flight then gives way to, goes by the content of the snapshot it was mapped from (0009, #1124),
+  without what each read stamps on it (its times, its revision, each goals list's `updatedAt`) or
+  what a save adds to its answer: the minute's mapping of the snapshot on screen, and a poll of the
+  same content, are shown with their clock-made labels moved and are no newer work, so a save or a
+  read in flight keeps its answer when a rule's age passes a whole day or the date passes midnight.
+  A read's answer is ordered against the snapshots accepted while it waited by when the worker read
+  each, the snapshot's `revision` (unix ms): one read after them stands, one read before them gives
+  way, as a poll of the work on screen can be the newer (an Undo puts back what a check changed). A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after

@@ -160,6 +160,8 @@ where
     let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
     // The pages count unlinked work and read nothing of it.
     let unlinked = usize::try_from(work["unlinked"].as_u64().unwrap_or(0)).unwrap_or(0);
+    // `revision` is the time of this read, unix ms: the pages order a read's answer against the
+    // snapshots they took meanwhile by it (patch 0009, #1124).
     let snapshot = json!({
         "version": 1, "generatedAt": iso(now), "revision": now.to_string(),
         "source": {"kind": "oboete", "connected": true, "error": null, "lastCheckedAt": iso(now)},
