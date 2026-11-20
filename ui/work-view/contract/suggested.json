@@ -1,0 +1,156 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-20T01:33:43.899Z",
+  "revision": "1795138423899",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-20T01:33:43.899Z"
+  },
+  "agents": [
+    {
+      "id": "claude:c:claude:s2",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "The parser drops a trailing comma.",
+      "project": "r",
+      "contentSessionId": "c:claude:s2"
+    },
+    {
+      "id": "claude:c:claude:s1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Parser",
+      "project": "r",
+      "contentSessionId": "c:claude:s1"
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "g:5dd173c06c3e",
+      "contentFingerprint": "b75c7390b1c87a28bbc1a440457c497a113d95fc179578b469c88be6ff0f024b",
+      "title": "The parser drops a trailing comma.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "The parser drops a trailing comma.",
+        "summary": "The parser drops a trailing comma.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "The parser drops a trailing comma.",
+        "atEpoch": 1795137883784
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "claude:c:claude:s2"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s2\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795137883784,
+      "updatedAtEpoch": 1795137883784,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null,
+      "suggestion": {
+        "conversationKey": "g:5dd173c06c3e",
+        "requestId": "g:7e1cf1048ce6",
+        "requestTitle": "Parser",
+        "evidence": "",
+        "expectedSuggestionHash": "987bacc2f2f52e877322c2f05bc2cfd9733dc6b64fa18da46ee847d71bfa0d9c"
+      }
+    },
+    {
+      "id": "g:7e1cf1048ce6",
+      "contentFingerprint": "2f8efada7e4f8395a1d8e6ed2b7486f4257b7aafc3125753b867285f5826f5b7",
+      "title": "Parser",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Parser",
+        "summary": "Build the parser.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Build the parser.",
+        "atEpoch": 1795137823784
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "claude:c:claude:s1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795137823784,
+      "updatedAtEpoch": 1795137823784,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [],
+  "goals": null,
+  "goalHistory": [],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    }
+  ],
+  "rules": [],
+  "story": null,
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1795138423899,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}

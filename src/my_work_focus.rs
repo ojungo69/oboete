@@ -574,16 +574,21 @@ pub(crate) struct Checked {
 }
 
 /// `held_of` with what J4 checks an answer against, from the same read, through the stores given
-/// (W3b-2).
+/// (W3b-2), the request named by its shown id or (W3b-3) by its held id.
 pub(crate) fn held_in(
     stores: (&crate::raw::Raw, &rusqlite::Connection),
     home: &Path,
-    shown: &str,
+    carrier: &crate::my_work_judge::Carrier,
 ) -> Result<Option<Checked>> {
+    use crate::my_work_judge::Carrier;
     let (answer, held) = crate::my_work::reviewing_on(stores, home, crate::db::now_ms())?;
     let answer = crate::view::answered("my-work", answer);
     let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
-    let Some(i) = requests.iter().position(|r| r["id"] == shown) else {
+    let found = match carrier {
+        Carrier::Shown(shown) => requests.iter().position(|r| r["id"] == shown.as_str()),
+        Carrier::Held(id) => held.iter().position(|h| h.id() == id),
+    };
+    let Some(i) = found else {
         return Ok(None);
     };
     Ok(Some(Checked {

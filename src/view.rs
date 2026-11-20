@@ -91,6 +91,8 @@ struct Viewer {
     token: Token,
     /// Settings saves, one at a time.
     saving: Mutex<()>,
+    /// The work-view's writes waiting for `saving` (W3b-3), `my_work::WAITERS` at most.
+    saving_waiters: AtomicUsize,
     /// A port saved and the listener moved onto it, one at a time, a page's new token's too: the
     /// moves take effect in the order their ports were written (Codex on W6).
     moving: Mutex<()>,
@@ -1327,6 +1329,32 @@ fn work_view_refresh_answer(answer: &Value) -> Response {
     work_view_refused(409, state, &error)
 }
 
+/// The snapshot a write's answer on the work-view's origin carries (`Viewer::carried`).
+enum Carried {
+    /// Read, and the request's token still the work-view's.
+    Read(Value),
+    /// Not read, which the viewer's log says.
+    Unread,
+    /// The request's token was replaced while the write ran or the snapshot was read: none goes.
+    Replaced,
+}
+
+/// The sentence the work-view's pages show for an answer to a suggestion refused with `code`
+/// (W3b-3), after "The suggestion decision was not saved:".
+fn suggestion_refused(code: &str) -> &'static str {
+    match code {
+        "suggestion_not_found" => "This suggestion was already answered or is gone.",
+        "suggestion_changed" => {
+            "This suggestion changed while you were reading. Read it again before answering."
+        }
+        "suggestion_target_gone" => "The request it pointed to is gone.",
+        "my_work_pending" => "My Work is still saving an earlier change. Try again in a moment.",
+        "my_work_unavailable" => "My Work cannot be read just now. Try again in a moment.",
+        "ambiguous" => "oboete cannot tell this request from another one, so nothing was saved.",
+        _ => "oboete could not answer. Try again later.",
+    }
+}
+
 /// A refusal on the work-view's origin (decision 117): the sentence its pages show, with the code
 /// and field oboete's page's refusals carry (`refused`).
 fn work_view_refused(status: u16, code: &str, error: &str) -> Response {
@@ -1356,6 +1384,7 @@ impl Viewer {
             next: Mutex::new(None),
             token,
             saving: Mutex::new(()),
+            saving_waiters: AtomicUsize::new(0),
             moving: Mutex::new(()),
             recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
@@ -1727,7 +1756,12 @@ impl Viewer {
         let (cap, save): (usize, Save) = match (method, target) {
             // Decision 117: the work-view's writes, each taken on its origin alone (`save_gate`).
             ("POST", "/api/work-view/refresh") => (MAX_BODY, |v, b, _| v.work_view_refresh(b)),
-            ("POST", "/api/work-view/review") => (MAX_REVIEW_BODY, |v, b, _| v.work_view_review(b)),
+            ("POST", "/api/work-view/review") => {
+                (MAX_REVIEW_BODY, |v, b, given| v.work_view_review(b, given))
+            }
+            ("POST", "/api/work-view/suggestions") => (MAX_REVIEW_BODY, |v, b, given| {
+                v.work_view_suggestion(b, given)
+            }),
             ("POST", "/api/doctor") => (MAX_BODY, |v, b, _| v.doctor(b)),
             ("POST", "/api/settings") => (MAX_BODY, Self::save),
             ("POST", "/api/settings/recovery/preview") => {
@@ -2414,8 +2448,9 @@ impl Viewer {
     /// goes by with 404. The answer is the snapshot after the write, read once the reviews' lock is
     /// let go, as a purge holds the readers' hold while it waits for that lock; a check saved whose
     /// snapshot does not read is answered 200 with its receipt alone, which the pages tell as
-    /// saved, to be read again.
-    fn work_view_review(&self, body: &[u8]) -> Response {
+    /// saved, to be read again. The snapshot goes only while the request's token is still the
+    /// work-view's (`carried`, W3b-3).
+    fn work_view_review(&self, body: &[u8], given: &str) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
         struct Posted {
@@ -2466,23 +2501,158 @@ impl Viewer {
                 if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
                     hook();
                 }
-                match self.snapshot_after_check() {
-                    Some(snapshot) => Response::json(&snapshot),
+                match self.carried(given) {
+                    Carried::Read(snapshot) => Response::json(&snapshot),
                     // claude-mem's receipt (`readSaveReceipt`): the pages tell it as saved.
-                    None => Response::json(&json!({"save": {"scope": "local", "state": "saved"}})),
+                    Carried::Unread | Carried::Replaced => {
+                        Response::json(&json!({"save": {"scope": "local", "state": "saved"}}))
+                    }
                 }
             }
             Ok(Some((404, code, error))) => work_view_refused(404, code, error),
-            Ok(Some((status, code, error))) => {
-                let mut refusal = json!({"error": error, "code": code, "field": ""});
-                if let Some(snapshot) = self.snapshot_after_check() {
-                    refusal["snapshot"] = snapshot;
-                }
-                let body = serde_json::to_vec(&refusal).unwrap_or_default();
-                Response::new(status, "application/json", body)
-            }
+            Ok(Some((status, code, error))) => self.refusal_carrying(given, status, code, error),
             Err(e) => work_view_failed(&e),
         }
+    }
+
+    /// A judge's suggestion answered on the work-view's pages, Join or Not this (decision 117,
+    /// W3b-3): `{conversationKey, action, expectedSuggestionHash}` as the pages post it
+    /// (`answerRequestSuggestion`). The request is the one the snapshot shows by
+    /// `conversationKey` (`work_view::named`), answered by J4's check and write with the
+    /// work-view's token (`my_work_judge::settle`), which posts no target: a suggestion whose pick
+    /// left every request is `suggestion_changed` here for either action. `saving` is waited for as
+    /// the reviews' lock is (`saving_within`) and let go before the snapshot after the answer is
+    /// read, which goes only while the request's token is still the work-view's (`carried`).
+    fn work_view_suggestion(&self, body: &[u8], given: &str) -> Response {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Posted {
+            conversation_key: String,
+            action: String,
+            expected_suggestion_hash: String,
+        }
+        let unread = || {
+            work_view_refused(
+                400,
+                "bad_request",
+                "The answer could not be read. Reload the page.",
+            )
+        };
+        let Ok(posted) = serde_json::from_slice::<Posted>(body) else {
+            return unread();
+        };
+        let join = match posted.action.as_str() {
+            "join" => true,
+            "not-this" => false,
+            _ => return unread(),
+        };
+        if posted.conversation_key.is_empty()
+            || !crate::my_work_judge::bound(&posted.expected_suggestion_hash)
+        {
+            return unread();
+        }
+        let now = crate::db::now_ms();
+        let held = match crate::work_view::named(&self.home, now, &posted.conversation_key) {
+            Ok(crate::work_view::Named::One(_, i, held)) => held[i].id().to_owned(),
+            Ok(crate::work_view::Named::Gone) => {
+                let code = "suggestion_not_found";
+                return self.refusal_carrying(given, 404, code, suggestion_refused(code));
+            }
+            Ok(crate::work_view::Named::Shared) => {
+                let code = "ambiguous";
+                return self.refusal_carrying(given, 409, code, suggestion_refused(code));
+            }
+            Err(e) => return work_view_failed(&e),
+        };
+        let wait = crate::db::OPEN_WRITE_WAIT;
+        #[cfg(test)]
+        let wait = SAVING_WAIT.with(std::cell::Cell::get).unwrap_or(wait);
+        let Some(saving) = self.saving_within(wait) else {
+            return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+        };
+        let answer = crate::my_work_judge::Answer {
+            carrier: crate::my_work_judge::Carrier::Held(held),
+            join,
+            binding: posted.expected_suggestion_hash,
+            target: None,
+        };
+        let authorized = || self.work_view_token_ok(Some(given));
+        let settled = crate::my_work_judge::settle(&self.home, saving, &answer, &authorized);
+        #[cfg(test)]
+        if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        match settled {
+            Ok(state) => {
+                let mut save = json!({"scope": "local", "state": "saved"});
+                if state["state"] != "applied" {
+                    save["localMaterialization"] = json!("pending");
+                }
+                match self.carried(given) {
+                    Carried::Read(mut snapshot) => {
+                        snapshot["save"] = save;
+                        Response::json(&snapshot)
+                    }
+                    Carried::Unread | Carried::Replaced => Response::json(&json!({"save": save})),
+                }
+            }
+            Err(r) if r.status == 401 => Response::text(401, "missing or wrong token"),
+            Err(r) => self.refusal_carrying(given, r.status, r.code, suggestion_refused(r.code)),
+        }
+    }
+
+    /// `saving` as the work-view's writes take it (W3b-3): waited for `wait` at most and by
+    /// `my_work::WAITERS` at most at once, none past either, so that a settings save holding it
+    /// keeps no more of the viewer's connections waiting than the reviews' lock does; a poisoned
+    /// one is taken, as `my_work_judge::act` takes it.
+    fn saving_within(&self, wait: Duration) -> Option<std::sync::MutexGuard<'_, ()>> {
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        if self.saving_waiters.fetch_add(1, Ordering::SeqCst) >= crate::my_work::WAITERS {
+            self.saving_waiters.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        let _waiting = Waiting(&self.saving_waiters);
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.saving.try_lock() {
+                Ok(held) => return Some(held),
+                Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(Duration::from_millis(20).min(left));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => return None,
+            }
+        }
+    }
+
+    /// The snapshot after a write on the work-view's origin, read once the write let go of its
+    /// locks, and the token the request brought asked again after it (W3b-3, round 2 of W3b's plan
+    /// review): its reading can outlast a new token, whose pages alone may read it.
+    fn carried(&self, given: &str) -> Carried {
+        let snapshot = self.snapshot_after_check();
+        if !self.work_view_token_ok(Some(given)) {
+            return Carried::Replaced;
+        }
+        snapshot.map_or(Carried::Unread, Carried::Read)
+    }
+
+    /// A refusal on the work-view's origin with the snapshot it was refused against, when that
+    /// reads, as claude-mem's are; 401 once the request's token was replaced (`carried`).
+    fn refusal_carrying(&self, given: &str, status: u16, code: &str, error: &str) -> Response {
+        let mut refusal = json!({"error": error, "code": code, "field": ""});
+        match self.carried(given) {
+            Carried::Replaced => return Response::text(401, "missing or wrong token"),
+            Carried::Read(snapshot) => refusal["snapshot"] = snapshot,
+            Carried::Unread => {}
+        }
+        let body = serde_json::to_vec(&refusal).unwrap_or_default();
+        Response::new(status, "application/json", body)
     }
 
     /// `work_view_review`'s part under the reviews' lock, from the read the check is tested against
@@ -2535,11 +2705,16 @@ impl Viewer {
     /// The snapshot a check's answer carries; none when it does not read, which the viewer's log
     /// says.
     fn snapshot_after_check(&self) -> Option<Value> {
-        (self.work_view_snapshot())
+        let snapshot = (self.work_view_snapshot())
             .map_err(|e| {
                 eprintln!("oboete: the work-view's snapshot after a check not read: {e:#}")
             })
-            .ok()
+            .ok();
+        #[cfg(test)]
+        if let Some(hook) = SNAPSHOT_READ.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        snapshot
     }
 
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
@@ -3273,6 +3448,14 @@ thread_local! {
     /// snapshot after it is read: a test's way to make that read fail.
     pub(crate) static CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// One-shot for this thread's next snapshot after a work-view write, run once it is read and
+    /// before the token is asked again: a test's way to replace the token while it is read.
+    pub(crate) static SNAPSHOT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The work-view's wait for `saving` on this thread in place of `OPEN_WRITE_WAIT` (W3b-3): a
+    /// test's way to see it run out.
+    pub(crate) static SAVING_WAIT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// `v` with every string through the outbound gate (spec 6.5), keys included.

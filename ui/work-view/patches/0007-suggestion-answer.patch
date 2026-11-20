@@ -1,0 +1,22 @@
+diff --git a/src/ui/my-work/src/components/request-detail.tsx b/src/ui/my-work/src/components/request-detail.tsx
+index 5a759a0eddc7c4f8edd43d69e258699e160531a6..ff1e82e27699bb61a1e417232ae4ae70e4da6cb5 100644
+--- a/src/ui/my-work/src/components/request-detail.tsx
++++ b/src/ui/my-work/src/components/request-detail.tsx
+@@ -172,6 +172,8 @@ function SuggestionAction({ request }: { request: Request }) {
+   const [notice, setNotice] = useState<CheckNotice | null>(null)
+   const suggestion = request.suggestion
+   if (!suggestion) return notice ? <p role="status" className="text-sm text-muted-foreground">{notice.message}</p> : null
++  // Modified by oboete (ui/work-view/patches/0007-suggestion-answer.patch): resolves false when the answer was not saved, so the
++  // button shows no check, as CheckAction's does; the notice line says why.
+   const save = async (action: 'join' | 'not-this') => {
+     setSaving(true)
+     try {
+@@ -186,7 +188,7 @@ function SuggestionAction({ request }: { request: Request }) {
+       setNotice({ tone: 'saved', message: `${action === 'join' ? 'Joined the request.' : 'Kept these requests separate.'} ${shared
+         ? result.save?.state === 'queued' ? 'Saved here; waiting to sync to your other viewers.' : 'Saved as a shared decision.'
+         : sourceKind === 'cloud' ? 'Saved in your cloud viewer only.' : 'Saved on this machine only.'}${localCopy}` })
+-    } catch (error) { setNotice({ tone: 'problem', message: error instanceof Error ? error.message : String(error) }) }
++    } catch (error) { setNotice({ tone: 'problem', message: error instanceof Error ? error.message : String(error) }); return false }
+     finally { setSaving(false) }
+   }
+   return <div className="space-y-2 rounded-xl border p-4 text-sm">

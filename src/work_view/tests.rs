@@ -230,6 +230,41 @@ fn home() -> (Store, i64) {
     (h, crate::db::now_ms())
 }
 
+/// A My Work op of `job` with `fields`, as grouping and the judge append theirs.
+fn my_work_op(h: &mut Store, job: &str, fields: Value) {
+    let op = MyWorkOp {
+        job: job.into(),
+        about: R.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
+/// A home of a judge's open suggestion (J4, W3b-3): `session`'s conversation may be part of the
+/// parser's request, s1's, which a grouping made a group of.
+fn suggested(session: &str) -> (Store, i64) {
+    let mut h = Store::new();
+    let t = crate::db::now_ms() - 10 * 60_000;
+    h.said("s1", R, t, "Build the parser.");
+    h.said(session, R, t + 60_000, "The parser drops a trailing comma.");
+    let parser = json!({"ignored": [], "groups": [{"conversations": [["claude", "s1"]],
+        "title": "Parser", "links": []}]});
+    let judged = json!({"conversation": ["claude", session], "outcome": "suggested",
+        "groups": [{"conversations": [["claude", session]], "title": null, "links": []}],
+        "suggestion": {"request": ["claude", "s1"], "score": 0.6}});
+    my_work_op(&mut h, "group", parser);
+    my_work_op(&mut h, "judge", judged);
+    h.run();
+    (h, crate::db::now_ms())
+}
+
 /// What the route reads (`read`): the two answers as their readers give them, and the story's kept texts.
 fn answers(h: &Store, now: i64) -> (Value, Value) {
     let rules = crate::redact::Rules::load(h.home.path()).unwrap();
@@ -840,6 +875,12 @@ fn hex(t: &str, n: usize) -> bool {
 /// months, the keyed fingerprints, the masks' prints and the references' (`refer`). What is left
 /// is what the answer says.
 fn steady(v: &Value) -> Value {
+    steady_with(v, &mut Vec::new())
+}
+
+/// `steady`, each group's print (`g:` and 12 hex digits, keyed by the home's key) written as its
+/// place among the groups seen first, so that the id a suggestion names stays its row's (W3b-3).
+fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
     match v {
         Value::Number(n) if n.as_i64().is_some_and(|n| n > 1_000_000_000_000) => json!("<ms>"),
         Value::String(s) => {
@@ -848,25 +889,36 @@ fn steady(v: &Value) -> Value {
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
             let reference = regex::Regex::new(r"\bm:[0-9a-f]{12}\b").unwrap();
+            let group = regex::Regex::new(r"\bg:[0-9a-f]{12}\b").unwrap();
             let s = iso.replace_all(s, "<iso>");
             let s = stamp.replace_all(&s, "<day>");
             let s = month.replace_all(&s, "<month>");
             let s = print.replace_all(&s, "#<print>");
-            json!(reference.replace_all(&s, "m:<print>"))
+            let s = reference.replace_all(&s, "m:<print>");
+            json!(group.replace_all(&s, |c: &regex::Captures| {
+                let seen = groups.iter().position(|g| *g == c[0]);
+                let at = seen.unwrap_or_else(|| {
+                    groups.push(c[0].to_owned());
+                    groups.len() - 1
+                });
+                format!("g:<{at}>")
+            }))
         }
-        Value::Array(a) => Value::Array(a.iter().map(steady).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(|v| steady_with(v, groups)).collect()),
         Value::Object(o) => Value::Object(
             (o.iter())
                 .map(|(k, v)| match (k.as_str(), v.as_str()) {
                     // A version's keyed hash and the snapshot's time, each in its own shape: an
                     // empty or malformed one stays as it is and differs.
-                    ("contentFingerprint", Some(t)) if hex(t, 64) => (k.clone(), json!("<kept>")),
+                    ("contentFingerprint" | "expectedSuggestionHash", Some(t)) if hex(t, 64) => {
+                        (k.clone(), json!("<kept>"))
+                    }
                     ("revision", Some(t))
                         if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) =>
                     {
                         (k.clone(), json!("<kept>"))
                     }
-                    _ => (k.clone(), steady(v)),
+                    _ => (k.clone(), steady_with(v, groups)),
                 })
                 .collect(),
         ),
@@ -1741,4 +1793,166 @@ fn a_checks_read_is_made_under_the_rules_it_is_given() {
         .expect("the codex conversation");
     assert!(codex["fingerprint"].is_string(), "{codex}");
     assert_eq!(held.len(), arr(&work["requests"]).len());
+}
+
+/// J4 on the work-view (W3b-3): a request with a judge's open suggestion carries claude-mem's,
+/// its own id and the id of the request it names as the snapshot gives them, that request's
+/// title, and My Work's binding, and nothing else of My Work's suggestion.
+#[test]
+fn a_judges_open_suggestion_goes_with_the_request_it_names() {
+    let (h, now) = suggested("s2");
+    let (work, goals) = answers(&h, now);
+    let mine: Vec<&Value> = (arr(&work["requests"]).iter())
+        .filter(|r| r.get("suggestion").is_some())
+        .collect();
+    assert_eq!(mine.len(), 1, "{work}");
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let with: Vec<&Value> = (arr(&snapshot["humanRequests"]).iter())
+        .filter(|r| r.get("suggestion").is_some())
+        .collect();
+    assert_eq!(with.len(), 1, "{snapshot}");
+    let parser = one(&snapshot["humanRequests"], "title", "Parser");
+    assert!(parser["id"].as_str().unwrap().starts_with("g:"), "{parser}");
+    assert_eq!(
+        with[0]["suggestion"],
+        json!({"conversationKey": with[0]["id"], "requestId": parser["id"],
+            "requestTitle": "Parser", "evidence": "",
+            "expectedSuggestionHash": mine[0]["suggestion"]["binding"]})
+    );
+}
+
+/// The request a suggestion names is the one row with its id and fingerprint (round 2 of W3b's
+/// plan review): none goes when two rows go by them, when none does, or when the one by its id
+/// has another fingerprint. A request with no title is named by its ask, else as untitled.
+#[test]
+fn a_suggestion_names_one_request_or_goes_with_none() {
+    let carrier = json!({"id": "c:claude:s2", "sessions": [{"agent": "claude",
+        "id": "c:claude:s2"}], "suggestion": {"id": "g:aaaaaaaaaaaa",
+        "fingerprint": "aaaaaaaaaaaa", "title": "Parser", "binding": "0".repeat(64)}});
+    let target = json!({"id": "g:aaaaaaaaaaaa", "fingerprint": "aaaaaaaaaaaa", "title": null,
+        "ask": {"text": "Build the parser."}, "sessions": []});
+    let named = |rows: &[&Value]| -> Value {
+        let work = json!({"requests": rows});
+        let snapshot = snapshot_at(&work, &json!({}), crate::db::now_ms(), &Utc, &Gate::now());
+        snapshot["humanRequests"][0]["suggestion"].clone()
+    };
+    let found = named(&[&carrier, &target]);
+    assert_eq!(found["requestId"], "g:aaaaaaaaaaaa");
+    assert_eq!(found["requestTitle"], "Build the parser.");
+    assert_eq!(
+        found["conversationKey"],
+        conversation_key("claude", "c:claude:s2")
+    );
+    assert!(named(&[&carrier, &target, &target]).is_null());
+    assert!(named(&[&carrier]).is_null());
+    let mut other = target.clone();
+    other["fingerprint"] = json!("bbbbbbbbbbbb");
+    assert!(named(&[&carrier, &other]).is_null());
+    let mut untitled = target.clone();
+    untitled["ask"]["text"] = json!(" ");
+    let found = named(&[&carrier, &untitled]);
+    assert_eq!(found["requestTitle"], crate::my_work_judge::UNTITLED);
+}
+
+/// A suggestion on a request whose conversation a rule masks (W3b-3): its own id and the id of the
+/// request it names go as the snapshot gives them, by their references, the stored id of the
+/// conversation is nowhere in it, the binding goes whole though the rule finds hex digits in it,
+/// and the route's resolver finds the request by the id the suggestion gives it.
+#[test]
+fn a_suggestion_on_a_masked_conversation_goes_by_its_references() {
+    let name = "work_view::tests::a_suggestion_on_a_masked_conversation_goes_by_its_references";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let session = "0123456789ab";
+    let (h, _) = suggested(session);
+    let home = h.home.path();
+    let rules = "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    crate::redact::set_home(home).unwrap();
+    let now = crate::db::now_ms();
+    let snapshot = answer(home, now).unwrap();
+    let text = snapshot.to_string();
+    assert!(!text.contains(session), "{text}");
+    let requests = arr(&snapshot["humanRequests"]);
+    let carrier = (requests.iter())
+        .find(|r| r.get("suggestion").is_some())
+        .expect("the suggestion");
+    let suggestion = &carrier["suggestion"];
+    assert_eq!(suggestion["conversationKey"], carrier["id"]);
+    assert!(
+        (requests.iter()).any(|r| r["id"] == suggestion["requestId"]),
+        "{snapshot}"
+    );
+    assert_eq!(suggestion["requestTitle"], "Parser");
+    let binding = suggestion["expectedSuggestionHash"].as_str().unwrap();
+    assert!(hex(binding, 64), "{binding}");
+    let key = suggestion["conversationKey"].as_str().unwrap();
+    assert!(matches!(named(home, now, key).unwrap(), Named::One(..)));
+}
+
+/// The contract of a judge's suggestion (W3b-3): `ui/work-view/contract/suggested.json` is the
+/// suggestion home's answer, which the Node test reads through claude-mem's mapper; written again
+/// as the other contract files are (OBOETE_CONTRACT_WRITE=1).
+#[test]
+fn the_contract_suggestion_is_a_suggestion_homes_answer() {
+    let (h, now) = suggested("s2");
+    let (work, goals) = answers(&h, now);
+    let fresh = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/suggested.json");
+    if std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
+        let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
+        std::fs::write(&path, text).unwrap();
+        return;
+    }
+    let kept: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        steady(&kept),
+        steady(&fresh),
+        "the contract suggestion is not this home's answer"
+    );
+}
+
+/// The suggestion's keys, which the walk leaves as they are (`OWN`), name nothing else in the
+/// contract's answers: each is a request's suggestion's (W3b-3).
+#[test]
+fn the_suggestions_keys_are_its_alone() {
+    const KEYS: [&str; 3] = ["conversationKey", "requestId", "expectedSuggestionHash"];
+    fn walk(v: &Value, path: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Array(a) => {
+                (a.iter().enumerate()).for_each(|(i, v)| walk(v, &format!("{path}/{i}"), out))
+            }
+            Value::Object(o) => {
+                for (k, v) in o {
+                    let at = format!("{path}/{k}");
+                    if KEYS.contains(&k.as_str()) {
+                        out.push(at.clone());
+                    }
+                    walk(v, &at, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let own = Regex::new(r"^/humanRequests/\d+/suggestion/[A-Za-z]+$").unwrap();
+    for (file, least) in [
+        ("snapshot.json", 0),
+        ("gated.json", 0),
+        ("suggested.json", 3),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui/work-view/contract")
+            .join(file);
+        let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut found = Vec::new();
+        walk(&v, "", &mut found);
+        assert!(found.len() >= least, "{file}: {found:?}");
+        for at in &found {
+            assert!(own.is_match(at), "{file}: {at}");
+        }
+    }
 }

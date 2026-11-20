@@ -2070,6 +2070,25 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   Focus does, and the page reads
   My Work again and says what was done; a Join from the request's page shows the request it
   joined, whose id stays.
+- **The work-view's drawer** (W3b-3, decision 117): `POST /api/work-view/suggestions` on the
+  work-view's origin, `{conversationKey, action, expectedSuggestionHash}` as claude-mem's drawer
+  posts it (`answerRequestSuggestion`). The snapshot gives a request with an open suggestion
+  claude-mem's `suggestion`: `conversationKey` the request's own id in the snapshot, `requestId`
+  the id of the request it names (the one row with its id and fingerprint, else no suggestion
+  goes), `requestTitle` that request's title (else its ask, else "Untitled request"), `evidence`
+  "", and `expectedSuggestionHash` its binding; nothing else of My Work's suggestion. The route
+  finds the request by `conversationKey` as the check's route does (`work_view::named`), and
+  answers it by J4's check and write (`my_work_judge::settle`), the request named by its held id.
+  It posts no target: a suggestion whose pick left every request is 409 `suggestion_changed` there
+  for either action (its snapshot shows none), where oboete's page closes it on Not this.
+  `saving` is waited for 10 s at most and by four at most (else 503 `busy`), and let go before the
+  snapshot after the answer is read. That snapshot goes with `save: {scope: "local", state:
+  "saved"}` (and `localMaterialization: "pending"` while the answer is not applied) only while the
+  request's token is still the work-view's: replaced, a recorded answer is answered with the
+  receipt alone and a refusal with 401, as the check's route is too. A refusal carries the
+  snapshot when it reads, and the sentence the drawer shows after "The suggestion decision was not
+  saved:". A refused answer shows no check on the drawer's button (`0007-suggestion-answer.patch`);
+  a Join that takes the request away takes the drawer's notice with it, as in claude-mem (#1114).
 - **The op**: one op of job `judge` by the owner (no entry), about the conversation's repository,
   that read nothing: fields `conversation`, `action` and `groups`. Join: the anchor of the request
   the pick is in now first (an op naming the picked anchor first would take it out of that
@@ -2192,6 +2211,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   7.6 hours of them, 608 longer than the answer's wait of 10 seconds): `my_work::senders` reads,
   beside the index, this device's tool records past the fts consumer's checkpoint (docs/my-work.md,
   "The link"). On this PC, sampled every 20 s for two hours, that tail held at most 10 records.
+  A call read through the tail and through the index reads alike, under the tombstones of the
+  moment (Codex on #1117, run in W3b-3): a new rule that finds a value in it leaves the write
+  attributed until the rescan masks the call, and then, through either, the call is no longer the
+  write's (#1114).
   Known limits (#1114): another device's ops and records are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.

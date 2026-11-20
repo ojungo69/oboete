@@ -2772,6 +2772,12 @@ fn the_work_views_writes_are_taken_on_their_own_origin_alone() {
     for (path, passed, code, cap) in [
         ("/api/work-view/refresh", 409, "off", MAX_BODY),
         ("/api/work-view/review", 400, "bad_request", MAX_REVIEW_BODY),
+        (
+            "/api/work-view/suggestions",
+            400,
+            "bad_request",
+            MAX_REVIEW_BODY,
+        ),
     ] {
         let answer = post(path, &[WV_HOST, token, origin, json_type, cl]);
         assert_eq!(
@@ -2832,7 +2838,11 @@ fn a_work_view_save_is_refused_when_its_token_is_replaced_before_its_body() {
     std::fs::create_dir_all(home.path().join("state")).unwrap();
     write_token(home.path()).unwrap();
     let v = Viewer::new(home.path(), None, 4321, Token::File);
-    for path in ["/api/work-view/refresh", "/api/work-view/review"] {
+    for path in [
+        "/api/work-view/refresh",
+        "/api/work-view/review",
+        "/api/work-view/suggestions",
+    ] {
         let made = work_view_token(&file_token(home.path()).unwrap());
         let headers = [
             WV_HOST,
@@ -9504,4 +9514,393 @@ fn a_check_hidden_by_an_exclusion_outlives_another_check() {
     s.run();
     let back = shown_by(&get_work_view(&v, "/api/work-view"), "r:rel").expect("shown again");
     assert_eq!(back["review"]["checked"], true, "{back}");
+}
+
+/// A My Work op of `job` with `fields`, as grouping and the judge append theirs.
+fn my_work_op(job: &str, fields: Value) -> (crate::raw::OpKind, Value) {
+    let op = crate::my_work_ops::MyWorkOp {
+        job: job.into(),
+        about: R.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: serde_json::from_value(fields).unwrap(),
+        skipped: false,
+        forgotten: None,
+    };
+    (
+        crate::raw::OpKind::MyWork,
+        serde_json::to_value(op).unwrap(),
+    )
+}
+
+/// J4 on the work-view (W3b-3): the judge's open suggestion that `session`'s conversation is part
+/// of s1's request, Parser (a group), and `others` in `session`'s own request; a ready request
+/// (`r:rel`) beside them; read by a viewer of `token`.
+fn suggestion_fixture(session: &str, others: &[&str], token: Token) -> (Store, Viewer) {
+    let mut s = Store::new();
+    std::fs::create_dir_all(s.home.path().join("state")).unwrap();
+    let v = Viewer::new(s.home.path(), Some(s.home.path().to_owned()), 4321, token);
+    let t = crate::db::now_ms() - 3_600_000;
+    s.said("s1", R, t, "Build the parser.");
+    s.said(
+        session,
+        R,
+        t + 300_000,
+        "The parser drops a trailing comma.",
+    );
+    let mut own = vec![json!(["claude", session])];
+    for (i, other) in others.iter().enumerate() {
+        // Eight days and more before: a conversation of the request that left the week.
+        let old = t - (8 * 24 + i64::try_from(i).unwrap()) * 3_600_000;
+        s.said(other, R, old, "An older look at the parser.");
+        own.push(json!(["claude", other]));
+    }
+    let parser = json!({"ignored": [],
+        "groups": [{"conversations": [["claude", "s1"]], "title": "Parser", "links": []}]});
+    let judged = json!({"conversation": ["claude", session], "outcome": "suggested",
+        "groups": [{"conversations": own, "title": null, "links": []}],
+        "suggestion": {"request": ["claude", "s1"], "score": 0.6}});
+    let ready = json!({"task": "rel", "request_id": "rel", "request": "Fix the release notes",
+        "status": "done", "request_status": "done"});
+    s.raw
+        .work_state(R, "plan", ready.as_object().unwrap(), None)
+        .unwrap();
+    s.raw
+        .append_ops(&[my_work_op("group", parser), my_work_op("judge", judged)])
+        .unwrap();
+    s.run();
+    (s, v)
+}
+
+/// The judge's ops `s`'s raw.db holds: the suggestion's, and an answer's for each answer recorded.
+fn judge_ops(s: &Store) -> i64 {
+    rusqlite::Connection::open(s.home.path().join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM ops WHERE type = 'my_work'
+               AND json_extract(body, '$.job') = 'judge'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// A write on the work-view's origin as its pages post it, with the token made from `token`.
+fn post_work_view(v: &Viewer, path: &str, token: &str, body: &[u8]) -> (u16, Value) {
+    let made = work_view_token(token);
+    let len = body.len().to_string();
+    let headers = [
+        WV_HOST,
+        ("X-Oboete-Token", made.as_str()),
+        ("Origin", "http://work-view.localhost:4321"),
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let answer = request(v, "POST", path, &headers, body);
+    assert_eq!(answer.headers, WORK_VIEW_HEADERS);
+    (
+        answer.status,
+        serde_json::from_slice(&answer.body).unwrap_or(Value::Null),
+    )
+}
+
+/// The work-view's snapshot as the viewer of `token` answers it.
+fn work_view_of(v: &Viewer, token: &str) -> Value {
+    let made = work_view_token(token);
+    json_of(&v.route(
+        "GET",
+        "/api/work-view",
+        &[WV_HOST, ("X-Oboete-Token", made.as_str())],
+    ))
+}
+
+/// The one request of `snapshot` with a suggestion, and the answer its drawer posts for `action`.
+fn suggestion_answer(snapshot: &Value, action: &str) -> (Value, Vec<u8>) {
+    let with: Vec<&Value> = (snapshot["humanRequests"].as_array().unwrap().iter())
+        .filter(|r| r.get("suggestion").is_some())
+        .collect();
+    assert_eq!(with.len(), 1, "{snapshot}");
+    let suggestion = &with[0]["suggestion"];
+    let body = json!({"conversationKey": suggestion["conversationKey"], "action": action,
+        "expectedSuggestionHash": suggestion["expectedSuggestionHash"]});
+    (with[0].clone(), serde_json::to_vec(&body).unwrap())
+}
+
+/// Decision 117, W3b-3: a Join on the work-view's drawer, as its pages post it, joins the request
+/// it showed to the one its suggestion named, by J4's check and write, and answers with the
+/// snapshot after it and claude-mem's receipt; the same answer again finds no suggestion (404,
+/// the snapshot with it) and records nothing. The request is one whose conversation left the
+/// week: the binding its snapshot gives is the one the check makes over every range.
+#[test]
+fn the_work_views_join_joins_the_request_its_drawer_showed() {
+    let (s, v) = suggestion_fixture("s2", &["s0"], Token::Run("t0k".into()));
+    let first = work_view_of(&v, "t0k");
+    let (carrier, body) = suggestion_answer(&first, "join");
+    let parser = shown_by(&first, carrier["suggestion"]["requestId"].as_str().unwrap()).unwrap();
+    assert_eq!(parser["title"], "Parser");
+    let before = judge_ops(&s);
+    let (status, answer) = post_work_view(&v, "/api/work-view/suggestions", "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    assert!(is_snapshot(&answer), "{answer}");
+    assert_eq!(answer["save"], json!({"scope": "local", "state": "saved"}));
+    assert_eq!(judge_ops(&s), before + 1);
+    let joined = shown_by(&answer, parser["id"].as_str().unwrap()).expect("the parser's request");
+    assert_eq!(
+        joined["conversationKeys"].as_array().unwrap().len(),
+        3,
+        "{joined}"
+    );
+    let open = (answer["humanRequests"].as_array().unwrap().iter())
+        .filter(|r| r.get("suggestion").is_some())
+        .count();
+    assert_eq!(open, 0, "{answer}");
+    let (status, again) = post_work_view(&v, "/api/work-view/suggestions", "t0k", &body);
+    assert_eq!(
+        (status, &again["code"]),
+        (404, &json!("suggestion_not_found"))
+    );
+    assert!(is_snapshot(&again["snapshot"]), "{again}");
+    assert_eq!(judge_ops(&s), before + 1);
+}
+
+/// A Not this on the work-view's drawer keeps the request it showed apart and closes the
+/// suggestion, the request's conversation a rule masks: the request goes by its reference, which
+/// the answer names it by, and the binding goes whole though the rule finds hex digits in it.
+#[test]
+fn the_work_views_not_this_keeps_the_request_apart_by_its_reference() {
+    let name = "view::tests::the_work_views_not_this_keeps_the_request_apart_by_its_reference";
+    if !in_child(name) {
+        return;
+    }
+    let session = "0123456789ab";
+    let (s, v) = suggestion_fixture(session, &[], Token::Run("t0k".into()));
+    let home = s.home.path();
+    let rules = "[redaction]\nextra_rules = [{ id = 'hex', regex = '[0-9a-f]{12}' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    redact::set_home(home).unwrap();
+    let first = work_view_of(&v, "t0k");
+    assert!(!first.to_string().contains(session), "{first}");
+    let (carrier, body) = suggestion_answer(&first, "not-this");
+    assert!(
+        carrier["id"].as_str().unwrap().starts_with("m:"),
+        "{carrier}"
+    );
+    let before = judge_ops(&s);
+    let (status, answer) = post_work_view(&v, "/api/work-view/suggestions", "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(judge_ops(&s), before + 1);
+    let apart = shown_by(&answer, carrier["id"].as_str().unwrap()).expect("its own request");
+    assert!(apart.get("suggestion").is_none(), "{apart}");
+    assert_eq!(apart["conversationKeys"].as_array().unwrap().len(), 1);
+    let named = carrier["suggestion"]["requestId"].as_str().unwrap();
+    let parser = shown_by(&answer, named).expect("the parser's request");
+    assert_eq!(parser["conversationKeys"].as_array().unwrap().len(), 1);
+}
+
+/// An answer the work-view cannot read is 400 with its sentence and no snapshot; one that names
+/// another suggestion (another binding) is 409 `suggestion_changed` for either action, and one
+/// whose request no request goes by 404, each with the snapshot; none records anything.
+#[test]
+fn a_work_view_answer_it_cannot_read_or_that_names_another_suggestion_records_nothing() {
+    let (s, v) = suggestion_fixture("s2", &[], Token::Run("t0k".into()));
+    let first = work_view_of(&v, "t0k");
+    let (carrier, _) = suggestion_answer(&first, "join");
+    let key = carrier["suggestion"]["conversationKey"].clone();
+    let hash = carrier["suggestion"]["expectedSuggestionHash"].clone();
+    let before = judge_ops(&s);
+    let post = |body: &Value| {
+        let body = serde_json::to_vec(body).unwrap();
+        post_work_view(&v, "/api/work-view/suggestions", "t0k", &body)
+    };
+    let unread = [
+        json!({}),
+        json!({"conversationKey": key, "action": "join"}),
+        json!({"conversationKey": key, "action": "join", "expectedSuggestionHash": null}),
+        json!({"conversationKey": key, "action": "join", "expectedSuggestionHash": ""}),
+        json!({"conversationKey": key, "action": "join", "expectedSuggestionHash": "0".repeat(63)}),
+        json!({"conversationKey": key, "action": "merge", "expectedSuggestionHash": hash}),
+        json!({"conversationKey": "", "action": "join", "expectedSuggestionHash": hash}),
+        json!({"conversationKey": key, "action": "join", "expectedSuggestionHash": hash,
+            "sharedConflict": false}),
+    ];
+    for body in &unread {
+        let (status, answer) = post(body);
+        assert_eq!(
+            (status, &answer["code"]),
+            (400, &json!("bad_request")),
+            "{body}"
+        );
+        assert_eq!(
+            answer["error"],
+            "The answer could not be read. Reload the page."
+        );
+        assert!(answer.get("snapshot").is_none(), "{answer}");
+    }
+    for action in ["join", "not-this"] {
+        let other = json!({"conversationKey": key, "action": action,
+            "expectedSuggestionHash": "0".repeat(64)});
+        let (status, answer) = post(&other);
+        assert_eq!(
+            (status, &answer["code"]),
+            (409, &json!("suggestion_changed"))
+        );
+        assert!(is_snapshot(&answer["snapshot"]), "{answer}");
+    }
+    let nobody = json!({"conversationKey": "g:000000000000", "action": "join",
+        "expectedSuggestionHash": hash});
+    let (status, answer) = post(&nobody);
+    assert_eq!(
+        (status, &answer["code"]),
+        (404, &json!("suggestion_not_found"))
+    );
+    assert_eq!(
+        answer["error"],
+        "This suggestion was already answered or is gone."
+    );
+    assert!(is_snapshot(&answer["snapshot"]), "{answer}");
+    assert_eq!(judge_ops(&s), before);
+}
+
+/// The work-view's writes send nothing after the token their request brought was replaced
+/// (round 2 of W3b's plan review): an answer whose token is replaced while it waits records
+/// nothing (401); one whose token is replaced while the snapshot after it is read answers the
+/// receipt alone once written, and 401 once refused; the check's route alike. Linux's: elsewhere
+/// the viewer reads no token file (`file_token`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_work_view_write_whose_token_is_replaced_sends_no_snapshot() {
+    let (s, v) = suggestion_fixture("s2", &[], Token::File);
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let token = || file_token(&home).unwrap();
+    let suggestions = "/api/work-view/suggestions";
+    let replace = {
+        let home = home.clone();
+        move || write_token(&home).unwrap()
+    };
+    // Replaced while the answer comes to config.lock: nothing recorded.
+    let (_, body) = suggestion_answer(&work_view_of(&v, &token()), "join");
+    let before = judge_ops(&s);
+    let again = replace.clone();
+    crate::my_work_judge::CAUGHT_UP.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, _) = post_work_view(&v, suggestions, &token(), &body);
+    assert_eq!(status, 401);
+    assert_eq!(judge_ops(&s), before);
+    // Replaced while the snapshot after a refusal is read: 401.
+    let (_, body) = suggestion_answer(&work_view_of(&v, &token()), "join");
+    let mut other: Value = serde_json::from_slice(&body).unwrap();
+    other["expectedSuggestionHash"] = json!("0".repeat(64));
+    let other = serde_json::to_vec(&other).unwrap();
+    let again = replace.clone();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, answer) = post_work_view(&v, suggestions, &token(), &other);
+    assert_eq!(status, 401, "{answer}");
+    // Replaced while the snapshot after a write is read: the receipt alone.
+    let again = replace.clone();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, answer) = post_work_view(&v, suggestions, &token(), &body);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"save": {"scope": "local", "state": "saved"}})
+    );
+    assert_eq!(judge_ops(&s), before + 1);
+    // The check's route: a stale version refused, then a check written.
+    let rel = shown_by(&work_view_of(&v, &token()), "r:rel").expect("the ready request");
+    let stale = serde_json::to_vec(&check_of("r:rel", &"0".repeat(64), true)).unwrap();
+    let again = replace.clone();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(again)));
+    let (status, _) = post_work_view(&v, "/api/work-view/review", &token(), &stale);
+    assert_eq!(status, 401);
+    let fingerprint = rel["contentFingerprint"].as_str().unwrap();
+    let check = serde_json::to_vec(&check_of("r:rel", fingerprint, true)).unwrap();
+    SNAPSHOT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(replace)));
+    let (status, answer) = post_work_view(&v, "/api/work-view/review", &token(), &check);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"save": {"scope": "local", "state": "saved"}})
+    );
+}
+
+/// The work-view's answer waits for `saving` a bounded time (W3b-3): 503 once it ran out, and at
+/// once when four answers wait already; `saving` is let go before the snapshot after an answer is
+/// read, and a pending answer says so in its receipt.
+#[test]
+fn the_work_views_answer_waits_for_saving_a_bounded_time() {
+    let (s, v) = suggestion_fixture("s2", &[], Token::Run("t0k".into()));
+    let v: &'static Viewer = Box::leak(Box::new(v));
+    let (_, body) = suggestion_answer(&work_view_of(v, "t0k"), "join");
+    let before = judge_ops(&s);
+    let suggestions = "/api/work-view/suggestions";
+    let held = v.saving.lock().unwrap();
+    SAVING_WAIT.with(|wait| wait.set(Some(Duration::from_millis(50))));
+    let started = Instant::now();
+    let (status, answer) = post_work_view(v, suggestions, "t0k", &body);
+    SAVING_WAIT.with(|wait| wait.set(None));
+    assert_eq!((status, &answer["code"]), (503, &json!("busy")));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    let waiting: Vec<_> = (0..crate::my_work::WAITERS)
+        .map(|_| {
+            let body = body.clone();
+            std::thread::spawn(move || post_work_view(v, suggestions, "t0k", &body).0)
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while v.saving_waiters.load(Ordering::SeqCst) < crate::my_work::WAITERS {
+        assert!(Instant::now() < deadline, "the answers never came to wait");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let started = Instant::now();
+    let (status, _) = post_work_view(v, suggestions, "t0k", &body);
+    assert_eq!(status, 503);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(judge_ops(&s), before);
+    drop(held);
+    // One lands; the rest find no suggestion, or ran out of their wait behind it on a slow machine.
+    let answered: Vec<u16> = waiting.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(
+        answered.iter().filter(|s| **s == 200).count(),
+        1,
+        "{answered:?}"
+    );
+    assert!(
+        answered.iter().all(|s| [200, 404, 503].contains(s)),
+        "{answered:?}"
+    );
+    assert_eq!(judge_ops(&s), before + 1);
+    // A second home: `saving` free when the snapshot after the answer is read, and an answer
+    // whose op its consumer has not applied says so (the worker held).
+    let (s, v) = suggestion_fixture("s2", &[], Token::Run("t0k".into()));
+    let v: &'static Viewer = Box::leak(Box::new(v));
+    let (_, body) = suggestion_answer(&work_view_of(v, "t0k"), "join");
+    let free = std::sync::Arc::new(AtomicBool::new(false));
+    let seen = free.clone();
+    SNAPSHOT_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            seen.store(v.saving.try_lock().is_ok(), Ordering::SeqCst);
+        }))
+    });
+    let worker = crate::worker::lock(s.home.path()).unwrap().unwrap();
+    let (status, answer) = post_work_view(v, suggestions, "t0k", &body);
+    drop(worker);
+    assert_eq!(status, 200, "{answer}");
+    assert!(
+        free.load(Ordering::SeqCst),
+        "saving held while the snapshot was read"
+    );
+    assert_eq!(
+        answer["save"],
+        json!({"scope": "local", "state": "saved", "localMaterialization": "pending"})
+    );
 }

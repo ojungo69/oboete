@@ -1614,7 +1614,8 @@ fn a_suggestion_whose_group_lost_a_conversation_is_not_shown_nor_answered() {
     let card = h.card("s3");
     let shown = carrier["id"].as_str().unwrap();
     let (raw, k) = crate::search::b::stores(h.s.home.path()).unwrap().unwrap();
-    let checked = crate::my_work_focus::held_in((&raw, &k), h.s.home.path(), shown).unwrap();
+    let carrier = Carrier::Shown(shown.to_owned());
+    let checked = crate::my_work_focus::held_in((&raw, &k), h.s.home.path(), &carrier).unwrap();
     drop((raw, k));
     let mut placement = checked.unwrap().placement;
     placement.sort();
@@ -2396,4 +2397,160 @@ fn a_second_call_far_into_the_tail_keeps_the_write_ambiguous() {
     assert!(h.indexed() < h.s.raw.record_top().unwrap());
     let s1 = h.unindexed_request_of("s1");
     assert_ne!(s1["id"], "r:A", "two calls: no sender");
+}
+
+/// W3b-3: the request an answer is about, named by its held id (the work-view's route, which found
+/// it by the id its snapshot gives it), is the one its shown id names, with the same placement and
+/// binding, and an answer so named lands.
+#[test]
+fn a_request_named_by_its_held_id_is_the_one_its_shown_id_names() {
+    let mut h = Home::new();
+    let _ = suggested(&mut h);
+    let shown = h.request_of("s2");
+    let path = h.s.home.path();
+    let (raw, k) = crate::search::b::stores(path).unwrap().unwrap();
+    let by = |carrier: Carrier| {
+        (crate::my_work_focus::held_in((&raw, &k), path, &carrier).unwrap()).unwrap()
+    };
+    let by_shown = by(Carrier::Shown(shown["id"].as_str().unwrap().to_owned()));
+    let by_held = by(Carrier::Held(by_shown.held.clone()));
+    drop((raw, k));
+    assert_eq!(
+        (&by_held.held, &by_held.placement, &by_held.binding),
+        (&by_shown.held, &by_shown.placement, &by_shown.binding)
+    );
+    assert_eq!(
+        by_shown.binding.as_deref(),
+        shown["suggestion"]["binding"].as_str()
+    );
+    let answer = Answer {
+        carrier: Carrier::Held(by_shown.held),
+        join: true,
+        binding: by_shown.binding.unwrap(),
+        target: None,
+    };
+    let saving = Mutex::new(());
+    let answered = settle(path, saving.lock().unwrap(), &answer, &|| true);
+    assert_eq!(
+        answered.map_err(|r| (r.status, r.code)),
+        Ok(json!({"state": "applied"}))
+    );
+    assert_eq!(h.recorded(), 2, "the judge's op and the answer's");
+    let joined = h.request_of("s2");
+    assert_eq!(joined["id"], h.request_of("s1")["id"], "{joined}");
+}
+
+/// W3b-3 (#1114's third item, its summaries): a summary of the pick's conversation made after the
+/// check (a turn op of curation's, in `CHECKED`) leaves the answer be, and it records what it was
+/// checked on.
+#[test]
+fn a_summary_after_the_check_leaves_the_answer_as_checked() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let turn: i64 = Connection::open(home.join("raw.db"))
+        .unwrap()
+        .query_row(
+            "SELECT MAX(seq) FROM records WHERE session = 's2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let summarized = move || {
+        let op = crate::turns::TurnOp {
+            agent: "claude".into(),
+            session: "s2".into(),
+            repo: Some(R.into()),
+            ts: crate::db::now_ms(),
+            from: turn,
+            through: turn,
+            read: Vec::new(),
+            stretches: Vec::new(),
+            goals: Vec::new(),
+            removed: Vec::new(),
+            fields: [
+                ("request", "Fix the trailing comma."),
+                ("completed", "Fixed."),
+            ]
+            .into_iter()
+            .map(|(f, t)| (f.to_owned(), t.to_owned()))
+            .collect(),
+            skipped: false,
+            excluded: false,
+        };
+        let mut raw = crate::raw::open(&home).unwrap();
+        let op = serde_json::to_value(op).unwrap();
+        raw.append_ops(&[(OpKind::Turn, op)]).unwrap();
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(summarized)));
+    assert_eq!(h.answer(&card, "join").unwrap()["state"], "applied");
+    let (conversation, placed) = answered(&h);
+    assert_eq!(conversation, json!(["claude", "s2"]));
+    assert_eq!(placed, json!([["claude", "s1"], ["claude", "s2"]]));
+}
+
+/// Codex on #1117 (a newly active redaction rule), run (W3b-3): a work state write's call read
+/// through the tail alone (the record index not run) and through the index alone (run, nothing
+/// past its checkpoint) attribute the write alike: before the rule, with the rule in force before
+/// the rescan reaches the call, and once the rescan masked what the rule finds in it (then,
+/// through either, the call is no longer the write's: the conversation is its own request's).
+#[test]
+fn the_tail_and_the_index_attribute_a_write_alike_under_a_new_rule() {
+    let rule = "[redaction]\nextra_rules = [{ id = 'notes', regex = 'Write the notes' }]\n";
+    // My Work's read alone, nothing of the worker run: the request `session` is shown in, as the
+    // one the write names or as its own (a group's print, which is each home's own).
+    let read = |h: &Home, session: &str| -> &'static str {
+        let path = h.s.home.path();
+        let v = crate::my_work::read(path, crate::my_work::Range::All, crate::db::now_ms());
+        let v = crate::view::answered("my-work", v.unwrap());
+        let id = format!("c:claude:{session}");
+        let found = (v["requests"].as_array().unwrap().iter())
+            .find(|r| (r["sessions"].as_array().unwrap().iter()).any(|s| s["id"] == id))
+            .unwrap();
+        match found["id"].as_str().unwrap() {
+            "r:A" => "named",
+            g if g.starts_with("g:") => "own",
+            other => panic!("{other}"),
+        }
+    };
+    // Whether a record of this device reads, as every reader reads it, with what the rule finds.
+    let shown = |h: &Home| -> bool {
+        let raw = crate::raw::open(h.s.home.path()).unwrap();
+        let records = raw.after(raw.device(), 0, 100_000).unwrap();
+        (records.into_iter()).any(|r| match r.item {
+            crate::raw::Item::Event(e) => e.body.contains("Write the notes"),
+            _ => false,
+        })
+    };
+    let mut seen = Vec::new();
+    for indexed in [false, true] {
+        let mut h = Home::new();
+        let _served = suggested(&mut h);
+        h.named("s2", "A");
+        let run = |h: &Home| {
+            if indexed {
+                h.s.run();
+            } else {
+                h.run_unindexed();
+            }
+        };
+        run(&h);
+        let call = h.s.raw.record_top().unwrap();
+        assert_eq!(
+            h.indexed() >= call,
+            indexed,
+            "the call past the index: {indexed}"
+        );
+        let before = read(&h, "s2");
+        h.config(rule);
+        assert!(shown(&h), "the rescan has not run: {indexed}");
+        let unmasked = read(&h, "s2");
+        run(&h);
+        assert!(!shown(&h), "the rescan masked the call: {indexed}");
+        let masked = read(&h, "s2");
+        seen.push((before, unmasked, masked));
+    }
+    assert_eq!(seen[0], ("named", "named", "own"), "the tail");
+    assert_eq!(seen[0], seen[1], "the tail and the index");
 }
