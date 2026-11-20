@@ -281,8 +281,9 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   alone, on the review's day), a request's two newest reviews are its readings, from which the pages
   measure the pace oboete's page shows, and the goals' times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
   (oboete's own page shows them), the evidence links (X37), the subagents (a later pull request),
-  the rules (they come with My Rules), a request's grouping suggestion (its Join and Not this come
-  with the pages' actions), and continuing a conversation (X36).
+  the rules (they come with My Rules), and continuing a conversation (X36). A request with a
+  judge's open grouping suggestion carries it, with its binding, and its Join and Not this save
+  (W3b-3, docs/my-work-model.md slice 11b-2).
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow
@@ -300,8 +301,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   [claude-mem-parity.md](claude-mem-parity.md). Continuing a conversation will work from the new
   pages directly too. Focus sharing and Team stay unbuilt (row 22). A control whose write oboete
   does not take yet is hidden until the pull request that takes it: adding a rule, and changing
-  an area or a suggested one (#1085, #1102). Refresh now, and a request's check and its Undo, work
-  there (decision 117). A write the viewer saved is told as saved there, its answer a snapshot or
+  an area or a suggested one (#1085, #1102). Refresh now, a request's check and its Undo, and
+  the Join and Not this of a grouping suggestion work there (decision 117). A write the viewer saved is told as saved there, its answer a snapshot or
   claude-mem's receipt alone, and a poll of the content already on screen that lands while it waits
   does not stand for it (#1108). claude-mem's installer is none
   of the pages and is left out of the bundle: oboete's setup is `oboete setup` and its settings page.

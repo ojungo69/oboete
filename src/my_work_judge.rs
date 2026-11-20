@@ -463,10 +463,10 @@ fn reached(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<bool> {
     Ok(true)
 }
 
-/// J4's answer as the page posts it.
+/// J4's answer as oboete's page posts it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Answer {
+struct Posted {
     /// The request My Work shows the suggestion on, by its shown id.
     request: String,
     action: String,
@@ -475,6 +475,30 @@ struct Answer {
     /// The request the card's suggestion named, by the id the page has it (`suggestion.id`), which
     /// its binding proves: a Not this whose pick is in no group now is checked with it.
     target: Option<String>,
+}
+
+/// The request an answer is about (W3b-3).
+pub(crate) enum Carrier {
+    /// By the id oboete's page shows it by.
+    Shown(String),
+    /// By its held id (`Held::id`), which the work-view's route found by the id its snapshot gives
+    /// it (`work_view::named`).
+    Held(String),
+}
+
+/// An answer as `settle` checks and writes it: the request it is about, Join or Not this, the
+/// binding of the suggestion its card showed, and the request the card named, which only
+/// oboete's page posts.
+pub(crate) struct Answer {
+    pub(crate) carrier: Carrier,
+    pub(crate) join: bool,
+    pub(crate) binding: String,
+    pub(crate) target: Option<String>,
+}
+
+/// A binding as a page may post it: 64 hex digits (`my_work::binding`).
+pub(crate) fn bound(binding: &str) -> bool {
+    binding.len() == 64 && binding.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 /// What an answer appends and what its append is fenced against (`Raw::append_ops_at`).
@@ -501,7 +525,7 @@ pub(crate) fn act(
     body: &[u8],
     authorized: &dyn Fn() -> bool,
 ) -> Result<Value, Refusal> {
-    let posted: Answer =
+    let posted: Posted =
         serde_json::from_slice(body).map_err(|_| refused(400, "bad_request", ""))?;
     let join = match posted.action.as_str() {
         "join" => true,
@@ -514,14 +538,29 @@ pub(crate) fn act(
     if (posted.target.as_ref()).is_some_and(|t| !(1..=80).contains(&t.len())) {
         return Err(refused(400, "bad_request", "target"));
     }
-    let bound = (posted.binding.as_deref())
-        .is_some_and(|b| b.len() == 64 && b.bytes().all(|c| c.is_ascii_hexdigit()));
-    if !bound {
+    let Some(binding) = posted.binding.filter(|b| bound(b)) else {
         return Err(refused(400, "bad_request", "binding"));
-    }
-    let _held = saving
+    };
+    let held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let answer = Answer {
+        carrier: Carrier::Shown(posted.request),
+        join,
+        binding,
+        target: posted.target,
+    };
+    settle(home, held, &answer, authorized)
+}
+
+/// `act` from its catch-up on, `saving` held (`_held`) until it returns: the work-view's route
+/// calls it with the guard it waited for (W3b-3).
+pub(crate) fn settle(
+    home: &Path,
+    _held: std::sync::MutexGuard<'_, ()>,
+    answer: &Answer,
+    authorized: &dyn Fn() -> bool,
+) -> Result<Value, Refusal> {
     let unavailable = || refused(503, "my_work_unavailable", "");
     let pending = || refused(409, "my_work_pending", "");
     // #775: what this device recorded before, an earlier answer among it, applied first, so that
@@ -532,7 +571,7 @@ pub(crate) fn act(
     #[cfg(test)]
     hook(&CAUGHT_UP);
     let config = crate::settings::config_lock(home).map_err(|_| unavailable())?;
-    let (ops, fence) = check(home, &posted, join)?;
+    let (ops, fence) = check(home, answer)?;
     #[cfg(test)]
     hook(&CHECKED);
     if !authorized() {
@@ -560,7 +599,7 @@ pub(crate) fn act(
 /// suggestion is the one the posted binding names, from one descriptor (the carrier, its
 /// placement, the request its pick is in now), which a Join also needs My Work to show; and the
 /// ops of its decision, with what the append is fenced against, read here.
-fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
+fn check(home: &Path, posted: &Answer) -> Result<Decided, Refusal> {
     let unavailable = || refused(503, "my_work_unavailable", "");
     let pending = || refused(409, "my_work_pending", "");
     let not_found = || refused(404, "suggestion_not_found", "request");
@@ -587,7 +626,7 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
         placement,
         current,
         binding: shown,
-    } = crate::my_work_focus::held_in((&raw, &k), home, &posted.request)
+    } = crate::my_work_focus::held_in((&raw, &k), home, &posted.carrier)
         .map_err(|_| unavailable())?
         .ok_or_else(not_found)?;
     let groups = crate::my_work_group::groups(&raw, &k, &reading).map_err(|_| unavailable())?;
@@ -622,12 +661,12 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
     };
     let now = crate::my_work::binding((&held, picked, &named), &placement, home, &mut mask)
         .map_err(|_| unavailable())?;
-    if posted.binding.as_deref() != Some(now.as_str()) {
+    if posted.binding != now {
         return Err(changed());
     }
     // Its own request's other conversations come with it (claude-mem's `brought`).
     let others = placement.iter().filter(|m| *m != c).map(key);
-    let decision = if join {
+    let decision = if posted.join {
         // A Join places them in the target, which must be a request My Work shows the suggestion
         // to.
         let target = target.ok_or_else(gone)?;
@@ -652,7 +691,8 @@ fn check(home: &Path, posted: &Answer, join: bool) -> Result<Decided, Refusal> {
         let members: Vec<Value> = std::iter::once(key(c)).chain(others).collect();
         json!([{"conversations": members, "title": null, "links": []}])
     };
-    let fields = json!({"conversation": key(c), "action": posted.action, "groups": decision});
+    let action = if posted.join { "join" } else { "not-this" };
+    let fields = json!({"conversation": key(c), "action": action, "groups": decision});
     let fence = crate::raw::AnswerFence {
         top,
         forget: reading.fence,

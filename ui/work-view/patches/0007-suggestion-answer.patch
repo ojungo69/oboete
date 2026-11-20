@@ -1,0 +1,38 @@
+diff --git a/src/ui/my-work/src/components/request-detail.tsx b/src/ui/my-work/src/components/request-detail.tsx
+index 5a759a0eddc7c4f8edd43d69e258699e160531a6..7b336b05f8916bc16be58053787bee0152a9e7dd 100644
+--- a/src/ui/my-work/src/components/request-detail.tsx
++++ b/src/ui/my-work/src/components/request-detail.tsx
+@@ -167,11 +167,17 @@ function CheckAction({ request }: { request: Request }) {
+ }
+ 
+ function SuggestionAction({ request }: { request: Request }) {
+-  const { sourceKind } = useWorkModel()
++  const { sourceKind, requests } = useWorkModel()
+   const [saving, setSaving] = useState(false)
+   const [notice, setNotice] = useState<CheckNotice | null>(null)
+   const suggestion = request.suggestion
+   if (!suggestion) return notice ? <p role="status" className="text-sm text-muted-foreground">{notice.message}</p> : null
++  // Modified by oboete (ui/work-view/patches/0007-suggestion-answer.patch): the request the suggestion names, by the title
++  // its own card and drawer show it by, found by its id: the mapper's label can read as another request's title.
++  const named = requests.find((r) => r.id === suggestion.requestId)
++  const namedTitle = named ? named.title ?? named.resolvesTo?.title ?? 'Untitled request' : suggestion.requestTitle
++  // Modified by oboete (ui/work-view/patches/0007-suggestion-answer.patch): resolves false when the answer was not saved, so the
++  // button shows no check, as CheckAction's does; the notice line says why.
+   const save = async (action: 'join' | 'not-this') => {
+     setSaving(true)
+     try {
+@@ -186,12 +192,12 @@ function SuggestionAction({ request }: { request: Request }) {
+       setNotice({ tone: 'saved', message: `${action === 'join' ? 'Joined the request.' : 'Kept these requests separate.'} ${shared
+         ? result.save?.state === 'queued' ? 'Saved here; waiting to sync to your other viewers.' : 'Saved as a shared decision.'
+         : sourceKind === 'cloud' ? 'Saved in your cloud viewer only.' : 'Saved on this machine only.'}${localCopy}` })
+-    } catch (error) { setNotice({ tone: 'problem', message: error instanceof Error ? error.message : String(error) }) }
++    } catch (error) { setNotice({ tone: 'problem', message: error instanceof Error ? error.message : String(error) }); return false }
+     finally { setSaving(false) }
+   }
+   return <div className="space-y-2 rounded-xl border p-4 text-sm">
+     <p>{suggestion.sharedConflict ? 'Your viewers recorded different grouping decisions. Read this suggestion, then choose again to resolve them.' : 'This work may be part of another request.'}</p>
+-    <p className="font-medium">{suggestion.requestTitle}</p>
++    <p className="font-medium">{namedTitle}</p>
+     {suggestion.evidence && <p className="text-muted-foreground">{suggestion.evidence}</p>}
+     <div className="flex gap-2">
+       <SaveButton className={cn(buttonVariants(), 'h-11 md:h-9')} onClick={() => save('join')} disabled={saving}>Join</SaveButton>

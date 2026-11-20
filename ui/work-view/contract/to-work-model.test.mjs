@@ -264,3 +264,23 @@ test('a conversation of an agent the raw hook named goes under the platform othe
   const strings = (v) => typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(strings) : v && typeof v === 'object' ? Object.values(v).flatMap(strings) : []
   assert.ok(!strings(gated).some((s) => s.startsWith('tenant-orchid:')), 'no string opens with its name')
 })
+
+// suggested.json is the answer of work_view::tests::the_contract_suggestion_is_a_suggestion_homes_answer:
+// the judge's open suggestion that a conversation is part of the parser's request (J4, W3b-3).
+const suggested = JSON.parse(readFileSync(new URL('./suggested.json', import.meta.url), 'utf8'))
+const suggestedModel = toWorkModel(suggested, Number(suggested.revision))
+
+test("a judge's open suggestion reads with its request and the request it names, each by an id the mapper gives a request", () => {
+  assert.deepEqual(suggestedModel.requestReadErrors, [])
+  const carriers = suggestedModel.requests.filter((r) => r.suggestion)
+  assert.equal(carriers.length, 1)
+  const [carrier] = carriers
+  assert.equal(carrier.suggestion.conversationKey, carrier.id)
+  const named = suggestedModel.requests.find((r) => r.id === carrier.suggestion.requestId)
+  assert.ok(named, carrier.suggestion.requestId)
+  assert.notEqual(named.id, carrier.id)
+  assert.equal(carrier.suggestion.requestTitle, 'Parser')
+  assert.equal(named.title, 'Parser')
+  assert.equal(carrier.suggestion.evidence, '')
+  assert.match(carrier.suggestion.expectedSuggestionHash, /^[0-9a-f]{64}$/)
+})

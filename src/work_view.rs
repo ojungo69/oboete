@@ -146,8 +146,15 @@ where
 {
     let mut agents = Vec::new();
     let mut seen = HashMap::new();
-    let requests: Vec<Value> = (arr(&work["requests"]).iter())
-        .map(|r| request(r, &mut agents, &mut seen, tz))
+    let rows = arr(&work["requests"]);
+    let requests: Vec<Value> = (rows.iter())
+        .map(|r| {
+            let mut out = request(r, &mut agents, &mut seen, tz);
+            if let Some(suggestion) = suggestion(r, rows) {
+                out["suggestion"] = suggestion;
+            }
+            out
+        })
         .collect();
     let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
     // The pages count unlinked work and read nothing of it.
@@ -295,6 +302,11 @@ fn conversation_key(agent: &str, id: &str) -> String {
 /// they name, and the code's own words and times, which hold none of the owner's.
 const OWN: &[&str] = &[
     "id",
+    // A judge's suggestion's (W3b-3): its request's id and the one it names, as `id` holds them,
+    // and its binding, a keyed hash, which the answer posts back.
+    "conversationKey",
+    "requestId",
+    "expectedSuggestionHash",
     "agentIds",
     "conversationKeys",
     "contentSessionId",
@@ -920,6 +932,38 @@ fn selector(r: &Value) -> Value {
         }
     }
     own
+}
+
+/// A judge's open suggestion on `r` as claude-mem's drawer reads it (`to-work-model.ts:248-251`,
+/// W3b-3): `r`'s own id in the snapshot, the request it names, its title (else its ask's text),
+/// and the binding the answer posts back (`expectedSuggestionHash`). The request it names is the
+/// one row of `rows` with its id and fingerprint, else none goes: the drawer never shows one
+/// request's title over another's binding (round 2 of W3b's plan review). Nothing else of My
+/// Work's suggestion goes, the stored id of the conversation it is about among it.
+fn suggestion(r: &Value, rows: &[Value]) -> Option<Value> {
+    let s = r.get("suggestion")?;
+    let binding = s["binding"].as_str()?;
+    let mut named =
+        (rows.iter()).filter(|t| t["id"] == s["id"] && t["fingerprint"] == s["fingerprint"]);
+    let (Some(target), None) = (named.next(), named.next()) else {
+        return None;
+    };
+    // The pages show a title the mapper finds meaningful (`to-work-model.ts:45`), none else.
+    let meaningful = |t: &&str| {
+        let t = t.trim().to_ascii_lowercase();
+        !t.is_empty()
+            && !["true", "false", "null", "undefined"].contains(&t.as_str())
+            && !t.bytes().all(|b| b.is_ascii_digit())
+    };
+    let title = [&target["title"], &target["ask"]["text"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .find(meaningful)
+        .unwrap_or(crate::my_work_judge::UNTITLED);
+    Some(
+        json!({"conversationKey": selector(r), "requestId": selector(target),
+        "requestTitle": title, "evidence": "", "expectedSuggestionHash": binding}),
+    )
 }
 
 /// One My Work request as claude-mem's human request; each conversation's agent goes in `agents`

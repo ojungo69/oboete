@@ -180,7 +180,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
    snapshot after the check, read once the reviews' lock is let go, which a 409 carries too when
    it reads (a 409 whose snapshot does not read comes without one, and the pages read it again).
    A check saved whose snapshot does not read is answered with claude-mem's receipt alone, and the
-   work-view's version moves with the checks, from either page.
+   work-view's version moves with the checks, from either page. The snapshot goes only while the
+   request's token is still the work-view's (W3b-3): replaced while it was read, a check saved is
+   answered with the receipt alone and a refusal with 401.
 7. **The page**: a My Work tab, first and opened by default, as claude-mem opens on My Work; the
    Timeline is one tab away. Cards, list and by agent (one card a conversation, as claude-mem's;
    decision 55); search, project, time range, sort and the status tabs with counts; the drill-down
@@ -278,8 +280,9 @@ makes no model call to show anything (`docs/public/usage/my-work.mdx`).
   time through `raw_docs_tools`, a new index the fts consumer makes in knowledge.db, as it makes
   `raw_docs_prompts` (2.6 s once on this PC's store, and no hook waits on it), and (W3b-2c,
   #1114) among this device's tool records the index has not taken yet: those past the fts
-  consumer's checkpoint, read once for a read of My Work before the index is (a record indexed
-  between the two reads is found once), with no cutoff; before the worker has made the index,
+  consumer's checkpoint, read by each of the two steps of a read of My Work that look for calls
+  (`link`'s and `writers`'), each time before the index is (a record indexed between the two
+  reads is found once), with no cutoff; before the worker has made the index,
   nothing links. An item no call ties to a session may be an excluded session's
   write in a shown repository (capture refuses that session's later tool calls), so while a
   session is excluded it is neither shown nor counted, in every repository, and before the index

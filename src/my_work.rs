@@ -2157,7 +2157,7 @@ fn waited(
 /// How many requests may hold or wait for Mark finished's lock at once, and how many the
 /// reviews', well under the viewer's 32 connections; one more is answered at once (CodeRabbit on
 /// #850).
-const WAITERS: usize = 4;
+pub(crate) const WAITERS: usize = 4;
 
 #[cfg(test)]
 thread_local! {
