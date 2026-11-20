@@ -601,7 +601,11 @@ Slice 3:
 - **Known limits**: a kept or pending stop changes nothing on the work-view's card until a hook
   writes it back, as the pages keep their model and drop the receipt, and its button records
   nothing more; two subagents of one conversation read alike in 15.19.0's pages; more than 300
-  within the window leave the oldest out; a subagent's folder is looked at only when it is marked.
+  within the window leave the oldest out; a subagent's folder is looked at only when it is marked;
+  the pages read the snapshot again after a write of theirs or when the page's version moves (a
+  prompt, a session started, an op appended or applied, a record hidden), which a subagent's steps,
+  a stop a hook records and the passing of time do not move, so a card can stay as it was read
+  until then.
 - **Reviewed** (the plan, a local Codex review in three rounds): a second click racing a
   write-back, a kept stop answered as not recorded, a partly written-back file's consumed events
   counted, the id's uniqueness taken over the capped list, the worker not started for a kept stop,

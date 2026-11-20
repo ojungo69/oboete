@@ -291,9 +291,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   kept, or that already waits to be written back, changes nothing on the card until a hook writes
   it back (the pages keep the model and drop the receipt), and its button records nothing more;
   two subagents of one conversation read alike in 15.19.0's pages (claude-mem 16 adds the launch
-  description); more than 300 within the window leave the oldest out; and a subagent's folder is
+  description); more than 300 within the window leave the oldest out; a subagent's folder is
   looked at only when it is marked, so a card can offer Mark finished that answers that its
-  conversation records nothing now.
+  conversation records nothing now; and a card changes when the pages read the snapshot again,
+  after a write of theirs or when the page's version moves (above), which a subagent's steps, a
+  stop a hook records and the passing of time (a subagent turning quiet, a finished one leaving
+  the window) do not move, where claude-mem's pages read again within a second of a recorded
+  change.
 - The new My Work stays out of the page's menu until its Japanese is whole; its address opens it
   (Claude; overrulable). It shows the requests claude-mem's shows, with no switch of period; if
   claude-mem shows every request, the last 7 days while #1037's reads are slow
