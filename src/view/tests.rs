@@ -9699,6 +9699,39 @@ fn the_work_views_not_this_keeps_the_request_apart_by_its_reference() {
     assert_eq!(parser["conversationKeys"].as_array().unwrap().len(), 1);
 }
 
+/// A rule that finds My Work's keys (`requests`, `suggestion`), which oboete's page's walk through
+/// the gate reads and the work-view's snapshot keeps as they are: the work-view's Join still
+/// lands on the request its drawer showed (Codex on #1118).
+#[test]
+fn a_rule_on_my_works_keys_leaves_the_work_views_join_to_land() {
+    let name = "view::tests::a_rule_on_my_works_keys_leaves_the_work_views_join_to_land";
+    if !in_child(name) {
+        return;
+    }
+    let (s, v) = suggestion_fixture("s2", &[], Token::Run("t0k".into()));
+    let home = s.home.path();
+    let rules = "[redaction]\nextra_rules = [{ id = 'requests', regex = '^requests$' }, \
+                 { id = 'suggestion', regex = '^suggestion$' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    redact::set_home(home).unwrap();
+    let first = work_view_of(&v, "t0k");
+    let (carrier, body) = suggestion_answer(&first, "join");
+    let named = carrier["suggestion"]["requestId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = judge_ops(&s);
+    let (status, answer) = post_work_view(&v, "/api/work-view/suggestions", "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(judge_ops(&s), before + 1);
+    let joined = shown_by(&answer, &named).expect("the parser's request");
+    assert_eq!(
+        joined["conversationKeys"].as_array().unwrap().len(),
+        2,
+        "{joined}"
+    );
+}
+
 /// An answer the work-view cannot read is 400 with its sentence and no snapshot; one that names
 /// another suggestion (another binding) is 409 `suggestion_changed` for either action, and one
 /// whose request no request goes by 404, each with the snapshot; none records anything.

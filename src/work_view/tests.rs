@@ -1823,7 +1823,8 @@ fn a_judges_open_suggestion_goes_with_the_request_it_names() {
 
 /// The request a suggestion names is the one row with its id and fingerprint (round 2 of W3b's
 /// plan review): none goes when two rows go by them, when none does, or when the one by its id
-/// has another fingerprint. A request with no title is named by its ask, else as untitled.
+/// has another fingerprint. A request with no title the pages show is named by its ask, else as
+/// untitled.
 #[test]
 fn a_suggestion_names_one_request_or_goes_with_none() {
     let carrier = json!({"id": "c:claude:s2", "sessions": [{"agent": "claude",
@@ -1852,6 +1853,13 @@ fn a_suggestion_names_one_request_or_goes_with_none() {
     untitled["ask"]["text"] = json!(" ");
     let found = named(&[&carrier, &untitled]);
     assert_eq!(found["requestTitle"], crate::my_work_judge::UNTITLED);
+    // A title the mapper would show as none (`to-work-model.ts:45`) is passed over for the ask.
+    for blank in ["2026", "null", " True "] {
+        let mut titled = target.clone();
+        titled["title"] = json!(blank);
+        let found = named(&[&carrier, &titled]);
+        assert_eq!(found["requestTitle"], "Build the parser.", "{blank}");
+    }
 }
 
 /// A suggestion on a request whose conversation a rule masks (W3b-3): its own id and the id of the

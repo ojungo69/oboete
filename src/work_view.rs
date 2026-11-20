@@ -948,10 +948,17 @@ fn suggestion(r: &Value, rows: &[Value]) -> Option<Value> {
     let (Some(target), None) = (named.next(), named.next()) else {
         return None;
     };
+    // The pages show a title the mapper finds meaningful (`to-work-model.ts:45`), none else.
+    let meaningful = |t: &&str| {
+        let t = t.trim().to_ascii_lowercase();
+        !t.is_empty()
+            && !["true", "false", "null", "undefined"].contains(&t.as_str())
+            && !t.bytes().all(|b| b.is_ascii_digit())
+    };
     let title = [&target["title"], &target["ask"]["text"]]
         .into_iter()
         .filter_map(Value::as_str)
-        .find(|t| !t.trim().is_empty())
+        .find(meaningful)
         .unwrap_or(crate::my_work_judge::UNTITLED);
     Some(
         json!({"conversationKey": selector(r), "requestId": selector(target),

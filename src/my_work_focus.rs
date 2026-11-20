@@ -582,22 +582,30 @@ pub(crate) fn held_in(
 ) -> Result<Option<Checked>> {
     use crate::my_work_judge::Carrier;
     let (answer, held) = crate::my_work::reviewing_on(stores, home, crate::db::now_ms())?;
-    let answer = crate::view::answered("my-work", answer);
-    let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
-    let found = match carrier {
-        Carrier::Shown(shown) => requests.iter().position(|r| r["id"] == shown.as_str()),
-        Carrier::Held(id) => held.iter().position(|h| h.id() == id),
-    };
-    let Some(i) = found else {
-        return Ok(None);
+    let (i, binding) = match carrier {
+        // As oboete's page reads My Work: through the gate's walk, which reads keys too.
+        Carrier::Shown(shown) => {
+            let answer = crate::view::answered("my-work", answer);
+            let requests = answer["requests"].as_array().map_or(&[][..], Vec::as_slice);
+            let Some(i) = requests.iter().position(|r| r["id"] == shown.as_str()) else {
+                return Ok(None);
+            };
+            (i, requests[i]["suggestion"]["binding"].clone())
+        }
+        // As the work-view's snapshot keeps My Work's keys (`work_view::leaving`): its binding
+        // as My Work gives it, whatever a rule finds in a key (Codex on #1118).
+        Carrier::Held(id) => {
+            let Some(i) = held.iter().position(|h| h.id() == id) else {
+                return Ok(None);
+            };
+            (i, answer["requests"][i]["suggestion"]["binding"].clone())
+        }
     };
     Ok(Some(Checked {
         held: held[i].id().to_owned(),
         placement: held[i].placement().to_vec(),
         current: held.iter().map(|h| h.id().to_owned()).collect(),
-        binding: requests[i]["suggestion"]["binding"]
-            .as_str()
-            .map(str::to_owned),
+        binding: binding.as_str().map(str::to_owned),
     }))
 }
 
