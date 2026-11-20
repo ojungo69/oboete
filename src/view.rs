@@ -2681,8 +2681,9 @@ impl Viewer {
 
     /// #1083 (R2a): a rule turned on or off from the work-view's pages (`saveRuleChange`,
     /// `{action, ruleId, ruleVersion}`: `turn-on` or `turn-off`, the rule's `u:` or `l:` reference
-    /// and the version the pages read of it), with `saving` held from before the switch's locks to
-    /// its receipt (`work_view::switch`), let go before the snapshot after it, which goes only while
+    /// and the version the pages read of it), with `saving` held from the switch's locks to its
+    /// append (`work_view::switch`; #1128 item 5: not through its waits), and the snapshot after
+    /// it, which goes only while
     /// the request's token is still the work-view's (`carried`). Applied, the answer names the rule
     /// (`savedRuleId`) and the version the switch left it at (`savedRuleVersion`), which the pages'
     /// Undo posts back; none when a record came after the switch that also decides the rule. A
@@ -2723,19 +2724,16 @@ impl Viewer {
         let wait = crate::db::OPEN_WRITE_WAIT;
         #[cfg(test)]
         let wait = SAVING_WAIT.with(std::cell::Cell::get).unwrap_or(wait);
-        let Some(saving) = self.saving_within(wait) else {
-            return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
-        };
+        let saving = || self.saving_within(wait);
         let authorized = || self.work_view_token_ok(Some(given));
         let reference = &posted.rule_id;
         let switched = crate::work_view::switch(
             &self.home,
-            reference,
-            &posted.rule_version,
+            (reference, &posted.rule_version),
             muted,
+            &saving,
             &authorized,
         );
-        drop(saving);
         let refusal = |status, code, error| self.refusal_carrying(given, status, code, error);
         use crate::work_view::Switched;
         let (version, pending) = match switched {

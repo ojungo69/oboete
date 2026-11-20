@@ -301,7 +301,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   takes (config.lock with the token asked again, raw.db and the readers' hold), reads My Rules on the
   handles it appends on, and appends its correction against a fence of what it read of the rule (an
   op naming its claim, an exclusion, a tombstone, a forget, another raw.db file; curation's other ops
-  leave it be). Applied and kept, its answer names the version it left the rule at
+  leave it be). A claim op names it by the uid it derives or by its `supersedes`, a correction by its
+  `uid`, a rule decision by its `claim` or by the rule's suggestion (`about`); a claim that only
+  quotes the uid does not (#1128). It is refused as pending (409) while what it reads is not applied
+  yet: such an op past the claims or my_work consumer's checkpoint, or a correction of the rule a
+  worker of an older oboete passed, which the next step applies. The viewer's save lock is held from
+  the switch's locks to its append, through none of its waits. Applied and kept, its answer names
+  the version it left the rule at
   (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
   also decides the rule, and the pages then offer no Undo; not applied yet, it is saved, and its
   receipt says so, with no Undo. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by

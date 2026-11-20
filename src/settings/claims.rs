@@ -165,13 +165,19 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unavailable = |_| refused(503, "rule_unavailable", "");
-    let (shown, unapplied) = match crate::search::b::stores(home).map_err(unavailable)? {
-        Some((raw, k)) => (
-            crate::my_work_rules::shown(&raw, &k).map_err(unavailable)?,
-            crate::my_work_rules::unapplied(&raw, &k, id).map_err(unavailable)?,
-        ),
-        None => return Err(refused(404, "rule_not_found", "suggestion")),
+    let Some((raw, k)) = crate::search::b::stores(home).map_err(unavailable)? else {
+        return Err(refused(404, "rule_not_found", "suggestion"));
     };
+    // One read of knowledge.db (#1083's R2b): a decision the my_work consumer applies between two
+    // reads would read as neither shown nor waiting, and a retry would approve again.
+    let read = (k.unchecked_transaction().map_err(anyhow::Error::from)).map_err(unavailable)?;
+    let shown = crate::my_work_rules::shown(&raw, &read).map_err(unavailable)?;
+    #[cfg(test)]
+    if let Some(hook) = BETWEEN_READS.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let unapplied = crate::my_work_rules::unapplied(&raw, &read, id).map_err(unavailable)?;
+    drop((read, raw));
     let Some(suggestion) = shown.suggestions.iter().find(|sg| sg.id == id) else {
         return Err(refused(404, "rule_not_found", "suggestion"));
     };
@@ -186,32 +192,39 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         ("undo", None) => Err(refused(409, "rule_not_decided", "suggestion")),
         ("approve", None) => {
             let text = posted.statement.as_deref().unwrap_or(&suggestion.statement);
-            let receipt = crate::claims::pref_add_recorded(home, text, repo);
-            let (uid, kept) = match &receipt {
-                Ok(OwnerReceipt::Applied { uid }) => (uid.clone(), true),
-                Ok(OwnerReceipt::Pending { uid, .. }) => (uid.clone(), false),
-                // No preference to name: the suggestion waits as it was.
-                _ => return answer(receipt),
-            };
-            // The preference is the owner's now: a retry would make a second one.
-            let Ok(applied) = record(json!({"action": "approve", "claim": uid})) else {
-                return Ok(json!({"state": "pending", "uid": uid, "code": "rule_partly_recorded"}));
-            };
-            Ok(json!({"state": state(kept && applied), "uid": uid}))
+            // The directive, its preference and the decision in one transaction (#1083's R2b):
+            // recorded whole or not at all, so a retry never makes a second preference.
+            match crate::claims::approve_recorded(home, id, text, repo) {
+                Ok(OwnerReceipt::Applied { uid }) => Ok(json!({"state": "applied", "uid": uid})),
+                Ok(OwnerReceipt::Pending { uid, .. }) => {
+                    Ok(json!({"state": "pending", "uid": uid}))
+                }
+                receipt => answer(receipt),
+            }
         }
         (_, None) => Ok(json!({"state": state(record(json!({"action": "reject"}))?)})),
-        (_, Some(d)) => {
-            if let Some(uid) = &d.claim {
-                match crate::claims::correct_recorded(home, uid, Some("retracted"), None) {
-                    // A preference forgotten since has nothing left to retract.
-                    Ok(_) => {}
-                    Err(e) if matches!(e.code, OwnerRefusalCode::ClaimMissing) => {}
-                    Err(e) => return answer(Err(e)),
+        (_, Some(d)) => match &d.claim {
+            // Its preference retracted and the decision undone in one append (#1083's R2b).
+            Some(uid) => match crate::claims::undo_approval_recorded(home, id, uid) {
+                Ok(crate::claims::Undone::Recorded(applied)) => {
+                    Ok(json!({"state": state(applied)}))
                 }
-            }
-            Ok(json!({"state": state(record(json!({"action": "undo"}))?)}))
-        }
+                Ok(crate::claims::Undone::Waiting) => {
+                    Err(refused(409, "rule_pending", "suggestion"))
+                }
+                Err(e) => answer(Err(e)),
+            },
+            None => Ok(json!({"state": state(record(json!({"action": "undo"}))?)})),
+        },
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook, run between a rule action's read of what My Rules shows and of what is not
+    /// applied yet.
+    pub(crate) static BETWEEN_READS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
