@@ -1,0 +1,31 @@
+docs/page.md
+  s_52c3955e48bff4::t_ac6d2e68699e91 294-307,348-352
+docs/spec.md
+  s_52c3955e48bff4::t_5d4e3d73c46806 147-148
+src/my_work_rules.rs
+  s_52c3955e48bff4::t_c21763ab91ae43 268
+src/work_view.rs
+  s_52c3955e48bff4::t_1c2cd5841aab3b 7-10,350-351,353-355
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_acfee7bf1144fd 914-916
+ui/work-view/README.md
+  s_52c3955e48bff4::t_a7c32ff29983cb 16,18
+ui/work-view/patches/0010-my-rules-switch.patch
+  s_52c3955e48bff4::t_92bd4c4b4f2352 1-428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7477a7fc7635f52633e5927042d89fbebc5625ab",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
