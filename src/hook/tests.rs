@@ -9584,3 +9584,34 @@ fn the_start_texts_work_state_waits_for_a_forgets_hold_and_leaves_out_what_it_co
     });
     assert!(!shown.contains("Zebrafinch"), "{shown}");
 }
+
+/// W4 (the plan review's rounds 2 and 3): `record_if` on a damaged store, with every event its
+/// caller keeps left out, keeps no file and says it kept none (an empty keep is no keep): the kept
+/// file before it stays alone, and no stop is appended.
+#[test]
+fn record_if_on_a_damaged_store_with_nothing_kept_says_none_was_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let settings = crate::capture::Settings::default();
+    let prompt = json!({"session_id": "s", "cwd": h, "prompt": "Kept before."});
+    let earlier = crate::capture::events("claude", "UserPromptSubmit", &prompt, 1, &settings);
+    crate::unwritten::keep(h, &earlier, settings.rules.version()).unwrap();
+    let mut raw = crate::raw::open(h).unwrap();
+    crate::unwritten::FAILS.set(Some((0, rusqlite::ffi::SQLITE_CORRUPT)));
+    let stop = json!({"session_id": "s", "cwd": h, "agent_id": "a1", "agent_type": "Explore"});
+    let (mut failed, mut back, mut kept) = (0, 0, false);
+    let recorded = record_if(
+        h,
+        &mut raw,
+        "claude",
+        "SubagentStop",
+        &stop,
+        (2, &settings),
+        (&mut failed, &mut back, &mut kept),
+        &|_| false,
+    );
+    assert!(recorded.is_err());
+    assert!(!kept);
+    assert_eq!(crate::unwritten::counts(h).unwrap(), (1, 0));
+    assert!(raw.stops_after(raw.device(), 0).unwrap().is_empty());
+}

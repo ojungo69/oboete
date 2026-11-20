@@ -35,6 +35,11 @@ fn launch(session: &str, ts: i64, mut launched: Value) -> Event {
     )
 }
 
+/// oboete's page's read: the newest `MAX_LISTED`.
+fn read(raw: &Raw, k: &Connection, convs: &[Key], rules: &Rules) -> Result<Vec<Subagent>> {
+    read_picked(raw, k, convs, rules, Pick::Newest)
+}
+
 fn drain(home: &Path, store: &Raw) -> Connection {
     let mut consumers: Vec<Box<dyn worker::Consumer>> = vec![Box::new(Subagents)];
     let mut k = crate::knowledge::open(home).unwrap();
@@ -127,6 +132,44 @@ fn a_subagents_state_follows_its_steps_stops_and_launch() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Decision 118 (W4): `Window` keeps the subagents not finished and those finished within
+/// `RECENT_MS` of its time, before the cap, so a quiet one older than `MAX_LISTED` newer finished
+/// ones stays; `All` keeps every one; `Newest` the newest `MAX_LISTED`, as `read` does.
+#[test]
+fn a_pick_keeps_its_subagents_before_the_cap() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = raw::open(home.path()).unwrap();
+    store.append(&step("s", "quiet", 0)).unwrap();
+    let n = MAX_LISTED as i64;
+    for i in 1..=n {
+        store.append(&step("s", &format!("f{i}"), i * MIN)).unwrap();
+        store.append(&stop("s", &format!("f{i}"), i * MIN)).unwrap();
+    }
+    let k = drain(home.path(), &store);
+    let picked = |pick| {
+        let found = read_picked(&store, &k, &[key("s")], &Rules::default(), pick).unwrap();
+        let mut ids: Vec<String> = found.into_iter().map(|s| s.agent_id).collect();
+        ids.sort();
+        ids
+    };
+    let newest = picked(Pick::Newest);
+    assert_eq!(newest.len(), MAX_LISTED);
+    assert!(!newest.contains(&"quiet".to_owned()), "{newest:?}");
+    assert_eq!(picked(Pick::All).len(), MAX_LISTED + 1);
+    // A minute after the last stop: the stops of the last 15 minutes are within the window.
+    let now = (n + 1) * MIN;
+    let mut within: Vec<String> = ((n - 14)..=n).map(|i| format!("f{i}")).collect();
+    within.push("quiet".to_owned());
+    within.sort();
+    assert_eq!(picked(Pick::Window(now)), within);
+    // Ten minutes before the last stop (another clock's): a stop timed after it is not within it.
+    let now = (n - 10) * MIN;
+    let mut within: Vec<String> = ((n - 25)..=(n - 10)).map(|i| format!("f{i}")).collect();
+    within.push("quiet".to_owned());
+    within.sort();
+    assert_eq!(picked(Pick::Window(now)), within);
 }
 
 /// Slice 2: at most `MAX_LISTED` subagents, those with the newest last steps.
@@ -443,4 +486,162 @@ fn an_imported_agent_lifecycle_row_is_its_subagents_stop() {
             ("c3", "working", None),
         ]
     );
+}
+
+/// W4 (Codex on #1121): the steps `fresh_steps` reads past the checkpoints pass over a record any
+/// device's tombstone took since, though the tombstone is another device's and leaves the agent's
+/// id whole: in a copied home, a range tombstone of the first device's newer step leaves the older
+/// step the newest.
+#[test]
+fn fresh_steps_pass_over_a_step_another_devices_tombstone_took() {
+    let from = tempfile::tempdir().unwrap();
+    let mut store = raw::open(from.path()).unwrap();
+    let old = store.append(&step("s", "a1", MIN)).unwrap();
+    let first = store.device().to_owned();
+    drop(drain(from.path(), &store));
+    let newer = step("s", "a1", 2 * MIN);
+    let at = i64::try_from(newer.body.find("Read").unwrap()).unwrap();
+    let seq = store.append(&newer).unwrap();
+    drop(store);
+    let to = tempfile::tempdir().unwrap();
+    for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+        if from.path().join(f).exists() {
+            std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+        }
+    }
+    let mut store = raw::open(to.path()).unwrap();
+    assert_ne!(store.device(), first);
+    let k = crate::knowledge::open(to.path()).unwrap();
+    let taken = Target::Range {
+        device: first.clone(),
+        seq,
+        offset: at,
+        length: 4,
+    };
+    store.append_tombstone(taken).unwrap();
+    let rules = Rules::default();
+    let mut s = (read_picked(&store, &k, &[key("s")], &rules, Pick::All).unwrap())
+        .pop()
+        .unwrap();
+    fresh_steps(&store, &k, &mut s).unwrap();
+    assert_eq!((s.last_step, s.step_record.clone()), (MIN, (first, old)));
+}
+
+/// W4 (Codex on #1121): of steps at one time, `fresh_steps` takes the one the read takes once the
+/// consumer has read them all, the greatest (device, seq): in a copied home whose first device's id
+/// sorts after its own, the first device's read step stays the newest beside the copy's own unread
+/// step of the same time, as the read keeps it once the consumer has read both.
+#[test]
+fn fresh_steps_break_a_tie_as_the_read_does() {
+    let rules = Rules::default();
+    let newest = |store: &Raw, k: &Connection| {
+        let mut s = (read_picked(store, k, &[key("s")], &rules, Pick::All).unwrap())
+            .pop()
+            .unwrap();
+        fresh_steps(store, k, &mut s).unwrap();
+        s.step_record
+    };
+    // A copied home's own device id is a random one: 64 homes leave none whose first device's id
+    // sorts after its own once in 2^64.
+    for _ in 0..64 {
+        let from = tempfile::tempdir().unwrap();
+        let mut store = raw::open(from.path()).unwrap();
+        let read = store.append(&step("s", "a1", MIN)).unwrap();
+        let first = store.device().to_owned();
+        drop(drain(from.path(), &store));
+        drop(store);
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+            if from.path().join(f).exists() {
+                std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+            }
+        }
+        let mut store = raw::open(to.path()).unwrap();
+        if store.device() > first.as_str() {
+            continue;
+        }
+        store.append(&step("s", "a1", MIN)).unwrap();
+        let k = crate::knowledge::open(to.path()).unwrap();
+        assert_eq!(newest(&store, &k), (first.clone(), read));
+        drop(k);
+        let k = drain(to.path(), &store);
+        assert_eq!(newest(&store, &k), (first, read));
+        return;
+    }
+    panic!("no copied home whose first device's id sorts after its own in 64");
+}
+
+/// W4 (Codex on #1121): the type of an unread step newer than the type the read has is the
+/// subagent's, though a newer step names none, as the read takes it once the consumer has read
+/// them: a stop Mark finished sends carries that type.
+#[test]
+fn fresh_steps_take_the_type_the_read_takes() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = raw::open(home.path()).unwrap();
+    let typed = |kind: &str, ts| {
+        let body = json!({"tool": "Read", "agent_id": "a1", "agent_type": kind});
+        ev("s", "tool", ts, body)
+    };
+    store.append(&typed("Explore", MIN)).unwrap();
+    drop(drain(home.path(), &store));
+    store.append(&typed("Plan", 2 * MIN)).unwrap();
+    store.append(&step("s", "a1", 3 * MIN)).unwrap();
+    let rules = Rules::default();
+    let picked = |k: &Connection| {
+        (read_picked(&store, k, &[key("s")], &rules, Pick::All).unwrap())
+            .pop()
+            .unwrap()
+    };
+    let k = crate::knowledge::open(home.path()).unwrap();
+    let mut s = picked(&k);
+    assert_eq!(s.agent_type.as_deref(), Some("Explore"));
+    fresh_steps(&store, &k, &mut s).unwrap();
+    assert_eq!(
+        (s.agent_type.as_deref(), s.last_step),
+        (Some("Plan"), 3 * MIN)
+    );
+    drop(k);
+    let k = drain(home.path(), &store);
+    let s = picked(&k);
+    assert_eq!(
+        (s.agent_type.as_deref(), s.last_step),
+        (Some("Plan"), 3 * MIN)
+    );
+}
+
+/// W4 (Codex on #1121): a rewind of the subagents consumer drops every row and keeps the
+/// checkpoints, and the worker rebuilds the devices one at a time: until a device with records is
+/// rebuilt, a rebuild is owed, in a copied home with one device rebuilt as before any; a device owed
+/// that has no records owes none.
+#[test]
+fn a_rebuild_is_owed_until_every_device_with_records_is_rebuilt() {
+    let from = tempfile::tempdir().unwrap();
+    let mut store = raw::open(from.path()).unwrap();
+    store.append(&step("s", "a1", MIN)).unwrap();
+    let first = store.device().to_owned();
+    drop(drain(from.path(), &store));
+    drop(store);
+    let to = tempfile::tempdir().unwrap();
+    for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+        if from.path().join(f).exists() {
+            std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+        }
+    }
+    let mut store = raw::open(to.path()).unwrap();
+    let own = store.device().to_owned();
+    store.append(&step("s", "a1", 2 * MIN)).unwrap();
+    let k = drain(to.path(), &store);
+    assert!(!rebuild_owed(&store, &k).unwrap());
+    let mut consumer = Subagents;
+    worker::Consumer::rewind(&mut consumer, &k, &first, 0).unwrap();
+    assert!(rebuild_owed(&store, &k).unwrap());
+    for (device, owed) in [(&first, true), (&own, false)] {
+        let at = worker::Consumer::step(&mut consumer, &store, &k, device, 0).unwrap();
+        let seqs = crate::knowledge::checkpoint::SEQS;
+        crate::knowledge::checkpoint::set_in(&k, seqs, subagents::NAME, device, at).unwrap();
+        assert_eq!(rebuild_owed(&store, &k).unwrap(), owed, "{device}");
+    }
+    k.execute("INSERT INTO subagent_rebuild(device) VALUES('gone')", [])
+        .unwrap();
+    assert!(!rebuild_owed(&store, &k).unwrap());
 }

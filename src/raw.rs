@@ -5403,6 +5403,19 @@ impl Raw {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// W4 (Codex on #1121): the seqs of `device`'s tool records of `session` after `seq`, a
+    /// subagent's steps among them, which Mark finished reads before the consumer has.
+    pub(crate) fn tools_after(&self, device: &str, seq: i64, session: &str) -> Result<Vec<i64>> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT seq FROM records WHERE device = ?1 AND seq > ?2 AND type = 'event'
+                   AND kind = 'tool' AND session = ?3 ORDER BY seq",
+            )?
+            .query_map(params![device, seq, session], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Slice 2: which of `device`'s `seqs` are events whose text retention removed.
     pub(crate) fn expired_among(&self, device: &str, seqs: &[i64]) -> Result<Vec<i64>> {
         Ok(self

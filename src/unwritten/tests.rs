@@ -515,3 +515,115 @@ fn a_bad_file_goes_aside_and_nothing_is_kept_past_the_bound() {
     assert!(e.to_string().contains("holds"), "{e}");
     assert_eq!(counts(h).unwrap(), (1, 1));
 }
+
+/// An owner's stop of subagent `id`, as the viewer's Mark finished sends it through the hook's path.
+fn owner_stop(id: &str, ts: i64) -> Captured {
+    let payload = json!({"session_id": "s", "cwd": "/w", "agent_id": id,
+        crate::capture::OWNER_MARK: true});
+    let settings = crate::capture::Settings::default();
+    crate::capture::events("claude", "SubagentStop", &payload, ts, &settings)
+        .pop()
+        .unwrap()
+}
+
+fn owners_stop_of(id: &str) -> impl Fn(&crate::raw::Event) -> bool + '_ {
+    move |e| {
+        let body: serde_json::Value = serde_json::from_str(&e.body).unwrap_or_default();
+        e.kind == crate::raw::SUBAGENT_STOP && body["agent_id"] == id && body["marked"] == true
+    }
+}
+
+/// W4: `holds` finds an owner's stop among a kept file's events not yet written back: one before
+/// its consumed offset is written back, one at it is not; another subagent's, a file set aside in
+/// `bad/`, a file of another version and one that does not parse hold none; a spool with no file
+/// holds none; a file it cannot read is an error.
+#[test]
+fn holds_reads_the_events_a_write_back_has_not_written() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let settings = crate::capture::Settings::default();
+    let mut raw = crate::raw::open(h).unwrap();
+    assert!(!holds(h, &raw, &owners_stop_of("a1")).unwrap(), "no file");
+    keep(h, &[owner_stop("a1", 1), owner_stop("a2", 2)], "r").unwrap();
+    assert!(holds(h, &raw, &owners_stop_of("a1")).unwrap());
+    assert!(holds(h, &raw, &owners_stop_of("a2")).unwrap());
+    assert!(
+        !holds(h, &raw, &owners_stop_of("a3")).unwrap(),
+        "another subagent's"
+    );
+    // The first event written back: a1's stop is before the offset, a2's at it.
+    let file = files(&h.join(DIR)).unwrap().pop().unwrap();
+    let bytes = std::fs::read(&file).unwrap();
+    let kept: Kept = serde_json::from_slice(&bytes).unwrap();
+    let hash = crate::forget::hash(&bytes);
+    let progress = crate::raw::KeptProgress {
+        hash: &hash,
+        from: 0,
+        through: 1,
+        complete: false,
+    };
+    assert!(
+        raw.append_kept(&kept.events[..1], "r", Some(progress), &settings)
+            .unwrap()
+    );
+    assert!(
+        !holds(h, &raw, &owners_stop_of("a1")).unwrap(),
+        "written back"
+    );
+    assert!(
+        holds(h, &raw, &owners_stop_of("a2")).unwrap(),
+        "at the offset"
+    );
+    // Set aside: none.
+    let bad = h.join(DIR).join("bad");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::rename(&file, bad.join(file.file_name().unwrap())).unwrap();
+    assert!(!holds(h, &raw, &owners_stop_of("a2")).unwrap(), "in bad/");
+    // Another version, and a file that does not parse: passed over.
+    let other =
+        serde_json::json!({"v": VERSION + 1, "ruleset": "r", "events": [owner_stop("a4", 4)]});
+    std::fs::write(
+        h.join(DIR).join("0000000000001-other.json"),
+        other.to_string(),
+    )
+    .unwrap();
+    std::fs::write(h.join(DIR).join("0000000000002-broken.json"), "{").unwrap();
+    assert!(
+        !holds(h, &raw, &owners_stop_of("a4")).unwrap(),
+        "another version"
+    );
+    keep(h, &[owner_stop("a5", 5)], "r").unwrap();
+    assert!(
+        holds(h, &raw, &owners_stop_of("a5")).unwrap(),
+        "past the files passed over"
+    );
+    UNREADABLE.set(true);
+    let unreadable = holds(h, &raw, &owners_stop_of("a5"));
+    UNREADABLE.set(false);
+    assert!(unreadable.is_err(), "{unreadable:?}");
+}
+
+/// W4 (Codex on #1121): `holds` reads a kept event's session as write-back writes it: a stop kept
+/// with no session of its own is this device's `unknown-<device>` conversation's, and not another
+/// conversation's though its subagent's id is the same.
+#[test]
+fn holds_reads_a_kept_events_session_as_write_back_writes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let raw = crate::raw::open(h).unwrap();
+    let mut stop = owner_stop("a1", 1);
+    stop.event.session = "unknown".into();
+    keep(h, &[stop], "r").unwrap();
+    let of = |session: String| {
+        move |e: &crate::raw::Event| e.kind == crate::raw::SUBAGENT_STOP && e.session == session
+    };
+    assert!(holds(h, &raw, &of(format!("unknown-{}", raw.device()))).unwrap());
+    assert!(
+        !holds(h, &raw, &of("unknown".into())).unwrap(),
+        "as it was kept"
+    );
+    assert!(
+        !holds(h, &raw, &of("s".into())).unwrap(),
+        "another conversation's"
+    );
+}

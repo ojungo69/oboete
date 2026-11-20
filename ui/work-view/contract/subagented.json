@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-20T08:35:59.081Z",
+  "revision": "1795163759081",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-20T08:35:59.081Z"
+  },
+  "agents": [
+    {
+      "id": "claude:c:claude:s1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1"
+    },
+    {
+      "id": "s:565c5fdfe30d",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": true,
+      "presence": {
+        "status": "recent",
+        "finishedAt": null
+      }
+    },
+    {
+      "id": "s:67c8e7fc7c7b",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": false,
+      "presence": {
+        "status": "finished",
+        "finishedAt": "2026-11-20T08:30:59.081Z"
+      }
+    },
+    {
+      "id": "s:adf7234ef1f1",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": true,
+      "presence": {
+        "status": "quiet",
+        "finishedAt": null
+      }
+    }
+  ],
+  "humanRequests": [
+    {
+      "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
+      "contentFingerprint": "dc46dea825ce30de1709a31add0863379c23da0c0c1f00639dcb7e91635c50ad",
+      "title": "Fix the parser.",
+      "titleSource": "title-cache",
+      "humanCopy": {
+        "state": "current",
+        "title": "Fix the parser.",
+        "summary": "Fix the parser.",
+        "workstreams": []
+      },
+      "original": {
+        "text": "Fix the parser.",
+        "atEpoch": 1795161059081
+      },
+      "scopeUpdates": [],
+      "items": [],
+      "workstreams": [],
+      "activity": [],
+      "agentIds": [
+        "claude:c:claude:s1"
+      ],
+      "conversationKeys": [
+        "[\"conversation\",\"claude\",\"c:claude:s1\"]"
+      ],
+      "requestedBy": null,
+      "startedAtEpoch": 1795161059081,
+      "updatedAtEpoch": 1795161059081,
+      "completedAtEpoch": null,
+      "lifecycle": {
+        "status": "unknown",
+        "explicit": true,
+        "complete": null,
+        "atEpoch": null
+      },
+      "review": {
+        "checked": false,
+        "checkedAtEpoch": null,
+        "available": false
+      },
+      "progress": null,
+      "anchorConversationKey": null
+    }
+  ],
+  "unlinkedWork": [],
+  "focusAreas": [],
+  "goals": null,
+  "goalHistory": [],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    }
+  ],
+  "rules": [],
+  "story": null,
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1795163759081,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}

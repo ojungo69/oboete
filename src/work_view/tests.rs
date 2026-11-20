@@ -878,8 +878,9 @@ fn steady(v: &Value) -> Value {
     steady_with(v, &mut Vec::new())
 }
 
-/// `steady`, each group's print (`g:` and 12 hex digits, keyed by the home's key) written as its
-/// place among the groups seen first, so that the id a suggestion names stays its row's (W3b-3).
+/// `steady`, each group's print (`g:` and 12 hex digits, keyed by the home's key) and each
+/// subagent's (`s:`, W4) written as its place among those seen first, so that the id a suggestion
+/// names stays its row's (W3b-3).
 fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
     match v {
         Value::Number(n) if n.as_i64().is_some_and(|n| n > 1_000_000_000_000) => json!("<ms>"),
@@ -889,7 +890,7 @@ fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
             let reference = regex::Regex::new(r"\bm:[0-9a-f]{12}\b").unwrap();
-            let group = regex::Regex::new(r"\bg:[0-9a-f]{12}\b").unwrap();
+            let group = regex::Regex::new(r"\b[gs]:[0-9a-f]{12}\b").unwrap();
             let s = iso.replace_all(s, "<iso>");
             let s = stamp.replace_all(&s, "<day>");
             let s = month.replace_all(&s, "<month>");
@@ -901,7 +902,7 @@ fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
                     groups.push(c[0].to_owned());
                     groups.len() - 1
                 });
-                format!("g:<{at}>")
+                format!("{}<{at}>", &c[0][..2])
             }))
         }
         Value::Array(a) => Value::Array(a.iter().map(|v| steady_with(v, groups)).collect()),
@@ -1907,9 +1908,17 @@ fn the_contract_suggestion_is_a_suggestion_homes_answer() {
     let (h, now) = suggested("s2");
     let (work, goals) = answers(&h, now);
     let fresh = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/work-view/contract/suggested.json");
+    contract_holds("suggested.json", &fresh);
+}
+
+/// `fresh` is the contract file `file` (`ui/work-view/contract`), as `steady` reads both; with
+/// OBOETE_CONTRACT_WRITE=1, `fresh` is written there.
+fn contract_holds(file: &str, fresh: &Value) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("ui/work-view/contract")
+        .join(file);
     if std::env::var_os("OBOETE_CONTRACT_WRITE").is_some() {
-        let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
+        let text = serde_json::to_string_pretty(fresh).unwrap() + "\n";
         std::fs::write(&path, text).unwrap();
         return;
     }
@@ -1919,48 +1928,248 @@ fn the_contract_suggestion_is_a_suggestion_homes_answer() {
         .unwrap_or(Value::Null);
     assert_eq!(
         steady(&kept),
-        steady(&fresh),
-        "the contract suggestion is not this home's answer"
+        steady(fresh),
+        "{file} is not this home's answer"
     );
 }
 
-/// The suggestion's keys, which the walk leaves as they are (`OWN`), name nothing else in the
-/// contract's answers: each is a request's suggestion's (W3b-3).
-#[test]
-fn the_suggestions_keys_are_its_alone() {
-    const KEYS: [&str; 3] = ["conversationKey", "requestId", "expectedSuggestionHash"];
-    fn walk(v: &Value, path: &str, out: &mut Vec<String>) {
+/// Where each of `keys` is in the contract file `file`, as paths (`/agents/0/isSubagent`).
+fn paths_in(file: &str, keys: &[&str]) -> Vec<String> {
+    fn walk(v: &Value, path: &str, keys: &[&str], out: &mut Vec<String>) {
         match v {
             Value::Array(a) => {
-                (a.iter().enumerate()).for_each(|(i, v)| walk(v, &format!("{path}/{i}"), out))
+                (a.iter().enumerate()).for_each(|(i, v)| walk(v, &format!("{path}/{i}"), keys, out))
             }
             Value::Object(o) => {
                 for (k, v) in o {
                     let at = format!("{path}/{k}");
-                    if KEYS.contains(&k.as_str()) {
+                    if keys.contains(&k.as_str()) {
                         out.push(at.clone());
                     }
-                    walk(v, &at, out);
+                    walk(v, &at, keys, out);
                 }
             }
             _ => {}
         }
     }
-    let own = Regex::new(r"^/humanRequests/\d+/suggestion/[A-Za-z]+$").unwrap();
-    for (file, least) in [
-        ("snapshot.json", 0),
-        ("gated.json", 0),
-        ("suggested.json", 3),
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("ui/work-view/contract")
+        .join(file);
+    let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut found = Vec::new();
+    walk(&v, "", keys, &mut found);
+    found
+}
+
+/// Keys the walk leaves as they are (`OWN`) name nothing else in the contract's answers: the
+/// suggestion's three, each a request's suggestion's (W3b-3); a subagent's `isSubagent`,
+/// `canMarkFinished` and `finishedAt`, each an agent's (W4).
+#[test]
+fn the_suggestions_and_subagents_keys_are_theirs_alone() {
+    let files = [
+        "snapshot.json",
+        "gated.json",
+        "suggested.json",
+        "subagented.json",
+    ];
+    for (keys, own, least) in [
+        (
+            &["conversationKey", "requestId", "expectedSuggestionHash"][..],
+            r"^/humanRequests/\d+/suggestion/[A-Za-z]+$",
+            ("suggested.json", 3),
+        ),
+        (
+            &["isSubagent", "canMarkFinished", "finishedAt"][..],
+            r"^/agents/\d+/(isSubagent|canMarkFinished|presence/finishedAt)$",
+            ("subagented.json", 9),
+        ),
     ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("ui/work-view/contract")
-            .join(file);
-        let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let mut found = Vec::new();
-        walk(&v, "", &mut found);
-        assert!(found.len() >= least, "{file}: {found:?}");
-        for at in &found {
-            assert!(own.is_match(at), "{file}: {at}");
+        let own = Regex::new(own).unwrap();
+        for file in files {
+            let found = paths_in(file, keys);
+            let at_least = if file == least.0 { least.1 } else { 0 };
+            assert!(found.len() >= at_least, "{file}: {found:?}");
+            for at in &found {
+                assert!(own.is_match(at), "{file}: {at}");
+            }
         }
     }
+}
+
+/// A step of subagent `id` in `session` at `at`, as Claude Code's hook records it.
+fn sub_step(h: &mut Store, session: &str, at: i64, id: &str) {
+    let body = json!({"tool": "Read", "agent_id": id, "agent_type": "Explore"});
+    event(h, "tool", "claude", session, at, body);
+}
+
+/// A stop of subagent `id` in `session` at `at`.
+fn sub_stop(h: &mut Store, session: &str, at: i64, id: &str) {
+    event(
+        h,
+        crate::raw::SUBAGENT_STOP,
+        "claude",
+        session,
+        at,
+        json!({"agent_id": id}),
+    );
+}
+
+/// W4: a home whose conversation `s1`, of this week, has four subagents: `a0` working (its last
+/// step 2 minutes back), `a1` quiet (its last step 20 minutes back, no stop), `a2` finished 5
+/// minutes back, `a3` finished 40 minutes back; and whose conversation `s0`, eight days back, has
+/// `b1`, quiet.
+fn subagented() -> (Store, i64) {
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let min = 60_000;
+    h.said("s1", R, now - 45 * min, "Fix the parser.");
+    let old = now - 8 * 24 * 60 * min;
+    h.said("s0", R, old, "Tidy the old notes.");
+    sub_step(&mut h, "s1", now - 2 * min, "a0");
+    sub_step(&mut h, "s1", now - 20 * min, "a1");
+    sub_step(&mut h, "s1", now - 6 * min, "a2");
+    sub_stop(&mut h, "s1", now - 5 * min, "a2");
+    sub_step(&mut h, "s1", now - 41 * min, "a3");
+    sub_stop(&mut h, "s1", now - 40 * min, "a3");
+    sub_step(&mut h, "s0", old + min, "b1");
+    h.run();
+    (h, now)
+}
+
+/// Decision 118 (W4): the snapshot's agents hold a subagent of a conversation it carries while it
+/// has not finished, and for `RECENT_MS` after it finished, each after every conversation's agent,
+/// with its own id and its conversation's label, title, project and content session id; none of a
+/// conversation the week leaves out.
+#[test]
+fn a_carried_conversations_subagents_go_while_not_finished_or_lately_finished() {
+    let (h, now) = subagented();
+    let (work, goals) = answers(&h, now);
+    assert_eq!(arr(&work["subagents"]).len(), 3, "{}", work["subagents"]);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let agents = arr(&snapshot["agents"]);
+    let subs: Vec<&Value> = agents.iter().filter(|a| a["isSubagent"] == true).collect();
+    assert_eq!(subs.len(), 3, "{snapshot}");
+    let first = agents.iter().position(|a| a["isSubagent"] == true).unwrap();
+    assert!(
+        agents[first..].iter().all(|a| a["isSubagent"] == true),
+        "after every conversation's: {snapshot}"
+    );
+    let parent = (agents.iter())
+        .find(|a| a["isSubagent"] != true && a["contentSessionId"] == subs[0]["contentSessionId"])
+        .expect("the conversation's agent");
+    for sub in &subs {
+        for key in [
+            "label",
+            "platformSource",
+            "sessionTitle",
+            "project",
+            "contentSessionId",
+        ] {
+            assert_eq!(sub[key], parent[key], "{key} of {sub}");
+        }
+        assert!(sub["id"].as_str().unwrap().starts_with("s:"), "{sub}");
+    }
+    let ids: std::collections::HashSet<&Value> = subs.iter().map(|s| &s["id"]).collect();
+    assert_eq!(ids.len(), 3, "{snapshot}");
+    let by = |status: &str| -> Vec<&Value> {
+        (subs.iter().copied())
+            .filter(|s| s["presence"]["status"] == status)
+            .collect()
+    };
+    for status in ["recent", "quiet"] {
+        let one = by(status);
+        assert_eq!(one.len(), 1, "{status}: {snapshot}");
+        assert_eq!(one[0]["canMarkFinished"], true);
+        assert_eq!(one[0]["presence"]["finishedAt"], Value::Null);
+    }
+    let finished = by("finished");
+    assert_eq!(finished.len(), 1, "{snapshot}");
+    assert_eq!(finished[0]["canMarkFinished"], false);
+    // Its stop's time, 5 minutes before the home's `now`, as an ISO time.
+    assert_eq!(finished[0]["presence"]["finishedAt"], iso(now - 5 * 60_000));
+}
+
+/// W4 (the plan review's round 1): a subagent goes with the session whose shown id and fingerprint
+/// are both its conversation's, though another session shows the same id (a masked one), or with
+/// none.
+#[test]
+fn a_subagent_goes_with_the_session_its_id_and_fingerprint_name() {
+    let row = |id: &str, title: &str, fingerprint: &str, reference: &str| {
+        json!({"id": id, "title": title, "projects": [title], "sessions": [{"agent": "claude",
+            "id": "c:claude:[REDACTED]", "fingerprint": fingerprint, "ref": reference}]})
+    };
+    let sub = |fingerprint: &str| {
+        json!({"conversation": {"id": "c:claude:[REDACTED]", "fingerprint": fingerprint},
+            "id": "s:0123456789ab", "state": "quiet", "can_mark": true, "finished_at": null})
+    };
+    let work = |fingerprint: &str| {
+        json!({"requests": [row("r1", "One", "f1", "r:1"), row("r2", "Two", "f2", "r:2")],
+            "subagents": [sub(fingerprint)]})
+    };
+    let agents = |work: &Value| {
+        let snapshot = snapshot_at(work, &json!({}), crate::db::now_ms(), &Utc, &Gate::now());
+        snapshot["agents"].clone()
+    };
+    let found = agents(&work("f2"));
+    let child = one(&found, "id", "s:0123456789ab");
+    assert_eq!(child["sessionTitle"], "Two", "{found}");
+    assert_eq!(child["contentSessionId"], "r:2", "{found}");
+    let found = agents(&work("f3"));
+    assert!(
+        arr(&found).iter().all(|a| a["isSubagent"] != true),
+        "{found}"
+    );
+}
+
+/// W4: a subagent's label is gated as its conversation's: a rule that masks the conversation's
+/// title masks it alike; its id and `finishedAt` leave whole though rules find hex digits and a
+/// time in them (`OWN`).
+#[test]
+fn a_subagents_label_is_gated_as_its_conversations() {
+    let name = "work_view::tests::a_subagents_label_is_gated_as_its_conversations";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, _) = subagented();
+    let home = h.home.path();
+    let rules = "[redaction]\nextra_rules = [{ id = 'parser', regex = 'parser' }, \
+                 { id = 'hex', regex = '[0-9a-f]{12}' }, { id = 'time', regex = 'T[0-9]{2}:[0-9]{2}' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    crate::redact::set_home(home).unwrap();
+    let snapshot = answer(home, crate::db::now_ms()).unwrap();
+    let agents = arr(&snapshot["agents"]);
+    let subs: Vec<&Value> = agents.iter().filter(|a| a["isSubagent"] == true).collect();
+    assert_eq!(subs.len(), 3, "{snapshot}");
+    let parent = (agents.iter())
+        .find(|a| a["isSubagent"] != true && a["contentSessionId"] == subs[0]["contentSessionId"])
+        .unwrap();
+    assert!(
+        !parent["sessionTitle"].to_string().contains("parser"),
+        "{parent}"
+    );
+    let print = Regex::new(r"^s:[0-9a-f]{12}$").unwrap();
+    for sub in &subs {
+        assert_eq!(sub["sessionTitle"], parent["sessionTitle"], "{sub}");
+        let id = sub["id"].as_str().unwrap();
+        assert!(print.is_match(id), "{id}");
+    }
+    let finished = (subs.iter())
+        .find(|s| s["presence"]["status"] == "finished")
+        .unwrap();
+    let at = finished["presence"]["finishedAt"].as_str().unwrap();
+    assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+}
+
+/// The contract of a carried conversation's subagents (W4, decision 118):
+/// `ui/work-view/contract/subagented.json` is the subagent home's answer, which the Node test reads
+/// through claude-mem's mapper; written again as the other contract files are
+/// (OBOETE_CONTRACT_WRITE=1).
+#[test]
+fn the_contract_subagents_are_a_subagent_homes_answer() {
+    let (h, now) = subagented();
+    let (work, goals) = answers(&h, now);
+    contract_holds(
+        "subagented.json",
+        &snapshot_at(&work, &goals, now, &Utc, &Gate::now()),
+    );
 }

@@ -156,6 +156,7 @@ where
             out
         })
         .collect();
+    subagents(&work["subagents"], rows, &mut agents, &seen);
     let areas: Vec<Value> = arr(&work["areas"]).iter().map(focus_area).collect();
     // The pages count unlinked work and read nothing of it.
     let unlinked = usize::try_from(work["unlinked"].as_u64().unwrap_or(0)).unwrap_or(0);
@@ -283,6 +284,50 @@ fn refer(home: &Path, work: &mut Value, gate: &Gate) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Decision 118 (W4): each subagent My Work's read lists (`work["subagents"]`: of the requests it
+/// answers, not finished or finished within `my_work_subagents::RECENT_MS`) as an agent of its
+/// conversation, after every conversation's: the session of a request whose shown id and
+/// fingerprint are both its conversation's (a masked id can be another conversation's literal one),
+/// with that conversation's agent's label, title, project and content session id, as claude-mem's
+/// worker gives a subagent its session's. One whose conversation no request carries goes nowhere.
+fn subagents(
+    listed: &Value,
+    rows: &[Value],
+    agents: &mut Vec<Value>,
+    seen: &HashMap<String, usize>,
+) {
+    for sub in arr(listed) {
+        let conversation = &sub["conversation"];
+        let parent = (rows.iter())
+            .flat_map(|r| arr(&r["sessions"]))
+            .find(|c| {
+                c["id"] == conversation["id"] && c["fingerprint"] == conversation["fingerprint"]
+            })
+            .and_then(|c| {
+                let agent = c["agent"].as_str().unwrap_or("");
+                let id = c["ref"].as_str().or(c["id"].as_str()).unwrap_or("");
+                seen.get(&agent_id(agent, id)).map(|&at| agents[at].clone())
+            });
+        let Some(parent) = parent else {
+            continue;
+        };
+        // The pages' three (`to-work-model.ts:94-107`).
+        let status = match sub["state"].as_str() {
+            Some("finished") => "finished",
+            Some("working") => "recent",
+            _ => "quiet",
+        };
+        agents.push(json!({
+            "id": sub["id"], "label": parent["label"], "platformSource": parent["platformSource"],
+            "sessionTitle": parent["sessionTitle"], "project": parent["project"],
+            "contentSessionId": parent["contentSessionId"], "isSubagent": true,
+            "canMarkFinished": sub["can_mark"] == true,
+            "presence": {"status": status,
+                "finishedAt": sub["finished_at"].as_i64().map_or(Value::Null, iso)},
+        }));
+    }
+}
+
 /// A conversation's agent's id in the snapshot, by which the pages give a request its agent
 /// (`agentIds`, `to-work-model.ts:154`): its platform, a word of this file's in place of the
 /// agent's own name, which the raw hook takes as given, and the conversation's id or reference.
@@ -339,6 +384,7 @@ const OWN: &[&str] = &[
     "periodStart",
     "periodEnd",
     "writtenAt",
+    "finishedAt",
 ];
 
 /// `v` with each string under a key not in `OWN` through the gate as it is sent (#1089), and no

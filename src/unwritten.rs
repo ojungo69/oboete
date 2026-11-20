@@ -260,6 +260,87 @@ fn write_back_counting(
     Ok(())
 }
 
+/// W4 (docs/subagents.md): whether the events not yet written back of a kept file hold one
+/// `matches` takes: Mark finished's look for an owner's stop that waits. Each kept file once, read
+/// as `write_back` reads it: one of another version, or that does not parse, is passed over (a
+/// write-back sets it aside and writes none of it back), one gone meanwhile too; its events from
+/// its consumed offset (`Raw::kept_progress`, the next a write-back writes) on. Any other error
+/// reading a file is the error: what it holds is not known.
+pub(crate) fn holds(
+    home: &Path,
+    raw: &crate::raw::Raw,
+    matches: &dyn Fn(&crate::raw::Event) -> bool,
+) -> Result<bool> {
+    for path in files(&home.join(DIR))? {
+        let read = std::fs::read(&path);
+        #[cfg(test)]
+        let read = if UNREADABLE.get() {
+            Err(std::io::Error::other("a kept file cannot be read"))
+        } else {
+            read
+        };
+        let bytes = match read {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let Some(kept) = (serde_json::from_slice::<Kept>(&bytes).ok()).filter(|k| k.v == VERSION)
+        else {
+            continue;
+        };
+        // As `write_back` reads its offset: a file kept before the id has none.
+        let from = match kept.id {
+            Some(_) => raw.kept_progress(&crate::forget::hash(&bytes), kept.events.len())?,
+            None => 0,
+        };
+        // Each event's session as write-back writes it (`hook::own_session`; Codex on #1121).
+        let written = |c: &Captured| {
+            let mut event = c.event.clone();
+            event.session = crate::hook::own_session(std::mem::take(&mut event.session), raw);
+            matches(&event)
+        };
+        if kept.events.iter().skip(from).any(written) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// W4: write-back's lock (`write-back.lock`), held while this lives: a `write_back` meanwhile
+/// writes nothing back (it takes the lock with `try_lock` and leaves), so what `holds` looked at is
+/// still kept when the holder records.
+pub(crate) struct Held(#[allow(dead_code)] std::fs::File);
+
+/// W4: write-back's lock, waited for `wait` at most (a write-back holds it for one call's budget);
+/// none when it is not had by then. The folder is made when it is not there.
+pub(crate) fn hold(home: &Path, wait: std::time::Duration) -> Result<Option<Held>> {
+    let dir = home.join(DIR);
+    std::fs::create_dir_all(&dir)?;
+    crate::db::private(&dir, 0o700);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("write-back.lock"))?;
+    let until = std::time::Instant::now() + wait;
+    loop {
+        match crate::worker::try_lock(&lock) {
+            Ok(()) => return Ok(Some(Held(lock))),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// W4's test of a kept file `holds` cannot read.
+    pub(crate) static UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// U6: the hook calls kept, and the files set aside in `bad/`; an error when either cannot be
 /// listed, which may hide some (Codex on #440).
 pub fn counts(home: &Path) -> Result<(usize, usize)> {

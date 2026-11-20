@@ -24,15 +24,18 @@ pub(crate) const RECENT_MS: i64 = 15 * 60 * 1000;
 /// more than doubled each minute's read of My Work.
 pub(crate) const MAX_LISTED: usize = 300;
 
+/// A row's place among a subagent's rows: its time, then its record (device, seq).
+pub(crate) type RowAt = (i64, (String, i64));
+
 /// What a subagent's rows say once read: its last step, its newest stop at or after it, its type,
 /// and the launch record it was started by.
 #[derive(Debug, Default)]
 struct Seen {
     /// Its newest step's time, and that step's record (device, seq).
-    last_step: Option<(i64, (String, i64))>,
+    last_step: Option<RowAt>,
     stops: Vec<i64>,
-    /// Its newest type, with that row's time.
-    kind: Option<(i64, String)>,
+    /// Its newest type, with that row's place.
+    kind: Option<(RowAt, String)>,
     /// The newest launch record (device, seq) and its time.
     launch: Option<(String, i64, i64)>,
 }
@@ -43,6 +46,8 @@ pub(crate) struct Subagent {
     pub conversation: Key,
     pub agent_id: String,
     pub agent_type: Option<String>,
+    /// Its type's row, which `fresh_steps` orders an unread step's against.
+    pub kind_at: Option<RowAt>,
     pub last_step: i64,
     /// Its newest step's record (device, seq), which Mark finished reads the folder of.
     pub step_record: (String, i64),
@@ -62,14 +67,27 @@ impl Subagent {
     }
 }
 
-/// The subagents of `convs` (Claude Code conversations), the `MAX_LISTED` with the newest last steps,
-/// each conversation's newest step first. The caller holds the read fence: a forget registers before
-/// this read or after it.
-pub(crate) fn read(
+/// Which of the subagents `read_picked` keeps.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Pick {
+    /// The newest `MAX_LISTED` by last step: oboete's page's.
+    Newest,
+    /// Every one, with no task read: Mark finished's lookup (W4).
+    All,
+    /// Decision 118: those not finished, or finished within `RECENT_MS` of the time given, then
+    /// the newest `MAX_LISTED` of them: the work-view's.
+    Window(i64),
+}
+
+/// The subagents of `convs` (Claude Code conversations) that `pick` keeps, each conversation's
+/// newest step first. The caller holds the read fence: a forget registers before this read or
+/// after it.
+pub(crate) fn read_picked(
     raw: &Raw,
     k: &Connection,
     convs: &[Key],
     rules: &Rules,
+    pick: Pick,
 ) -> Result<Vec<Subagent>> {
     let convs: Vec<&Key> = convs.iter().filter(|(a, _)| a == "claude").collect();
     if convs.is_empty() || !crate::consumer::manifest::exists(k, "table", "subagent_facts")? {
@@ -166,15 +184,17 @@ pub(crate) fn read(
             continue;
         }
         let s = seen.entry((key, f.agent_id.clone())).or_default();
+        // The newest by time, then by (device, seq), as `fresh_steps` orders them too.
+        let at = (ts, (device.clone(), seq));
         if let Some(kind) = f.agent_type.filter(|_| f.fact != "launch")
-            && s.kind.as_ref().is_none_or(|(at, _)| *at <= ts)
+            && s.kind.as_ref().is_none_or(|(was, _)| *was <= at)
         {
-            s.kind = Some((ts, kind));
+            s.kind = Some((at.clone(), kind));
         }
         match f.fact {
             "step" => {
-                if s.last_step.as_ref().is_none_or(|(at, _)| *at <= ts) {
-                    s.last_step = Some((ts, (device, seq)));
+                if s.last_step.as_ref().is_none_or(|was| *was <= at) {
+                    s.last_step = Some(at);
                 }
             }
             "stop" => s.stops.push(ts),
@@ -188,35 +208,46 @@ pub(crate) fn read(
             }
         }
     }
-    // A subagent is listed from its first step: a stop or a launch with no step makes none. The
-    // newest last steps first, at most `MAX_LISTED`.
-    type Stepped = ((Key, String), Seen, (i64, (String, i64)));
-    let mut stepped: Vec<Stepped> = (seen.into_iter())
-        .filter_map(|(id, mut s)| s.last_step.take().map(|last| (id, s, last)))
-        .collect();
-    stepped.sort_by_key(|(.., (at, _))| std::cmp::Reverse(*at));
-    stepped.truncate(MAX_LISTED);
+    // A subagent is listed from its first step: a stop or a launch with no step makes none. Each
+    // one's finish first, which `Pick::Window` keeps by; then the newest last steps first, at most
+    // `MAX_LISTED` but for `Pick::All`, and, for oboete's page, the task of those kept (the
+    // work-view's pages show none: Codex on #1121).
+    type Stepped = ((Key, String), Seen, RowAt, Option<i64>);
     let imported = imported_stops(raw, &wanted)?;
+    let mut stepped: Vec<Stepped> = (seen.into_iter())
+        .filter_map(|(id, mut s)| {
+            let last = s.last_step.take()?;
+            let finished = (s.stops.iter())
+                .chain(imported.get(&id).into_iter().flatten())
+                .copied()
+                .filter(|&at| at >= last.0)
+                .max();
+            Some((id, s, last, finished))
+        })
+        .collect();
+    if let Pick::Window(now) = pick {
+        // A stop timed after `now` (another clock's) is not within the window (Codex on #1121).
+        stepped
+            .retain(|(.., finished)| finished.is_none_or(|at| at <= now && now - at <= RECENT_MS));
+    }
+    stepped.sort_by_key(|(_, _, (at, _), _)| std::cmp::Reverse(*at));
+    if !matches!(pick, Pick::All) {
+        stepped.truncate(MAX_LISTED);
+    }
     let mut out = Vec::new();
-    for ((key, agent_id), s, (last_step, step_record)) in stepped {
-        let finished = (s.stops.iter())
-            .chain(
-                imported
-                    .get(&(key.clone(), agent_id.clone()))
-                    .into_iter()
-                    .flatten(),
-            )
-            .copied()
-            .filter(|&at| at >= last_step)
-            .max();
-        let task = match &s.launch {
-            Some((device, seq, _)) => task_of(raw, device, *seq, rules)?,
-            None => None,
+    for ((key, agent_id), s, (last_step, step_record), finished) in stepped {
+        let task = match (&s.launch, pick) {
+            (Some((device, seq, _)), Pick::Newest) => task_of(raw, device, *seq, rules)?,
+            _ => None,
         };
+        let (kind_at, agent_type) = s
+            .kind
+            .map_or((None, None), |(at, kind)| (Some(at), Some(kind)));
         out.push(Subagent {
             conversation: key,
             agent_id,
-            agent_type: s.kind.map(|(_, kind)| kind),
+            agent_type,
+            kind_at,
             last_step,
             step_record,
             finished,
@@ -341,18 +372,30 @@ pub(crate) fn recorded_folder(raw: &Raw, s: &Subagent) -> Result<Option<String>>
     }))
 }
 
+/// What `mark` did with the owner's stop (W4, #1102 item 1).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Marked {
+    /// Appended to raw.db.
+    Appended,
+    /// Kept, to be written back by the next hook call whose store opens: behind older kept files,
+    /// or because its append failed and its keep did not.
+    Kept,
+    /// Neither: the checkout's capture setting, an exclusion, a forget or a rule of now takes it.
+    Refused,
+}
+
 /// Mark finished: the owner's stop of `s`, sent through the hook's own path as if Claude Code had
 /// sent it from `folder`, the conversation's recorded folder, at `now`, so the checkout's capture
 /// setting, the exclusions and the gate read it as they read the hook's. `raw` is the handle the
-/// caller read `s` with, opened before its readers' hold. True when it is recorded,
-/// or kept to be written back as a hook's stop would be.
+/// caller read `s` with, opened before its readers' hold. An error only when the stop is neither
+/// appended nor kept.
 pub(crate) fn mark(
     home: &Path,
     raw: &mut Raw,
     s: &Subagent,
     folder: &str,
     now: i64,
-) -> Result<bool> {
+) -> Result<Marked> {
     let settings = crate::capture::Settings::load(home)?;
     let mut payload = json!({"session_id": s.conversation.1, "cwd": folder,
         "hook_event_name": "SubagentStop", "agent_id": s.agent_id});
@@ -362,26 +405,259 @@ pub(crate) fn mark(
     payload[crate::capture::OWNER_MARK] = json!(true);
     // The stop is the listed conversation's and subagent's, or nothing is recorded: a rule of now
     // that masks the session or the id would make it another's (Codex on slice 2).
-    let keeps = |e: &crate::raw::Event| {
-        e.kind == SUBAGENT_STOP
-            && e.agent == s.conversation.0
-            && e.session == s.conversation.1
-            && serde_json::from_str::<Value>(&e.body)
-                .is_ok_and(|b| b["agent_id"] == s.agent_id.as_str())
-    };
-    let (mut failed, mut written_back) = (0, 0);
-    let recorded = crate::hook::record_if(
+    let keeps = stop_of(s);
+    let (mut failed, mut written_back, mut kept) = (0, 0, false);
+    let recorded = match crate::hook::record_if(
         home,
         raw,
         &s.conversation.0,
         "SubagentStop",
         &payload,
         (now, &settings),
-        (&mut failed, &mut written_back),
+        (&mut failed, &mut written_back, &mut kept),
         &keeps,
+    ) {
+        Ok(recorded) => recorded,
+        // The hook's error path kept it: written back by the next hook call, as a hook's stop is.
+        Err(e) if kept => {
+            eprintln!("oboete: Mark finished's stop kept to be written back: {e:#}");
+            return Ok(Marked::Kept);
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(if recorded.kept {
+        Marked::Kept
+    } else if recorded.events.iter().any(|(_, e)| e.kind == SUBAGENT_STOP) {
+        Marked::Appended
+    } else {
+        Marked::Refused
+    })
+}
+
+/// A stop of `s`: its conversation's and its id's, whatever its time and whoever sent it.
+fn stop_of(s: &Subagent) -> impl Fn(&crate::raw::Event) -> bool + '_ {
+    move |e| {
+        e.kind == SUBAGENT_STOP
+            && e.agent == s.conversation.0
+            && e.session == s.conversation.1
+            && serde_json::from_str::<Value>(&e.body)
+                .is_ok_and(|b| b["agent_id"] == s.agent_id.as_str())
+    }
+}
+
+/// What Mark finished did (W4), which both routes answer from.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Finish {
+    /// `finished_lock`, config.lock or write-back's lock not had in time, or a rebuild of the
+    /// subagents consumer's rows not done yet.
+    Busy,
+    /// No subagent has the id, or there is no store.
+    NotFound,
+    /// Two subagents have it (#1102 item 2): nothing is recorded.
+    Shared,
+    /// It has a stop at or after its last step.
+    Finished,
+    /// Its newest step's folder is gone or masked, or that checkout records nothing now.
+    NotRecorded,
+    /// Its last step is timed after this machine's clock: a stop now would finish nothing.
+    Ahead,
+    /// A stop of it waits in a kept file (#1102 item 1): nothing is recorded again.
+    Pending,
+    /// Its stop is kept, to be written back by the next hook call.
+    Kept,
+    /// Its stop is appended.
+    Appended,
+    /// `authorized` said no once config.lock was had: nothing is read or recorded.
+    Unauthorized,
+}
+
+/// W4 (docs/subagents.md): Mark finished, for both routes. Under `finished_lock`, then config.lock,
+/// which a new token takes, with `authorized` asked as soon as it is had, then raw.db and the
+/// readers' hold, then write-back's lock, so that no kept file is written back meanwhile: the only
+/// subagent `id` names (`my_work::subagent`, read after the locks, with its steps the consumer has
+/// not read yet), refused when it finished; a stop of it that waits in a kept file is `Pending` and
+/// none more is recorded (#1102 item 1); its folder is the one its newest step was recorded in; a
+/// last step timed after now is `Ahead`. The stop is sent at the time read then. The locks let go,
+/// an appended or kept stop starts the worker, as a hook's write does.
+pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Result<Finish> {
+    let done = (|| -> Result<Finish> {
+        let Some(_finishing) = crate::my_work::finished_lock(home, crate::db::OPEN_WRITE_WAIT)?
+        else {
+            return Ok(Finish::Busy);
+        };
+        // config.lock, which a new token takes, from before the stores (as a restore takes it) to
+        // the record, and the caller's token asked as soon as it is had: no new token is made
+        // while it is held, so nothing below is read or written for a token replaced meanwhile
+        // (Codex on #1121).
+        let wait = crate::db::OPEN_WRITE_WAIT;
+        let Some(_config) = crate::settings::config_lock_within(home, wait)? else {
+            return Ok(Finish::Busy);
+        };
+        if !authorized() {
+            return Ok(Finish::Unauthorized);
+        }
+        // raw.db first, then the readers' hold, the order a restore takes them in (Codex on slice
+        // 2); the same handle reads and appends.
+        let Some((mut raw, k)) = crate::search::b::stores(home)? else {
+            return Ok(Finish::NotFound);
+        };
+        let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+        let Some(_held) = crate::unwritten::hold(home, crate::db::OPEN_WRITE_WAIT)? else {
+            return Ok(Finish::Busy);
+        };
+        let (s, folder) = match crate::my_work::subagent(home, (&raw, &k), id)? {
+            crate::my_work::Lookup::None => return Ok(Finish::NotFound),
+            crate::my_work::Lookup::Shared => return Ok(Finish::Shared),
+            crate::my_work::Lookup::Rebuilding => return Ok(Finish::Busy),
+            crate::my_work::Lookup::One(s, folder) => (s, folder),
+        };
+        #[cfg(test)]
+        if let Some(hook) = LOOKED_UP.with(|hook| hook.borrow_mut().take()) {
+            hook(&mut raw);
+        }
+        if s.finished.is_some() {
+            return Ok(Finish::Finished);
+        }
+        if crate::unwritten::holds(home, &raw, &stop_of(&s))? {
+            return Ok(Finish::Pending);
+        }
+        let Some(folder) = folder else {
+            return Ok(Finish::NotRecorded);
+        };
+        // A stop before the subagent's last step finishes nothing: a step timed after this
+        // machine's clock (a copied home's, or one before the clock was set back) is waited out,
+        // nothing recorded (Codex on #1121).
+        let now = crate::db::now_ms();
+        if s.last_step > now {
+            return Ok(Finish::Ahead);
+        }
+        #[cfg(test)]
+        if let Some(hook) = MARKING.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        Ok(match mark(home, &mut raw, &s, &folder, now)? {
+            Marked::Appended => Finish::Appended,
+            Marked::Kept => Finish::Kept,
+            Marked::Refused => Finish::NotRecorded,
+        })
+    })()?;
+    if matches!(done, Finish::Appended | Finish::Kept) {
+        // As a hook starts one after it writes (Codex and cubic on #850), reaped when it leaves,
+        // or it sits as a zombie for as long as the viewer runs (cubic on #850).
+        match crate::hook::start_worker(home) {
+            Ok(Some(mut child)) => {
+                std::thread::spawn(move || child.wait());
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("oboete: worker not started: {e:#}"),
+        }
+    }
+    Ok(done)
+}
+
+/// W4 (Codex on #1121): whether a device with records owes the subagents consumer a rebuild: a
+/// rewind drops every row and keeps the checkpoints (`Subagents::rewind`), so until the worker has
+/// rebuilt that device, the facts and the records past its checkpoint both miss its records.
+pub(crate) fn rebuild_owed(raw: &Raw, k: &Connection) -> Result<bool> {
+    let made: bool = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'subagent_rebuild')",
+        [],
+        |r| r.get(0),
     )?;
-    // A stop kept behind older kept files is recorded when they are written back, as the hook's.
-    Ok(recorded.kept || recorded.events.iter().any(|(_, e)| e.kind == SUBAGENT_STOP))
+    if !made {
+        return Ok(false);
+    }
+    let owed: Vec<String> = k
+        .prepare("SELECT device FROM subagent_rebuild")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if owed.is_empty() {
+        return Ok(false);
+    }
+    let devices = subagents::Subagents.devices(raw)?;
+    Ok(owed.iter().any(|d| devices.contains(d)))
+}
+
+/// W4 (Codex on #1121): `s`'s steps recorded past the consumer's checkpoints, which `read_picked`
+/// leaves to the consumer, read for Mark finished: its newest step governs where its stop is
+/// recorded from, the type it carries and whether a stop now would finish it, each the newest by
+/// time, then by (device, seq), as `read_picked` takes it. A record a tombstone hides since, or
+/// whose text expired, is passed over, as `read_picked` passes it over.
+pub(crate) fn fresh_steps(raw: &Raw, k: &Connection, s: &mut Subagent) -> Result<()> {
+    let checkpoints: HashMap<String, i64> = k
+        .prepare("SELECT device, seq FROM checkpoints WHERE consumer = ?1")?
+        .query_map([subagents::NAME], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let devices = subagents::Subagents.devices(raw)?;
+    // Every device's tombstones since its checkpoint, as `read_picked` hides them: another
+    // device's can take this one's record (Codex on #1121).
+    let mut hidden: HashSet<(String, i64)> = HashSet::new();
+    for device in &devices {
+        let at = checkpoints.get(device).copied().unwrap_or(0);
+        hidden.extend(raw.tombstones_after(device, at)?);
+    }
+    let mut returned = Vec::new();
+    for device in &devices {
+        let at = checkpoints.get(device).copied().unwrap_or(0);
+        let seqs = raw.tools_after(device, at, &s.conversation.1)?;
+        // In pages, so that a long backlog is not held at once (Codex on #1121).
+        for page in seqs.chunks(200) {
+            let expired: HashSet<i64> = raw.expired_among(device, page)?.into_iter().collect();
+            for r in raw.at(device, page)? {
+                let Item::Event(e) = r.item else { continue };
+                if e.agent != s.conversation.0
+                    || hidden.contains(&(device.clone(), r.seq))
+                    || expired.contains(&r.seq)
+                {
+                    continue;
+                }
+                for f in subagents::facts(&e)
+                    .into_iter()
+                    .filter(|f| f.agent_id == s.agent_id)
+                {
+                    let at = (e.ts, (device.clone(), r.seq));
+                    match f.fact {
+                        "step" => {
+                            if at > (s.last_step, s.step_record.clone()) {
+                                s.last_step = e.ts;
+                                s.step_record = (device.clone(), r.seq);
+                            }
+                            if let Some(kind) = f.agent_type
+                                && s.kind_at.as_ref().is_none_or(|was| *was < at)
+                            {
+                                s.agent_type = Some(kind);
+                                s.kind_at = Some(at);
+                            }
+                        }
+                        // A launch that returned with it finished it, as `read_picked` counts one.
+                        "launch" if f.returned => returned.push(e.ts),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let last = s.last_step;
+    s.finished = (s.finished.into_iter().chain(returned))
+        .filter(|&at| at >= last)
+        .max();
+    Ok(())
+}
+
+/// W4's tests: run once in `finish` after its lookup, with its raw.db handle.
+#[cfg(test)]
+type LookedUp = Option<Box<dyn FnOnce(&mut Raw)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// W4's tests: run once in `finish` just before the stop is sent.
+    pub(crate) static MARKING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOOKED_UP: std::cell::RefCell<LookedUp> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

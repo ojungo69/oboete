@@ -1055,6 +1055,9 @@ fn read_held_on(
     // the range, as Mark finished looks a subagent up (the page reads all and filters itself;
     // Codex and cubic on #850).
     let mut listed: BTreeSet<Key> = BTreeSet::new();
+    // Decision 118: the conversations of the requests the answer gives, whose subagents the
+    // work-view's read lists.
+    let mut answered: BTreeSet<Key> = BTreeSet::new();
     for r in &requests {
         listed.extend(r.owns.iter().map(|(key, _)| key.clone()));
         let stores = (raw, k, &rules, &hidden);
@@ -1066,6 +1069,7 @@ fn read_held_on(
             (since, now),
         )?;
         if let Some((v, mut h)) = found {
+            answered.extend(r.owns.iter().map(|(key, _)| key.clone()));
             h.sole = (r.owns.iter())
                 .filter(|(key, _)| holders.get(key) == Some(&1))
                 .map(|(key, _)| key.clone())
@@ -1141,10 +1145,23 @@ fn read_held_on(
         Some(_) => crate::my_work_story::kept(k, raw.device(), &hidden, &rules)?,
         None => crate::my_work_story::page(k, raw.device(), &hidden, &rules)?,
     };
-    // The page's read alone (`listed`), in its readers' hold.
-    let subagents = match cards {
-        Some(_) => subagents_of(home, (raw, k, &rules), &listed, now, &mut key)?,
-        None => Vec::new(),
+    // The page's read alone (`listed`), in its readers' hold. oboete's page reads the newest of
+    // every request's conversations' (slice 2); the work-view's (`kept`, `listed_kept`) those of
+    // the requests it answers not finished or finished within `RECENT_MS` (decision 118).
+    use crate::my_work_subagents::Pick;
+    let subagents = match (cards, kept) {
+        (Some(_), None) => subagents_of(
+            home,
+            (raw, k, &rules),
+            (&listed, Pick::Newest),
+            now,
+            &mut key,
+        )?,
+        (Some(_), Some(_)) => {
+            let pick = Pick::Window(now);
+            subagents_of(home, (raw, k, &rules), (&answered, pick), now, &mut key)?
+        }
+        (None, _) => Vec::new(),
     };
     let answer = json!({"requests": answers, "unlinked": unlinked, "story": story,
         "areas": areas, "other_asks": other_asks, "page_words": crate::my_work_focus::page_words(),
@@ -1152,18 +1169,18 @@ fn read_held_on(
     Ok((answer, held))
 }
 
-/// Slice 2 of docs/subagents.md: the subagents of the `listed` conversations as the answer gives
-/// them, each conversation by the id its request's `sessions` give it. Read in the list's readers'
+/// Slice 2 of docs/subagents.md: the subagents of the `listed` conversations that `pick` keeps, as
+/// the answer gives them, each conversation by the id its request's `sessions` give it. Read in the list's readers'
 /// hold, which the caller holds: a forget registers before this read or after it.
 fn subagents_of(
     home: &Path,
     (raw, k, rules): (&Raw, &Connection, &Rules),
-    listed: &BTreeSet<Key>,
+    (listed, pick): (&BTreeSet<Key>, crate::my_work_subagents::Pick),
     now: i64,
     key: &mut Option<Vec<u8>>,
 ) -> Result<Vec<Value>> {
-    let found =
-        crate::my_work_subagents::read(raw, k, &listed.iter().cloned().collect::<Vec<_>>(), rules)?;
+    let listed = listed.iter().cloned().collect::<Vec<_>>();
+    let found = crate::my_work_subagents::read_picked(raw, k, &listed, rules, pick)?;
     let mut conversations: HashMap<Key, (String, Option<String>)> = HashMap::new();
     for s in &found {
         if !conversations.contains_key(&s.conversation) {
@@ -1185,14 +1202,29 @@ fn subagents_of(
     )
 }
 
-/// Slice 2: the listed subagent the page names `id`, read afresh from `raw` and `k`, with the folder
-/// its conversation's newest record was recorded in (none when that label is gone or masked). The
-/// caller holds the readers' hold, taken after it opened them.
-pub(crate) fn subagent(
-    home: &Path,
-    (raw, k): (&Raw, &Connection),
-    id: &str,
-) -> Result<Option<(crate::my_work_subagents::Subagent, Option<String>)>> {
+/// What `subagent` found the page's id names.
+pub(crate) enum Lookup {
+    None,
+    /// The one subagent it names, with the folder its newest step was recorded in.
+    One(Box<crate::my_work_subagents::Subagent>, Option<String>),
+    /// Two or more (#1102 item 2): their prints are one, so nothing is marked.
+    Shared,
+    /// The subagents consumer owes a device a rebuild, so the facts miss that device's records
+    /// until the worker has rebuilt it: nothing is looked up (Codex on #1121).
+    Rebuilding,
+}
+
+/// Slice 2, W4: the subagent the page names `id`, read afresh from `raw` and `k`: the only one
+/// with that id among every subagent of every request's conversations, before any cap (#1102 item
+/// 2), and the folder its newest step was recorded in (none when that label is gone or masked),
+/// read once it is the only one. The caller holds the readers' hold, taken after it opened them.
+pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> Result<Lookup> {
+    // One snapshot of knowledge.db for the whole lookup: the candidates' facts and the checkpoints
+    // the named one's unread steps are read past are the same consumer's moment (Codex on #1121).
+    let _snapshot = k.unchecked_transaction()?;
+    if crate::my_work_subagents::rebuild_owed(raw, k)? {
+        return Ok(Lookup::Rebuilding);
+    }
     let rules = Rules::load(home)?;
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let Built { requests, .. } = build(raw, k, &rules, &reading)?;
@@ -1200,17 +1232,49 @@ pub(crate) fn subagent(
         .map(|(key, _)| key.clone())
         .collect();
     let mut key = None;
-    for s in crate::my_work_subagents::read(raw, k, &listed, &rules)? {
+    let mut named = None;
+    let all = crate::my_work_subagents::Pick::All;
+    for s in crate::my_work_subagents::read_picked(raw, k, &listed, &rules, all)? {
         let shown = format!(
             "s:{}",
             keyed_print(&crate::my_work_subagents::held(&s), home, &mut key)?
         );
+        #[cfg(test)]
+        let shown = PRINTED
+            .with_borrow(|p| p.as_ref().and_then(|p| p(&s)))
+            .unwrap_or(shown);
         if shown == id {
-            let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
-            return Ok(Some((s, folder)));
+            if named.is_some() {
+                return Ok(Lookup::Shared);
+            }
+            named = Some(s);
         }
     }
-    Ok(None)
+    #[cfg(test)]
+    if let Some(hook) = PICKED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let Some(mut s) = named else {
+        return Ok(Lookup::None);
+    };
+    // Its steps the consumer has not read yet too: the newest governs its folder (Codex on #1121).
+    crate::my_work_subagents::fresh_steps(raw, k, &mut s)?;
+    let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
+    Ok(Lookup::One(Box::new(s), folder))
+}
+
+/// W4's test of two subagents whose ids are one: the id `subagent` reads for a subagent, in place
+/// of its print, when this gives one.
+#[cfg(test)]
+type Printed = Option<Box<dyn Fn(&crate::my_work_subagents::Subagent) -> Option<String>>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PRINTED: std::cell::RefCell<Printed> = const { std::cell::RefCell::new(None) };
+    /// W4's tests: run once in `subagent` between its read of the candidates and its read of the
+    /// named one's steps past the consumer's checkpoints.
+    pub(crate) static PICKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any
@@ -2103,7 +2167,7 @@ pub(crate) fn reviews_lock_within(
 }
 
 /// Slice 2 of docs/subagents.md: Mark finished's own hold, taken before anything else, so two at
-/// once append one stop. No other path takes it: it waits on nothing a forget's purge holds, as
+/// once record one stop (W4: the second finds the first's stop appended, or kept and waiting). No other path takes it: it waits on nothing a forget's purge holds, as
 /// the reviews' lock would (Codex on slice 2). Waited for `wait` at most, none past it, and by
 /// `WAITERS` at most at once, so requests do not keep the viewer's connections waiting
 /// (CodeRabbit on #850).
