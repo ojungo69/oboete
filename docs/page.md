@@ -297,8 +297,17 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
   such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each
   session (where `[inject]` gives one), a repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
-  whole days in what the pages compare to tell new work from the work on screen, so the same
-  snapshot mapped a minute later is the work on screen, and a save in flight keeps its answer. A request with a judge's open grouping suggestion carries
+  whole days in the mapped content the pages compare to decide whether a mapping is sent to the
+  screens again (0008). Whether a model the screens are shown is newer work, which a save in flight
+  then gives way to, goes by the content of the snapshot it was mapped from (0009, #1124), without
+  what each read stamps on it (its times, its revision, each goals list's `updatedAt`) or what a
+  save adds to its answer: the minute's mapping of the snapshot on screen, and a poll of the same
+  content, are shown with their clock-made labels moved and are no newer work, so a save in flight
+  keeps its answer when a rule's age passes a whole day or the date passes midnight, and a read in
+  flight keeps its answer when the minute maps the work on screen again. A read still gives way to
+  any snapshot taken while it waited, as claude-mem orders reads, and a save's answer is shown over
+  a poll of the content on screen that came after an Undo in another tab: neither knows which saw
+  the newer state, which a version taken with the state is to decide (#1126). A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after
