@@ -567,8 +567,8 @@ Slice 3:
 
 - **The work-view's read** (decision 118): `my_work_subagents::read_picked` with `Pick::Window(now)`
   over the conversations of the requests the work-view's answer gives (`my_work::read_held_on`, in
-  its read alone): the subagents not finished or finished within `RECENT_MS`, then the newest
-  `MAX_LISTED` of those, so a quiet one stays though 300 newer ones finished. oboete's page reads
+  its read alone): the subagents not finished or finished within `RECENT_MS` before now (a stop
+  timed after now, another clock's, is left out), then the newest `MAX_LISTED` of those, so a quiet one stays though 300 newer ones finished. oboete's page reads
   `Pick::Newest` as before; Mark finished looks a subagent up over `Pick::All`.
 - **The snapshot** (`work_view::subagents`): each as an agent of the request session whose shown id
   and fingerprint are both its conversation's (a masked id can be another conversation's literal
@@ -583,7 +583,9 @@ Slice 3:
   kept file is written back between the look and the record (a `write_back` meanwhile takes the lock
   with `try_lock` and writes nothing); the only subagent the id names among every request's
   conversations' subagents, before any cap (`my_work::subagent`; `Lookup::Shared` when two share
-  it, #1102 item 2); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
+  it, #1102 item 2), with its steps recorded past the consumer's checkpoints, which the read leaves
+  to the consumer (`my_work_subagents::fresh_steps`: its newest step sets its folder, its clock
+  and whether it finished); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
   events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
   write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
   step's folder is gone or masked; `Ahead`, nothing recorded, when its last step is timed after

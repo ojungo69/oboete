@@ -10652,3 +10652,68 @@ fn a_work_view_read_whose_token_is_replaced_while_it_reads_is_refused() {
     assert!(body.get("agents").is_none(), "no snapshot: {body}");
     drop(s);
 }
+
+/// W4 (Codex on #1121): Mark finished reads a subagent's steps the consumer has not read yet: a
+/// newer step in a checkout that records nothing is 409 `not_recorded`, and one timed after this
+/// machine's clock 409 `ahead`, on both routes, though the consumer has not reached either, and
+/// nothing is recorded.
+#[test]
+fn mark_finished_reads_the_steps_the_consumer_has_not_read_yet() {
+    for (code, ahead) in [("not_recorded", false), ("ahead", true)] {
+        let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+        let subs = subagents_in(&work_view_of(&v, "t0k"));
+        let off = place.path().join("off");
+        std::fs::create_dir_all(off.join(".git")).unwrap();
+        std::fs::write(off.join(".oboete.toml"), "capture = false\n").unwrap();
+        let now = crate::db::now_ms();
+        for id in ["a1", "a2"] {
+            let (at, folder) = if ahead {
+                (now + 10 * 60_000, place.path().join(id))
+            } else {
+                (now - 60_000, off.clone())
+            };
+            // Appended past the consumer's checkpoint: no `s.run()`.
+            s.raw.append(&mark_step("s1", at, &folder, id)).unwrap();
+        }
+        let (stops, kept) = stops_and_kept(&s);
+        let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (409, Some(code)),
+            "{answer}"
+        );
+        let (status, main) = post_finished(&v, &subs[1]["id"]);
+        assert_eq!((status, main["code"].as_str()), (409, Some(code)), "{main}");
+        assert_eq!(stops_and_kept(&s), (stops, kept), "{code}");
+    }
+}
+
+/// W4 (Codex on #1121): of the steps the consumer has not read yet, only the subagent's own count:
+/// another subagent's newer step in a checkout that records nothing leaves its stop recorded from
+/// its own folder; and a subagent whose own newer step comes after its stop has resumed, so Mark
+/// finished records a stop again.
+#[test]
+fn mark_finished_reads_only_its_own_unread_steps_and_marks_a_resumed_one_again() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let off = place.path().join("off");
+    std::fs::create_dir_all(off.join(".git")).unwrap();
+    std::fs::write(off.join(".oboete.toml"), "capture = false\n").unwrap();
+    let step = mark_step("s1", crate::db::now_ms() - 60_000, &off, "a3");
+    s.raw.append(&step).unwrap();
+    let (stops, kept) = stops_and_kept(&s);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+    // Its own newer step, after that stop, unread by the consumer: it resumed.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let now = crate::db::now_ms();
+    for id in ["a1", "a2"] {
+        let step = mark_step("s1", now, &place.path().join(id), id);
+        s.raw.append(&step).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let (status, again) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(stops_and_kept(&s), (stops + 2, kept));
+}

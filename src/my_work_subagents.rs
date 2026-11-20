@@ -219,7 +219,9 @@ pub(crate) fn read_picked(
         })
         .collect();
     if let Pick::Window(now) = pick {
-        stepped.retain(|(.., finished)| finished.is_none_or(|at| now - at <= RECENT_MS));
+        // A stop timed after `now` (another clock's) is not within the window (Codex on #1121).
+        stepped
+            .retain(|(.., finished)| finished.is_none_or(|at| at <= now && now - at <= RECENT_MS));
     }
     stepped.sort_by_key(|(_, _, (at, _), _)| std::cmp::Reverse(*at));
     if !matches!(pick, Pick::All) {
@@ -458,13 +460,13 @@ pub(crate) enum Finish {
 }
 
 /// W4 (docs/subagents.md): Mark finished, for both routes. Under `finished_lock`, then config.lock,
-/// which a new token takes, then raw.db and the readers' hold, then write-back's lock, so that no
-/// kept file is written back meanwhile: the
-/// only subagent `id` names (`my_work::subagent`, read after the locks), refused when it finished;
-/// a stop of it that waits in a kept file is `Pending` and none more is recorded (#1102 item 1); its
-/// folder is the one its newest step was recorded in. `authorized` is asked last, before the stop is
-/// sent at the time read then, and before a waiting stop is answered as saved. The locks let go, an appended or kept stop starts the worker, as a
-/// hook's write does.
+/// which a new token takes, with `authorized` asked as soon as it is had, then raw.db and the
+/// readers' hold, then write-back's lock, so that no kept file is written back meanwhile: the only
+/// subagent `id` names (`my_work::subagent`, read after the locks, with its steps the consumer has
+/// not read yet), refused when it finished; a stop of it that waits in a kept file is `Pending` and
+/// none more is recorded (#1102 item 1); its folder is the one its newest step was recorded in; a
+/// last step timed after now is `Ahead`. The stop is sent at the time read then. The locks let go,
+/// an appended or kept stop starts the worker, as a hook's write does.
 pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Result<Finish> {
     let done = (|| -> Result<Finish> {
         let Some(_finishing) = crate::my_work::finished_lock(home, crate::db::OPEN_WRITE_WAIT)?
@@ -538,6 +540,46 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
         }
     }
     Ok(done)
+}
+
+/// W4 (Codex on #1121): `s`'s steps recorded past the consumer's checkpoints, which `read_picked`
+/// leaves to the consumer, read for Mark finished: its newest step governs where its stop is
+/// recorded from and whether a stop now would finish it. A record a tombstone hides since, or whose
+/// text expired, is passed over, as `read_picked` passes it over.
+pub(crate) fn fresh_steps(raw: &Raw, k: &Connection, s: &mut Subagent) -> Result<()> {
+    let checkpoints: HashMap<String, i64> = k
+        .prepare("SELECT device, seq FROM checkpoints WHERE consumer = ?1")?
+        .query_map([subagents::NAME], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for device in subagents::Subagents.devices(raw)? {
+        let at = checkpoints.get(&device).copied().unwrap_or(0);
+        let seqs = raw.tools_after(&device, at, &s.conversation.1)?;
+        if seqs.is_empty() {
+            continue;
+        }
+        let hidden: HashSet<(String, i64)> =
+            raw.tombstones_after(&device, at)?.into_iter().collect();
+        let expired: HashSet<i64> = raw.expired_among(&device, &seqs)?.into_iter().collect();
+        for r in raw.at(&device, &seqs)? {
+            let Item::Event(e) = r.item else { continue };
+            if e.agent != s.conversation.0
+                || hidden.contains(&(device.clone(), r.seq))
+                || expired.contains(&r.seq)
+            {
+                continue;
+            }
+            let stepped =
+                (subagents::facts(&e).iter()).any(|f| f.fact == "step" && f.agent_id == s.agent_id);
+            if stepped && e.ts >= s.last_step {
+                s.last_step = e.ts;
+                s.step_record = (device.clone(), r.seq);
+            }
+        }
+    }
+    if s.finished.is_some_and(|at| at < s.last_step) {
+        s.finished = None;
+    }
+    Ok(())
 }
 
 /// W4's tests: run once in `finish` after its lookup, with its raw.db handle.

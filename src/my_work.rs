@@ -1241,9 +1241,11 @@ pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> 
             named = Some(s);
         }
     }
-    let Some(s) = named else {
+    let Some(mut s) = named else {
         return Ok(Lookup::None);
     };
+    // Its steps the consumer has not read yet too: the newest governs its folder (Codex on #1121).
+    crate::my_work_subagents::fresh_steps(raw, k, &mut s)?;
     let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
     Ok(Lookup::One(s, folder))
 }

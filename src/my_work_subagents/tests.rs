@@ -164,6 +164,12 @@ fn a_pick_keeps_its_subagents_before_the_cap() {
     within.push("quiet".to_owned());
     within.sort();
     assert_eq!(picked(Pick::Window(now)), within);
+    // Ten minutes before the last stop (another clock's): a stop timed after it is not within it.
+    let now = (n - 10) * MIN;
+    let mut within: Vec<String> = ((n - 25)..=(n - 10)).map(|i| format!("f{i}")).collect();
+    within.push("quiet".to_owned());
+    within.sort();
+    assert_eq!(picked(Pick::Window(now)), within);
 }
 
 /// Slice 2: at most `MAX_LISTED` subagents, those with the newest last steps.
