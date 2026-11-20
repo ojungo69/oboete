@@ -1,0 +1,33 @@
+assets/work-view/assets/index-B-Wv4GN1.js
+  s_52c3955e48bff4::t_28207d12c2c29d 1-2,4,7,9-10,18,22,37-39
+assets/work-view/assets/my-rules-CTtM0TTi.js
+  s_52c3955e48bff4::t_b0a73de0749773 1
+assets/work-view/assets/past-focus-KV_jT3hl.js
+  s_52c3955e48bff4::t_2c5bb9d5dcc461 1
+assets/work-view/assets/request-detail-BwSKejAr.js
+  s_52c3955e48bff4::t_b183e9bcf7e82e 1
+assets/work-view/assets/suggested-areas-BQwZQWLC.js
+  s_52c3955e48bff4::t_82d466894a1949 1
+assets/work-view/assets/swipe-to-decide-Bv1sxF2O.js
+  s_52c3955e48bff4::t_a60f66cf5fe217 1
+assets/work-view/assets/textarea-BMH-MAGC.js
+  s_52c3955e48bff4::t_ce2e009b2c7d86 51
+assets/work-view/index.html
+  s_52c3955e48bff4::t_32a60ff3b98899 9-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2e2e7930c081a70c733928c1db18afb42f11a39b",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
