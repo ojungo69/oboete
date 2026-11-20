@@ -297,8 +297,10 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
   such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each
   session (where `[inject]` gives one), a repository's to its own sessions. A rule's age, which orders the rules by strength, counts in
-  whole days in what the pages compare to tell new work from the work on screen, so the same
-  snapshot mapped a minute later is the work on screen, and a save in flight keeps its answer. A request with a judge's open grouping suggestion carries
+  whole days in what the pages compare to tell new work from the work on screen. A mapping of the
+  snapshot on screen (the minute's, or a poll's of the same content in a new envelope) is shown with
+  its clock-made labels moved and stands for no new work, so a save or a read in flight keeps its
+  answer when a rule's age passes a whole day or the date passes midnight too (patch 0009, #1124). A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after
