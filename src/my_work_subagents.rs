@@ -24,15 +24,18 @@ pub(crate) const RECENT_MS: i64 = 15 * 60 * 1000;
 /// more than doubled each minute's read of My Work.
 pub(crate) const MAX_LISTED: usize = 300;
 
+/// A row's place among a subagent's rows: its time, then its record (device, seq).
+pub(crate) type RowAt = (i64, (String, i64));
+
 /// What a subagent's rows say once read: its last step, its newest stop at or after it, its type,
 /// and the launch record it was started by.
 #[derive(Debug, Default)]
 struct Seen {
     /// Its newest step's time, and that step's record (device, seq).
-    last_step: Option<(i64, (String, i64))>,
+    last_step: Option<RowAt>,
     stops: Vec<i64>,
-    /// Its newest type, with that row's time.
-    kind: Option<(i64, String)>,
+    /// Its newest type, with that row's place.
+    kind: Option<(RowAt, String)>,
     /// The newest launch record (device, seq) and its time.
     launch: Option<(String, i64, i64)>,
 }
@@ -43,6 +46,8 @@ pub(crate) struct Subagent {
     pub conversation: Key,
     pub agent_id: String,
     pub agent_type: Option<String>,
+    /// Its type's row, which `fresh_steps` orders an unread step's against.
+    pub kind_at: Option<RowAt>,
     pub last_step: i64,
     /// Its newest step's record (device, seq), which Mark finished reads the folder of.
     pub step_record: (String, i64),
@@ -179,15 +184,17 @@ pub(crate) fn read_picked(
             continue;
         }
         let s = seen.entry((key, f.agent_id.clone())).or_default();
+        // The newest by time, then by (device, seq), as `fresh_steps` orders them too.
+        let at = (ts, (device.clone(), seq));
         if let Some(kind) = f.agent_type.filter(|_| f.fact != "launch")
-            && s.kind.as_ref().is_none_or(|(at, _)| *at <= ts)
+            && s.kind.as_ref().is_none_or(|(was, _)| *was <= at)
         {
-            s.kind = Some((ts, kind));
+            s.kind = Some((at.clone(), kind));
         }
         match f.fact {
             "step" => {
-                if s.last_step.as_ref().is_none_or(|(at, _)| *at <= ts) {
-                    s.last_step = Some((ts, (device, seq)));
+                if s.last_step.as_ref().is_none_or(|was| *was <= at) {
+                    s.last_step = Some(at);
                 }
             }
             "stop" => s.stops.push(ts),
@@ -205,7 +212,7 @@ pub(crate) fn read_picked(
     // one's finish first, which `Pick::Window` keeps by; then the newest last steps first, at most
     // `MAX_LISTED` but for `Pick::All`, and, for oboete's page, the task of those kept (the
     // work-view's pages show none: Codex on #1121).
-    type Stepped = ((Key, String), Seen, (i64, (String, i64)), Option<i64>);
+    type Stepped = ((Key, String), Seen, RowAt, Option<i64>);
     let imported = imported_stops(raw, &wanted)?;
     let mut stepped: Vec<Stepped> = (seen.into_iter())
         .filter_map(|(id, mut s)| {
@@ -233,10 +240,14 @@ pub(crate) fn read_picked(
             (Some((device, seq, _)), Pick::Newest) => task_of(raw, device, *seq, rules)?,
             _ => None,
         };
+        let (kind_at, agent_type) = s
+            .kind
+            .map_or((None, None), |(at, kind)| (Some(at), Some(kind)));
         out.push(Subagent {
             conversation: key,
             agent_id,
-            agent_type: s.kind.map(|(_, kind)| kind),
+            agent_type,
+            kind_at,
             last_step,
             step_record,
             finished,
@@ -437,7 +448,7 @@ fn stop_of(s: &Subagent) -> impl Fn(&crate::raw::Event) -> bool + '_ {
 /// What Mark finished did (W4), which both routes answer from.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Finish {
-    /// `finished_lock` or write-back's lock not had in time.
+    /// `finished_lock`, config.lock or write-back's lock not had in time.
     Busy,
     /// No subagent has the id, or there is no store.
     NotFound,
@@ -544,8 +555,9 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
 
 /// W4 (Codex on #1121): `s`'s steps recorded past the consumer's checkpoints, which `read_picked`
 /// leaves to the consumer, read for Mark finished: its newest step governs where its stop is
-/// recorded from and whether a stop now would finish it. A record a tombstone hides since, or whose
-/// text expired, is passed over, as `read_picked` passes it over.
+/// recorded from, the type it carries and whether a stop now would finish it, each the newest by
+/// time, then by (device, seq), as `read_picked` takes it. A record a tombstone hides since, or
+/// whose text expired, is passed over, as `read_picked` passes it over.
 pub(crate) fn fresh_steps(raw: &Raw, k: &Connection, s: &mut Subagent) -> Result<()> {
     let checkpoints: HashMap<String, i64> = k
         .prepare("SELECT device, seq FROM checkpoints WHERE consumer = ?1")?
@@ -578,10 +590,19 @@ pub(crate) fn fresh_steps(raw: &Raw, k: &Connection, s: &mut Subagent) -> Result
                     .into_iter()
                     .filter(|f| f.agent_id == s.agent_id)
                 {
+                    let at = (e.ts, (device.clone(), r.seq));
                     match f.fact {
-                        "step" if e.ts >= s.last_step => {
-                            s.last_step = e.ts;
-                            s.step_record = (device.clone(), r.seq);
+                        "step" => {
+                            if at > (s.last_step, s.step_record.clone()) {
+                                s.last_step = e.ts;
+                                s.step_record = (device.clone(), r.seq);
+                            }
+                            if let Some(kind) = f.agent_type
+                                && s.kind_at.as_ref().is_none_or(|was| *was < at)
+                            {
+                                s.agent_type = Some(kind);
+                                s.kind_at = Some(at);
+                            }
                         }
                         // A launch that returned with it finished it, as `read_picked` counts one.
                         "launch" if f.returned => returned.push(e.ts),

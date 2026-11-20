@@ -526,3 +526,85 @@ fn fresh_steps_pass_over_a_step_another_devices_tombstone_took() {
     fresh_steps(&store, &k, &mut s).unwrap();
     assert_eq!((s.last_step, s.step_record.clone()), (MIN, (first, old)));
 }
+
+/// W4 (Codex on #1121): of steps at one time, `fresh_steps` takes the one the read takes once the
+/// consumer has read them all, the greatest (device, seq): in a copied home whose first device's id
+/// sorts after its own, the first device's read step stays the newest beside the copy's own unread
+/// step of the same time, as the read keeps it once the consumer has read both.
+#[test]
+fn fresh_steps_break_a_tie_as_the_read_does() {
+    let rules = Rules::default();
+    let newest = |store: &Raw, k: &Connection| {
+        let mut s = (read_picked(store, k, &[key("s")], &rules, Pick::All).unwrap())
+            .pop()
+            .unwrap();
+        fresh_steps(store, k, &mut s).unwrap();
+        s.step_record
+    };
+    // A copied home's own device id is a random one: 64 homes leave none whose first device's id
+    // sorts after its own once in 2^64.
+    for _ in 0..64 {
+        let from = tempfile::tempdir().unwrap();
+        let mut store = raw::open(from.path()).unwrap();
+        let read = store.append(&step("s", "a1", MIN)).unwrap();
+        let first = store.device().to_owned();
+        drop(drain(from.path(), &store));
+        drop(store);
+        let to = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+            if from.path().join(f).exists() {
+                std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+            }
+        }
+        let mut store = raw::open(to.path()).unwrap();
+        if store.device() > first.as_str() {
+            continue;
+        }
+        store.append(&step("s", "a1", MIN)).unwrap();
+        let k = crate::knowledge::open(to.path()).unwrap();
+        assert_eq!(newest(&store, &k), (first.clone(), read));
+        drop(k);
+        let k = drain(to.path(), &store);
+        assert_eq!(newest(&store, &k), (first, read));
+        return;
+    }
+    panic!("no copied home whose first device's id sorts after its own in 64");
+}
+
+/// W4 (Codex on #1121): the type of an unread step newer than the type the read has is the
+/// subagent's, though a newer step names none, as the read takes it once the consumer has read
+/// them: a stop Mark finished sends carries that type.
+#[test]
+fn fresh_steps_take_the_type_the_read_takes() {
+    let home = tempfile::tempdir().unwrap();
+    let mut store = raw::open(home.path()).unwrap();
+    let typed = |kind: &str, ts| {
+        let body = json!({"tool": "Read", "agent_id": "a1", "agent_type": kind});
+        ev("s", "tool", ts, body)
+    };
+    store.append(&typed("Explore", MIN)).unwrap();
+    drop(drain(home.path(), &store));
+    store.append(&typed("Plan", 2 * MIN)).unwrap();
+    store.append(&step("s", "a1", 3 * MIN)).unwrap();
+    let rules = Rules::default();
+    let picked = |k: &Connection| {
+        (read_picked(&store, k, &[key("s")], &rules, Pick::All).unwrap())
+            .pop()
+            .unwrap()
+    };
+    let k = crate::knowledge::open(home.path()).unwrap();
+    let mut s = picked(&k);
+    assert_eq!(s.agent_type.as_deref(), Some("Explore"));
+    fresh_steps(&store, &k, &mut s).unwrap();
+    assert_eq!(
+        (s.agent_type.as_deref(), s.last_step),
+        (Some("Plan"), 3 * MIN)
+    );
+    drop(k);
+    let k = drain(home.path(), &store);
+    let s = picked(&k);
+    assert_eq!(
+        (s.agent_type.as_deref(), s.last_step),
+        (Some("Plan"), 3 * MIN)
+    );
+}

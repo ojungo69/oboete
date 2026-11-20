@@ -587,7 +587,8 @@ Slice 3:
   to the consumer (`my_work_subagents::fresh_steps`, read in one snapshot of knowledge.db with the
   candidates; a record any device's tombstone took since, or whose text expired, passed over, and a
   launch that returned with it counted as its finish, as the read counts them: its newest step sets
-  its folder, its clock and whether it finished); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
+  its folder, its clock and whether it finished, and its newest type the type its stop carries,
+  each the newest by time, then by (device, seq), as the read orders them); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
   events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
   write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
   step's folder is gone or masked; `Ahead`, nothing recorded, when its last step is timed after

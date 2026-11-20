@@ -1206,7 +1206,7 @@ fn subagents_of(
 pub(crate) enum Lookup {
     None,
     /// The one subagent it names, with the folder its newest step was recorded in.
-    One(crate::my_work_subagents::Subagent, Option<String>),
+    One(Box<crate::my_work_subagents::Subagent>, Option<String>),
     /// Two or more (#1102 item 2): their prints are one, so nothing is marked.
     Shared,
 }
@@ -1254,7 +1254,7 @@ pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> 
     // Its steps the consumer has not read yet too: the newest governs its folder (Codex on #1121).
     crate::my_work_subagents::fresh_steps(raw, k, &mut s)?;
     let folder = crate::my_work_subagents::recorded_folder(raw, &s)?;
-    Ok(Lookup::One(s, folder))
+    Ok(Lookup::One(Box::new(s), folder))
 }
 
 /// W4's test of two subagents whose ids are one: the id `subagent` reads for a subagent, in place
