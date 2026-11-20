@@ -445,13 +445,15 @@ pub(crate) enum Finish {
     Finished,
     /// Its newest step's folder is gone or masked, or that checkout records nothing now.
     NotRecorded,
+    /// Its last step is timed after this machine's clock: a stop now would finish nothing.
+    Ahead,
     /// A stop of it waits in a kept file (#1102 item 1): nothing is recorded again.
     Pending,
     /// Its stop is kept, to be written back by the next hook call.
     Kept,
     /// Its stop is appended.
     Appended,
-    /// `authorized` said no once the locks were had: nothing is recorded.
+    /// `authorized` said no once config.lock was had: nothing is read or recorded.
     Unauthorized,
 }
 
@@ -470,12 +472,16 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
             return Ok(Finish::Busy);
         };
         // config.lock, which a new token takes, from before the stores (as a restore takes it) to
-        // the record: the token asked under it below stays the one the stop is made under (Codex
-        // on #1121).
+        // the record, and the caller's token asked as soon as it is had: no new token is made
+        // while it is held, so nothing below is read or written for a token replaced meanwhile
+        // (Codex on #1121).
         let wait = crate::db::OPEN_WRITE_WAIT;
         let Some(_config) = crate::settings::config_lock_within(home, wait)? else {
             return Ok(Finish::Busy);
         };
+        if !authorized() {
+            return Ok(Finish::Unauthorized);
+        }
         // raw.db first, then the readers' hold, the order a restore takes them in (Codex on slice
         // 2); the same handle reads and appends.
         let Some((mut raw, k)) = crate::search::b::stores(home)? else {
@@ -497,27 +503,28 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
         if s.finished.is_some() {
             return Ok(Finish::Finished);
         }
-        // A stop that waits is answered as saved, so the token is asked first, as before a write.
         if crate::unwritten::holds(home, &raw, &stop_of(&s))? {
-            return Ok(if authorized() {
-                Finish::Pending
-            } else {
-                Finish::Unauthorized
-            });
+            return Ok(Finish::Pending);
         }
         let Some(folder) = folder else {
             return Ok(Finish::NotRecorded);
         };
-        if !authorized() {
-            return Ok(Finish::Unauthorized);
+        // A stop before the subagent's last step finishes nothing: a step timed after this
+        // machine's clock (a copied home's, or one before the clock was set back) is waited out,
+        // nothing recorded (Codex on #1121).
+        let now = crate::db::now_ms();
+        if s.last_step > now {
+            return Ok(Finish::Ahead);
         }
-        Ok(
-            match mark(home, &mut raw, &s, &folder, crate::db::now_ms())? {
-                Marked::Appended => Finish::Appended,
-                Marked::Kept => Finish::Kept,
-                Marked::Refused => Finish::NotRecorded,
-            },
-        )
+        #[cfg(test)]
+        if let Some(hook) = MARKING.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        Ok(match mark(home, &mut raw, &s, &folder, now)? {
+            Marked::Appended => Finish::Appended,
+            Marked::Kept => Finish::Kept,
+            Marked::Refused => Finish::NotRecorded,
+        })
     })()?;
     if matches!(done, Finish::Appended | Finish::Kept) {
         // As a hook starts one after it writes (Codex and cubic on #850), reaped when it leaves,
@@ -536,6 +543,13 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
 /// W4's tests: run once in `finish` after its lookup, with its raw.db handle.
 #[cfg(test)]
 type LookedUp = Option<Box<dyn FnOnce(&mut Raw)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// W4's tests: run once in `finish` just before the stop is sent.
+    pub(crate) static MARKING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 thread_local! {

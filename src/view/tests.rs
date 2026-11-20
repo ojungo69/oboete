@@ -10380,8 +10380,9 @@ fn a_step_recorded_while_mark_finished_waits_is_before_its_stop() {
     assert_eq!(marked["presence"]["status"], "finished", "{marked}");
 }
 
-/// W4: a token replaced once Mark finished has its locks records nothing (401); one replaced while
-/// the snapshot after it is read leaves the receipt alone after a write and 401 after a refusal.
+/// W4: a token replaced while Mark finished waits for config.lock, which a new token takes,
+/// records nothing (401); one replaced while the snapshot after it is read leaves the receipt
+/// alone after a write and 401 after a refusal.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_no_snapshot() {
@@ -10396,11 +10397,10 @@ fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_n
     let subs = subagents_in(&work_view_of(&v, &token()));
     let first = subs[0]["id"].clone();
     let (stops, kept) = stops_and_kept(&s);
-    let again = replace.clone();
-    crate::my_work_subagents::LOOKED_UP.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| again()));
+    let given = token();
+    let (status, _) = replaced_while_it_waits(&home, || {
+        post_work_view(&v, MARK, &given, &agent_body(&first))
     });
-    let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&first));
     assert_eq!(status, 401);
     assert_eq!(stops_and_kept(&s), (stops, kept));
     let again = replace.clone();
@@ -10416,7 +10416,8 @@ fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_n
     let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&first));
     assert_eq!(status, 401);
     assert_eq!(stops_and_kept(&s), (stops + 1, kept));
-    // Replaced once a click whose stop waits kept has its locks: 401, not a saved receipt.
+    // Replaced while a click whose stop waits kept waits for config.lock: 401, not a saved
+    // receipt.
     let second = subs[1]["id"].clone();
     let held = rusqlite::Connection::open(home.join("raw.db")).unwrap();
     held.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -10425,11 +10426,10 @@ fn a_work_view_mark_finished_whose_token_is_replaced_records_nothing_and_sends_n
     assert_eq!(status, 200, "{answer}");
     held.execute_batch("ROLLBACK").unwrap();
     drop(held);
-    let again = replace.clone();
-    crate::my_work_subagents::LOOKED_UP.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| again()));
+    let given = token();
+    let (status, _) = replaced_while_it_waits(&home, || {
+        post_work_view(&v, MARK, &given, &agent_body(&second))
     });
-    let (status, _) = post_work_view(&v, MARK, &token(), &agent_body(&second));
     assert_eq!(status, 401);
     assert_eq!(stops_and_kept(&s), (stops + 1, kept + 1));
 }
@@ -10530,13 +10530,65 @@ fn mark_finished_holds_config_lock_from_its_lookup_to_its_record() {
             seen.set(Some(matches!(busy, Err(std::fs::TryLockError::WouldBlock))));
         }));
     });
+    let at_mark = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen_at_mark = at_mark.clone();
+    let lock = home.join("state").join("config.lock");
+    crate::my_work_subagents::MARKING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let file = (std::fs::OpenOptions::new().read(true).write(true))
+                .open(&lock)
+                .unwrap();
+            let busy = crate::worker::try_lock(&file);
+            seen_at_mark.set(Some(matches!(busy, Err(std::fs::TryLockError::WouldBlock))));
+        }));
+    });
     let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
     assert_eq!(status, 200, "{answer}");
     assert_eq!(held.get(), Some(true), "config.lock held at the lookup");
+    assert_eq!(
+        at_mark.get(),
+        Some(true),
+        "config.lock held when the stop is sent"
+    );
 }
 
-/// W4 (Codex on #1121): oboete's page's Mark finished asks its own token again under config.lock: a
-/// token replaced once the locks are had records nothing (401).
+/// W4 (Codex on #1121): a subagent whose last step is timed after this machine's clock (a copied
+/// home's, or one before the clock was set back) is not marked, as a stop now would finish
+/// nothing: 409 `ahead` on both routes, and nothing is recorded.
+#[test]
+fn a_subagent_stepped_after_the_clock_is_not_marked() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let ahead = crate::db::now_ms() + 10 * 60_000;
+    for id in ["a1", "a2"] {
+        let step = mark_step("s1", ahead, &place.path().join(id), id);
+        s.raw.append(&step).unwrap();
+    }
+    s.run();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let (stops, kept) = stops_and_kept(&s);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (409, Some("ahead")),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["error"],
+        "Its last step is timed after this computer\u{2019}s clock, so nothing was marked. Try again later."
+    );
+    assert!(answer["snapshot"]["humanRequests"].is_array(), "{answer}");
+    let (status, main) = post_finished(&v, &subs[1]["id"]);
+    assert_eq!(
+        (status, main["code"].as_str()),
+        (409, Some("ahead")),
+        "{main}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (Codex on #1121): oboete's page's Mark finished asks its own token as soon as it has
+/// config.lock, which a new token takes: a token replaced while it waits for the lock is 401, for
+/// a subagent it would mark and for one it would answer 409 `finished`, and nothing is recorded.
 #[cfg(target_os = "linux")]
 #[test]
 fn oboetes_page_mark_finished_whose_token_is_replaced_records_nothing() {
@@ -10545,16 +10597,37 @@ fn oboetes_page_mark_finished_whose_token_is_replaced_records_nothing() {
     write_token(&home).unwrap();
     let token = file_token(&home).unwrap();
     let subs = subagents_in(&work_view_of(&v, &token));
+    let (first, second) = (subs[0]["id"].clone(), subs[1]["id"].clone());
+    assert_eq!(post_finished_as(&v, &first, &token).0, 200);
     let (stops, kept) = stops_and_kept(&s);
-    let again = home.clone();
-    crate::my_work_subagents::LOOKED_UP.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move |_: &mut crate::raw::Raw| {
-            write_token(&again).unwrap();
-        }));
-    });
-    let (status, _) = post_finished_as(&v, &subs[0]["id"], &token);
-    assert_eq!(status, 401);
+    for id in [&first, &second] {
+        let given = file_token(&home).unwrap();
+        let (status, answer) = replaced_while_it_waits(&home, || post_finished_as(&v, id, &given));
+        assert_eq!(status, 401, "{answer}");
+    }
     assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// What `post` answers when its token is replaced while it waits for config.lock, as by a new
+/// token made meanwhile: the test holds the lock, replaces `home`'s token once the request waits
+/// for it, then lets go.
+#[cfg(target_os = "linux")]
+fn replaced_while_it_waits<T: Send>(home: &Path, post: impl FnOnce() -> T + Send) -> T {
+    let lock = crate::settings::config_lock(home).unwrap();
+    let (told, waits) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let posting = scope.spawn(move || {
+            crate::settings::CONFIG_BLOCKED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || told.send(()).unwrap()));
+            });
+            post()
+        });
+        (waits.recv_timeout(std::time::Duration::from_secs(30)))
+            .expect("the request waits for config.lock");
+        write_token(home).unwrap();
+        drop(lock);
+        posting.join().unwrap()
+    })
 }
 
 /// W4 (Codex on #1121): the work-view's read asks its token again once the snapshot is read: a token

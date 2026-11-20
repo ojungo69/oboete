@@ -391,7 +391,7 @@ Slice 3:
   again from raw; a rewind drops every device's rows and marks each it has a checkpoint of
   (`subagent_rebuild`), as a device's lost tombstone may have taken another device's record (the
   manifest makes the device's alone again); every device raw holds is read.
-- **My Work's read** (`my_work_subagents::read`, from `my_work::read_held` by `subagents_of`, in
+- **My Work's read** (`my_work_subagents::read_picked`, `Pick::Newest`, as built since W4; from `my_work::read_held` by `subagents_of`, in
   the read fence the page's read holds from its first read), in the page's read (`my_work::listed`)
   alone: `my_work::reviewing`, which
   the owner's actions read under the reviews' lock, reads none, as a purge holds the read fence
@@ -577,16 +577,18 @@ Slice 3:
   (`finished`, `recent` for working, else `quiet`; `finishedAt` its stop's time as an ISO time,
   which `OWN` leaves whole). One whose conversation no request carries goes nowhere.
 - **The core** (`my_work_subagents::finish`, both routes): `finished_lock`; config.lock (waited for
-  10 s at most), which a new token takes, held to the end, so that the token asked under it is the
-  one the stop is made under; raw.db, then the readers' hold; then write-back's lock (`unwritten::hold`, waited for 10 s at most), held to the end, so no
+  10 s at most), which a new token takes, held to the end, and the caller's token asked as soon as
+  it is had (`Unauthorized` else), so that nothing is read or written for a token replaced
+  meanwhile; raw.db, then the readers' hold; then write-back's lock (`unwritten::hold`, waited for 10 s at most), held to the end, so no
   kept file is written back between the look and the record (a `write_back` meanwhile takes the lock
   with `try_lock` and writes nothing); the only subagent the id names among every request's
   conversations' subagents, before any cap (`my_work::subagent`; `Lookup::Shared` when two share
   it, #1102 item 2); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
   events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
   write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
-  step's folder is gone or masked; the caller's token asked again; then the stop, at the time read
-  then (`mark`: `Marked::{Appended, Kept, Refused}`, `record_if` saying when its error path kept the
+  step's folder is gone or masked; `Ahead`, nothing recorded, when its last step is timed after
+  this machine's clock (a copied home's), where a stop would finish nothing; then the stop, at the
+  time read then (`mark`: `Marked::{Appended, Kept, Refused}`, `record_if` saying when its error path kept the
   call's events, which `hook::record` reads nothing of). The locks let go, an appended or kept stop
   starts the worker.
 - **The work-view's route** (`POST /api/work-view/agents/mark-finished`,
@@ -595,9 +597,10 @@ Slice 3:
   `save` (`localMaterialization: "pending"` for a kept or pending stop), the receipt alone when the
   snapshot cannot be read or the token was replaced while it was read; refusals with the snapshot
   and claude-mem's sentences where its worker has the case: 404 `not_found`, 409 `finished`, 409
-  `ambiguous`, 409 `not_recorded`; 503 `busy` with none.
-- **oboete's page's route** takes the same core, its own token asked again under config.lock: a
-  kept or pending stop is 200 `{}`, two subagents of one id 409 `ambiguous`, which the page words as its generic sentence before it reads My Work
+  `ambiguous`, 409 `not_recorded`, 409 `ahead`; 503 `busy` with none.
+- **oboete's page's route** takes the same core, its own token asked under config.lock: a kept or
+  pending stop is 200 `{}`, two subagents of one id 409 `ambiguous`, a step ahead of the clock 409
+  `ahead`, which the page words as its generic sentence before it reads My Work
   again.
 - **Known limits**: a kept or pending stop changes nothing on the work-view's card until a hook
   writes it back, as the pages keep their model and drop the receipt, and its button records

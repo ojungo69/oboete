@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-20T06:35:26.752Z",
-  "revision": "1795156526752",
+  "generatedAt": "2026-11-20T08:35:59.081Z",
+  "revision": "1795163759081",
   "source": {
     "kind": "oboete",
     "connected": true,
     "error": null,
-    "lastCheckedAt": "2026-11-20T06:35:26.752Z"
+    "lastCheckedAt": "2026-11-20T08:35:59.081Z"
   },
   "agents": [
     {
@@ -18,7 +18,21 @@
       "contentSessionId": "c:claude:s1"
     },
     {
-      "id": "s:fdd484202faf",
+      "id": "s:565c5fdfe30d",
+      "label": "Claude Code",
+      "platformSource": "claude",
+      "sessionTitle": "Fix the parser.",
+      "project": "r",
+      "contentSessionId": "c:claude:s1",
+      "isSubagent": true,
+      "canMarkFinished": true,
+      "presence": {
+        "status": "recent",
+        "finishedAt": null
+      }
+    },
+    {
+      "id": "s:67c8e7fc7c7b",
       "label": "Claude Code",
       "platformSource": "claude",
       "sessionTitle": "Fix the parser.",
@@ -28,11 +42,11 @@
       "canMarkFinished": false,
       "presence": {
         "status": "finished",
-        "finishedAt": "2026-11-20T06:30:26.752Z"
+        "finishedAt": "2026-11-20T08:30:59.081Z"
       }
     },
     {
-      "id": "s:cf956bbee663",
+      "id": "s:adf7234ef1f1",
       "label": "Claude Code",
       "platformSource": "claude",
       "sessionTitle": "Fix the parser.",
@@ -49,7 +63,7 @@
   "humanRequests": [
     {
       "id": "[\"conversation\",\"claude\",\"c:claude:s1\"]",
-      "contentFingerprint": "22757ac6bd3341f136e717594d3a4c28bc223773fe27dd14af52c2feae3a11be",
+      "contentFingerprint": "dc46dea825ce30de1709a31add0863379c23da0c0c1f00639dcb7e91635c50ad",
       "title": "Fix the parser.",
       "titleSource": "title-cache",
       "humanCopy": {
@@ -60,7 +74,7 @@
       },
       "original": {
         "text": "Fix the parser.",
-        "atEpoch": 1795153826752
+        "atEpoch": 1795161059081
       },
       "scopeUpdates": [],
       "items": [],
@@ -73,8 +87,8 @@
         "[\"conversation\",\"claude\",\"c:claude:s1\"]"
       ],
       "requestedBy": null,
-      "startedAtEpoch": 1795153826752,
-      "updatedAtEpoch": 1795153826752,
+      "startedAtEpoch": 1795161059081,
+      "updatedAtEpoch": 1795161059081,
       "completedAtEpoch": null,
       "lifecycle": {
         "status": "unknown",
@@ -110,7 +124,7 @@
     "state": "unconfigured",
     "mode": "disabled",
     "checkedAt": null,
-    "observedAt": 1795156526752,
+    "observedAt": 1795163759081,
     "message": "oboete keeps your work on this computer only.",
     "download": null,
     "projection": {

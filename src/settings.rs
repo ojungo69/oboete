@@ -77,12 +77,23 @@ pub(crate) fn config_lock_within(
         match crate::worker::try_lock(&file) {
             Ok(()) => return Ok(Some(file)),
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                #[cfg(test)]
+                if let Some(hook) = CONFIG_BLOCKED.with(|hook| hook.borrow_mut().take()) {
+                    hook();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// W4's tests: told once when `config_lock_within` first finds the lock held.
+    pub(crate) static CONFIG_BLOCKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn config_lock_file(home: &Path) -> std::io::Result<std::fs::File> {

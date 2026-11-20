@@ -288,27 +288,29 @@ test("a judge's open suggestion reads with its request and the request it names,
 const subagented = JSON.parse(readFileSync(new URL('./subagented.json', import.meta.url), 'utf8'))
 const subagentedModel = toWorkModel(subagented, Number(subagented.revision))
 
-// The home of work_view::tests::subagented: conversation s1, of this hour, with a quiet subagent, one
-// finished 5 minutes back and one finished 40 minutes back; conversation s0, eight days back, with a
-// quiet one (decision 118: the work-view lists a carried conversation's subagents not finished or
-// finished within 15 minutes).
+// The home of work_view::tests::subagented: conversation s1, of this hour, with a working subagent,
+// a quiet one, one finished 5 minutes back and one finished 40 minutes back; conversation s0, eight
+// days back, with a quiet one (decision 118: the work-view lists a carried conversation's subagents
+// not finished or finished within 15 minutes).
 test("a carried conversation's subagents read as agents of their own, and leave its request as it is", () => {
   assert.deepEqual(subagentedModel.requestReadErrors, [])
   const parent = subagentedModel.agents.find((a) => a.id === 'claude:c:claude:s1')
   assert.ok(parent)
   const children = subagentedModel.agents.filter((a) => a.id !== parent.id)
-  // The quiet one and the one finished 5 minutes back.
-  assert.equal(children.length, 2)
+  // The working one, the quiet one and the one finished 5 minutes back.
+  assert.equal(children.length, 3)
   for (const child of children) {
     assert.match(child.id, /^s:[0-9a-f]{12}$/)
     assert.equal(child.tool, 'claude')
     assert.equal(child.role, 'Subagent · Fix the parser.')
   }
-  assert.notEqual(children[0].id, children[1].id)
-  const quiet = children.filter((a) => a.status === 'quiet')
-  assert.equal(quiet.length, 1)
-  assert.equal(quiet[0].canMarkFinished, true)
-  assert.equal(quiet[0].finishedAt, undefined)
+  assert.equal(new Set(children.map((a) => a.id)).size, 3)
+  for (const status of ['working', 'quiet']) {
+    const one = children.filter((a) => a.status === status)
+    assert.equal(one.length, 1, status)
+    assert.equal(one[0].canMarkFinished, true)
+    assert.equal(one[0].finishedAt, undefined)
+  }
   const finished = children.filter((a) => a.status === 'finished')
   assert.equal(finished.length, 1)
   assert.equal(finished[0].canMarkFinished, false)

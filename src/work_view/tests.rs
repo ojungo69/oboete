@@ -1981,7 +1981,7 @@ fn the_suggestions_and_subagents_keys_are_theirs_alone() {
         (
             &["isSubagent", "canMarkFinished", "finishedAt"][..],
             r"^/agents/\d+/(isSubagent|canMarkFinished|presence/finishedAt)$",
-            ("subagented.json", 6),
+            ("subagented.json", 9),
         ),
     ] {
         let own = Regex::new(own).unwrap();
@@ -2014,9 +2014,10 @@ fn sub_stop(h: &mut Store, session: &str, at: i64, id: &str) {
     );
 }
 
-/// W4: a home whose conversation `s1`, of this week, has three subagents: `a1` quiet (its last
-/// step 20 minutes back, no stop), `a2` finished 5 minutes back, `a3` finished 40 minutes back;
-/// and whose conversation `s0`, eight days back, has `b1`, quiet.
+/// W4: a home whose conversation `s1`, of this week, has four subagents: `a0` working (its last
+/// step 2 minutes back), `a1` quiet (its last step 20 minutes back, no stop), `a2` finished 5
+/// minutes back, `a3` finished 40 minutes back; and whose conversation `s0`, eight days back, has
+/// `b1`, quiet.
 fn subagented() -> (Store, i64) {
     let mut h = Store::new();
     let now = crate::db::now_ms();
@@ -2024,6 +2025,7 @@ fn subagented() -> (Store, i64) {
     h.said("s1", R, now - 45 * min, "Fix the parser.");
     let old = now - 8 * 24 * 60 * min;
     h.said("s0", R, old, "Tidy the old notes.");
+    sub_step(&mut h, "s1", now - 2 * min, "a0");
     sub_step(&mut h, "s1", now - 20 * min, "a1");
     sub_step(&mut h, "s1", now - 6 * min, "a2");
     sub_stop(&mut h, "s1", now - 5 * min, "a2");
@@ -2042,11 +2044,11 @@ fn subagented() -> (Store, i64) {
 fn a_carried_conversations_subagents_go_while_not_finished_or_lately_finished() {
     let (h, now) = subagented();
     let (work, goals) = answers(&h, now);
-    assert_eq!(arr(&work["subagents"]).len(), 2, "{}", work["subagents"]);
+    assert_eq!(arr(&work["subagents"]).len(), 3, "{}", work["subagents"]);
     let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
     let agents = arr(&snapshot["agents"]);
     let subs: Vec<&Value> = agents.iter().filter(|a| a["isSubagent"] == true).collect();
-    assert_eq!(subs.len(), 2, "{snapshot}");
+    assert_eq!(subs.len(), 3, "{snapshot}");
     let first = agents.iter().position(|a| a["isSubagent"] == true).unwrap();
     assert!(
         agents[first..].iter().all(|a| a["isSubagent"] == true),
@@ -2067,18 +2069,24 @@ fn a_carried_conversations_subagents_go_while_not_finished_or_lately_finished() 
         }
         assert!(sub["id"].as_str().unwrap().starts_with("s:"), "{sub}");
     }
-    assert_ne!(subs[0]["id"], subs[1]["id"]);
-    let quiet = (subs.iter())
-        .find(|s| s["presence"]["status"] == "quiet")
-        .unwrap();
-    assert_eq!(quiet["canMarkFinished"], true);
-    assert_eq!(quiet["presence"]["finishedAt"], Value::Null);
-    let finished = (subs.iter())
-        .find(|s| s["presence"]["status"] == "finished")
-        .unwrap();
-    assert_eq!(finished["canMarkFinished"], false);
-    let at = finished["presence"]["finishedAt"].as_str().unwrap();
-    assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+    let ids: std::collections::HashSet<&Value> = subs.iter().map(|s| &s["id"]).collect();
+    assert_eq!(ids.len(), 3, "{snapshot}");
+    let by = |status: &str| -> Vec<&Value> {
+        (subs.iter().copied())
+            .filter(|s| s["presence"]["status"] == status)
+            .collect()
+    };
+    for status in ["recent", "quiet"] {
+        let one = by(status);
+        assert_eq!(one.len(), 1, "{status}: {snapshot}");
+        assert_eq!(one[0]["canMarkFinished"], true);
+        assert_eq!(one[0]["presence"]["finishedAt"], Value::Null);
+    }
+    let finished = by("finished");
+    assert_eq!(finished.len(), 1, "{snapshot}");
+    assert_eq!(finished[0]["canMarkFinished"], false);
+    // Its stop's time, 5 minutes before the home's `now`, as an ISO time.
+    assert_eq!(finished[0]["presence"]["finishedAt"], iso(now - 5 * 60_000));
 }
 
 /// W4 (the plan review's round 1): a subagent goes with the session whose shown id and fingerprint
@@ -2131,7 +2139,7 @@ fn a_subagents_label_is_gated_as_its_conversations() {
     let snapshot = answer(home, crate::db::now_ms()).unwrap();
     let agents = arr(&snapshot["agents"]);
     let subs: Vec<&Value> = agents.iter().filter(|a| a["isSubagent"] == true).collect();
-    assert_eq!(subs.len(), 2, "{snapshot}");
+    assert_eq!(subs.len(), 3, "{snapshot}");
     let parent = (agents.iter())
         .find(|a| a["isSubagent"] != true && a["contentSessionId"] == subs[0]["contentSessionId"])
         .unwrap();

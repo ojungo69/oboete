@@ -2653,6 +2653,10 @@ impl Viewer {
                 let error = "Its conversation\u{2019}s folder is gone, or it records nothing now.";
                 return refusal(409, "not_recorded", error);
             }
+            Ok(Finish::Ahead) => {
+                let error = "Its last step is timed after this computer\u{2019}s clock, so nothing was marked. Try again later.";
+                return refusal(409, "ahead", error);
+            }
             Ok(Finish::Busy) => {
                 return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
             }
@@ -2789,11 +2793,14 @@ impl Viewer {
     }
 
     /// Slice 2 of docs/subagents.md: Mark finished. The body is `{"id"}`, a subagent's id as the
-    /// page has it; under its own lock and the readers' hold, from a fresh read to the write:
-    /// 404 when it names no listed subagent, 409 `finished` when it is Finished already, 409
-    /// `not_recorded` when its conversation's folder is gone or masked or records nothing now,
-    /// 503 `busy` when another Mark finished holds the lock past the wait.
-    /// The page reads My Work again after it, which counts the new stop at once.
+    /// page has it, marked by the core the work-view shares (`my_work_subagents::finish`, W4): 401
+    /// when this page's token is replaced before the core has config.lock, 404 when it names no
+    /// listed subagent, 409 `ambiguous` when two subagents share it, 409 `finished` when it is
+    /// Finished already, 409 `not_recorded` when its conversation's folder is gone or masked or
+    /// records nothing now, 409 `ahead` when its last step is timed after this machine's clock, 503
+    /// `busy` when a lock is not had within its wait; 200 `{}` for a stop appended, kept, or one
+    /// already waiting in a kept file. The page reads My Work again after it, which counts an
+    /// appended stop at once and a kept one once a hook writes it back.
     fn my_work_finished(&self, body: &[u8], given: &str) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -2815,6 +2822,7 @@ impl Viewer {
             Ok(Finish::Shared) => refused(409, "ambiguous", ""),
             Ok(Finish::Finished) => refused(409, "finished", ""),
             Ok(Finish::NotRecorded) => refused(409, "not_recorded", ""),
+            Ok(Finish::Ahead) => refused(409, "ahead", ""),
             Ok(Finish::Unauthorized) => Response::text(401, "missing or wrong token"),
             Err(e) => failed(&e),
         }
