@@ -10717,3 +10717,66 @@ fn mark_finished_reads_only_its_own_unread_steps_and_marks_a_resumed_one_again()
     assert_eq!(status, 200, "{again}");
     assert_eq!(stops_and_kept(&s), (stops + 2, kept));
 }
+
+/// W4 (Codex on #1121): Mark finished reads the candidates and the named one's unread steps from one
+/// snapshot of the consumer's checkpoints: the consumer reaching a newer step between the two reads
+/// leaves it read all the same, so a newer step in a checkout that records nothing is 409
+/// `not_recorded`, and nothing is recorded.
+#[test]
+fn a_step_the_consumer_reaches_during_the_lookup_is_read_all_the_same() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let home = s.home.path().to_owned();
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let off = place.path().join("off");
+    std::fs::create_dir_all(off.join(".git")).unwrap();
+    std::fs::write(off.join(".oboete.toml"), "capture = false\n").unwrap();
+    let now = crate::db::now_ms();
+    for id in ["a1", "a2"] {
+        s.raw
+            .append(&mark_step("s1", now - 60_000, &off, id))
+            .unwrap();
+    }
+    let (stops, kept) = stops_and_kept(&s);
+    crate::my_work::PICKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+        }));
+    });
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (409, Some("not_recorded")),
+        "{answer}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}
+
+/// W4 (Codex on #1121): a launch that returned with its subagent, recorded past the consumer's
+/// checkpoint, finished it, as the read counts one: Mark finished is 409 `finished`, and nothing is
+/// recorded.
+#[test]
+fn a_returned_launch_the_consumer_has_not_read_finished_the_subagent() {
+    let (mut s, v, place) = mark_fixture(Token::Run("t0k".into()));
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let now = crate::db::now_ms();
+    for id in ["a1", "a2"] {
+        let body = json!({"tool": "Agent", "input": "{}",
+            "launched": {"agent_id": id, "async": false, "status": "completed"}});
+        let e = crate::raw::Event {
+            kind: "tool".into(),
+            session: "s1".into(),
+            cwd: Some(place.path().join(id).to_string_lossy().into_owned()),
+            ts: now - 60_000,
+            ..crate::raw::test_event(&body.to_string())
+        };
+        s.raw.append(&e).unwrap();
+    }
+    let (stops, kept) = stops_and_kept(&s);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (409, Some("finished")),
+        "{answer}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+}

@@ -1216,6 +1216,9 @@ pub(crate) enum Lookup {
 /// 2), and the folder its newest step was recorded in (none when that label is gone or masked),
 /// read once it is the only one. The caller holds the readers' hold, taken after it opened them.
 pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> Result<Lookup> {
+    // One snapshot of knowledge.db for the whole lookup: the candidates' facts and the checkpoints
+    // the named one's unread steps are read past are the same consumer's moment (Codex on #1121).
+    let _snapshot = k.unchecked_transaction()?;
     let rules = Rules::load(home)?;
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let Built { requests, .. } = build(raw, k, &rules, &reading)?;
@@ -1241,6 +1244,10 @@ pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> 
             named = Some(s);
         }
     }
+    #[cfg(test)]
+    if let Some(hook) = PICKED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let Some(mut s) = named else {
         return Ok(Lookup::None);
     };
@@ -1258,6 +1265,10 @@ type Printed = Option<Box<dyn Fn(&crate::my_work_subagents::Subagent) -> Option<
 #[cfg(test)]
 thread_local! {
     pub(crate) static PRINTED: std::cell::RefCell<Printed> = const { std::cell::RefCell::new(None) };
+    /// W4's tests: run once in `subagent` between its read of the candidates and its read of the
+    /// named one's steps past the consumer's checkpoints.
+    pub(crate) static PICKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// docs/my-work-model.md P1, P3: what a progress review reads of a request, its texts before any

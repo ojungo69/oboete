@@ -487,3 +487,42 @@ fn an_imported_agent_lifecycle_row_is_its_subagents_stop() {
         ]
     );
 }
+
+/// W4 (Codex on #1121): the steps `fresh_steps` reads past the checkpoints pass over a record any
+/// device's tombstone took since, though the tombstone is another device's and leaves the agent's
+/// id whole: in a copied home, a range tombstone of the first device's newer step leaves the older
+/// step the newest.
+#[test]
+fn fresh_steps_pass_over_a_step_another_devices_tombstone_took() {
+    let from = tempfile::tempdir().unwrap();
+    let mut store = raw::open(from.path()).unwrap();
+    let old = store.append(&step("s", "a1", MIN)).unwrap();
+    let first = store.device().to_owned();
+    drop(drain(from.path(), &store));
+    let newer = step("s", "a1", 2 * MIN);
+    let at = i64::try_from(newer.body.find("Read").unwrap()).unwrap();
+    let seq = store.append(&newer).unwrap();
+    drop(store);
+    let to = tempfile::tempdir().unwrap();
+    for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+        if from.path().join(f).exists() {
+            std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+        }
+    }
+    let mut store = raw::open(to.path()).unwrap();
+    assert_ne!(store.device(), first);
+    let k = crate::knowledge::open(to.path()).unwrap();
+    let taken = Target::Range {
+        device: first.clone(),
+        seq,
+        offset: at,
+        length: 4,
+    };
+    store.append_tombstone(taken).unwrap();
+    let rules = Rules::default();
+    let mut s = (read_picked(&store, &k, &[key("s")], &rules, Pick::All).unwrap())
+        .pop()
+        .unwrap();
+    fresh_steps(&store, &k, &mut s).unwrap();
+    assert_eq!((s.last_step, s.step_record.clone()), (MIN, (first, old)));
+}

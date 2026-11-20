@@ -551,34 +551,50 @@ pub(crate) fn fresh_steps(raw: &Raw, k: &Connection, s: &mut Subagent) -> Result
         .prepare("SELECT device, seq FROM checkpoints WHERE consumer = ?1")?
         .query_map([subagents::NAME], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    for device in subagents::Subagents.devices(raw)? {
-        let at = checkpoints.get(&device).copied().unwrap_or(0);
-        let seqs = raw.tools_after(&device, at, &s.conversation.1)?;
-        if seqs.is_empty() {
-            continue;
-        }
-        let hidden: HashSet<(String, i64)> =
-            raw.tombstones_after(&device, at)?.into_iter().collect();
-        let expired: HashSet<i64> = raw.expired_among(&device, &seqs)?.into_iter().collect();
-        for r in raw.at(&device, &seqs)? {
-            let Item::Event(e) = r.item else { continue };
-            if e.agent != s.conversation.0
-                || hidden.contains(&(device.clone(), r.seq))
-                || expired.contains(&r.seq)
-            {
-                continue;
-            }
-            let stepped =
-                (subagents::facts(&e).iter()).any(|f| f.fact == "step" && f.agent_id == s.agent_id);
-            if stepped && e.ts >= s.last_step {
-                s.last_step = e.ts;
-                s.step_record = (device.clone(), r.seq);
+    let devices = subagents::Subagents.devices(raw)?;
+    // Every device's tombstones since its checkpoint, as `read_picked` hides them: another
+    // device's can take this one's record (Codex on #1121).
+    let mut hidden: HashSet<(String, i64)> = HashSet::new();
+    for device in &devices {
+        let at = checkpoints.get(device).copied().unwrap_or(0);
+        hidden.extend(raw.tombstones_after(device, at)?);
+    }
+    let mut returned = Vec::new();
+    for device in &devices {
+        let at = checkpoints.get(device).copied().unwrap_or(0);
+        let seqs = raw.tools_after(device, at, &s.conversation.1)?;
+        // In pages, so that a long backlog is not held at once (Codex on #1121).
+        for page in seqs.chunks(200) {
+            let expired: HashSet<i64> = raw.expired_among(device, page)?.into_iter().collect();
+            for r in raw.at(device, page)? {
+                let Item::Event(e) = r.item else { continue };
+                if e.agent != s.conversation.0
+                    || hidden.contains(&(device.clone(), r.seq))
+                    || expired.contains(&r.seq)
+                {
+                    continue;
+                }
+                for f in subagents::facts(&e)
+                    .into_iter()
+                    .filter(|f| f.agent_id == s.agent_id)
+                {
+                    match f.fact {
+                        "step" if e.ts >= s.last_step => {
+                            s.last_step = e.ts;
+                            s.step_record = (device.clone(), r.seq);
+                        }
+                        // A launch that returned with it finished it, as `read_picked` counts one.
+                        "launch" if f.returned => returned.push(e.ts),
+                        _ => {}
+                    }
+                }
             }
         }
     }
-    if s.finished.is_some_and(|at| at < s.last_step) {
-        s.finished = None;
-    }
+    let last = s.last_step;
+    s.finished = (s.finished.into_iter().chain(returned))
+        .filter(|&at| at >= last)
+        .max();
     Ok(())
 }
 

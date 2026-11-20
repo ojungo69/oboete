@@ -584,8 +584,10 @@ Slice 3:
   with `try_lock` and writes nothing); the only subagent the id names among every request's
   conversations' subagents, before any cap (`my_work::subagent`; `Lookup::Shared` when two share
   it, #1102 item 2), with its steps recorded past the consumer's checkpoints, which the read leaves
-  to the consumer (`my_work_subagents::fresh_steps`: its newest step sets its folder, its clock
-  and whether it finished); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
+  to the consumer (`my_work_subagents::fresh_steps`, read in one snapshot of knowledge.db with the
+  candidates; a record any device's tombstone took since, or whose text expired, passed over, and a
+  launch that returned with it counted as its finish, as the read counts them: its newest step sets
+  its folder, its clock and whether it finished); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
   events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
   write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
   step's folder is gone or masked; `Ahead`, nothing recorded, when its last step is timed after
