@@ -878,9 +878,9 @@ fn steady(v: &Value) -> Value {
     steady_with(v, &mut Vec::new())
 }
 
-/// `steady`, each group's print (`g:` and 12 hex digits, keyed by the home's key) and each
-/// subagent's (`s:`, W4) written as its place among those seen first, so that the id a suggestion
-/// names stays its row's (W3b-3).
+/// `steady`, each group's print (`g:` and 12 hex digits, keyed by the home's key), each
+/// subagent's (`s:`, W4), and each rule's and scope's (`l:`, `u:`, `r:`, #1083) written as its
+/// place among those seen first, so that the id a suggestion names stays its row's (W3b-3).
 fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
     match v {
         Value::Number(n) if n.as_i64().is_some_and(|n| n > 1_000_000_000_000) => json!("<ms>"),
@@ -890,7 +890,7 @@ fn steady_with(v: &Value, groups: &mut Vec<String>) -> Value {
             let month = regex::Regex::new(r"\b\d{4}-\d{2}\b").unwrap();
             let print = regex::Regex::new(r"#[0-9a-f]{12}").unwrap();
             let reference = regex::Regex::new(r"\bm:[0-9a-f]{12}\b").unwrap();
-            let group = regex::Regex::new(r"\b[gs]:[0-9a-f]{12}\b").unwrap();
+            let group = regex::Regex::new(r"\b[gslur]:[0-9a-f]{12}\b").unwrap();
             let s = iso.replace_all(s, "<iso>");
             let s = stamp.replace_all(&s, "<day>");
             let s = month.replace_all(&s, "<month>");
@@ -1963,14 +1963,16 @@ fn paths_in(file: &str, keys: &[&str]) -> Vec<String> {
 
 /// Keys the walk leaves as they are (`OWN`) name nothing else in the contract's answers: the
 /// suggestion's three, each a request's suggestion's (W3b-3); a subagent's `isSubagent`,
-/// `canMarkFinished` and `finishedAt`, each an agent's (W4).
+/// `canMarkFinished` and `finishedAt`, each an agent's (W4); a rule's references and the fields
+/// oboete writes of it, each a rule's (#1083), but for a focus area's `savedAt`, which is null.
 #[test]
-fn the_suggestions_and_subagents_keys_are_theirs_alone() {
+fn the_keys_the_walk_leaves_whole_are_theirs_alone() {
     let files = [
         "snapshot.json",
         "gated.json",
         "suggested.json",
         "subagented.json",
+        "ruled.json",
     ];
     for (keys, own, least) in [
         (
@@ -1983,6 +1985,20 @@ fn the_suggestions_and_subagents_keys_are_theirs_alone() {
             r"^/agents/\d+/(isSubagent|canMarkFinished|presence/finishedAt)$",
             ("subagented.json", 9),
         ),
+        (
+            &[
+                "ruleId",
+                "scopeId",
+                "replacedBy",
+                "setBy",
+                "scopeTier",
+                "when",
+                "savedAt",
+                "replacedAt",
+            ][..],
+            r"^/rules/\d+/(ruleId|scopeId|replacedBy|setBy|scopeTier|when|savedAt|replacedAt)$|^/focusAreas/\d+/savedAt$",
+            ("ruled.json", 32),
+        ),
     ] {
         let own = Regex::new(own).unwrap();
         for file in files {
@@ -1992,6 +2008,15 @@ fn the_suggestions_and_subagents_keys_are_theirs_alone() {
             for at in &found {
                 assert!(own.is_match(at), "{file}: {at}");
             }
+        }
+    }
+    for file in files {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui/work-view/contract")
+            .join(file);
+        let kept: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for area in arr(&kept["focusAreas"]) {
+            assert!(area["savedAt"].is_null(), "{file}: {area}");
         }
     }
 }
@@ -2172,4 +2197,362 @@ fn the_contract_subagents_are_a_subagent_homes_answer() {
         "subagented.json",
         &snapshot_at(&work, &goals, now, &Utc, &Gate::now()),
     );
+}
+
+/// A rules op of suggestion `id` as the rules job keeps one (`my_work_rules`): seen twice, quoted
+/// at `at`.
+fn suggestion_op(h: &mut Store, id: &str, statement: &str, at: i64) {
+    let fields = json!({"statement": statement, "seen": 2,
+        "requests": [format!("g:{id}0"), format!("g:{id}1")],
+        "quotes": [{"text": format!("Quoted for {id}."), "request": format!("g:{id}0"), "at": at}]});
+    let op = MyWorkOp {
+        job: crate::my_work_rules::NAME.into(),
+        about: id.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
+/// A checkout at `dir` with no remote, which a prompt of `session` started in: its repository key.
+fn started_in(h: &mut Store, dir: &Path, session: &str, at: i64) -> String {
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let repo = crate::repo::key(dir);
+    h.said(session, &repo, at, "Hello.");
+    repo
+}
+
+/// The preference a claim writer recorded.
+fn uid_of(receipt: crate::claims::OwnerReceipt) -> String {
+    match receipt {
+        crate::claims::OwnerReceipt::Applied { uid }
+        | crate::claims::OwnerReceipt::Pending { uid, .. } => uid,
+        crate::claims::OwnerReceipt::DirectiveOnly { .. } => panic!("no preference recorded"),
+    }
+}
+
+/// The home of My Rules (#1083, R1): suggestion s1 waiting, s2 approved for every repository, s3
+/// rejected; a rule the owner wrote for every repository, turned off; and one for a repository a
+/// session started in. With its place of checkouts, that repository's key and the off rule's uid.
+fn ruled() -> (Store, i64, tempfile::TempDir, String, String) {
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let statements = [
+        ("s1", "Keep commits small."),
+        ("s2", "Run the tests before a push."),
+        ("s3", "Use tabs."),
+    ];
+    for (n, (id, statement)) in (0i64..).zip(statements) {
+        suggestion_op(&mut h, id, statement, now - (3 - n) * 60_000);
+    }
+    let place = tempfile::tempdir().unwrap();
+    let repo = started_in(
+        &mut h,
+        &place.path().join("proj"),
+        "in-proj",
+        now - 4 * 60_000,
+    );
+    h.run();
+    let home = h.home.path().to_owned();
+    let act = |body: Value| {
+        let body = serde_json::to_vec(&body).unwrap();
+        crate::settings::claims::rule(&home, &std::sync::Mutex::new(()), &body).unwrap();
+    };
+    act(json!({"suggestion": "s2", "action": "approve", "scope": "global"}));
+    act(json!({"suggestion": "s3", "action": "reject"}));
+    uid_of(crate::claims::pref_add_recorded(&home, "Write the changelog.", Some(&repo)).unwrap());
+    let off = crate::claims::pref_add_recorded(&home, "Answer in Japanese.", None).unwrap();
+    let off = uid_of(off);
+    crate::claims::mute_recorded(&home, &off, true).unwrap();
+    h.run();
+    (h, now, place, repo, off)
+}
+
+/// The one rule of `snapshot` whose `then` is `then`.
+fn rule_of<'a>(snapshot: &'a Value, then: &str) -> &'a Value {
+    one(&snapshot["rules"], "then", then)
+}
+
+/// #1083 (R1): My Rules goes in the snapshot as claude-mem's pages read it: a waiting suggestion
+/// learned and suggested, an approved one by its suggestion's id, the owner's rules (one turned
+/// off, one of a repository under that repository's scope), and the rejected one left out; each
+/// by a keyed print, stable across reads, and no suggestion id, uid or repository key on the wire.
+#[test]
+fn my_rules_go_by_keyed_prints_with_who_set_them_and_their_states() {
+    let (h, now, _place, repo, off) = ruled();
+    let (work, goals) = answers(&h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let fields = |r: &Value| {
+        ["setBy", "status", "source", "scopeTier"].map(|k| r[k].as_str().unwrap().to_owned())
+    };
+    let waiting = rule_of(&snapshot, "Keep commits small.");
+    assert_eq!(
+        fields(waiting),
+        ["learned", "suggested", "request-progress", "everywhere"]
+    );
+    let approved = rule_of(&snapshot, "Run the tests before a push.");
+    assert_eq!(
+        fields(approved),
+        ["approved", "on", "request-progress", "everywhere"]
+    );
+    let turned_off = rule_of(&snapshot, "Answer in Japanese.");
+    assert_eq!(fields(turned_off), ["owner", "off", "you", "everywhere"]);
+    let theirs = rule_of(&snapshot, "Write the changelog.");
+    assert_eq!(fields(theirs), ["owner", "on", "you", "project"]);
+    assert!(
+        arr(&snapshot["rules"])
+            .iter()
+            .all(|r| r["then"] != "Use tabs."),
+        "{snapshot}"
+    );
+    assert_eq!(arr(&snapshot["rules"]).len(), 4, "{snapshot}");
+    let scope = one(
+        &snapshot["ruleScopes"],
+        "id",
+        theirs["scopeId"].as_str().unwrap(),
+    );
+    assert_eq!(
+        (scope["tier"].as_str(), scope["name"].as_str()),
+        (Some("project"), Some("proj"))
+    );
+    assert_eq!(theirs["scopeName"], "proj");
+    let print = |prefix: &str| Regex::new(&format!("^{prefix}:[0-9a-f]{{12}}$")).unwrap();
+    for (r, prefix) in [
+        (waiting, "l"),
+        (approved, "l"),
+        (turned_off, "u"),
+        (theirs, "u"),
+    ] {
+        let id = r["ruleId"].as_str().unwrap();
+        assert!(print(prefix).is_match(id), "{id}");
+        assert_eq!(r["when"], "", "{r}");
+    }
+    assert!(
+        print("r").is_match(scope["id"].as_str().unwrap()),
+        "{scope}"
+    );
+    assert_eq!(waiting["quotes"][0]["quote"], "Quoted for s1.");
+    assert_eq!(waiting["quotes"][0]["kind"], "correction");
+    assert!(chrono::DateTime::parse_from_rfc3339(waiting["latestAt"].as_str().unwrap()).is_ok());
+    assert!(chrono::DateTime::parse_from_rfc3339(turned_off["savedAt"].as_str().unwrap()).is_ok());
+    let wire = json!([snapshot["rules"], snapshot["ruleScopes"]]).to_string();
+    for held in [repo.as_str(), off.as_str(), "\"s1\"", "\"s2\""] {
+        assert!(!wire.contains(held), "{held} in {wire}");
+    }
+    let (work, goals) = answers(&h, now);
+    let again = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let ids = |s: &Value| -> Vec<Value> {
+        arr(&s["rules"])
+            .iter()
+            .map(|r| r["ruleId"].clone())
+            .collect()
+    };
+    assert_eq!(ids(&again), ids(&snapshot));
+}
+
+/// #1083 (R1): a home whose only suggestion was rejected sends no rule, so the pages show that
+/// there is none yet.
+#[test]
+fn a_home_of_a_rejected_suggestion_alone_sends_no_rule() {
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    suggestion_op(&mut h, "s1", "Use tabs.", now - 60_000);
+    h.run();
+    let body = serde_json::to_vec(&json!({"suggestion": "s1", "action": "reject"})).unwrap();
+    let saving = std::sync::Mutex::new(());
+    crate::settings::claims::rule(h.home.path(), &saving, &body).unwrap();
+    h.run();
+    let (work, goals) = answers(&h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    assert_eq!(snapshot["rules"], json!([]), "{snapshot}");
+}
+
+/// #1083 (R1): two repositories of one name, each with a rule, keep that name as the gate leaves
+/// it, nothing appended, each scope with an id of its own; a repository with no rule is no scope.
+#[test]
+fn two_repositories_of_one_name_keep_it_and_ids_of_their_own() {
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let place = tempfile::tempdir().unwrap();
+    let a = started_in(
+        &mut h,
+        &place.path().join("a/proj"),
+        "in-a",
+        now - 2 * 60_000,
+    );
+    let b = started_in(&mut h, &place.path().join("b/proj"), "in-b", now - 60_000);
+    assert_ne!(a, b);
+    let c = started_in(&mut h, &place.path().join("c/none"), "in-c", now - 60_000);
+    h.run();
+    for (repo, text) in [(&a, "Write the changelog."), (&b, "Keep the readme short.")] {
+        uid_of(crate::claims::pref_add_recorded(h.home.path(), text, Some(repo)).unwrap());
+    }
+    h.run();
+    let (work, goals) = answers(&h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    let scopes: Vec<&Value> = (arr(&snapshot["ruleScopes"]).iter())
+        .filter(|s| s["tier"] == "project")
+        .collect();
+    assert_eq!(scopes.len(), 2, "{snapshot}");
+    assert!(scopes.iter().all(|s| s["name"] == "proj"), "{scopes:?}");
+    assert_ne!(scopes[0]["id"], scopes[1]["id"]);
+    assert!(!snapshot["ruleScopes"].to_string().contains("none"), "{c}");
+}
+
+/// #1083 (R1): keys of one kind whose 12 hex are one take 24, so no two share an id; the others
+/// keep 12.
+#[test]
+fn prints_that_share_their_12_hex_take_24() {
+    let mut hash = |held: &str| -> anyhow::Result<String> {
+        let tail = if held.ends_with("one") { "1" } else { "2" };
+        Ok(format!("{}{tail}{}", "a".repeat(12), "b".repeat(51)))
+    };
+    let keys = ["one".to_owned(), "two".to_owned()];
+    let got = prints(&mut hash, "repo", &keys).unwrap();
+    assert_eq!(got["one"].len(), 24);
+    assert_ne!(got["one"], got["two"]);
+    let mut apart = |held: &str| -> anyhow::Result<String> {
+        let head = if held.ends_with("one") { "1" } else { "2" };
+        Ok(format!("{head:0<64}"))
+    };
+    let got = prints(&mut apart, "repo", &keys).unwrap();
+    assert!(got.values().all(|p| p.len() == 12), "{got:?}");
+}
+
+/// #1083 (R1): with the gate failing closed, a rule's texts are masked whole and the fields
+/// oboete writes stay as written, its empty condition among them, so the pages show no condition.
+#[test]
+fn a_gate_failing_closed_leaves_a_rules_own_fields_and_its_empty_condition() {
+    let (h, now, ..) = ruled();
+    let (work, goals) = answers(&h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate(None));
+    for r in arr(&snapshot["rules"]) {
+        assert_eq!(r["when"], "", "{r}");
+        assert_eq!(r["then"], crate::redact::MASK, "{r}");
+        assert!(
+            ["learned", "approved", "owner"].contains(&r["setBy"].as_str().unwrap()),
+            "{r}"
+        );
+    }
+}
+
+/// #1083 (R1): a redaction rule on oboete's own words of a rule (who set it, its state, its source,
+/// its kind) leaves them, and one on a statement masks it; one saved while the work view is read
+/// makes it read My Rules again under it.
+#[test]
+fn a_rule_on_oboetes_words_leaves_them_and_one_on_a_statement_masks_it() {
+    let name =
+        "work_view::tests::a_rule_on_oboetes_words_leaves_them_and_one_on_a_statement_masks_it";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, now, ..) = ruled();
+    let home = h.home.path();
+    let words = "[redaction]\nextra_rules = [{ id = 'words', regex = \
+                 'approved|owner|learned|suggested|request-progress|preference|correction|project' }]\n";
+    std::fs::write(home.join("config.toml"), words).unwrap();
+    crate::redact::set_home(home).unwrap();
+    let snapshot = answer(home, now).unwrap();
+    let approved = rule_of(&snapshot, "Run the tests before a push.");
+    assert_eq!(
+        (approved["setBy"].as_str(), approved["source"].as_str()),
+        (Some("approved"), Some("request-progress"))
+    );
+    assert_eq!(approved["quotes"][0]["kind"], "correction");
+    let theirs = rule_of(&snapshot, "Write the changelog.");
+    assert_eq!(theirs["scopeTier"], "project");
+    // A rule on a statement, saved once the first rules were read.
+    let statement = "[redaction]\nextra_rules = [{ id = 'commits', regex = 'commits' }]\n";
+    let mut reads = 0;
+    let snapshot = answered(home, now, || {
+        reads += 1;
+        if reads == 2 {
+            std::fs::write(home.join("config.toml"), statement).unwrap();
+        }
+        Gate::now()
+    })
+    .unwrap();
+    assert_eq!(reads, 3);
+    let text = snapshot["rules"].to_string();
+    assert!(!text.contains("commits"), "{text}");
+    assert!(text.contains("Run the tests before a push."), "{text}");
+}
+
+/// The contract of My Rules (#1083, R1): `ui/work-view/contract/ruled.json` is the rules home's
+/// answer, which the Node test reads through claude-mem's mapper; written again as the other
+/// contract files are (OBOETE_CONTRACT_WRITE=1).
+#[test]
+fn the_contract_rules_are_a_rules_homes_answer() {
+    let (h, now, ..) = ruled();
+    let (work, goals) = answers(&h, now);
+    contract_holds(
+        "ruled.json",
+        &snapshot_at(&work, &goals, now, &Utc, &Gate::now()),
+    );
+}
+
+/// #1083 (R1): a rule on a repository's name masks the scope's name and its rules' scope names,
+/// and one on a quote masks the quote; the scope keeps its id.
+#[test]
+fn a_rule_on_a_repository_name_or_a_quote_masks_it() {
+    let name = "work_view::tests::a_rule_on_a_repository_name_or_a_quote_masks_it";
+    if !crate::view::tests::in_child(name) {
+        return;
+    }
+    let (h, now, ..) = ruled();
+    let home = h.home.path();
+    let rules = "[redaction]\nextra_rules = [{ id = 'proj', regex = 'proj' }, \
+                 { id = 'quoted', regex = 'Quoted for s1' }]\n";
+    std::fs::write(home.join("config.toml"), rules).unwrap();
+    crate::redact::set_home(home).unwrap();
+    let snapshot = answer(home, now).unwrap();
+    let text = json!([snapshot["rules"], snapshot["ruleScopes"]]).to_string();
+    assert!(!text.contains("Quoted for s1"), "{text}");
+    let theirs = rule_of(&snapshot, "Write the changelog.");
+    // The tier, oboete's word, is `project`, which the rule finds too: it is left whole.
+    assert!(
+        !theirs["scopeName"].to_string().contains("proj"),
+        "{theirs}"
+    );
+    assert_eq!(theirs["scopeTier"], "project");
+    let scope = one(
+        &snapshot["ruleScopes"],
+        "id",
+        theirs["scopeId"].as_str().unwrap(),
+    );
+    assert_eq!(scope["tier"], "project");
+    assert!(!scope["name"].to_string().contains("proj"), "{scope}");
+    assert_eq!(scope["name"], theirs["scopeName"]);
+    assert!(rule_of(&snapshot, "Run the tests before a push.")["quotes"][0]["quote"].is_string());
+}
+
+/// #1083 (R1): an approved suggestion whose rule was retracted since is left out (R2 brings it
+/// with its Undo), so a home of that alone sends no rule.
+#[test]
+fn a_home_of_a_removed_approval_alone_sends_no_rule() {
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    suggestion_op(&mut h, "s1", "Keep commits small.", now - 60_000);
+    h.run();
+    let body = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let saving = std::sync::Mutex::new(());
+    let saved =
+        crate::settings::claims::rule(h.home.path(), &saving, &serde_json::to_vec(&body).unwrap())
+            .unwrap();
+    h.run();
+    let uid = saved["uid"].as_str().unwrap().to_owned();
+    crate::claims::correct_recorded(h.home.path(), &uid, Some("retracted"), None).unwrap();
+    h.run();
+    let page = crate::my_work_rules::page(h.home.path(), now).unwrap();
+    assert_eq!(arr(&page["removed"]).len(), 1, "{page}");
+    let (work, goals) = answers(&h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    assert_eq!(snapshot["rules"], json!([]), "{snapshot}");
 }

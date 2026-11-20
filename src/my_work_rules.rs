@@ -205,7 +205,26 @@ const OFFERED: usize = 20;
 /// the gate (S6).
 pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
     let settings = crate::capture::Settings::load(home)?;
-    let rules = &settings.rules;
+    page_under(home, now, &settings, &settings.rules)
+}
+
+/// `page`, each text gated under `rules`: the work-view's read (#1083), under its answer's rules.
+pub(crate) fn page_with(
+    home: &std::path::Path,
+    now: i64,
+    rules: &crate::redact::Rules,
+) -> Result<Value> {
+    let settings = crate::capture::Settings::load(home)?;
+    page_under(home, now, &settings, rules)
+}
+
+/// `page`'s read, its texts and repository names gated under `rules`.
+fn page_under(
+    home: &std::path::Path,
+    now: i64,
+    settings: &crate::capture::Settings,
+    rules: &crate::redact::Rules,
+) -> Result<Value> {
     let gate = |t: &str| crate::redact::outbound_with(t, rules);
     type Rule = (crate::claims::Claim, bool);
     let mut scopes: Vec<(Option<String>, Vec<Rule>)> = vec![(None, Vec::new())];
@@ -236,7 +255,7 @@ pub(crate) fn page(home: &std::path::Path, now: i64) -> Result<Value> {
             }
             // As every writer asks it (`CaptureExclusions::refuses`), with no index to build.
             let list = raw.capture_exclusions()?;
-            let never = crate::capture::never_recorded(&list, &settings);
+            let never = crate::capture::never_recorded(&list, settings);
             let started = crate::consumer::manifest::exists(&k, "table", "session_start")?;
             let mut st = k.prepare(if started {
                 "SELECT repo FROM session_start GROUP BY repo ORDER BY MAX(ts) DESC, repo"

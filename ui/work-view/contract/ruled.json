@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-20T12:55:12.753Z",
+  "revision": "1795179312753",
+  "source": {
+    "kind": "oboete",
+    "connected": true,
+    "error": null,
+    "lastCheckedAt": "2026-11-20T12:55:12.753Z"
+  },
+  "agents": [],
+  "humanRequests": [],
+  "unlinkedWork": [],
+  "focusAreas": [],
+  "goals": null,
+  "goalHistory": [],
+  "ruleScopes": [
+    {
+      "id": "everywhere",
+      "tier": "everywhere",
+      "name": "Everywhere"
+    },
+    {
+      "id": "r:aa625f0d22d9",
+      "tier": "project",
+      "name": "proj"
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": "l:cb7fa889848a",
+      "scopeId": "everywhere",
+      "scopeTier": "everywhere",
+      "scopeName": "Everywhere",
+      "when": "",
+      "then": "Keep commits small.",
+      "setBy": "learned",
+      "status": "suggested",
+      "kind": "preference",
+      "source": "request-progress",
+      "timesSeen": 2,
+      "latestAt": "2026-11-20T12:52:12.753Z",
+      "quotes": [
+        {
+          "at": "2026-11-20T12:52:12.753Z",
+          "quote": "Quoted for s1.",
+          "kind": "correction"
+        }
+      ],
+      "replacedBy": null,
+      "replacedAt": null,
+      "savedAt": null
+    },
+    {
+      "ruleId": "l:244ea0beec0e",
+      "scopeId": "everywhere",
+      "scopeTier": "everywhere",
+      "scopeName": "Everywhere",
+      "when": "",
+      "then": "Run the tests before a push.",
+      "setBy": "approved",
+      "status": "on",
+      "kind": "preference",
+      "source": "request-progress",
+      "timesSeen": 2,
+      "latestAt": "2026-11-20T12:53:12.753Z",
+      "quotes": [
+        {
+          "at": "2026-11-20T12:53:12.753Z",
+          "quote": "Quoted for s2.",
+          "kind": "correction"
+        }
+      ],
+      "replacedBy": null,
+      "replacedAt": null,
+      "savedAt": "2026-11-20T12:55:12.858Z"
+    },
+    {
+      "ruleId": "u:2463a212a00b",
+      "scopeId": "everywhere",
+      "scopeTier": "everywhere",
+      "scopeName": "Everywhere",
+      "when": "",
+      "then": "Answer in Japanese.",
+      "setBy": "owner",
+      "status": "off",
+      "kind": "preference",
+      "source": "you",
+      "timesSeen": 1,
+      "latestAt": "2026-11-20T12:55:13.042Z",
+      "quotes": [],
+      "replacedBy": null,
+      "replacedAt": null,
+      "savedAt": "2026-11-20T12:55:13.042Z"
+    },
+    {
+      "ruleId": "u:8473df120a90",
+      "scopeId": "r:aa625f0d22d9",
+      "scopeTier": "project",
+      "scopeName": "proj",
+      "when": "",
+      "then": "Write the changelog.",
+      "setBy": "owner",
+      "status": "on",
+      "kind": "preference",
+      "source": "you",
+      "timesSeen": 1,
+      "latestAt": "2026-11-20T12:55:12.996Z",
+      "quotes": [],
+      "replacedBy": null,
+      "replacedAt": null,
+      "savedAt": "2026-11-20T12:55:12.996Z"
+    }
+  ],
+  "story": null,
+  "refresh": null,
+  "sync": {
+    "configured": false,
+    "state": "unconfigured",
+    "mode": "disabled",
+    "checkedAt": null,
+    "observedAt": 1795179312753,
+    "message": "oboete keeps your work on this computer only.",
+    "download": null,
+    "projection": {
+      "remaining": null
+    },
+    "completeness": {
+      "pushQuarantine": 0,
+      "pullQuarantine": 0,
+      "excludedNative": null,
+      "scope": "unknown"
+    }
+  }
+}

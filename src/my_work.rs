@@ -2424,7 +2424,7 @@ fn shown_id(
 
 /// A stored text hashed with the home's own key, made the first time one is needed: the same from
 /// read to read, and nothing of a guess at the text.
-fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
+pub(crate) fn keyed(held: &str, home: &Path, key: &mut Option<Vec<u8>>) -> Result<String> {
     let key = match key {
         Some(key) => key,
         None => key.insert(mask_key(home)?),

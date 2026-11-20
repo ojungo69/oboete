@@ -281,8 +281,22 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   conversation, a request is complete when its newest status completed it (or, shipped by a review
   alone, on the review's day), a request's two newest reviews are its readings, from which the pages
   measure the pace oboete's page shows, and the goals' times are this machine's. What the snapshot does not carry yet is left empty: the deliverables
-  (oboete's own page shows them), the evidence links (X37), the rules (they come with My Rules),
-  and continuing a conversation (X36). A request with a judge's open grouping suggestion carries
+  (oboete's own page shows them), the evidence links (X37) and continuing a conversation (X36).
+  My Rules carries oboete's (#1083): the suggestions waiting, and the owner's rules, an approved
+  one by its suggestion, each under Everywhere or the repository it is for, the repositories a
+  rule is for being the scopes. Each goes by a keyed print: a suggestion's rule by `l:` and the
+  print of its id, one the owner wrote by `u:` and its uid's, a repository's scope by `r:` and its
+  key's, 12 hex digits, or 24 for two keys of one kind whose 12 are one, so that no key, uid or
+  suggestion id leaves. The walk leaves these ids, who set a rule, its tier, its condition (always
+  empty: X38) and its times whole, as the code's own words, and gates its statement, its scope's
+  name and its quotes; two scopes whose names the gate leaves alike read apart on the page by as
+  much of their ids as tells them apart. My Rules is read under the rules My Work is read under,
+  in the same readers' hold. The rejected suggestions, and the approved ones whose rule was
+  retracted or forgotten since, wait for the writes that bring their Undo. The pages show the
+  rules with no control that writes one (below); a quote's source record is named `Your prompt`,
+  the quote itself shown whole, and a suggestion as learned by oboete. claude-mem's rules file
+  and where its edits go are not shown: oboete writes no such file, and gives the rules to Claude
+  Code, Codex and Grok at the start of each session. A request with a judge's open grouping suggestion carries
   it, with its binding, and its Join and Not this save (W3b-3, docs/my-work-model.md slice 11b-2).
   The subagents of a conversation a request of the answer carries go as agents of that
   conversation, after every conversation's, while they have not finished and for 15 minutes after
@@ -315,8 +329,10 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
 - What the pages have and oboete lacks is hidden until it is built: rows X36 to X38 of
   [claude-mem-parity.md](claude-mem-parity.md). Continuing a conversation will work from the new
   pages directly too. Focus sharing and Team stay unbuilt (row 22). A control whose write oboete
-  does not take yet is hidden until the pull request that takes it: adding a rule, and changing
-  an area or a suggested one (#1085, #1102). Refresh now, a request's check and its Undo, and
+  does not take yet is hidden until the pull request that takes it: every write of My Rules
+  (approving or rejecting a suggestion, by its buttons or a phone's swipe, editing a rule,
+  turning one on or off, Undo and adding one: #1083), and changing an area or a suggested one
+  (#1085, #1102). Refresh now, a request's check and its Undo, and
   the Join and Not this of a grouping suggestion work there (decision 117). A write the viewer saved is told as saved there, its answer a snapshot or
   claude-mem's receipt alone, and a poll of the content already on screen that lands while it waits
   does not stand for it (#1108). claude-mem's installer is none
