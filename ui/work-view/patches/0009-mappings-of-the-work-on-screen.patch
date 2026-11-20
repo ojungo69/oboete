@@ -1,5 +1,5 @@
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
-index 2455739..688a0c5 100644
+index 2455739..bbbc41a 100644
 --- a/src/ui/my-work/src/live/local-source.ts
 +++ b/src/ui/my-work/src/live/local-source.ts
 @@ -128,7 +128,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
@@ -27,7 +27,7 @@ index 2455739..688a0c5 100644
    const orOnScreen = (model: WorkModel): WorkModel =>
      displayed && modelSignature(model) === modelSignature(displayed) ? displayed : model
    // Accepted models are immutable. Connection-only wrappers share their content signature,
-@@ -153,9 +169,33 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -153,9 +169,30 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    const withConnection = (mapped: MappedWorkModel): WorkModel => {
      const model: WorkModel = { ...mapped, sourceKind: SOURCE_KIND, connection: currentConnectionStatus() }
      modelSignatures.set(model, modelSignature(mapped))
@@ -37,9 +37,6 @@ index 2455739..688a0c5 100644
      return model
    }
  
-+  /** oboete (0009): when the worker read `snapshot`, unix ms, as oboete stamps its `revision`; none for another stamp. */
-+  const sampledAt = (snapshot: WorkViewSnapshot): number | null => /^\d{1,16}$/.test(snapshot.revision) ? Number(snapshot.revision) : null
-+
 +  /**
 +   * oboete (0009): a snapshot's content, without what each read stamps on it (its times and revision, and each goals
 +   * list's `updatedAt`, which oboete writes as the time of the read and the mapper does not read) or a save adds to its
@@ -61,7 +58,7 @@ index 2455739..688a0c5 100644
    /** app.js `health`: only a payload whose source read succeeded counts as a successful check. */
    function recordSourceHealth(source: WorkViewSource | undefined, serverAt?: string) {
      connectionEvidence.sourceConnected = typeof source?.connected === 'boolean' ? source.connected : null
-@@ -185,6 +225,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -185,6 +222,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
      latestSnapshot = snapshot
      latestOverviewSignature = null
      latestModel = toWorkModel(snapshot, Date.now())
@@ -70,25 +67,7 @@ index 2455739..688a0c5 100644
      if (fromEvent || connectionEvidence.lastEventAt === null) recordSourceHealth(snapshot.source, snapshot.generatedAt)
      recordSync(snapshot.sync, expectedSyncVersion)
      return withConnection(latestModel)
-@@ -253,6 +295,17 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
-       assertOwnership?.()
-     }
-     if (!answer.response.ok) throw new Error(`The worker answered ${answer.response.status} ${answer.response.statusText}`.trim())
-+    // Modified by oboete (ui/work-view/patches/0009-mappings-of-the-work-on-screen.patch, #1124): oboete stamps each
-+    // snapshot with the time the worker read it (`revision`, unix ms). A read of one sampled before the newest snapshot
-+    // accepted gives way to it, and one sampled after it is newer work whatever was accepted meanwhile: content cannot
-+    // order them, as a poll of the content on screen can be the newer of the two (an Undo puts back what a check
-+    // changed). Snapshots of no such stamp keep claude-mem's order, below.
-+    const sampled = isWorkViewSnapshot(answer.body) ? sampledAt(answer.body) : null
-+    const newest = latestSnapshot ? sampledAt(latestSnapshot) : null
-+    if (sampled !== null && newest !== null) {
-+      if (sampled < newest && latestModel) return withConnection(latestModel)
-+      return acceptSnapshot(answer.body as WorkViewSnapshot, false, syncBeforeRead)
-+    }
-     // A newer accepted event, read or save wins over this response; oboete's read again after a receipt
-     // (`kept`, 0006) gives way only to a model that went to the screens meanwhile.
-     if ((kept ? kept() : modelVersion !== versionBeforeRead) && latestModel) return withConnection(latestModel)
-@@ -682,7 +735,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -682,7 +721,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        // an HTTP fallback is only needed while the feed is unhealthy, at most once per cache window.
        const agingTimer = setInterval(() => {
          if (pageHidden()) return
@@ -103,7 +82,7 @@ index 2455739..688a0c5 100644
            void readOverview().then((model) => { if (generation === streamGeneration) sendIfChanged(model) }).catch(() => { /* Keep the last model; event freshness remains independent. */ })
          }
 diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
-index ace3b7d..e29ce1e 100644
+index ace3b7d..a83c9f8 100644
 --- a/src/ui/my-work/src/live/oboete-saves.test.ts
 +++ b/src/ui/my-work/src/live/oboete-saves.test.ts
 @@ -553,8 +553,10 @@ describe('oboete: a receipt alone, with the minute timer', () => {
@@ -127,7 +106,7 @@ index ace3b7d..e29ce1e 100644
        } finally { stop() }
      })
    }
-@@ -628,3 +630,250 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
+@@ -628,3 +630,224 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
      } finally { stop() }
    })
  })
@@ -156,12 +135,13 @@ index ace3b7d..e29ce1e 100644
 +   * `value` with a goals list and a past month of them as oboete writes them, each stamped with the time of the read, and
 +   * the snapshot with that time as oboete stamps it (`revision`).
 +   */
-+  const goaled = (value: WorkViewSnapshot, readAt: number, prompts = 3): WorkViewSnapshot => {
++  const goaled = (value: WorkViewSnapshot, readAt: number, prompts: { current?: number; month?: number } = {}): WorkViewSnapshot => {
 +    const list = (id: string, history: boolean) => ({
 +      listId: id, listName: history ? '2026-10' : 'goals', history, project: '', updatedAt: new Date(readAt).toISOString(),
 +      periodStart: history ? '2026-10-01' : '2026-11-12', periodEnd: history ? '2026-11-01' : '2026-11-20',
 +      summary: history ? 'A month of parsers.' : null, generatedAt: history ? null : '2026-11-19T11:00:00.000Z',
-+      windowDays: history ? null : 7, sourcePromptCount: prompts, mapPath: null, areas: [], asks: [],
++      windowDays: history ? null : 7, sourcePromptCount: (history ? prompts.month : prompts.current) ?? 3, mapPath: null,
++      areas: [], asks: [],
 +    })
 +    return {
 +      ...value, revision: String(readAt), goals: list('goals', false), goalHistory: [list('goals:2026-10', true)],
@@ -306,35 +286,6 @@ index ace3b7d..e29ce1e 100644
 +    } finally { stop(); restore() }
 +  })
 +
-+  it('on the screen: a read answered after a poll of the content on screen landed while it waited shows the read', async () => {
-+    const read = deferred<Response>()
-+    const gets = { count: 0 }
-+    const streams: FakeStream[] = []
-+    const local = createLocalSource({
-+      hostname: 'localhost',
-+      bootstrapTimeoutMs: 10,
-+      fetchImpl: async () => { gets.count++; return read.promise },
-+      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
-+    })
-+    const { store, stop, shown } = storeOn(local)
-+    try {
-+      streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW))
-+      // The store's first read, which the event answered, done before the read again.
-+      await settled()
-+      assert.equal(shown(), FIRST)
-+      const reading = store.getState().retryWorkRead()
-+      await settle()
-+      assert.equal(gets.count, 1, 'the read again is a read of its own')
-+      // The same work polled meanwhile, read by the worker before the read again was: its envelope and goals stamped anew.
-+      const polled = goaled(ruledAt(snapshot(FIRST), NOW), NOW + 5_000)
-+      streams[0].emit('work-view', { ...polled, generatedAt: new Date(NOW + 5_000).toISOString() })
-+      read.resolve(json(goaled(ruledAt(snapshot(THIRD), NOW), NOW + 6_000)))
-+      await reading
-+      await until(() => shown() === THIRD)
-+      assert.equal(shown(), THIRD)
-+    } finally { stop() }
-+  })
-+
 +  it('on the screen: a read sampled before a poll of the content on screen gives way to that poll', async () => {
 +    const read = deferred<Response>()
 +    const gets = { count: 0 }
@@ -362,21 +313,23 @@ index ace3b7d..e29ce1e 100644
 +    } finally { stop() }
 +  })
 +
-+  it('a check answered after a poll that changed only the goals keeps that content', async () => {
-+    const held = deferred<Response>()
-+    const { local, streams } = harness(held.promise, async () => { throw new TypeError('Failed to fetch') })
-+    const shownModels: WorkModel[] = []
-+    const stop = local.subscribeToLiveUpdates((model) => shownModels.push(model), () => {})
-+    try {
-+      streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW))
-+      const saving = local.setRequestChecked('request-a', FIRST, true)
-+      streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW + 5_000, 4))
-+      assert.equal(shownModels.length, 2, 'the goals that changed reached the screens')
-+      held.resolve(json({ ...goaled(ruledAt(snapshot(SECOND), NOW), NOW + 6_000), save: saved }))
-+      const result = await saving
-+      assert.equal(result.outcome === 'saved' && result.model, shownModels.at(-1), 'the goals that changed were new work shown while it waited')
-+    } finally { stop() }
-+  })
++  for (const [list, prompts] of [['the current goals', { current: 4 }], ["a past month's goals", { month: 4 }]] as const) {
++    it(`a check answered after a poll that changed only ${list} keeps that content`, async () => {
++      const held = deferred<Response>()
++      const { local, streams } = harness(held.promise, async () => { throw new TypeError('Failed to fetch') })
++      const shownModels: WorkModel[] = []
++      const stop = local.subscribeToLiveUpdates((model) => shownModels.push(model), () => {})
++      try {
++        streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW))
++        const saving = local.setRequestChecked('request-a', FIRST, true)
++        streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW + 5_000, prompts))
++        assert.equal(shownModels.length, 2, 'the goals that changed reached the screens')
++        held.resolve(json({ ...goaled(ruledAt(snapshot(SECOND), NOW), NOW + 6_000), save: saved }))
++        const result = await saving
++        assert.equal(result.outcome === 'saved' && result.model, shownModels.at(-1), 'the goals that changed were new work shown while it waited')
++      } finally { stop() }
++    })
++  }
 +})
 diff --git a/src/ui/my-work/src/live/work-data-source.ts b/src/ui/my-work/src/live/work-data-source.ts
 index 99b090a..a0704fc 100644
