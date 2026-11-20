@@ -1209,6 +1209,9 @@ pub(crate) enum Lookup {
     One(Box<crate::my_work_subagents::Subagent>, Option<String>),
     /// Two or more (#1102 item 2): their prints are one, so nothing is marked.
     Shared,
+    /// The subagents consumer owes a device a rebuild, so the facts miss that device's records
+    /// until the worker has rebuilt it: nothing is looked up (Codex on #1121).
+    Rebuilding,
 }
 
 /// Slice 2, W4: the subagent the page names `id`, read afresh from `raw` and `k`: the only one
@@ -1219,6 +1222,9 @@ pub(crate) fn subagent(home: &Path, (raw, k): (&Raw, &Connection), id: &str) -> 
     // One snapshot of knowledge.db for the whole lookup: the candidates' facts and the checkpoints
     // the named one's unread steps are read past are the same consumer's moment (Codex on #1121).
     let _snapshot = k.unchecked_transaction()?;
+    if crate::my_work_subagents::rebuild_owed(raw, k)? {
+        return Ok(Lookup::Rebuilding);
+    }
     let rules = Rules::load(home)?;
     let reading = crate::curate::Reading::now(raw, crate::curate::Reads::Live)?;
     let Built { requests, .. } = build(raw, k, &rules, &reading)?;

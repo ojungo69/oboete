@@ -10780,3 +10780,35 @@ fn a_returned_launch_the_consumer_has_not_read_finished_the_subagent() {
     );
     assert_eq!(stops_and_kept(&s), (stops, kept));
 }
+
+/// W4 (Codex on #1121): while the subagents consumer owes a device a rebuild (its rows dropped, its
+/// checkpoint kept), Mark finished could miss that device's steps and stops: it is 503 `busy` on
+/// both routes, with nothing recorded, and once the worker has rebuilt it a click is saved.
+#[test]
+fn mark_finished_waits_out_a_rebuild_the_subagents_consumer_owes() {
+    let (s, v, _place) = mark_fixture(Token::Run("t0k".into()));
+    let subs = subagents_in(&work_view_of(&v, "t0k"));
+    let k = crate::knowledge::open(s.home.path()).unwrap();
+    let device = s.raw.device().to_owned();
+    let mut consumer = crate::consumer::subagents::Subagents;
+    crate::worker::Consumer::rewind(&mut consumer, &k, &device, 0).unwrap();
+    drop(k);
+    let (stops, kept) = stops_and_kept(&s);
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (503, Some("busy")),
+        "{answer}"
+    );
+    let (status, main) = post_finished(&v, &subs[1]["id"]);
+    assert_eq!(
+        (status, main["code"].as_str()),
+        (503, Some("busy")),
+        "{main}"
+    );
+    assert_eq!(stops_and_kept(&s), (stops, kept));
+    s.run();
+    let (status, answer) = post_work_view(&v, MARK, "t0k", &agent_body(&subs[0]["id"]));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(stops_and_kept(&s), (stops + 1, kept));
+}

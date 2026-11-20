@@ -608,3 +608,40 @@ fn fresh_steps_take_the_type_the_read_takes() {
         (Some("Plan"), 3 * MIN)
     );
 }
+
+/// W4 (Codex on #1121): a rewind of the subagents consumer drops every row and keeps the
+/// checkpoints, and the worker rebuilds the devices one at a time: until a device with records is
+/// rebuilt, a rebuild is owed, in a copied home with one device rebuilt as before any; a device owed
+/// that has no records owes none.
+#[test]
+fn a_rebuild_is_owed_until_every_device_with_records_is_rebuilt() {
+    let from = tempfile::tempdir().unwrap();
+    let mut store = raw::open(from.path()).unwrap();
+    store.append(&step("s", "a1", MIN)).unwrap();
+    let first = store.device().to_owned();
+    drop(drain(from.path(), &store));
+    drop(store);
+    let to = tempfile::tempdir().unwrap();
+    for f in ["raw.db", "raw.db-wal", "knowledge.db", "knowledge.db-wal"] {
+        if from.path().join(f).exists() {
+            std::fs::copy(from.path().join(f), to.path().join(f)).unwrap();
+        }
+    }
+    let mut store = raw::open(to.path()).unwrap();
+    let own = store.device().to_owned();
+    store.append(&step("s", "a1", 2 * MIN)).unwrap();
+    let k = drain(to.path(), &store);
+    assert!(!rebuild_owed(&store, &k).unwrap());
+    let mut consumer = Subagents;
+    worker::Consumer::rewind(&mut consumer, &k, &first, 0).unwrap();
+    assert!(rebuild_owed(&store, &k).unwrap());
+    for (device, owed) in [(&first, true), (&own, false)] {
+        let at = worker::Consumer::step(&mut consumer, &store, &k, device, 0).unwrap();
+        let seqs = crate::knowledge::checkpoint::SEQS;
+        crate::knowledge::checkpoint::set_in(&k, seqs, subagents::NAME, device, at).unwrap();
+        assert_eq!(rebuild_owed(&store, &k).unwrap(), owed, "{device}");
+    }
+    k.execute("INSERT INTO subagent_rebuild(device) VALUES('gone')", [])
+        .unwrap();
+    assert!(!rebuild_owed(&store, &k).unwrap());
+}

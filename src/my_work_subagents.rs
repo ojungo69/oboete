@@ -448,7 +448,8 @@ fn stop_of(s: &Subagent) -> impl Fn(&crate::raw::Event) -> bool + '_ {
 /// What Mark finished did (W4), which both routes answer from.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Finish {
-    /// `finished_lock`, config.lock or write-back's lock not had in time.
+    /// `finished_lock`, config.lock or write-back's lock not had in time, or a rebuild of the
+    /// subagents consumer's rows not done yet.
     Busy,
     /// No subagent has the id, or there is no store.
     NotFound,
@@ -507,6 +508,7 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
         let (s, folder) = match crate::my_work::subagent(home, (&raw, &k), id)? {
             crate::my_work::Lookup::None => return Ok(Finish::NotFound),
             crate::my_work::Lookup::Shared => return Ok(Finish::Shared),
+            crate::my_work::Lookup::Rebuilding => return Ok(Finish::Busy),
             crate::my_work::Lookup::One(s, folder) => (s, folder),
         };
         #[cfg(test)]
@@ -551,6 +553,29 @@ pub(crate) fn finish(home: &Path, id: &str, authorized: &dyn Fn() -> bool) -> Re
         }
     }
     Ok(done)
+}
+
+/// W4 (Codex on #1121): whether a device with records owes the subagents consumer a rebuild: a
+/// rewind drops every row and keeps the checkpoints (`Subagents::rewind`), so until the worker has
+/// rebuilt that device, the facts and the records past its checkpoint both miss its records.
+pub(crate) fn rebuild_owed(raw: &Raw, k: &Connection) -> Result<bool> {
+    let made: bool = k.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'subagent_rebuild')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !made {
+        return Ok(false);
+    }
+    let owed: Vec<String> = k
+        .prepare("SELECT device FROM subagent_rebuild")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if owed.is_empty() {
+        return Ok(false);
+    }
+    let devices = subagents::Subagents.devices(raw)?;
+    Ok(owed.iter().any(|d| devices.contains(d)))
 }
 
 /// W4 (Codex on #1121): `s`'s steps recorded past the consumer's checkpoints, which `read_picked`

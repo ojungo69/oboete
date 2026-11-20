@@ -2581,9 +2581,12 @@ fn config_lock_within_gives_up_after_its_wait_and_has_a_free_lock() {
     let home = tempfile::tempdir().unwrap();
     let held = config_lock(home.path()).unwrap();
     let wait = std::time::Duration::from_millis(100);
+    // Its own wait, not the tests' retries in `worker::try_lock` (Codex on #1121).
+    let contending = crate::worker::contending();
     let start = std::time::Instant::now();
     assert!(config_lock_within(home.path(), wait).unwrap().is_none());
     let waited = start.elapsed();
+    drop(contending);
     assert!(waited >= wait, "{waited:?}");
     assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
     drop(held);

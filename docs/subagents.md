@@ -588,7 +588,10 @@ Slice 3:
   candidates; a record any device's tombstone took since, or whose text expired, passed over, and a
   launch that returned with it counted as its finish, as the read counts them: its newest step sets
   its folder, its clock and whether it finished, and its newest type the type its stop carries,
-  each the newest by time, then by (device, seq), as the read orders them); `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
+  each the newest by time, then by (device, seq), as the read orders them); none while the
+  consumer owes a device with records a rebuild (`my_work_subagents::rebuild_owed`: a rewind
+  dropped its rows and kept its checkpoint, so both reads miss that device's records until the
+  worker has rebuilt it), when the click is `Busy`, 503; `Finished` when it has a stop; `Pending`, nothing recorded, when a kept file's
   events not yet written back hold a stop of it (`unwritten::holds`: its kind, agent, session as
   write-back writes it and `agent_id`, whatever its time and whoever sent it, #1102 item 1); `NotRecorded` when its newest
   step's folder is gone or masked; `Ahead`, nothing recorded, when its last step is timed after
