@@ -1,5 +1,5 @@
 diff --git a/src/ui/my-work/src/live/local-source.ts b/src/ui/my-work/src/live/local-source.ts
-index 2455739..96b289d 100644
+index 2455739..535a526 100644
 --- a/src/ui/my-work/src/live/local-source.ts
 +++ b/src/ui/my-work/src/live/local-source.ts
 @@ -128,7 +128,23 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
@@ -27,7 +27,7 @@ index 2455739..96b289d 100644
    const orOnScreen = (model: WorkModel): WorkModel =>
      displayed && modelSignature(model) === modelSignature(displayed) ? displayed : model
    // Accepted models are immutable. Connection-only wrappers share their content signature,
-@@ -153,9 +169,20 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -153,9 +169,30 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
    const withConnection = (mapped: MappedWorkModel): WorkModel => {
      const model: WorkModel = { ...mapped, sourceKind: SOURCE_KIND, connection: currentConnectionStatus() }
      modelSignatures.set(model, modelSignature(mapped))
@@ -37,27 +37,44 @@ index 2455739..96b289d 100644
      return model
    }
  
-+  /** oboete (0009): a snapshot's content, without what each read stamps on it (its times and revision) or a save adds to its answer. */
++  /**
++   * oboete (0009): a snapshot's content, without what each read stamps on it (its times and revision, and each goals
++   * list's `updatedAt`, which oboete writes as the time of the read and the mapper does not read) or a save adds to its
++   * answer.
++   */
 +  function snapshotContentKey(snapshot: WorkViewSnapshot): string {
 +    const { generatedAt: _generatedAt, revision: _revision, source, sync, save: _save, savedRuleId: _savedRuleId, ...content } = snapshot as WorkViewSnapshot & Record<string, unknown>
 +    const { lastCheckedAt: _lastCheckedAt, ...sourceContent } = (source ?? {}) as unknown as Record<string, unknown>
 +    const { observedAt: _observedAt, ...syncContent } = (sync ?? {}) as unknown as Record<string, unknown>
-+    return JSON.stringify([content, sourceContent, syncContent])
++    const unstamped = (list: unknown) => {
++      if (!list || typeof list !== 'object') return list
++      const { updatedAt: _updatedAt, ...rest } = list as Record<string, unknown>
++      return rest
++    }
++    const goalHistory = Array.isArray(content.goalHistory) ? content.goalHistory.map(unstamped) : content.goalHistory
++    return JSON.stringify([{ ...content, goals: unstamped(content.goals), goalHistory }, sourceContent, syncContent])
 +  }
 +
    /** app.js `health`: only a payload whose source read succeeded counts as a successful check. */
    function recordSourceHealth(source: WorkViewSource | undefined, serverAt?: string) {
      connectionEvidence.sourceConnected = typeof source?.connected === 'boolean' ? source.connected : null
-@@ -185,6 +212,8 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -181,10 +218,14 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+ 
+   /** app.js `accept`: an HTTP read that began before a newer event must not renew or overwrite the feed's health evidence. */
+   function acceptSnapshot(snapshot: WorkViewSnapshot, fromEvent: boolean, expectedSyncVersion?: number): WorkModel {
+-    modelVersion++
++    // oboete (0009): a snapshot of the content accepted last is no newer work for a read in flight either (`readOverview`).
++    const key = snapshotContentKey(snapshot)
++    if (latestSnapshot === null || key !== latestSnapshotKey) modelVersion++
      latestSnapshot = snapshot
      latestOverviewSignature = null
      latestModel = toWorkModel(snapshot, Date.now())
-+    latestSnapshotKey = snapshotContentKey(snapshot)
++    latestSnapshotKey = key
 +    snapshotKeys.set(latestModel, latestSnapshotKey)
      if (fromEvent || connectionEvidence.lastEventAt === null) recordSourceHealth(snapshot.source, snapshot.generatedAt)
      recordSync(snapshot.sync, expectedSyncVersion)
      return withConnection(latestModel)
-@@ -682,7 +711,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
+@@ -682,7 +723,12 @@ export function createLocalSource(options: LocalSourceOptions = {}): WorkDataSou
        // an HTTP fallback is only needed while the feed is unhealthy, at most once per cache window.
        const agingTimer = setInterval(() => {
          if (pageHidden()) return
@@ -72,7 +89,7 @@ index 2455739..96b289d 100644
            void readOverview().then((model) => { if (generation === streamGeneration) sendIfChanged(model) }).catch(() => { /* Keep the last model; event freshness remains independent. */ })
          }
 diff --git a/src/ui/my-work/src/live/oboete-saves.test.ts b/src/ui/my-work/src/live/oboete-saves.test.ts
-index ace3b7d..046a5a8 100644
+index ace3b7d..921d356 100644
 --- a/src/ui/my-work/src/live/oboete-saves.test.ts
 +++ b/src/ui/my-work/src/live/oboete-saves.test.ts
 @@ -553,8 +553,10 @@ describe('oboete: a receipt alone, with the minute timer', () => {
@@ -96,7 +113,7 @@ index ace3b7d..046a5a8 100644
        } finally { stop() }
      })
    }
-@@ -628,3 +630,148 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
+@@ -628,3 +630,195 @@ describe('oboete: a snapshot with a rule, mapped again a minute later', () => {
      } finally { stop() }
    })
  })
@@ -121,6 +138,15 @@ index ace3b7d..046a5a8 100644
 +      }],
 +    } as WorkViewSnapshot
 +  }
++  /** `value` with a goals list and a past month of them, each stamped with the time of the read, as oboete writes them. */
++  const goaled = (value: WorkViewSnapshot, readAt: number): WorkViewSnapshot => {
++    const list = (id: string, history: boolean) => ({
++      listId: id, listName: history ? '2026-10' : 'goals', history, project: '', updatedAt: new Date(readAt).toISOString(),
++      periodStart: history ? '2026-10-01' : '2026-11-12', periodEnd: history ? '2026-11-01' : '2026-11-20', summary: null,
++      generatedAt: null, windowDays: history ? null : 7, sourcePromptCount: 3, mapPath: null, areas: [], asks: [],
++    })
++    return { ...value, goals: list('goals', false), goalHistory: [list('goals:2026-10', true)] } as unknown as WorkViewSnapshot
++  }
 +  /** The clock the test moves, from `now`, the source's performance clock on it; what undoes it. */
 +  function clock(t: TestContext, now: number) {
 +    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now })
@@ -131,23 +157,29 @@ index ace3b7d..046a5a8 100644
 +  const settled = async () => { for (let i = 0; i < 20; i++) await settle() }
 +  const saved = { scope: 'local', state: 'saved' }
 +
-+  for (const [boundary, start] of [["a rule's day", NOW], ['midnight and a rule\'s day', midnight - 30_000]] as const) {
++  // A rule quoted a day, less half a minute, before the start passes a whole day at the next minute; one quoted a minute
++  // before midnight stays in its day as the date passes, and only its time's label moves.
++  for (const [boundary, start, quotedAt] of [["a rule's day", NOW, NOW - DAY_MS + 30_000], ['midnight', midnight - 30_000, midnight - 90_000]] as const) {
 +    it(`on the screen: a check answered after the minute timer passed ${boundary}, every read failing, shows the check`, async (t: TestContext) => {
 +      const restore = clock(t, start)
 +      const held = deferred<Response>()
 +      const { local, streams } = harness(held.promise, async () => { throw new TypeError('Failed to fetch') })
 +      const { store, stop, shown } = storeOn(local)
++      const rule = () => { const load = store.getState().work.load; return load.state === 'loaded' ? load.model.rules[0] : null }
 +      try {
-+        streams[0].emit('work-view', ruledAt(snapshot(FIRST), start))
++        streams[0].emit('work-view', ruledAt(snapshot(FIRST), quotedAt + DAY_MS - 30_000))
 +        await settled()
 +        assert.equal(shown(), FIRST)
 +        const saving = store.getState().setRequestChecked('request-a', true, FIRST, null)
-+        const daysBefore = (() => { const load = store.getState().work.load; return load.state === 'loaded' ? Math.floor(load.model.rules[0].latestDaysAgo) : -1 })()
++        const before = rule()!
 +        t.mock.timers.tick(60_000)
 +        await settled()
-+        const load = store.getState().work.load
-+        assert.equal(load.state === 'loaded' && Math.floor(load.model.rules[0].latestDaysAgo), daysBefore + 1, 'the timer showed the rule a day older')
-+        held.resolve(json({ ...ruledAt(snapshot(SECOND), start), save: saved }))
++        const after = rule()!
++        if (boundary === 'midnight') {
++          assert.equal(Math.floor(after.latestDaysAgo), Math.floor(before.latestDaysAgo), 'the rule stays in its day')
++          assert.notEqual(after.latestAt, before.latestAt, "the timer showed the rule's time as of the next day")
++        } else assert.equal(Math.floor(after.latestDaysAgo), Math.floor(before.latestDaysAgo) + 1, 'the timer showed the rule a day older')
++        held.resolve(json({ ...ruledAt(snapshot(SECOND), quotedAt + DAY_MS - 30_000), save: saved }))
 +        await saving
 +        await settled()
 +        assert.equal(shown(), SECOND)
@@ -175,15 +207,15 @@ index ace3b7d..046a5a8 100644
 +      return load.state === 'loaded' && load.model.requests.find((r) => r.id === id)?.checkedAt !== undefined
 +    }
 +    try {
-+      streams[0].emit('work-view', ruledAt(two(false, false), NOW))
++      streams[0].emit('work-view', goaled(ruledAt(two(false, false), NOW), NOW))
 +      await settled()
 +      const a = store.getState().setRequestChecked('request-a', true, FIRST, null)
-+      held.a.resolve(json({ ...ruledAt(two(true, false), NOW), save: saved }))
++      held.a.resolve(json({ ...goaled(ruledAt(two(true, false), NOW), NOW + 1_000), save: saved }))
 +      await a
 +      await settled()
 +      assert.ok(checked('request-a') && !checked('request-b'), 'the first check is shown')
-+      // The work as the check left it, polled: its envelope stamped anew, and no save's fields.
-+      const polled = ruledAt(two(true, false), NOW)
++      // The work as the check left it, polled: its envelope and its goals stamped anew, and no save's fields.
++      const polled = goaled(ruledAt(two(true, false), NOW), NOW + 5_000)
 +      streams[0].emit('work-view', {
 +        ...polled, generatedAt: new Date(NOW + 5_000).toISOString(), revision: String(NOW + 5_000),
 +        source: { ...polled.source, lastCheckedAt: new Date(NOW + 5_000).toISOString() },
@@ -191,7 +223,7 @@ index ace3b7d..046a5a8 100644
 +      const b = store.getState().setRequestChecked('request-b', true, SECOND, null)
 +      t.mock.timers.tick(60_000)
 +      await settled()
-+      held.b.resolve(json({ ...ruledAt(two(true, true), NOW), save: saved }))
++      held.b.resolve(json({ ...goaled(ruledAt(two(true, true), NOW), NOW + 61_000), save: saved }))
 +      await b
 +      await settled()
 +      assert.ok(checked('request-a') && checked('request-b'), 'the second check is shown')
@@ -228,7 +260,7 @@ index ace3b7d..046a5a8 100644
 +  it('on the screen: a check answered after a poll of new content reached the screen keeps that content', async (t: TestContext) => {
 +    const restore = clock(t, NOW)
 +    const held = deferred<Response>()
-+    const { local, streams } = harness(held.promise, async () => json(ruledAt(snapshot(THIRD), NOW)))
++    const { local, streams, calls } = harness(held.promise, async () => json(ruledAt(snapshot(THIRD), NOW)))
 +    const { store, stop, shown } = storeOn(local)
 +    try {
 +      streams[0].emit('work-view', ruledAt(snapshot(FIRST), NOW))
@@ -238,11 +270,43 @@ index ace3b7d..046a5a8 100644
 +      streams[0].emit('work-view', ruledAt(snapshot(THIRD), NOW))
 +      await settled()
 +      assert.equal(shown(), THIRD)
++      const gets = calls.gets
 +      held.resolve(json({ ...ruledAt(snapshot(SECOND), NOW), save: saved }))
-+      await saving
++      const result = await saving
 +      await settled()
++      assert.equal(result.outcome === 'saved' && result.model.requests[0].contentFingerprint, THIRD, 'the source handed back the newer work')
++      assert.equal(calls.gets, gets + 1, 'the store read the work again')
 +      assert.equal(shown(), THIRD)
 +    } finally { stop(); restore() }
++  })
++
++  it('on the screen: a read answered after a poll of the content on screen landed while it waited shows the read', async () => {
++    const read = deferred<Response>()
++    const gets = { count: 0 }
++    const streams: FakeStream[] = []
++    const local = createLocalSource({
++      hostname: 'localhost',
++      bootstrapTimeoutMs: 10,
++      fetchImpl: async () => { gets.count++; return read.promise },
++      eventSourceFactory: () => { const stream = new FakeStream(); streams.push(stream); return stream as unknown as EventSource },
++    })
++    const { store, stop, shown } = storeOn(local)
++    try {
++      streams[0].emit('work-view', goaled(ruledAt(snapshot(FIRST), NOW), NOW))
++      // The store's first read, which the event answered, done before the read again.
++      await settled()
++      assert.equal(shown(), FIRST)
++      const reading = store.getState().retryWorkRead()
++      await settle()
++      assert.equal(gets.count, 1, 'the read again is a read of its own')
++      // The same work polled meanwhile, its envelope and goals stamped anew.
++      const polled = goaled(ruledAt(snapshot(FIRST), NOW), NOW + 5_000)
++      streams[0].emit('work-view', { ...polled, generatedAt: new Date(NOW + 5_000).toISOString(), revision: String(NOW + 5_000) })
++      read.resolve(json(goaled(ruledAt(snapshot(THIRD), NOW), NOW + 6_000)))
++      await reading
++      await until(() => shown() === THIRD)
++      assert.equal(shown(), THIRD)
++    } finally { stop() }
 +  })
 +})
 diff --git a/src/ui/my-work/src/live/work-data-source.ts b/src/ui/my-work/src/live/work-data-source.ts
