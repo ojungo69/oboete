@@ -1,0 +1,21 @@
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_e0c6c6b33ecdb3 2676-2678,2699-2703
+ui/work-view/contract/ruled.json
+  s_52c3955e48bff4::t_ef85d6219f178e 3-4,9,24,31,42,45,52-53,56,67,70,77-78,81,92,96-97,100-101,111,115-116,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3bc436514d545c88f7370e13e707d3189e1099d9",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
