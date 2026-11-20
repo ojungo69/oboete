@@ -2139,13 +2139,11 @@ fn a_subagents_label_is_gated_as_its_conversations() {
         !parent["sessionTitle"].to_string().contains("parser"),
         "{parent}"
     );
+    let print = Regex::new(r"^s:[0-9a-f]{12}$").unwrap();
     for sub in &subs {
         assert_eq!(sub["sessionTitle"], parent["sessionTitle"], "{sub}");
         let id = sub["id"].as_str().unwrap();
-        assert!(
-            Regex::new(r"^s:[0-9a-f]{12}$").unwrap().is_match(id),
-            "{id}"
-        );
+        assert!(print.is_match(id), "{id}");
     }
     let finished = (subs.iter())
         .find(|s| s["presence"]["status"] == "finished")
