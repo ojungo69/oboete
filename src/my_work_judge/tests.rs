@@ -2178,10 +2178,11 @@ fn an_expiry_after_the_check_refuses_the_answer() {
     assert_eq!(h.s.raw.expired_rows().unwrap(), 1);
 }
 
-/// W3b-2b (#1114): a plain prompt of the pick's conversation, and curation's claim on it, made
-/// after the check leave the answer be, and it records what it was checked on.
+/// W3b-2b (#1114): a plain prompt of the pick's conversation made after the check leaves the
+/// answer be, and it records what it was checked on (curation's claim:
+/// `curation_between_the_check_and_the_write_leaves_the_answer_be`).
 #[test]
-fn a_prompt_and_curation_after_the_check_leave_the_answer_as_checked() {
+fn a_prompt_after_the_check_leaves_the_answer_as_checked() {
     let mut h = Home::new();
     let _served = suggested(&mut h);
     let card = h.card("s2");
@@ -2238,10 +2239,14 @@ fn an_old_cards_not_this_leaves_a_newer_suggestion_open() {
     assert_eq!(h.request_of("s2")["suggestion"]["title"], "Reader");
     h.ignored("s3");
     let before = h.recorded();
-    assert_eq!(
-        h.answer(&card, "not-this"),
-        Err((409, "suggestion_changed"))
-    );
+    // W3b-2c (CodeRabbit on #1116): another suggestion for either action, before its target.
+    for action in ["not-this", "join"] {
+        assert_eq!(
+            h.answer(&card, action),
+            Err((409, "suggestion_changed")),
+            "{action}"
+        );
+    }
     assert_eq!(h.recorded(), before);
     assert_eq!(
         h.groups().suggested.get(&key("s2")),
@@ -2272,4 +2277,123 @@ fn a_later_pick_in_the_same_request_refuses_an_older_card() {
     assert_eq!(h.recorded(), before);
     assert_eq!(h.answer_on("s2", "join").unwrap()["state"], "applied");
     assert_eq!(h.request_of("s2")["id"], h.request_of("s4")["id"]);
+}
+
+/// W3b-2c (#1114's third item: curation's cards): a card of the pick's conversation made after the
+/// check leaves the answer be, and it records what it was checked on.
+#[test]
+fn a_card_after_the_check_leaves_the_answer_as_checked() {
+    let mut h = Home::new();
+    let (_served, ask) = suggested(&mut h);
+    let card = h.card("s2");
+    let home = h.s.home.path().to_owned();
+    let curated = move || {
+        let op = json!({"outcome": "curated", "summary": "", "from_seq": ask, "to_seq": ask,
+            "from_offset": null, "to_offset": null, "elided": [], "removed": [], "goals": [],
+            "observations": [{"type": "feature", "title": "Parser built", "narrative": "Done."}],
+            "recurate": false});
+        let mut raw = crate::raw::open(&home).unwrap();
+        raw.append_ops(&[(OpKind::Window, op)]).unwrap();
+    };
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(curated)));
+    assert_eq!(h.answer(&card, "join").unwrap()["state"], "applied");
+    let (conversation, placed) = answered(&h);
+    assert_eq!(conversation, json!(["claude", "s2"]));
+    assert_eq!(placed, json!([["claude", "s1"], ["claude", "s2"]]));
+}
+
+impl Home {
+    /// The worker's pass without the record index's consumers (`fts`, `fts-text`), as when the
+    /// index lags behind the records.
+    fn run_unindexed(&self) {
+        let consumers = (crate::worker::consumers(self.s.home.path()).into_iter())
+            .filter(|c| !c.name().starts_with("fts"))
+            .collect();
+        self.applied_by(consumers);
+    }
+
+    /// The request My Work shows conversation `session` in, read as the page reads it, the
+    /// record index left as it is.
+    fn unindexed_request_of(&self, session: &str) -> Value {
+        self.run_unindexed();
+        let path = self.s.home.path();
+        let v = crate::my_work::read(path, crate::my_work::Range::All, crate::db::now_ms());
+        let v = crate::view::answered("my-work", v.unwrap());
+        let id = format!("c:claude:{session}");
+        (v["requests"].as_array().unwrap().iter())
+            .find(|r| (r["sessions"].as_array().unwrap().iter()).any(|s| s["id"] == id))
+            .unwrap()
+            .clone()
+    }
+
+    /// The record index's checkpoint on this device: the records it has taken.
+    fn indexed(&self) -> i64 {
+        let k = crate::knowledge::open(self.s.home.path()).unwrap();
+        crate::knowledge::checkpoint::get(&k, "fts", self.s.raw.device()).unwrap()
+    }
+}
+
+/// W3b-2c (#1114: the record index's lag): a work state write that names a request for the pick,
+/// its call recorded and not yet indexed (the worker's pass without the index's, the worker then
+/// held): My Work's read attributes it, so the pick is in the request named, and the answer's check
+/// refuses a Join, nothing recorded.
+#[test]
+fn a_call_the_index_has_not_taken_moves_the_pick() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    let card = h.card("s2");
+    h.named("s1", "A");
+    let call = h.s.raw.record_top().unwrap();
+    assert_eq!(h.unindexed_request_of("s1")["id"], "r:A");
+    assert!(h.indexed() < call, "the call is not indexed");
+    let held = crate::worker::lock(h.s.home.path()).unwrap().unwrap();
+    let before = h.recorded();
+    assert_eq!(
+        h.answer(&card, "join"),
+        Err((409, "suggestion_target_gone"))
+    );
+    assert_eq!(h.recorded(), before);
+    drop(held);
+}
+
+/// W3b-2c: a call the index has taken that is also past its checkpoint (a checkpoint set back, as a
+/// record indexed between the checkpoint's read and the index's is) is one call: the write is still
+/// attributed.
+#[test]
+fn a_call_both_indexed_and_past_the_checkpoint_is_found_once() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.named("s1", "A");
+    let call = h.s.raw.record_top().unwrap();
+    assert_eq!(h.request_of("s1")["id"], "r:A", "indexed");
+    let k = crate::knowledge::open(h.s.home.path()).unwrap();
+    let device = h.s.raw.device().to_owned();
+    let seqs = crate::knowledge::checkpoint::SEQS;
+    crate::knowledge::checkpoint::set_in(&k, seqs, "fts", &device, call - 1).unwrap();
+    drop(k);
+    assert!(h.indexed() < call);
+    assert_eq!(h.unindexed_request_of("s1")["id"], "r:A", "found once");
+}
+
+/// W3b-2c: no cutoff in the tail: a second call that sent the same write, from another
+/// conversation, far into the records the index has not taken, makes the write ambiguous, and it
+/// moves no conversation.
+#[test]
+fn a_second_call_far_into_the_tail_keeps_the_write_ambiguous() {
+    let mut h = Home::new();
+    let _served = suggested(&mut h);
+    h.said("s3", 8, "The commas, again.");
+    let write = h.naming("A");
+    let (ts, fields) = write.clone();
+    h.called("s1", write);
+    assert_eq!(h.request_of("s1")["id"], "r:A", "one call: attributed");
+    for n in 0..200 {
+        let body = json!({"tool": "Bash", "input": "{}", "output": format!("run {n}"),
+            "failed": false});
+        h.s.event("tool", "s3", (R, "main"), ts + 1, body);
+    }
+    h.called("s3", (ts + 40, fields));
+    assert!(h.indexed() < h.s.raw.record_top().unwrap());
+    let s1 = h.unindexed_request_of("s1");
+    assert_ne!(s1["id"], "r:A", "two calls: no sender");
 }

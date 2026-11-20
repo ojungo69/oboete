@@ -2147,9 +2147,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   target's group request owns the pick whole (a work state that names another request for the
   pick takes it: then 409 `suggestion_target_gone` for a Join; a Not this, which places nothing
   there, still closes it). A grouping that leaves the pick out of every request after the card
-  was read takes the target away: a Join is 409 `suggestion_target_gone`; a Not this is checked
-  with the posted target, which the binding proves the card named, and closes the suggestion, as
-  it did before the binding; with no target posted, or another, it is 409 `suggestion_changed`. The answer is checked under
+  was read takes the target away: the binding is then checked with the posted target, which it
+  proves the card named (W3b-2c, CodeRabbit on #1116): another suggestion, or no target posted, is
+  409 `suggestion_changed` for either action; of the card's own, a Join is 409
+  `suggestion_target_gone`, and a Not this closes the suggestion, as it did before the binding. The answer is checked under
   config.lock, which a rebuild and a restore hold for their run, through one raw.db and one
   knowledge.db handle opened there (an open handle reads the file it opened, whatever is put in
   place at its path since): the fence's newest op read on that raw.db; the my_work, cards and
@@ -2168,8 +2169,9 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   the work again after a refusal only when the rows it read are the ones it draws (a newer read, a
   poll's held behind "Show updates" among them, takes them otherwise), and asks for a reload when
   that read failed. A Join answered `applied` whose read after it a newer poll took says it was
-  saved and names no request, as a read that failed does (W3b-2b, CodeRabbit on #1115): where it
-  put the conversation is not in the rows drawn.
+  saved and names no request, as a read that failed does (W3b-2b, CodeRabbit on #1115): the rows
+  the page has are that poll's, drawn or held behind "Show updates", not the read after the
+  answer, so where it put the conversation is not known from them.
 - **Between the check and the write** (W3b-2b, 2026-11-20): the check also reads, on its raw.db
   handle before any read the answer is checked against, this device's newest record and the rows
   retention has made expired (`meta`'s `expired_rows`, moved by `expire_owed` in each batch's own
@@ -2183,11 +2185,14 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   names outranks the group. A row expired since is 409 the same way. Curation's summaries and
   cards and a plain prompt made meanwhile are not refused: the answer records what it was checked
   on, as the contract says.
-  Known limits (#1114): a work state write's call recorded before the answer that the record index
-  has not taken yet (the answer does not wait for the index: the worker indexes records between
-  its calls to a provider, and on this PC on 2026-11-19 a day held 4,628 calls, 7.6 hours of them,
-  608 longer than the answer's wait of 10 seconds): the next pull request (2c). Another device's
-  ops and records are not fenced (sync is not in use).
+- **The record index's lag** (W3b-2c, 2026-11-20): a work state write's call recorded before the
+  answer, which the record index has not taken yet, attributes the write all the same, in My Work's
+  read and in the answer's check, so the answer does not wait for the index (the worker indexes
+  records between its calls to a provider, and on this PC on 2026-11-19 a day held 4,628 calls,
+  7.6 hours of them, 608 longer than the answer's wait of 10 seconds): `my_work::senders` reads,
+  beside the index, this device's tool records past the fts consumer's checkpoint (docs/my-work.md,
+  "The link"). On this PC, sampled every 20 s for two hours, that tail held at most 10 records.
+  Known limits (#1114): another device's ops and records are not fenced (sync is not in use).
 - **Not built**: Undo. J4 makes Not this final, and claude-mem 15.4 and 15.7 have no Undo, nor
   any button for the suggestion.
 - **Then**: 11c, the focus judge's hint (J5).

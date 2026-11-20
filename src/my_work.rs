@@ -527,21 +527,29 @@ fn call(raw: &Raw, (device, seq): (&str, i64)) -> Result<Option<Call>> {
 
 /// The calls that sent `write`: of its repository, list and fields, within `CALL_MS`, each with
 /// its conversation and record. The tool records near a write are found by time through the fts
-/// consumer's index `raw_docs_tools`, and each is read once (CodeRabbit on #574). The hook gates
+/// consumer's index `raw_docs_tools`, and (W3b-2c, #1114) among this device's tool records the
+/// index has not taken yet (`unindexed`), and each is read once (CodeRabbit on #574). The hook gates
 /// a call's record and capture gates the write each its own way (a rule can mask a value beside
 /// its key but not in the call's text), so when no call's list and fields are the write's, the
 /// calls are compared again as work state keeps both now (`settings`); a call that is the write's
 /// as stored is never joined by another masked alike (#574).
 fn senders(
     raw: &Raw,
-    near: &mut rusqlite::CachedStatement<'_>,
+    (near, tail): (&mut rusqlite::CachedStatement<'_>, &[(i64, i64)]),
     read: &mut HashMap<(String, i64), Option<Call>>,
     (write, settings): (&WorkWrite, &crate::capture::Settings),
 ) -> Result<Vec<(Key, String, i64)>> {
-    let span = params![write.ts - CALL_MS, write.ts + CALL_MS];
-    let rows: Vec<(String, i64)> = near
-        .query_map(span, |r| Ok((r.get(0)?, r.get(1)?)))?
+    let (from, to) = (write.ts - CALL_MS, write.ts + CALL_MS);
+    let mut rows: Vec<(String, i64)> = near
+        .query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let first = tail.partition_point(|(ts, _)| *ts < from);
+    for (_, seq) in tail[first..].iter().take_while(|(ts, _)| *ts <= to) {
+        let record = (raw.device().to_owned(), *seq);
+        if !rows.contains(&record) {
+            rows.push(record);
+        }
+    }
     let (mut sent, mut other) = (Vec::new(), Vec::new());
     for record in rows {
         if !read.contains_key(&record) {
@@ -596,6 +604,7 @@ fn link(
         rules: rules.clone(),
         ..crate::capture::Settings::default()
     };
+    let tail = unindexed(raw, k)?;
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
@@ -607,7 +616,7 @@ fn link(
             break;
         }
         for write in w.writes.iter().rev() {
-            if let [c] = &senders(raw, &mut near, &mut read, (write, &settings))?[..] {
+            if let [c] = &senders(raw, (&mut near, &tail), &mut read, (write, &settings))?[..] {
                 w.by = Some(c.clone());
                 break;
             }
@@ -619,7 +628,7 @@ fn link(
             (w.by.as_ref()).map_or(excluded.is_empty(), |(key, ..)| !excluded.contains(key));
         if shown && !excluded.is_empty() {
             for write in w.writes.iter().chain(&w.list_writes) {
-                let sent = senders(raw, &mut near, &mut read, (write, &settings))?;
+                let sent = senders(raw, (&mut near, &tail), &mut read, (write, &settings))?;
                 if sent.is_empty() || sent.iter().any(|(key, ..)| excluded.contains(key)) {
                     shown = false;
                     break;
@@ -631,6 +640,15 @@ fn link(
         }
     }
     Ok(kept)
+}
+
+/// This device's tool records the record index has not taken yet, by time and seq, in time order
+/// (W3b-2c, #1114): those past the fts consumer's checkpoint, read before the index is, so that a
+/// record indexed between the two reads is in both and found once. One read for a read of My Work,
+/// whatever the tail's length (a rebuilt knowledge.db's index starts again from none).
+fn unindexed(raw: &Raw, k: &Connection) -> Result<Vec<(i64, i64)>> {
+    let at = crate::knowledge::checkpoint::get(k, "fts", raw.device())?;
+    raw.tool_records_after(at)
 }
 
 /// The newest `bound` of the records `page` reads that `keep` takes, newest first: the reader
@@ -1628,6 +1646,7 @@ fn writers(
         rules: rules.clone(),
         ..crate::capture::Settings::default()
     };
+    let tail = unindexed(raw, k)?;
     let mut near = k.prepare_cached(
         "SELECT device, seq FROM raw_docs INDEXED BY raw_docs_tools
          WHERE kind = 'tool' AND ts BETWEEN ?1 AND ?2",
@@ -1635,7 +1654,7 @@ fn writers(
     let mut read = HashMap::new();
     for w in work {
         for write in w.writes.iter().chain(&w.list_writes) {
-            for (key, ..) in senders(raw, &mut near, &mut read, (write, &settings))? {
+            for (key, ..) in senders(raw, (&mut near, &tail), &mut read, (write, &settings))? {
                 out.entry(key)
                     .or_default()
                     .insert((w.repo.clone(), w.list.clone()));
