@@ -2573,3 +2573,19 @@ fn a_file_that_does_not_parse_is_neither_shown_nor_written() {
         assert_eq!(file(&home).as_deref(), Some(text));
     }
 }
+
+/// W4: `config_lock_within` waits for config.lock no longer than it is told, and has it once it
+/// is free: Mark finished answers busy rather than wait out a save or an import that holds it.
+#[test]
+fn config_lock_within_gives_up_after_its_wait_and_has_a_free_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let held = config_lock(home.path()).unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let start = std::time::Instant::now();
+    assert!(config_lock_within(home.path(), wait).unwrap().is_none());
+    let waited = start.elapsed();
+    assert!(waited >= wait, "{waited:?}");
+    assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+    drop(held);
+    assert!(config_lock_within(home.path(), wait).unwrap().is_some());
+}
