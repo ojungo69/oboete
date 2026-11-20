@@ -1,0 +1,41 @@
+assets/work-view/assets/index-BiMYlg91.js
+  s_52c3955e48bff4::t_2e302ff307e38f 1-2,39
+assets/work-view/assets/my-rules-CAfF5phe.js
+  s_52c3955e48bff4::t_80a92a5e12d0ba 1
+assets/work-view/assets/past-focus-BsGclZwe.js
+  s_52c3955e48bff4::t_7ae31e085e62e7 1
+assets/work-view/assets/request-detail-CWogEhJ-.js
+  s_52c3955e48bff4::t_b76eff5b990c2e 1
+assets/work-view/assets/suggested-areas-Dgy7jmIn.js
+  s_52c3955e48bff4::t_b36f67828f0d18 1
+assets/work-view/assets/swipe-to-decide-ve5S2yp4.js
+  s_52c3955e48bff4::t_80b44c939aceb7 1
+assets/work-view/assets/textarea-CNV3uaJg.js
+  s_52c3955e48bff4::t_05799981b8668b 46
+assets/work-view/index.html
+  s_52c3955e48bff4::t_7a9f82bfe018ea 9-10
+docs/page.md
+  s_52c3955e48bff4::t_835e88a1426471 300-309
+src/work_view.rs
+  s_52c3955e48bff4::t_dcaf756398ce14 163-164
+ui/work-view/README.md
+  s_52c3955e48bff4::t_3f3ae221bdc500 16-17
+ui/work-view/patches/0009-mappings-of-the-work-on-screen.patch
+  s_52c3955e48bff4::t_4c32f85d7b76b8 2,30,40-42,64,68,73-91,106,130,155-159,162-164,166-173,237,328,330,337-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "baa392ccf28f8822160f6914c91d9efe09cfe249",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
