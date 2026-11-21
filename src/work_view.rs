@@ -244,7 +244,7 @@ pub(crate) fn my_rules_on(
     my_rules(home, &page, &states)
 }
 
-/// What a rule's switch from the pages did (#1083, R2a).
+/// What a rule's write from the pages did (#1083: R2a's switch, R2b's decisions).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Switched {
     /// Its correction is applied and kept: with the rule's version after it, none when a record
@@ -259,6 +259,8 @@ pub(crate) enum Switched {
     Ambiguous,
     /// A suggestion waiting, which has no switch.
     Suggestion,
+    /// The row is not one this decision takes (#1083's R2b): what the pages are told.
+    State(&'static str),
     /// The rule is on or off already, as asked.
     Already,
     /// The rule's version is not the one posted.
@@ -326,7 +328,12 @@ pub(crate) fn switch<'a>(
         return Ok(Switched::Already);
     }
     let suggestion = row.of["suggestion"].as_str();
-    if behind(&raw, &tx, uid, suggestion)? {
+    let subject = crate::raw::Subject {
+        uid: Some(uid),
+        suggestion,
+        sources: None,
+    };
+    if behind(&raw, &tx, &subject)? {
         return Ok(Switched::Behind);
     }
     let Some(op) = crate::claims::mute_op(&tx, uid, muted)? else {
@@ -339,8 +346,7 @@ pub(crate) fn switch<'a>(
     }
     // Owner decision 43, as every correction is appended.
     raw.gates_with(&settings.rules);
-    let named = (uid, suggestion);
-    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, named);
+    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, &subject);
     drop((read, raw, config, saving));
     let seqs = match appended {
         Ok(seqs) => seqs,
@@ -371,6 +377,144 @@ pub(crate) fn switch<'a>(
         }
         _ => Ok(Switched::Pending),
     }
+}
+
+/// What a suggestion's decision from the pages does (#1083's R2b).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Decision {
+    /// Reject a suggestion that waits (`dismiss`).
+    Dismiss,
+    /// Undo a suggestion's rejection (`restore-suggestion`).
+    Restore,
+}
+
+/// #1083's R2b: the suggestion the pages name by `reference` decided as `what`, only while its row
+/// is at `version`, under the switch's locks and in its order (`switch`): dismissed while it waits,
+/// its rejection undone while it is rejected. Refused, nothing recorded, while what its row reads
+/// is not applied yet (`behind`), and when anything moved it between the read and the append, a
+/// record of its sources' in a repository the exclusion list held included
+/// (`Raw::append_ops_ruled`). Applied and kept, the row's version after is the one a read after the
+/// write gives it while it is the row the write left (`fresh_version`).
+pub(crate) fn decide<'a>(
+    home: &Path,
+    (reference, version): (&str, &str),
+    what: Decision,
+    saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
+    authorized: &dyn Fn() -> bool,
+) -> anyhow::Result<Switched> {
+    caught_up(home)?;
+    let Some(saving) = saving() else {
+        return Ok(Switched::Busy);
+    };
+    let wait = crate::db::OPEN_WRITE_WAIT;
+    let Some(config) = crate::settings::config_lock_within(home, wait)? else {
+        return Ok(Switched::Busy);
+    };
+    if !authorized() {
+        return Ok(Switched::Unauthorized);
+    }
+    let settings = crate::capture::Settings::load(home)?;
+    let Some((mut raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(Switched::NotFound);
+    };
+    let read = crate::dispatch::reading(home, wait)?;
+    let fence = raw.rule_fence()?;
+    let device = raw.device().to_owned();
+    let tx = k.unchecked_transaction()?;
+    let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
+    let row = match the_one(found.rows, reference) {
+        Ok(row) => row,
+        Err(refused) => return Ok(refused),
+    };
+    let (fields, left) = match (what, row.of["rule"].as_str()) {
+        (Decision::Dismiss, Some("waiting")) => (json!({"action": "reject"}), "rejected"),
+        (Decision::Restore, Some("rejected")) => (json!({"action": "undo"}), "waiting"),
+        (Decision::Dismiss, _) => {
+            return Ok(Switched::State("This suggestion is decided already."));
+        }
+        (Decision::Restore, _) => {
+            return Ok(Switched::State("There is no rejection to undo here."));
+        }
+    };
+    if row.version != version {
+        return Ok(Switched::Stale);
+    }
+    let Some(id) = row.of["suggestion"].as_str() else {
+        return Ok(Switched::NotFound);
+    };
+    let kept = row.of["kept"].as_i64();
+    let mut sources = crate::raw::Sources {
+        repos: raw.exclusions_now()?,
+        ..Default::default()
+    };
+    if let Some(kept) = kept {
+        sources.sessions = crate::my_work_ops::sources(&raw, &tx, &device, kept)?;
+    }
+    let subject = crate::raw::Subject {
+        uid: None,
+        suggestion: Some(id),
+        sources: Some(&sources),
+    };
+    if behind(&raw, &tx, &subject)? {
+        return Ok(Switched::Behind);
+    }
+    drop(tx);
+    #[cfg(test)]
+    if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    raw.gates_with(&settings.rules);
+    let rule = crate::my_work_rules::RULE;
+    let ops = crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])?;
+    let appended = raw.append_ops_ruled(&ops, &fence, &subject);
+    drop((read, raw, config, saving));
+    let seqs = match appended {
+        Ok(seqs) => seqs,
+        Err(e) if e.is::<crate::raw::OpsMoved>() => return Ok(Switched::Behind),
+        Err(e) => return Err(e),
+    };
+    #[cfg(test)]
+    if let Some(hook) = SWITCHED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let what = ("decision", "my_work");
+    match crate::claims::applied_by(home, &k, &device, &seqs, what, crate::claims::deadline()) {
+        Err(e) if e.is::<crate::claims::NotYet>() => return Ok(Switched::Pending),
+        Err(e) => return Err(e),
+        Ok(()) => {}
+    }
+    let Some(&seq) = seqs.first() else {
+        return Ok(Switched::Pending);
+    };
+    // Saved: a proof that cannot be read leaves it pending, not an error.
+    if !crate::my_work_ops::kept(&k, &device, seq, (rule, id), &fields).unwrap_or(false) {
+        return Ok(Switched::Pending);
+    }
+    let file = row.of["file"].as_str().map(str::to_owned);
+    let expected = match left {
+        "rejected" => rejected_of(id, kept, Some(seq), Some(seq), &file),
+        _ => waiting_of(id, kept, Some(seq), &file),
+    };
+    Ok(Switched::Applied(fresh_version(home, reference, &expected)))
+}
+
+/// The version of the row by `reference` that a read of My Rules after a write gives (#1083's R2b;
+/// #1128 item 3), read as the writes read it, on handles of its own under the readers' hold, while
+/// that row's whole `of` is `expected`, what the write left; else none. A read that fails gives none:
+/// the write is saved, and the pages offer no Undo.
+fn fresh_version(home: &Path, reference: &str, expected: &Value) -> Option<String> {
+    let read = || -> anyhow::Result<Option<String>> {
+        let settings = crate::capture::Settings::load(home)?;
+        let Some((raw, k)) = crate::search::b::stores(home)? else {
+            return Ok(None);
+        };
+        let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+        let tx = k.unchecked_transaction()?;
+        let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
+        let row = the_one(found.rows, reference).ok();
+        Ok(row.filter(|row| row.of == *expected).map(|row| row.version))
+    };
+    read().ok().flatten()
 }
 
 /// The one row of `rows` that goes by `reference`, else why none is.
@@ -409,7 +553,7 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     let deadline = crate::claims::deadline();
     let device = raw.device().to_owned();
     let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
-    let decision = raw.rule_decision_after(get_in(&k, OPS, "my_work", &device)?)?;
+    let decision = raw.my_rules_op_after(get_in(&k, OPS, "my_work", &device)?)?;
     // The passed corrections are read only where a pass may follow (#1130's security review).
     let may_run = crate::executable::may_run_worker();
     let passed = may_run && crate::consumer::claims::any_passed(&raw, &k)?;
@@ -431,26 +575,35 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether what a switch of claim `uid`, of suggestion `suggestion` where it is an approved rule,
-/// reads is not applied yet, read on `k` (the switch's read): a claim or correction op of this
-/// device that names `uid` past the claims consumer's checkpoint; a rule decision of it or of its
-/// suggestion past the my_work consumer's (#1128 item 2); a correction of it that a worker of an
-/// older oboete passed, which the claims consumer's next step keeps (#1128 item 13); or a tombstone
-/// past the anchors consumer's (a forget or a mask of the record the rule quotes).
+/// Whether what a rule's write on `subject` reads is not applied yet, read on `k` (the write's
+/// read): where the rule has a claim, a claim or correction op of this device that names it past the
+/// claims consumer's checkpoint, or a correction of it that a worker of an older oboete passed,
+/// which the claims consumer's next step keeps (#1128 item 13); a rule decision of its claim or of
+/// its suggestion past the my_work consumer's (#1128 item 2); for a write that goes by its
+/// suggestion (#1083's R2b), a rules job's op of it past the same; or a tombstone past the anchors
+/// consumer's (a forget or a mask of the record the rule quotes).
 fn behind(
     raw: &crate::raw::Raw,
     k: &rusqlite::Connection,
-    uid: &str,
-    suggestion: Option<&str>,
+    subject: &crate::raw::Subject<'_>,
 ) -> anyhow::Result<bool> {
     use crate::knowledge::checkpoint::{OPS, SEQS, get_in};
     let device = raw.device();
     let claims = get_in(k, OPS, "claims", device)?;
     let my_work = get_in(k, OPS, "my_work", device)?;
     let anchors = get_in(k, SEQS, "anchors", device)?;
-    Ok(raw.names_after(claims, uid)?
-        || raw.decides_after(my_work, uid, suggestion)?
-        || crate::consumer::claims::passed_correction_of(raw, k, uid)?
+    if let Some(uid) = subject.uid
+        && (raw.names_after(claims, uid)?
+            || crate::consumer::claims::passed_correction_of(raw, k, uid)?)
+    {
+        return Ok(true);
+    }
+    let learned = match (subject.sources, subject.suggestion) {
+        (Some(_), Some(suggestion)) => raw.learns_after(my_work, suggestion)?,
+        _ => false,
+    };
+    Ok(raw.decides_after(my_work, subject.uid, subject.suggestion)?
+        || learned
         || raw.tombstone_after(anchors)?)
 }
 
@@ -459,14 +612,56 @@ fn everywhere() -> Value {
     json!({"id": "everywhere", "tier": "everywhere", "name": "Everywhere"})
 }
 
+/// #1083's R2b: what a waiting suggestion's row is read from, the projection's and a write's
+/// receipt's alike: its id, its kept learning op, its newest decision op of any action (an undo
+/// leaves the row another version than the one it had before it was decided), the raw.db file.
+pub(crate) fn waiting_of(
+    id: &str,
+    kept: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "waiting", "suggestion": id, "kept": kept, "transition": transition,
+        "file": file})
+}
+
+/// #1083's R2b: what a rejected suggestion's row is read from: as a waiting one's, and its
+/// rejection's op.
+pub(crate) fn rejected_of(
+    id: &str,
+    kept: Option<i64>,
+    decision: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "rejected", "suggestion": id, "kept": kept, "decision": decision,
+        "transition": transition, "file": file})
+}
+
+/// What an approved rule's row is read from (R2a): its suggestion, its claim and what decides it
+/// (`by`), its approval's op, and (R2b) its newest decision op of any action, the raw.db file.
+pub(crate) fn approved_of(
+    suggestion: &str,
+    uid: &str,
+    by: &Value,
+    decision: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by,
+        "decision": decision, "transition": transition, "file": file})
+}
+
 /// #1083 (R1): My Rules as claude-mem's pages read it (`WorkViewRule`, `work-view-api-types.ts`),
 /// from `my_work_rules::page`'s answer, its texts gated already: the suggestions waiting, and the
 /// owner's rules, an approved one by its suggestion; the scopes, Everywhere and each repository a
 /// rule is for, one per repository. Each rule and scope goes by the whole keyed hash of its key
 /// (`l:` a learned suggestion's id, `u:` the uid of a rule the owner wrote, `r:` a repository's
 /// key), the same in every read whatever else is read with it, so no key, uid or suggestion id
-/// leaves and no two share an id. The rejected and removed suggestions wait for the writes that
-/// bring their Undo (#1083's R2).
+/// leaves and no two share an id. A rejected suggestion is a row the writes find (#1083's R2b), which
+/// the snapshot sends with the pull request that brings its Undo to the pages; a removed one waits.
+/// The rows' versions are made of what each was read from (`waiting_of`, `rejected_of`,
+/// `approved_of`).
 fn my_rules(
     home: &Path,
     page: &Value,
@@ -479,6 +674,12 @@ fn my_rules(
     let suggestions: Vec<String> = (waiting.iter().filter_map(|c| c["id"].as_str()))
         .map(str::to_owned)
         .chain(yours.iter().flat_map(|g| arr(&g["rules"])).filter_map(from))
+        .chain(
+            (arr(&page["rejected"])
+                .iter()
+                .filter_map(|c| c["id"].as_str()))
+            .map(str::to_owned),
+        )
         .collect();
     let uids: Vec<String> = (yours.iter().flat_map(|g| arr(&g["rules"])))
         .filter(|r| from(r).is_none())
@@ -533,8 +734,8 @@ fn my_rules(
         let (quotes, newest) = quoted(c);
         let Some(id) = c["id"].as_str() else { continue };
         let reference = format!("l:{}", sg[id]);
-        let of = json!({"rule": "waiting", "suggestion": id, "kept": states.kept.get(id),
-            "file": file});
+        let transition = states.transitions.get(id).copied();
+        let of = waiting_of(id, states.kept.get(id).copied(), transition, file);
         let v = versioned(&of, home, &mut key)?;
         rules.push(json!({"ruleId": reference, "scopeId": "everywhere",
             "scopeTier": "everywhere", "scopeName": "Everywhere", "when": "",
@@ -547,6 +748,28 @@ fn my_rules(
             uid: None,
             on: None,
             version: v,
+            of,
+        });
+    }
+    for c in arr(&page["rejected"]) {
+        let Some(id) = c["id"].as_str() else { continue };
+        let (kept, decision) = (
+            states.kept.get(id).copied(),
+            states.decisions.get(id).copied(),
+        );
+        let of = rejected_of(
+            id,
+            kept,
+            decision,
+            states.transitions.get(id).copied(),
+            file,
+        );
+        let version = versioned(&of, home, &mut key)?;
+        rows.push(Row {
+            reference: format!("l:{}", sg[id]),
+            uid: None,
+            on: None,
+            version,
             of,
         });
     }
@@ -566,9 +789,9 @@ fn my_rules(
             let by = states.claims.get(uid).cloned().unwrap_or(Value::Null);
             let (id, set_by, source, of) = match from(r) {
                 Some(s) => {
-                    let decision = states.decisions.get(&s);
-                    let of = json!({"rule": "approved", "suggestion": s, "uid": uid, "by": by,
-                        "decision": decision, "file": file});
+                    let decision = states.decisions.get(&s).copied();
+                    let transition = states.transitions.get(&s).copied();
+                    let of = approved_of(&s, uid, &by, decision, transition, file);
                     (format!("l:{}", sg[&s]), "approved", "request-progress", of)
                 }
                 None => {

@@ -11075,3 +11075,57 @@ fn a_work_view_switch_whose_token_is_replaced_records_nothing_or_sends_no_snapsh
     );
     assert_eq!(correction_ops(&s), before + 1);
 }
+
+/// #1083's R2b: suggestion `id` of `statement`, as the rules job keeps one, appended on `s`'s raw.db.
+fn suggested(s: &Store, id: &str, statement: &str) {
+    let now = crate::db::now_ms();
+    let fields = json!({"statement": statement, "seen": 2,
+        "requests": [format!("g:{id}0"), format!("g:{id}1")],
+        "quotes": [{"text": format!("Quoted for {id}."), "request": format!("g:{id}0"), "at": now}]});
+    let op = crate::my_work_ops::MyWorkOp {
+        job: crate::my_work_rules::NAME.into(),
+        about: id.into(),
+        entry: "fake".into(),
+        ts: now,
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    (crate::raw::open(s.home.path()).unwrap())
+        .append_ops(&[(crate::raw::OpKind::MyWork, op)])
+        .unwrap();
+}
+
+/// #1083's R2b: the work-view's rules route takes a suggestion's dismissal and its undo, each by the
+/// version the one before answered: the dismissal's answer names its rejected row's version and the
+/// snapshot no longer lists it; the undo posted with that version brings it back as a suggestion by
+/// the same reference, at a new version its answer names.
+#[test]
+fn the_work_views_rules_route_dismisses_a_suggestion_and_undoes_it() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(rule["status"], "suggested", "{rule}");
+    let body = switch_body(&rule, "dismiss", &rule["ruleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let rejected = answer["savedRuleVersion"].clone();
+    assert!(rejected.is_string(), "{answer}");
+    let rules = work_view_of(&v, "t0k")["rules"].clone();
+    let shown = (rules.as_array().unwrap().iter()).any(|r| r["then"] == "Keep commits small.");
+    assert!(!shown, "{rules}");
+    let body = switch_body(&rule, "restore-suggestion", &rejected);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let back = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(
+        (&back["ruleId"], &back["status"]),
+        (&rule["ruleId"], &json!("suggested"))
+    );
+    assert_ne!(back["ruleVersion"], rule["ruleVersion"]);
+    assert_eq!(back["ruleVersion"], answer["savedRuleVersion"]);
+}

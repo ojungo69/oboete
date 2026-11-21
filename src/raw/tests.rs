@@ -4102,7 +4102,15 @@ fn a_rule_decision_of_the_claim_or_its_suggestion_refuses_a_rules_write() {
     for (n, (op, refuses)) in cases.into_iter().enumerate() {
         let fence = raw.rule_fence().unwrap();
         raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-        let got = raw.append_ops_ruled(&write(), &fence, (&uid, Some("s1")));
+        let got = raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: Some("s1"),
+                sources: None,
+            },
+        );
         assert_eq!(got.is_err(), refuses, "case {n}: {got:?}");
         if refuses {
             assert!(got.unwrap_err().is::<OpsMoved>(), "case {n}");
@@ -4143,8 +4151,16 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
     let quoting = serde_json::json!({"text": format!("the rule {uid} again")});
     raw.append_ops(&[(OpKind::Claim, quoting)]).unwrap();
     assert_eq!(
-        raw.append_ops_ruled(&write(), &fence, (&uid, None))
-            .unwrap(),
+        raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None
+            }
+        )
+        .unwrap(),
         vec![5]
     );
     let device = raw.device().to_owned();
@@ -4188,7 +4204,15 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         moved(&mut raw);
         let before = written(&raw);
         let refused = raw
-            .append_ops_ruled(&write(), &fence, (&uid, None))
+            .append_ops_ruled(
+                &write(),
+                &fence,
+                &Subject {
+                    uid: Some(&uid),
+                    suggestion: None,
+                    sources: None,
+                },
+            )
             .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "move {n}: {refused:#}");
         assert_eq!(written(&raw), before, "move {n}: nothing written");
@@ -4201,7 +4225,15 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         };
         let before = written(&raw);
         let refused = raw
-            .append_ops_ruled(&write(), &moved, (&uid, None))
+            .append_ops_ruled(
+                &write(),
+                &moved,
+                &Subject {
+                    uid: Some(&uid),
+                    suggestion: None,
+                    sources: None,
+                },
+            )
             .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
@@ -4211,8 +4243,27 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         ..fence.clone()
     };
     let refused = raw
-        .append_ops_ruled(&write(), &expired, (&uid, None))
+        .append_ops_ruled(
+            &write(),
+            &expired,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None,
+            },
+        )
         .unwrap_err();
     assert!(refused.is::<OpsMoved>(), "{refused:#}");
-    assert!(raw.append_ops_ruled(&write(), &fence, (&uid, None)).is_ok());
+    assert!(
+        raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None
+            }
+        )
+        .is_ok()
+    );
 }
