@@ -2824,7 +2824,7 @@ impl Viewer {
             Carried::Read(mut snapshot) => {
                 snapshot["save"] = save;
                 snapshot["savedRuleId"] = json!(reference);
-                // None, and the pages offer no Undo: one would undo more than this switch.
+                // None, and the pages offer no Undo (`work_view::fresh_version`).
                 snapshot["savedRuleVersion"] = json!(version);
                 Response::json(&snapshot)
             }

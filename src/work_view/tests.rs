@@ -3089,7 +3089,12 @@ fn a_correction_applied_while_my_rules_is_read_reaches_neither_its_text_nor_its_
     crate::my_work_rules::READ.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             let body = Some("Answer in Japanese, briefly.");
-            crate::claims::correct_recorded(&home, &uid, None, body).unwrap();
+            let receipt = crate::claims::correct_recorded(&home, &uid, None, body).unwrap();
+            // #1128 item 11: the correction the test reads around is applied.
+            assert!(
+                matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }),
+                "the hook's correction is applied"
+            );
         }))
     });
     let shown = answer(h.home.path(), now).unwrap();
@@ -3369,8 +3374,14 @@ fn a_learning_op_of_the_suggestion_refuses_its_dismissal() {
 /// from records an event in a repository the exclusion list holds between the check and the append
 /// (a session that touches one is excluded, and what was learned from it with it), the session read
 /// by the learning op itself or, as the rules job reads in production, by a review it took, from
-/// records or a session's summary. The same session's record in another repository leaves the write
-/// its append, as 64 records since the check do; more than the write reads refuse it.
+/// records or a session's summary; so does any other session's first event in an excluded
+/// repository (#1132's review: the write checks who first touches one, not the suggestion's
+/// sources), right after the fence too, and in an excluded repository with no event yet; a retry is
+/// not refused for that session again. The same session's record in another repository leaves the
+/// write its append, as does a session excluded before the read recording again, a source among them
+/// whose one record in what was learned is its start (which the source walk this check replaced
+/// refused), and 64 records since the check; more than the write reads refuse it, but not while no
+/// repository is excluded.
 #[test]
 fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_write() {
     let cases = [
@@ -3380,6 +3391,12 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
         "sixty-four",
         "through a review",
         "through a turn",
+        "another session's first event",
+        "a session excluded before the read",
+        "a first event right after the fence",
+        "nothing excluded, 65 records",
+        "an excluded repository with no event yet",
+        "a source session excluded before the read",
     ];
     for case in cases {
         let mut h = Store::new();
@@ -3397,6 +3414,18 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             "other",
             now - 5 * 60_000,
         );
+        // A source whose one record in what was learned is its start, in a repository excluded
+        // before the read: the read does not hide the suggestion, a start being no line.
+        let start = (case == "a source session excluded before the read").then(|| {
+            let e = Event {
+                kind: "start".into(),
+                session: "lifecycle".into(),
+                repo: Some(secret.clone()),
+                ts: now - 4 * 60_000,
+                ..crate::raw::test_event("{}")
+            };
+            h.raw.append(&e).unwrap()
+        });
         let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
         let at = now - 4 * 60_000;
         // As the rules job reads in production: the reviews it took, by their ops, and what each
@@ -3423,10 +3452,24 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
                 op["read"]["ops"] = json!([review]);
                 op
             }
-            _ => learned_op("s1", "Keep commits small.", at, vec![(seq, seq)]),
+            _ => learned_op(
+                "s1",
+                "Keep commits small.",
+                at,
+                vec![(start.unwrap_or(seq), seq)],
+            ),
         };
         h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-        h.raw.exclude(&secret, false).unwrap();
+        let empty = "github.com/x/empty";
+        match case {
+            "nothing excluded, 65 records" => {}
+            "an excluded repository with no event yet" => {
+                h.raw.exclude(empty, false).unwrap();
+            }
+            _ => {
+                h.raw.exclude(&secret, false).unwrap();
+            }
+        }
         h.run();
         let (reference, version, _) = row_of(&h, "s1");
         let home = h.home.path().to_owned();
@@ -3434,18 +3477,64 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             "elsewhere" => recorded(&home, "learned", &open),
             "many" => (0..65).for_each(|_| recorded(&home, "third", &open)),
             "sixty-four" => (0..64).for_each(|_| recorded(&home, "third", &open)),
+            "another session's first event" | "a first event right after the fence" => {
+                recorded(&home, "newcomer", &secret)
+            }
+            "a session excluded before the read" => recorded(&home, "other", &secret),
+            "a source session excluded before the read" => recorded(&home, "lifecycle", &secret),
+            "nothing excluded, 65 records" => (0..65).for_each(|_| recorded(&home, "third", &open)),
+            "an excluded repository with no event yet" => recorded(&home, "newcomer", empty),
             _ => recorded(&home, "learned", &secret),
         };
-        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        if case == "a first event right after the fence" {
+            FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        } else {
+            CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        }
         let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
-        if matches!(case, "elsewhere" | "sixty-four") {
+        let through = [
+            "elsewhere",
+            "sixty-four",
+            "a session excluded before the read",
+            "a source session excluded before the read",
+            "nothing excluded, 65 records",
+        ];
+        if through.contains(&case) {
             assert_eq!(got, Switched::Pending, "{case}");
             assert_eq!(decisions_of(&h, "s1"), 1, "{case}");
         } else {
             assert_eq!(got, Switched::Behind, "{case}");
             assert_eq!(decisions_of(&h, "s1"), 0, "{case}");
         }
+        if case == "another session's first event" {
+            // A retry, under a fence of its own, is not refused for that session again.
+            let again = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+            assert_eq!(again, Switched::Pending, "{case}: the retry");
+            assert_eq!(decisions_of(&h, "s1"), 1, "{case}: the retry is saved");
+        }
     }
+}
+
+/// #1131 item 10: a decision is refused, nothing written, when a session's first event since its read
+/// comes under a label first recorded then that a repository never recorded may be (a mask in it):
+/// the write reads that label as its read reads one. The event itself is stored, under that label.
+#[test]
+fn a_label_a_never_recorded_repository_may_be_refuses_a_decision() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    (crate::raw::open(h.home.path()).unwrap())
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    let (reference, version, _) = row_of(&h, "s1");
+    let (records, decisions) = (stored(&h).0, decisions_of(&h, "s1"));
+    let home = h.home.path().to_owned();
+    let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || recorded(&home, "newcomer", &masked)))
+    });
+    let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
+    assert_eq!(stored(&h).0, records + 1, "the hook's event is recorded");
 }
 
 /// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection
@@ -3497,6 +3586,163 @@ fn a_dismissal_whose_row_moved_before_its_receipt_answers_no_version() {
     let got = decided(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Applied(None));
     assert_eq!(row_of(&h, "s1").2["rule"], "rejected");
+}
+
+/// #1128 item 3: a switch whose rule My Rules no longer lists once its correction is applied (its
+/// claim forgotten there) is saved and answers no version, though what decides its mute is still its
+/// correction: the version is a read's of the rule, not its claim's provenance's.
+#[test]
+fn a_switch_whose_rule_is_gone_before_its_receipt_answers_no_version() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let uid = changelog_uid(&h, &repo);
+    let (home, gone) = (h.home.path().to_owned(), uid.clone());
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            (crate::raw::open(&home).unwrap())
+                .append_ops(&[(OpKind::Forget, json!({"uid": gone, "job": "j"}))])
+                .unwrap();
+        }))
+    });
+    assert_eq!(switched(&h, &id, &version, true), Switched::Applied(None));
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    let by = crate::claims::decided_by(&k, &uid).unwrap().unwrap();
+    assert_eq!(by["muted"], true, "its correction still decides its mute");
+}
+
+/// #1131 item 11: a dismissal applied and kept whose receipt reads My Rules while a later decision
+/// of its suggestion, or a rules job's op of it, is recorded and not applied answers no version: the
+/// row the write left is read, but the write that follows would be judged against that op.
+#[test]
+fn a_dismissal_whose_suggestion_moved_and_is_not_applied_answers_no_version() {
+    for case in ["a later decision", "a rules job's op"] {
+        let (h, now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::worker::run_once(&home).unwrap();
+                crate::my_work_rules::READ.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        if case == "a later decision" {
+                            decision_waiting(&home, "s1", json!({"action": "undo"}));
+                        } else {
+                            let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+                            (crate::raw::open(&home).unwrap())
+                                .append_ops(&[(OpKind::MyWork, op)])
+                                .unwrap();
+                        }
+                    }))
+                });
+            }))
+        });
+        let got = decided(&h, &reference, &version, Decision::Dismiss);
+        let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+        assert!(ran, "{case}: the hook ran");
+        assert_eq!(got, Switched::Applied(None), "{case}");
+        assert_eq!(row_of(&h, "s1").2["rule"], "rejected", "{case}: saved");
+    }
+}
+
+/// #1131 item 11 (#1132's plan review): an approval applied and kept whose receipt reads My Rules
+/// while a correction of its new preference is recorded and not applied answers no version: the
+/// check its Undo makes goes by the preference the row the write left names, not the waiting row's.
+#[test]
+fn an_approval_whose_preference_has_a_correction_not_applied_answers_no_version() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            crate::my_work_rules::READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    muted_elsewhere(&home, &approved_uid(&home, "s1"), true);
+                }))
+            });
+        }))
+    });
+    let got = decided(&h, &reference, &version, Decision::Approve);
+    let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+    assert!(ran, "the hook ran");
+    assert_eq!(got, Switched::Applied(None));
+    assert_eq!(row_of(&h, "s1").2["rule"], "approved", "saved");
+}
+
+/// #1131 item 11: a switch of an approved rule whose receipt reads while a rules job's op of its
+/// suggestion is recorded and not applied answers its version: the switch that undoes it does not
+/// read that op, and the version leaves it out, so that Undo goes through once it is applied.
+#[test]
+fn an_approved_rules_switch_answers_its_version_past_a_rules_jobs_op_not_applied() {
+    let (h, now, _place, _repo, _off) = ruled();
+    let (reference, version, of) = row_of(&h, "s2");
+    assert_eq!(of["rule"], "approved");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            crate::my_work_rules::READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let op = learned_op("s2", "Run the tests before a push.", now, vec![]);
+                    (crate::raw::open(&home).unwrap())
+                        .append_ops(&[(OpKind::MyWork, op)])
+                        .unwrap();
+                }))
+            });
+        }))
+    });
+    let off = left(switched(&h, &reference, &version, true));
+    let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+    assert!(ran, "the hook ran");
+    h.run();
+    left(switched(&h, &reference, &off, false));
+}
+
+/// #1131 item 14: a dismissal whose op the my_work consumer passed without keeping it (a worker of
+/// an older oboete moved the checkpoint past it, or it was skipped) is saved and pending: the
+/// checkpoint alone is no proof that it decides the row.
+#[test]
+fn a_dismissal_passed_but_not_kept_is_pending() {
+    for skipped in [false, true] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let before = decisions_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let raw = crate::raw::open(&home).unwrap();
+                let device = raw.device().to_owned();
+                let seq = raw
+                    .ops_after(&device, 0, 100_000)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .op_seq;
+                let k = crate::knowledge::open(&home).unwrap();
+                if skipped {
+                    crate::worker::run_once(&home).unwrap();
+                    let n = k
+                        .execute(
+                            "UPDATE my_work SET skipped = 1 WHERE device = ?1 AND op_seq = ?2",
+                            rusqlite::params![device, seq],
+                        )
+                        .unwrap();
+                    assert_eq!(n, 1, "the dismissal's row");
+                } else {
+                    let ops = crate::knowledge::checkpoint::OPS;
+                    crate::knowledge::checkpoint::set_in(&k, ops, "my_work", &device, seq).unwrap();
+                }
+            }))
+        });
+        let got = decided(&h, &reference, &version, Decision::Dismiss);
+        assert_eq!(got, Switched::Pending, "skipped: {skipped}");
+        assert_eq!(
+            decisions_of(&h, "s1"),
+            before + 1,
+            "skipped: {skipped}: saved"
+        );
+    }
 }
 
 /// raw.db's records, ledger rows and ops of `h`'s home, read on a connection of their own.
@@ -3559,7 +3805,8 @@ fn an_approval_from_the_pages_records_the_main_pages_approval() {
 /// #1083's R2b: an approval from the pages is refused, and writes nothing (no directive, ledger
 /// row, preference or decision), when a decision of its suggestion is appended between the check
 /// and the append, and when a session it was learned from records an event in a repository the
-/// exclusion list holds there.
+/// exclusion list holds there, or under a label first recorded there that a repository never
+/// recorded may be (#1131 item 10).
 #[test]
 fn an_approval_from_the_pages_is_refused_whole_when_its_suggestion_moved() {
     let (h, _now, _place, _repo, _off) = ruled();
@@ -3611,6 +3858,42 @@ fn an_approval_from_the_pages_is_refused_whole_when_its_suggestion_moved() {
         stored(&h),
         (before.0 + 1, before.1, before.2),
         "the hook's record alone"
+    );
+    // #1131 item 10: the source's first event under a label first recorded since the read, one a
+    // repository never recorded may be (a mask in it).
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let place = tempfile::tempdir().unwrap();
+    let open = started_in(
+        &mut h,
+        &place.path().join("open"),
+        "learned",
+        now - 5 * 60_000,
+    );
+    let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+    let op = learned_op(
+        "s1",
+        "Keep commits small.",
+        now - 4 * 60_000,
+        vec![(seq, seq)],
+    );
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    (h.raw)
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    h.run();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+    let excluded = move || recorded(&home, "learned", &masked);
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(excluded)));
+    let before = stored(&h);
+    let got = decided_at_once(&h, &reference, &version, Decision::Approve);
+    assert_eq!(got, Switched::Behind, "a masked label");
+    assert_eq!(
+        stored(&h),
+        (before.0 + 1, before.1, before.2),
+        "a masked label: the hook's record alone"
     );
 }
 

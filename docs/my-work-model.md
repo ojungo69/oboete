@@ -1686,8 +1686,8 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   preference (#1131). A decided suggestion is refused another
   approve or reject (409), an undecided one an undo. A suggestion's decisions are taken newest op
   first, whatever their times say (#1131 item 2): the one appended last decides. The work-view's
-  pages decide through their own route on the same writes, fenced by what they read
-  (docs/page.md). Edit, on/off and add are the existing
+  route (`POST /api/work-view/rules`) takes approve, dismiss and restore-suggestion on the same
+  writes, fenced by what they read (docs/page.md); its pages do not post them yet. Edit, on/off and add are the existing
   `/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. After an approve or a reject
   the page shows what it did with Undo, and the rule's Undo approval and the Rejected list undo it
   after a reload too.
