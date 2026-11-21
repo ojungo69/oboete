@@ -460,8 +460,10 @@ pub(crate) fn decide<'a>(
         return Ok(Switched::NotFound);
     }
     let kept = row.kept;
-    // What is not applied yet first, before any read of the exclusions' history (#1131 item 19):
-    // `behind` reads only whether the write has sources, not what they hold.
+    // What is not applied yet first (#1131 item 19), before this decision reads the exclusion list
+    // and its baseline for the append, which checks its window against them: `behind` reads only
+    // whether the write has sources, not what they hold. My Rules' read above has read the
+    // exclusions in force already.
     let none = crate::raw::Sources::default();
     let pending = crate::raw::Subject {
         uid: row.uid.as_deref(),
@@ -656,8 +658,6 @@ const RECEIPT_READ_FAILED: &str =
 fn told_failed_read() {
     use std::io::Write;
     let _ = writeln!(std::io::stderr(), "{RECEIPT_READ_FAILED}");
-    #[cfg(test)]
-    TOLD.with(|told| told.set(told.get() + 1));
 }
 
 /// The one row of `rows` that goes by `reference`, else why none is.
@@ -674,8 +674,6 @@ fn the_one(rows: Vec<Row>, reference: &str) -> Result<Row, Switched> {
 thread_local! {
     /// A test's switch: the next receipt's read after a write fails (#1131 item 22).
     pub(crate) static FRESH_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// How many times a receipt's failed read was told (`told_failed_read`).
-    pub(crate) static TOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// A test's hook, run once a decision has read its fence, before anything else it reads.
     pub(crate) static FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };

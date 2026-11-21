@@ -2031,13 +2031,15 @@ pub struct Subject<'a> {
 }
 
 /// What a suggestion's write is checked against inside its append (#1083's R2b; #1132's review): the
-/// repositories the exclusion list held when the write read them (`Raw::exclusions_read`), the
-/// sessions already excluded then (`Raw::excluded_through`), as `agent` NUL `session`, and the test
-/// that reads a repository label as one never recorded (#1131 item 10). A session that first
-/// touches an excluded repository between the read and the append refuses the write, a session the
-/// suggestion was learned from among them, so no walk of its sources is needed (#1131 items 13 and
-/// 17). A session excluded already when the write read is the read's to judge
-/// (`my_work_ops::hidden`): its next event refuses nothing.
+/// repositories the exclusion list held when the decision read them for its append, after its
+/// pending check (`Raw::exclusions_read`), the
+/// sessions already excluded at the write's fence (`Raw::excluded_through`: an event in one of them
+/// through the fence's rows), as `agent` NUL `session`, and the test that reads a repository label
+/// as one never recorded (#1131 item 10). A session that first touches an excluded repository after
+/// the fence refuses the write, a session the suggestion was learned from among them, so no walk of
+/// its sources is needed (#1131 items 13 and 17). A session excluded already at the fence is the
+/// read's to judge (`my_work_ops::hidden`): its later events are no first events, and count only
+/// toward `SOURCES_READ`.
 #[derive(Debug, Default)]
 pub struct Sources {
     pub repos: Vec<String>,
@@ -2077,14 +2079,14 @@ impl std::fmt::Debug for LabelTest {
 
 #[cfg(test)]
 thread_local! {
-    /// How many times `Raw::excluded_through` was called, for a test of a decision that reads none
-    /// (#1131 item 19).
-    pub(crate) static BASELINE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times `Raw::excluded_through` read `records_repo`: none for a decision refused as
+    /// pending (#1131 item 19), and none for no repository (#1131 item 24).
+    pub(crate) static BASELINE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many of the records recorded since a suggestion's write was checked, every device's, its
-/// append reads, under the writer's lock, for a session's first event in a repository the
-/// exclusion list held (`sources_moved`); more than that refuses the write.
+/// How many event records since a suggestion's write's fence, every device's, its append reads,
+/// under the writer's lock, for a session's first event in a repository the exclusion list held
+/// (`sources_moved`); more than that refuses the write.
 const SOURCES_READ: i64 = 64;
 
 /// How many tool records recorded after J4's check its append decodes, under the writer's lock,
@@ -7435,15 +7437,13 @@ impl Raw {
 
     /// #1083's R2b (#1132's review): the sessions, as `agent` NUL `session`, of the events recorded
     /// in one of `repos` that were there at a write's fence, of every device (`rows`, the fence's
-    /// largest rowid; #1131 item 21): who was already excluded when the write read. One read of
-    /// `records_repo`; none for no repository.
+    /// largest rowid; #1131 item 21): who was already excluded at the fence, by the list the
+    /// decision read for its append. One read of `records_repo`; none for no repository.
     pub fn excluded_through(
         &self,
         repos: &[String],
         rows: i64,
     ) -> Result<std::collections::HashSet<String>> {
-        #[cfg(test)]
-        BASELINE_READS.with(|n| n.set(n.get() + 1));
         let mut out = std::collections::HashSet::new();
         if repos.is_empty() {
             return Ok(out);
@@ -7454,6 +7454,8 @@ impl Raw {
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1)) AND rowid <= ?2",
         )?;
         let repos = serde_json::to_string(repos)?;
+        #[cfg(test)]
+        BASELINE_QUERIES.with(|n| n.set(n.get() + 1));
         for session in st.query_map(params![repos, rows], |r| r.get::<_, String>(0))? {
             out.insert(session?);
         }
@@ -10748,7 +10750,7 @@ fn moves(kind: &str, body: &str, subject: &Subject<'_>) -> bool {
 /// Whether the stores moved, inside `tx`, from what `fence` read for a rule's write on `subject`
 /// (#1083, R2a and R2b): forget denying more than it did, an op since its `top` that moves the
 /// subject (`moves`), a tombstone since its `records`, retention having expired a row, or, while a
-/// repository is excluded, a session's first event in one since its `records` (`sources_moved`).
+/// repository is excluded, a session's first event in one since its `rows` (`sources_moved`).
 fn fence_moved(
     tx: &Connection,
     device: &str,
@@ -10776,15 +10778,15 @@ fn fence_moved(
         || sources)
 }
 
-/// Whether a record since rowid `after` (a write's fence, every device's; #1131 item 21) is a
-/// session's first event in an excluded repository (#1083's R2b; #1132's review): an event in one of `sources`' repositories, or under a
-/// label its test reads as never recorded (#1131 item 10), of a session not already excluded when
-/// the write read. A session that touches one is excluded, and what was learned from it with it:
-/// this refuses a write while any session, one the suggestion was learned from among them, first
-/// touches one. A session excluded already when the write read was the read's to judge
-/// (`my_work_ops::hidden`), and is not refused again. Read inside the write: at most
-/// `SOURCES_READ` records, more than that refusing too. None to read while no repository is
-/// excluded.
+/// Whether an event since rowid `after` (a write's fence, every device's; #1131 item 21) is a
+/// session's first event in an excluded repository (#1083's R2b; #1132's review): an event in one
+/// of `sources`' repositories, or under a label its test reads as never recorded (#1131 item 10),
+/// of a session not already excluded at the fence (`Sources::excluded`). A session that touches one
+/// is excluded, and what was learned from it with it: this refuses a write while any session, one
+/// the suggestion was learned from among them, first touches one after the fence. A session
+/// excluded already at the fence was the read's to judge (`my_work_ops::hidden`), and is not
+/// refused again. Read inside the write: at most `SOURCES_READ` event records, more than that
+/// refusing too. None to read while no repository is excluded.
 fn sources_moved(tx: &Connection, after: i64, sources: &Sources) -> Result<bool> {
     if sources.repos.is_empty() {
         return Ok(false);

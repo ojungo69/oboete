@@ -3569,7 +3569,7 @@ fn a_decision_refused_as_pending_reads_no_exclusion_baseline() {
     (crate::raw::open(h.home.path()).unwrap())
         .append_ops(&[(OpKind::MyWork, op)])
         .unwrap();
-    let reads = || crate::raw::BASELINE_READS.with(|n| n.get());
+    let reads = || crate::raw::BASELINE_QUERIES.with(|n| n.get());
     let (before, decisions) = (reads(), decisions_of(&h, "s1"));
     let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Behind);
@@ -3577,20 +3577,112 @@ fn a_decision_refused_as_pending_reads_no_exclusion_baseline() {
     assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
 }
 
-/// #1131 item 22: a receipt whose read after the write fails answers saved with no version and is
-/// told on the viewer's stderr, a fixed line; a receipt whose read succeeds tells nothing.
+/// #1131 items 22 and 23: a receipt whose read after the write fails answers saved with no
+/// version, and its call writes `RECEIPT_READ_FAILED` and a newline on the process's stderr,
+/// nothing else, and nothing on stdout, as read from a child run of `a_receipts_read_in_a_child`. A
+/// read that succeeds writes nothing on either. A stderr that takes no write leaves the answer as
+/// it is.
 #[test]
-fn a_receipts_failed_read_is_told() {
+fn a_receipts_failed_read_is_told_on_stderr() {
+    const CHILD_TEST: &str = "work_view::tests::a_receipts_read_in_a_child";
+    let run = |case: &str, stderr: std::process::Stdio| {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                CHILD_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RECEIPT_CHILD, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
+            .output()
+            .unwrap();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert!(out.status.success(), "{case}: {stdout}\n{stderr}");
+        (stdout, stderr)
+    };
+    // What the receipt's call wrote, between the child's marks (Codex on #1141).
+    let call = |text: &str| -> String {
+        let from = text.find(RECEIPT_FROM).map(|at| at + RECEIPT_FROM.len());
+        let to = from.and_then(|from| text[from..].find(RECEIPT_TO).map(|to| from + to));
+        match (from, to) {
+            (Some(from), Some(to)) => text[from..to].to_owned(),
+            _ => panic!("no marks in: {text}"),
+        }
+    };
+    let (stdout, stderr) = run("fail", std::process::Stdio::piped());
+    assert!(stdout.contains("ANSWER Applied(None)"), "{stdout}");
+    // The sentence itself, not the constant, so that an emptied constant fails (Codex on #1141).
+    assert_eq!(
+        call(&stderr),
+        "oboete: the read after a rule's write failed; the change is saved, with no Undo\n"
+    );
+    assert_eq!(call(&stdout), "");
+    let (stdout, stderr) = run("ok", std::process::Stdio::piped());
+    assert!(stdout.contains("ANSWER Applied(Some("), "{stdout}");
+    assert_eq!(call(&stderr), "");
+    assert_eq!(call(&stdout), "");
+    let (stdout, _) = run("closed", unwritable());
+    assert!(stdout.contains("ANSWER Applied(None)"), "{stdout}");
+}
+
+/// The case a child run of the receipt's test does (`fail`, `ok`, `closed`). Only
+/// `a_receipts_read_in_a_child` reads it, which the parent runs with `--ignored --exact`. A run with
+/// `--include-ignored` runs it too, and it does nothing unless this is set: a value the test process
+/// inherited diverts no test, though its `closed` case then needs a stderr that takes no write
+/// (Sourcery and Codex on #1141).
+const RECEIPT_CHILD: &str = "OBOETE_RECEIPT_READ_CHILD";
+/// The marks around the receipt's call, on both of the child's streams.
+const RECEIPT_FROM: &str = "<<< the receipt's call\n";
+const RECEIPT_TO: &str = ">>> the receipt's call\n";
+
+/// The child of `a_receipts_failed_read_is_told_on_stderr`: the case `RECEIPT_CHILD` names, the
+/// receipt's call between marks, then its answer.
+#[test]
+#[ignore = "run by a_receipts_failed_read_is_told_on_stderr"]
+fn a_receipts_read_in_a_child() {
+    use std::io::Write;
+    let Ok(case) = std::env::var(RECEIPT_CHILD) else {
+        return;
+    };
     let (h, _now, _place, _repo, _off) = ruled();
     let (id, version, _) = read_rule(&h, "Write the changelog.");
-    let told = || TOLD.with(|n| n.get());
-    let before = told();
-    FRESH_FAILS.with(|fails| fails.set(true));
-    assert_eq!(switched(&h, &id, &version, true), Switched::Applied(None));
-    assert_eq!(told(), before + 1, "the failed read is told");
-    let (_, version, _) = read_rule(&h, "Write the changelog.");
-    left(switched(&h, &id, &version, false));
-    assert_eq!(told(), before + 1, "a read that succeeds tells nothing");
+    if case == "closed" {
+        assert!(
+            write!(std::io::stderr(), "a write no one reads").is_err(),
+            "a stderr shut for writing takes no write"
+        );
+    }
+    FRESH_FAILS.with(|fails| fails.set(case != "ok"));
+    print!("{RECEIPT_FROM}");
+    let _ = write!(std::io::stderr(), "{RECEIPT_FROM}");
+    let answer = switched(&h, &id, &version, true);
+    print!("{RECEIPT_TO}");
+    let _ = write!(std::io::stderr(), "{RECEIPT_TO}");
+    println!("ANSWER {answer:?}");
+}
+
+/// A stderr every write to fails from the start. On Unix it is a socket shut for writing, which no
+/// process that holds it can write to. A pipe's reader could be held by another test's child that
+/// inherited it before close-on-exec was set, which macOS sets after the pipe is made (Codex on
+/// #1141). On Windows it is a pipe whose reader is dropped, which no child inherits. A read-only
+/// file would not do: std's stderr turns the EBADF it gets into success on Unix.
+fn unwritable() -> std::process::Stdio {
+    #[cfg(unix)]
+    {
+        let (stream, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        std::os::fd::OwnedFd::from(stream).into()
+    }
+    #[cfg(windows)]
+    {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        writer.into()
+    }
 }
 
 /// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection

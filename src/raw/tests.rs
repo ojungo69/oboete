@@ -4463,11 +4463,16 @@ fn the_sessions_already_excluded_are_those_at_the_fence() {
         .unwrap();
     abroad(&raw, "late", "github.com/x/private", 2);
     let repos = vec!["github.com/x/private".to_owned()];
+    // #1131 item 24: the queries it runs, counted, not its calls.
+    let queries = || BASELINE_QUERIES.with(|n| n.get());
+    let before = queries();
     let got = raw.excluded_through(&repos, fence.rows).unwrap();
+    assert_eq!(queries(), before + 1, "one read of records_repo");
     let mut got: Vec<String> = got.into_iter().collect();
     got.sort();
     assert_eq!(got, ["claude\0abroad", "claude\0before"]);
     assert!(raw.excluded_through(&[], fence.rows).unwrap().is_empty());
+    assert_eq!(queries(), before + 1, "none for no repository");
 }
 
 /// #1083's R2b (#1132's review): a rule's write that reads the exclusions is refused inside its
