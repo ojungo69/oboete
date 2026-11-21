@@ -4355,48 +4355,48 @@ fn event_in_repo(session: &str, repo: &str) -> Event {
     }
 }
 
-/// #1083's R2b (#1132's review): who was already excluded when a write read is every session with
-/// an event in an excluded repository, but this device's records after the write's fence: another
-/// device's event counts whatever its seq, and nothing is read while no repository is excluded.
+/// Another device's event of `session` in `repo` at `seq`, as a restore or a sync holds one.
+fn abroad(raw: &Raw, session: &str, repo: &str, seq: i64) {
+    raw.conn
+        .execute(
+            "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, source, body)
+             VALUES('other-device', ?1, 'event', 0, 'prompt', 'claude', ?2, ?3, 'hook', '{}')",
+            params![seq, session, repo],
+        )
+        .unwrap();
+}
+
+/// #1083's R2b (#1132's review; #1131 item 21): who was already excluded when a write read is every
+/// session with an event in an excluded repository among the records there at the write's fence,
+/// whatever their device; a record inserted after the fence, this device's or another's, is not,
+/// and nothing is read while no repository is excluded.
 #[test]
-fn the_sessions_already_excluded_leave_out_only_this_devices_records_after_the_fence() {
+fn the_sessions_already_excluded_are_those_at_the_fence() {
     let home = tempfile::tempdir().unwrap();
     let mut raw = open(home.path()).unwrap();
     raw.append(&event_in_repo("before", "github.com/x/private"))
         .unwrap();
     raw.append(&event_in_repo("elsewhere", "github.com/x/open"))
         .unwrap();
+    abroad(&raw, "abroad", "github.com/x/private", 1);
     let fence = raw.rule_fence().unwrap();
     raw.append(&event_in_repo("after", "github.com/x/private"))
         .unwrap();
-    raw.conn
-        .execute(
-            "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, source, body)
-             VALUES('other-device', ?1, 'event', 0, 'prompt', 'claude', 'abroad',
-                    'github.com/x/private', 'hook', '{}')",
-            [fence.records + 100],
-        )
-        .unwrap();
-    let device = raw.device().to_owned();
+    abroad(&raw, "late", "github.com/x/private", 2);
     let repos = vec!["github.com/x/private".to_owned()];
-    let got = raw
-        .excluded_through(&repos, &device, fence.records)
-        .unwrap();
+    let got = raw.excluded_through(&repos, fence.rows).unwrap();
     let mut got: Vec<String> = got.into_iter().collect();
     got.sort();
     assert_eq!(got, ["claude\0abroad", "claude\0before"]);
-    assert!(
-        raw.excluded_through(&[], &device, fence.records)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(raw.excluded_through(&[], fence.rows).unwrap().is_empty());
 }
 
 /// #1083's R2b (#1132's review): a rule's write that reads the exclusions is refused inside its
 /// append when a session not already excluded records its first event in an excluded repository
 /// since the fence, or under a label the read's test reads as never recorded (#1131 item 10); a
 /// session already excluded recording again, an event elsewhere, and 64 records since the fence
-/// leave it its append; 65 refuse it; with no repository excluded nothing is read.
+/// leave it its append; 65 refuse it, another device's among them, as does another device's first
+/// event (#1131 item 21); with no repository excluded nothing is read.
 #[test]
 fn a_rules_write_is_refused_by_a_sessions_first_event_in_an_excluded_repository() {
     let private = "github.com/x/private";
@@ -4456,17 +4456,42 @@ fn a_rules_write_is_refused_by_a_sessions_first_event_in_an_excluded_repository(
             }),
             true,
         ),
+        // #1131 item 21: every device's records since the fence, by rowid.
+        (
+            "another device's first event",
+            Box::new(move |raw| abroad(raw, "newcomer", private, 1)),
+            true,
+        ),
+        (
+            "64 records of two devices",
+            Box::new(move |raw| {
+                (0..32).for_each(|_| {
+                    raw.append(&event_in_repo("third", "github.com/x/open"))
+                        .unwrap();
+                });
+                (1..=32).for_each(|seq| abroad(raw, "third", "github.com/x/open", seq));
+            }),
+            false,
+        ),
+        (
+            "65 records of two devices",
+            Box::new(move |raw| {
+                (0..32).for_each(|_| {
+                    raw.append(&event_in_repo("third", "github.com/x/open"))
+                        .unwrap();
+                });
+                (1..=33).for_each(|seq| abroad(raw, "third", "github.com/x/open", seq));
+            }),
+            true,
+        ),
     ];
     for (case, then, refused) in cases {
         let home = tempfile::tempdir().unwrap();
         let mut raw = open(home.path()).unwrap();
         raw.append(&event_in_repo("before", private)).unwrap();
         let fence = raw.rule_fence().unwrap();
-        let device = raw.device().to_owned();
         let repos = vec![private.to_owned()];
-        let excluded = raw
-            .excluded_through(&repos, &device, fence.records)
-            .unwrap();
+        let excluded = raw.excluded_through(&repos, fence.rows).unwrap();
         let label = LabelTest {
             never: std::collections::BTreeSet::from([format!("{private}-aaa")]),
             now: std::collections::BTreeSet::new(),

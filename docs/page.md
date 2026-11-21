@@ -349,9 +349,12 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   not refused for that session again, unless the exclusion hid the suggestion, when it answers not
   found or stale; the 64-record limit, another session's first event and the fence's other checks
   still apply to it. A session excluded already when the write read was the read's to judge: its
-  next event refuses nothing. While the list holds a repository, this device's records since the check are read
-  inside the write, at most 64, more refusing too, each label read as the write's read reads one
-  never recorded. Its answer's version is the one a read of My Rules after the write gives the row
+  next event refuses nothing. The window starts at the write's fence, which it reads before My
+  Rules, and is checked while the list holds a repository: a session excluded between the fence and
+  the read may hide the suggestion from that read already, and one still shown is checked in the
+  window. Every device's records since the fence are read inside the write, at most 64: a 65th
+  refuses it, whatever its device or repository, and each label is read as the write's read reads
+  one never recorded (#1131 items 20 and 21). Its answer's version is the one a read of My Rules after the write gives the row
   by its reference, only while the row is the one the write left (an approval's preference derived
   by its own op with no correction deciding it) and nothing not applied yet would refuse the write
   that follows as pending (the approval's undo, the dismissal's or the undo's own check, on the row
