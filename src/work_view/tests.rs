@@ -2266,7 +2266,7 @@ fn ruled() -> (Store, i64, tempfile::TempDir, String, String) {
     let home = h.home.path().to_owned();
     let act = |body: Value| {
         let body = serde_json::to_vec(&body).unwrap();
-        crate::settings::claims::rule(&home, &std::sync::Mutex::new(()), &body).unwrap();
+        crate::settings::claims::rule(&home, &std::sync::Mutex::new(()), &|| true, &body).unwrap();
     };
     act(json!({"suggestion": "s2", "action": "approve", "scope": "global"}));
     act(json!({"suggestion": "s3", "action": "reject"}));
@@ -2370,7 +2370,7 @@ fn a_home_of_a_rejected_suggestion_alone_sends_no_rule() {
     h.run();
     let body = serde_json::to_vec(&json!({"suggestion": "s1", "action": "reject"})).unwrap();
     let saving = std::sync::Mutex::new(());
-    crate::settings::claims::rule(h.home.path(), &saving, &body).unwrap();
+    crate::settings::claims::rule(h.home.path(), &saving, &|| true, &body).unwrap();
     h.run();
     let (work, goals) = answers(&h, now);
     let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
@@ -2538,9 +2538,13 @@ fn a_home_of_a_removed_approval_alone_sends_no_rule() {
     h.run();
     let body = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
     let saving = std::sync::Mutex::new(());
-    let saved =
-        crate::settings::claims::rule(h.home.path(), &saving, &serde_json::to_vec(&body).unwrap())
-            .unwrap();
+    let saved = crate::settings::claims::rule(
+        h.home.path(),
+        &saving,
+        &|| true,
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap();
     h.run();
     let uid = saved["uid"].as_str().unwrap().to_owned();
     crate::claims::correct_recorded(h.home.path(), &uid, Some("retracted"), None).unwrap();

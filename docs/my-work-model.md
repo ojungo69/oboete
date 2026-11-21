@@ -1670,17 +1670,34 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   `/api/preferences`' confirmation, spec 3.3) or, slice 8b, `repo` with its repository; reject;
   undo. An approve records the directive and its preference as `pref add` does (its caps and
   refusals), and the `rule` op naming the preference's uid, in one transaction
-  (`claims::approve_recorded`, #1083's R2b): all of them or none. The preference's uid derives
+  (`claims::approve_append`, #1083's R2b): all of them or none. The preference's uid derives
   from the directive's seq, so after a restore to a point before an approval whose preference was
   forgotten, an approval passes over the seq whose uid that forget names, which stays a gap
   (#1131 item 8; docs/backup-points.md B6). It tries at most 8 seqs: when the forgotten uids of all
   of them collide, the approval is refused and records nothing, as before, until another record
   moves the device's next seq. A retry in the same viewer finds
   the decision, applied or not yet, and is refused, so it makes no second preference; what the page
-  shows and what is not applied yet are read in one read of knowledge.db for that. Two viewers of
-  one home approving the same suggestion at once can each record one (#1131). An undo of an
-  approve retracts that preference (status `retracted`) and writes the undo op in one append
-  (`claims::undo_approval_recorded`); one forgotten since (raw.db's proof) has nothing left to
+  shows and what is not applied yet are read in one read of knowledge.db for that. Each action is
+  read and written as the work view writes (#1131 items 3, 4 and 7):
+  - on one raw.db handle, whose shared hold on raw.lock keeps a restore from swapping the store it
+    writes to;
+  - under config.lock, so the redaction rules it gates with stay those in force, and its token is
+    asked again once the lock is held (401 when it was replaced meanwhile);
+  - under the dispatch hold, so no purge rewrites ops in place between its read and its write;
+  - against the rule fence taken before its read: a decision of the suggestion, an exclusion, a
+    forget, a tombstone or a session's first event in an excluded repository since then refuses it
+    with nothing written (409 `rule_moved`; the page reads again). Two viewers of one home approving the
+    same suggestion at once record one approval; the other is refused.
+
+  Each lock waits up to 10 seconds, as the work view's do; one that does not come answers 503
+  `rule_unavailable`. So an action is refused while a purge or a rescan holds the dispatch lock
+  longer than that, and while a transcript import, a rebuild or a restore holds config.lock. The answers are otherwise as before, in the same order: a home with
+  no store is 404 before any lock, and the settings are read after the read's refusals (an approval
+  and an approval's undo answer a failed read 503 `claim_unavailable`, the rest 503
+  `rule_unavailable`).
+
+  An undo of an approve retracts that preference (status `retracted`) and writes the undo op in
+  one append (`claims::undo_append`); one forgotten since (raw.db's proof) has nothing left to
   retract, and the undo op alone is written, while one not in knowledge.db for another reason (its
   approval not applied yet) is refused as pending (409 `rule_pending`) until it is. The forgotten case
   needs the preference's uid forget: a forget of the directive's record takes the preference out of
@@ -1688,7 +1705,8 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   between the undo is refused as pending too. One whose directive a restore lost for good is undone
   on the main page (#1131 item 9): raw.db holds no record at the directive's seq, below the
   device's top, and the approval's batch holds its preference. The retraction is anchored where
-  the directive stood, and the write refuses if the suggestion was decided again since the read.
+  the directive stood, and the write refuses if the suggestion was decided again since the read,
+  or the rule fence moved.
   The claims consumer keeps the retraction though it derived no preference, so a later restore
   that brings the directive back derives the preference retracted. The work view lists no such
   approval. The suggestion

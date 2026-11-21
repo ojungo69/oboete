@@ -1827,7 +1827,7 @@ impl Viewer {
             ("POST", "/api/my-work/suggestion") => {
                 (MAX_BODY, |v, b, given| v.my_work_suggestion(b, given))
             }
-            ("POST", "/api/my-rules") => (MAX_BODY, |v, b, _| v.my_rules(b)),
+            ("POST", "/api/my-rules") => (MAX_BODY, |v, b, given| v.my_rules(b, given)),
             ("POST", "/api/my-focus") => (MAX_BODY, |v, b, _| v.my_focus(b)),
             ("POST", "/api/maintenance/preview") => (MAX_BODY, |v, b, _| v.maintenance_preview(b)),
             ("POST", "/api/setup/preview") => (MAX_BODY, |v, b, _| v.agent_preview(b)),
@@ -2392,13 +2392,14 @@ impl Viewer {
         ))
     }
 
-    /// V3, R3: an approve, reject or undo of a rule suggestion.
-    fn my_rules(&self, body: &[u8]) -> Response {
-        saved(crate::settings::claims::rule(
-            &self.home,
-            &self.saving,
-            body,
-        ))
+    /// V3, R3: an approve, reject or undo of a rule suggestion, only while the token its request
+    /// brought is the page's: asked again under config.lock (#1131 items 3, 4 and 7).
+    fn my_rules(&self, body: &[u8], given: &str) -> Response {
+        let authorized = || self.token_ok(Some(given));
+        match crate::settings::claims::rule(&self.home, &self.saving, &authorized, body) {
+            Err(r) if r.status == 401 => Response::text(401, "missing or wrong token"),
+            answer => saved(answer),
+        }
     }
 
     /// F6: the owner's action on My Focus.
