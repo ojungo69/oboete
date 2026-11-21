@@ -3569,7 +3569,7 @@ fn a_decision_refused_as_pending_reads_no_exclusion_baseline() {
     (crate::raw::open(h.home.path()).unwrap())
         .append_ops(&[(OpKind::MyWork, op)])
         .unwrap();
-    let reads = || crate::raw::BASELINE_READS.with(|n| n.get());
+    let reads = || crate::raw::BASELINE_QUERIES.with(|n| n.get());
     let (before, decisions) = (reads(), decisions_of(&h, "s1"));
     let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Behind);
@@ -3577,20 +3577,56 @@ fn a_decision_refused_as_pending_reads_no_exclusion_baseline() {
     assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
 }
 
-/// #1131 item 22: a receipt whose read after the write fails answers saved with no version and is
-/// told on the viewer's stderr, a fixed line; a receipt whose read succeeds tells nothing.
+/// #1131 items 22 and 23: a receipt whose read after the write fails answers saved with no
+/// version, and writes `RECEIPT_READ_FAILED` and a newline on the process's stderr, read here from
+/// a child run of this test; a read that succeeds writes nothing there, and a stderr that takes no
+/// write leaves the answer as it is.
 #[test]
-fn a_receipts_failed_read_is_told() {
-    let (h, _now, _place, _repo, _off) = ruled();
-    let (id, version, _) = read_rule(&h, "Write the changelog.");
-    let told = || TOLD.with(|n| n.get());
-    let before = told();
-    FRESH_FAILS.with(|fails| fails.set(true));
-    assert_eq!(switched(&h, &id, &version, true), Switched::Applied(None));
-    assert_eq!(told(), before + 1, "the failed read is told");
-    let (_, version, _) = read_rule(&h, "Write the changelog.");
-    left(switched(&h, &id, &version, false));
-    assert_eq!(told(), before + 1, "a read that succeeds tells nothing");
+fn a_receipts_failed_read_is_told_on_stderr() {
+    const NAME: &str = "work_view::tests::a_receipts_failed_read_is_told_on_stderr";
+    // This test's own: a child runs the case it names (`fail`, `ok`, `closed`).
+    const CHILD: &str = "OBOETE_RECEIPT_READ_CHILD";
+    if let Ok(case) = std::env::var(CHILD) {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Write the changelog.");
+        if case == "closed" {
+            use std::io::Write;
+            assert!(
+                writeln!(std::io::stderr(), "a write no one reads").is_err(),
+                "a stderr whose reader is gone takes no write"
+            );
+        }
+        FRESH_FAILS.with(|fails| fails.set(case != "ok"));
+        println!("ANSWER {:?}", switched(&h, &id, &version, true));
+        return;
+    }
+    let run = |case: &str, stderr: std::process::Stdio| {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
+            .output()
+            .unwrap();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert!(out.status.success(), "{case}: {stdout}\n{stderr}");
+        (stdout, stderr)
+    };
+    let line = format!("{RECEIPT_READ_FAILED}\n");
+    let (stdout, stderr) = run("fail", std::process::Stdio::piped());
+    assert!(stdout.contains("ANSWER Applied(None)"), "{stdout}");
+    assert!(!stdout.contains(RECEIPT_READ_FAILED), "{stdout}");
+    assert_eq!(stderr.matches(&line).count(), 1, "{stderr}");
+    let (stdout, stderr) = run("ok", std::process::Stdio::piped());
+    assert!(stdout.contains("ANSWER Applied(Some("), "{stdout}");
+    assert!(!stderr.contains(RECEIPT_READ_FAILED), "{stderr}");
+    // No reader from before the child starts: each write to its stderr fails (EPIPE, or Windows'
+    // ERROR_NO_DATA), unlike a read-only file, whose EBADF std's stderr turns into success.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let (stdout, _) = run("closed", writer.into());
+    assert!(stdout.contains("ANSWER Applied(None)"), "{stdout}");
 }
 
 /// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection
