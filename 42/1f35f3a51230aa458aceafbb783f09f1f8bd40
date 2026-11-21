@@ -1,0 +1,43 @@
+docs/my-work-model.md
+  s_52c3955e48bff4::t_077e021362b134 1673,1680-1700,1708-1709
+src/my_work_rules.rs
+  s_d52c2d995f51c6::t_b88c066b167720 459-463
+src/my_work_rules/tests.rs
+  s_52c3955e48bff4::t_0c1903e9150796 68-73,830-836,850,861-1156
+src/view.rs
+  s_52c3955e48bff4::t_1bef1f9a0923a7 1830,2395-2402
+src/view/tests.rs
+  s_52c3955e48bff4::t_3bcbb3591247c5 10618-10690
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_5e16e79bedefee 2269,2373,2541-2547
+src/claims.rs
+  s_52c3955e48bff4::t_f2b32aa089c482 402,851,862-886,1147-1161,1163-1167,1180-1181,1183
+src/raw.rs
+  s_52c3955e48bff4::t_0e03836ebbee4b 5240-5243,5259,5262-5264,5268-5270
+src/settings/claims.rs
+  s_52c3955e48bff4::t_3d549509b69eeb 143-155,180-195,197-198,208,210,213,215-217,219-271,274-278,281-351,361-364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "421f35f3a51230aa458aceafbb783f09f1f8bd40",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_d52c2d995f51c6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7db69c90-1ee6-4a9e-a4f5-24819169f3ce",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
