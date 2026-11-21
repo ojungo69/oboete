@@ -1515,6 +1515,85 @@ fn an_exclusion_ops_folder_and_level_are_names() {
     assert!(masked_op_text(OpKind::Exclusion, &other, &rules).is_some());
 }
 
+/// #1131 item 1: a rule decision's `action` and the `claim` it names stay as they are through an
+/// op's mask, where they are exactly what a decision writes (one of its three actions, a uid); the
+/// rest of its fields is masked as before, and so is a value of another shape, a key of another
+/// name and another My Work op's action. The keys keep their order.
+#[test]
+fn a_rule_decisions_action_and_claim_stay_through_an_ops_mask() {
+    let home = tempfile::tempdir().unwrap();
+    let uid = "ab".repeat(32);
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"x\", regex = 'approve|reject|undo|[0-9a-fA-F]{64}' }]\n",
+    )
+    .unwrap();
+    let rules = crate::redact::Rules::load(home.path()).unwrap();
+    let rule = crate::my_work_rules::RULE;
+    let decision = |fields: serde_json::Value| {
+        serde_json::json!({"job": rule, "about": "s1", "entry": "", "ts": 1, "fields": fields})
+            .to_string()
+    };
+    // Each of the three, as a decision writes it: an approval names its preference.
+    for fields in [
+        serde_json::json!({"action": "approve", "claim": uid}),
+        serde_json::json!({"action": "reject"}),
+        serde_json::json!({"action": "undo"}),
+    ] {
+        let body = decision(fields.clone());
+        assert_eq!(
+            masked_op_text(OpKind::MyWork, &body, &rules),
+            None,
+            "{fields}"
+        );
+    }
+    // A note beside them is masked, and they keep their places.
+    let body =
+        decision(serde_json::json!({"action": "approve", "note": "approve it", "claim": uid}));
+    let now: serde_json::Value =
+        serde_json::from_str(&masked_op_text(OpKind::MyWork, &body, &rules).unwrap()).unwrap();
+    let keys: Vec<&str> = now["fields"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["action", "note", "claim"]);
+    assert_eq!(
+        (
+            &now["fields"]["action"],
+            &now["fields"]["claim"],
+            &now["fields"]["note"]
+        ),
+        (
+            &serde_json::json!("approve"),
+            &serde_json::json!(uid),
+            &serde_json::json!("******* it")
+        )
+    );
+    // A value of another shape, another key, and a claim of a decision that names none, are text.
+    for fields in [
+        serde_json::json!({"action": "reject", "claim": uid}),
+        serde_json::json!({"action": "undo", "claim": uid}),
+        serde_json::json!({"action": "approve", "claim": uid.to_uppercase()}),
+        // Alone: with a claim, the claim's own mask would change the body whatever the action.
+        serde_json::json!({"action": "approved"}),
+        serde_json::json!({"action": "approve", "claim": format!("{uid}0")}),
+        serde_json::json!({"action": "approve", "claimed": uid}),
+    ] {
+        let body = decision(fields.clone());
+        assert!(
+            masked_op_text(OpKind::MyWork, &body, &rules).is_some(),
+            "{fields}"
+        );
+    }
+    // Another My Work op's action is text.
+    let other = serde_json::json!({"job": "other", "about": "s1", "entry": "", "ts": 1,
+        "fields": {"action": "approve"}})
+    .to_string();
+    assert!(masked_op_text(OpKind::MyWork, &other, &rules).is_some());
+}
+
 /// #751: My Focus's ids are kept in a My Focus op's own fields only, of jobs `focus` and
 /// `place`; the same keys of another op, or nested deeper, are text.
 #[test]

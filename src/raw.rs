@@ -10405,7 +10405,10 @@ const OP_NAMES: &[&str] = &[
 /// one `*` for each character a finding touches, but the values of `OP_NAMES`; none when they find
 /// nothing or the body does not parse. A forget's op (a uid and a job), a migration's (a
 /// checkpoint and hashes) and a hide's (what it names, by oboete's word and ids) hold no text:
-/// a rule for `card` would make a hide op name nothing (Codex on #658). Unlike a record's masks, which keep its bytes for the
+/// a rule for `card` would make a hide op name nothing (Codex on #658). A rule decision's `action`
+/// and the `claim` it names are kept where they are exactly what a decision writes, one of its three
+/// actions and an approval's uid, which the my_work consumer and an approval's undo read by their
+/// values (#1131 item 1). Unlike a record's masks, which keep its bytes for the
 /// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
 /// character cap (Codex on #487).
 pub(crate) fn masked_op_text(
@@ -10467,8 +10470,47 @@ pub(crate) fn masked_op_text(
             job,
             Some(crate::my_work_focus::NAME | crate::my_work_place::NAME)
         );
+    let rule = kind == OpKind::MyWork && job == Some(crate::my_work_rules::RULE);
     let mut fields = (v.get_mut("fields").filter(|_| focus)).map(std::mem::take);
+    // A rule decision's words, taken out for the walk and put back after it: `mem::take` leaves
+    // each key where it was (`preserve_order`).
+    let mut words = Vec::new();
+    if rule
+        && let Some(f) = v
+            .get_mut("fields")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        // An approval is the one decision that names a preference (Sourcery on #1136).
+        let approval = f.get("action").and_then(serde_json::Value::as_str) == Some("approve");
+        for key in ["action", "claim"] {
+            let Some(slot) = f.get_mut(key) else {
+                continue;
+            };
+            let exact = slot.as_str().is_some_and(|s| match key {
+                "action" => matches!(s, "approve" | "reject" | "undo"),
+                // A uid as `claims::uid` writes it: 64 lower-case hex digits (Codex on #1136).
+                _ => {
+                    approval
+                        && s.len() == 64
+                        && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                }
+            });
+            if exact {
+                words.push((key, std::mem::take(slot)));
+            }
+        }
+    }
     let mut changed = walk(&mut v, rules, true, false);
+    if let Some(f) = v
+        .get_mut("fields")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (key, word) in words {
+            if let Some(slot) = f.get_mut(key) {
+                *slot = word;
+            }
+        }
+    }
     if let Some(fields) = fields.as_mut() {
         changed |= walk(fields, rules, false, true);
     }

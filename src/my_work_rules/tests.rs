@@ -563,6 +563,49 @@ fn an_approved_rule_is_a_decided_preference_in_every_agents_session_start() {
     assert_eq!(rule["quotes"][0]["text"], "write the tests first");
 }
 
+/// #1131 items 1 and 6: an approved preference through a rescan, a purge and a rebuild. A rule
+/// that masks part of the directive, beside one that finds the decision's action and the uid it
+/// names, leaves the decision naming the preference the purge writes again from the masked text,
+/// with its uid: My Rules lists it as approved, and its undo applies.
+#[test]
+fn an_approval_keeps_its_decision_through_a_rescan_a_purge_and_a_rebuild() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+        .unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let uid = got["uid"].as_str().unwrap().to_owned();
+    let rules = format!(
+        "[redaction]\nextra_rules = [{{ id = \"tests\", regex = 'tests' }}, \
+         {{ id = \"words\", regex = 'approve|{uid}' }}]\n"
+    );
+    std::fs::write(h.s.home.path().join("config.toml"), rules).unwrap();
+    crate::worker::run_once(h.s.home.path()).unwrap();
+    let mut purged = None;
+    let h = h.closed(|home| {
+        purged = crate::forget::purge(home).unwrap();
+        crate::worker::rebuild(home).unwrap();
+    });
+    assert_eq!(purged.map(|p| p.preferences), Some(1), "written again");
+    h.s.run();
+    let page = h.page();
+    let rule = &page["yours"][0]["rules"][0];
+    assert_eq!(
+        (&rule["text"], &rule["suggestion"], &rule["uid"]),
+        (
+            &json!("Write the ***** before the code."),
+            &json!("s1"),
+            &json!(uid)
+        )
+    );
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "undo"}))
+        .unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    assert_eq!(h.waiting(), ["s1"]);
+}
+
 /// The tops of `h`'s raw.db for its device: its last record's seq and its last op's.
 fn tops(h: &Home) -> (i64, i64) {
     let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();

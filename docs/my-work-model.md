@@ -1681,9 +1681,11 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   needs the preference's uid forget: a forget of the directive's record takes the preference out of
   knowledge.db first, and its purge writes that uid's forget later (`purge_record_claims`), so in
   between the undo is refused as pending too. The suggestion
-  waits again, and a second approve makes a new preference. A redaction rule of the owner's that
-  finds a decision's `action` or `claim` masks it on a rescan, and that decision then names no
-  preference (#1131). A decided suggestion is refused another
+  waits again, and a second approve makes a new preference. A rescan keeps a decision's `action`
+  and `claim` where they are exactly what a decision writes, one of its three actions and an
+  approval's uid,
+  whatever a redaction rule finds in them, and masks the rest of its fields as before (#1131 item
+  1); a decision a rescan masked before this keeps that mask. A decided suggestion is refused another
   approve or reject (409), an undecided one an undo. A suggestion's decisions are taken newest op
   first, whatever their times say (#1131 item 2): the one appended last decides. The work-view's
   route (`POST /api/work-view/rules`) takes approve, dismiss and restore-suggestion on the same
