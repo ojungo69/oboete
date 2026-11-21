@@ -451,14 +451,15 @@ pub(crate) fn decide<'a>(
     let Some(id) = row.of["suggestion"].as_str() else {
         return Ok(Switched::NotFound);
     };
-    let kept = row.kept;
-    let mut sources = crate::raw::Sources {
-        repos: raw.exclusions_now()?,
-        ..Default::default()
+    // Every suggestion My Rules lists has the op that kept it; one without has no sources to check.
+    let Some(learned) = row.kept else {
+        return Ok(Switched::NotFound);
     };
-    if let Some(kept) = kept {
-        sources.sessions = crate::my_work_ops::sources(&raw, &tx, &device, kept)?;
-    }
+    let kept = Some(learned);
+    let sources = crate::raw::Sources {
+        repos: raw.exclusions_now()?,
+        sessions: crate::my_work_ops::sources(&raw, &tx, &device, learned)?,
+    };
     let subject = crate::raw::Subject {
         uid: row.uid.as_deref(),
         suggestion: Some(id),
