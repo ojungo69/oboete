@@ -4120,9 +4120,10 @@ fn a_rule_decision_of_the_claim_or_its_suggestion_refuses_a_rules_write() {
 
 /// #1083 (R2a): a rule's write is appended only while nothing it reads of its claim moved since its
 /// check (`rule_fence`): curation's ops in between, a correction of another claim among them,
-/// leave it be; an op naming its claim (a correction of it, a claim superseding it), an exclusion,
-/// a tombstone, a forget's denial, a row retention expired and another raw.db file refuse it, and
-/// nothing is written.
+/// leave it be, as do ops of other kinds that quote its uid (#1131 item 12); an op naming its claim
+/// (a correction of it, a claim superseding it), an exclusion, a forget op of any uid, a tombstone,
+/// a forget's denial, a row retention expired and another raw.db file refuse it, and nothing is
+/// written.
 #[test]
 fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
     let home = tempfile::tempdir().unwrap();
@@ -4150,6 +4151,25 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
     // #1128 item 1: a claim that only quotes the uid names no claim of it.
     let quoting = serde_json::json!({"text": format!("the rule {uid} again")});
     raw.append_ops(&[(OpKind::Claim, quoting)]).unwrap();
+    // #1131 item 12: nor does an op of another kind that quotes it.
+    let quote = format!("the rule {uid} again");
+    let others = [
+        (
+            OpKind::WorkState,
+            serde_json::json!({"repo": "r", "list": "l",
+            "fields": {"note": quote}, "clock": 1}),
+        ),
+        (OpKind::Turn, serde_json::json!({"summary": quote})),
+        (
+            OpKind::Window,
+            serde_json::json!({"outcome": "curated", "summary": quote}),
+        ),
+        (OpKind::Import, serde_json::json!({"text": quote})),
+    ];
+    for op in others {
+        raw.append_ops(&[op]).unwrap();
+    }
+    let next = written(&raw) + 1;
     assert_eq!(
         raw.append_ops_ruled(
             &write(),
@@ -4161,7 +4181,7 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
             }
         )
         .unwrap(),
-        vec![5]
+        vec![next]
     );
     let device = raw.device().to_owned();
     type Move = Box<dyn Fn(&mut Raw)>;
@@ -4177,6 +4197,11 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         Box::new(|raw| {
             raw.exclude_capture(("repo", "github.com/x/other"), false)
                 .unwrap();
+        }),
+        // A forget of any uid, by the fence's count, now that no other kind is matched by its text.
+        Box::new(|raw| {
+            let op = serde_json::json!({"uid": "c".repeat(64), "job": "claims"});
+            raw.append_ops(&[(OpKind::Forget, op)]).unwrap();
         }),
         Box::new(move |raw| {
             let seq = raw.record_top().unwrap() + 1;

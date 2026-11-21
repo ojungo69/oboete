@@ -725,6 +725,8 @@ pub type Removal = (i64, Option<i64>, Option<i64>);
 
 /// What an op records (milestone 3 D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The kinds of op raw.db holds. A new kind whose body can change a rule's row by naming a claim's
+/// uid needs its own arm in `names_claim`, which matches the others by field (#1131 item 12).
 pub enum OpKind {
     Window,
     Claim,
@@ -10499,8 +10501,10 @@ fn any_op_in(
 /// #1128 item 1: whether op `body` of type `kind` names claim `uid` for a rule's write. By field for
 /// the ops that name claims: a claim op that derives the uid (`claims::op_uid`), as a purge's
 /// preference op does without its body naming it, or supersedes it; a correction of it. Not a claim
-/// that only quotes it. An exclusion always, as it may take any rule's sessions; an op of another
-/// kind by its text, as before.
+/// that only quotes it. An exclusion always, as it may take any rule's sessions. No op of another
+/// kind (#1131 item 12): none changes a rule's row by naming its uid, and a forget moves the fence
+/// by its count (`FENCE_COUNT`); a work-state write or a summary that quotes the uid leaves the
+/// write its append.
 fn names_claim(kind: &str, body: &str, uid: &str) -> bool {
     let named = |found: &dyn Fn(&serde_json::Value) -> bool| {
         serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| found(&v))
@@ -10512,7 +10516,7 @@ fn names_claim(kind: &str, body: &str, uid: &str) -> bool {
         }),
         "correction" => named(&|v| v["uid"] == uid),
         "exclusion" => true,
-        _ => body.contains(uid),
+        _ => false,
     }
 }
 
