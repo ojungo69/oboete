@@ -5157,11 +5157,45 @@ impl Raw {
     pub fn append_event_with_ops(
         &mut self,
         e: &Event,
+        ledger: (&[(String, crate::redact::Finding)], &str),
+        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+    ) -> Result<Option<(i64, Vec<i64>)>> {
+        self.event_with_ops(e, ledger, ops, None)
+    }
+
+    /// `append_event_with_ops` for a rule's write on `subject` (#1083's R2b: the work-view's
+    /// approval), only while the stores stand as `fence` read them for it (`fence_moved`, and the
+    /// same raw.db file), compared inside the write before anything is inserted; else nothing is
+    /// written and the error is `OpsMoved`.
+    pub fn append_event_with_ops_ruled(
+        &mut self,
+        e: &Event,
+        ledger: (&[(String, crate::redact::Finding)], &str),
+        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        fence: &RuleFence,
+        subject: &Subject<'_>,
+    ) -> Result<Option<(i64, Vec<i64>)>> {
+        if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
+            return Err(OpsMoved.into());
+        }
+        self.event_with_ops(e, ledger, ops, Some((fence, subject)))
+    }
+
+    /// `append_event_with_ops`, against `ruled`'s fence for its subject where it is given.
+    fn event_with_ops(
+        &mut self,
+        e: &Event,
         (ledger, ruleset): (&[(String, crate::redact::Finding)], &str),
         ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        ruled: Option<(&RuleFence, &Subject<'_>)>,
     ) -> Result<Option<(i64, Vec<i64>)>> {
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
+        if let Some((fence, subject)) = ruled
+            && fence_moved(&tx, &self.device, fence, subject)?
+        {
+            return Err(OpsMoved.into());
+        }
         let Some(seq) = event_in(&tx, &self.device, e, (ledger, ruleset), None, None)? else {
             return Ok(None);
         };

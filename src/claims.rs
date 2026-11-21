@@ -841,27 +841,7 @@ impl Directive {
         repo: Option<&str>,
     ) -> std::result::Result<Self, OwnerRefusal> {
         let settings = crate::capture::Settings::load(home).map_err(OwnerRefusal::unavailable)?;
-        let c = crate::capture::directive(text, crate::db::now_ms(), &settings, repo);
-        // What the gate stores: the quote reads verbatim there. Checked before either append, so
-        // a preference that cannot be a claim leaves no event behind.
-        let quote = crate::curate::long_text(&c.event).unwrap_or_default();
-        if quote.trim().is_empty() {
-            return Err(OwnerRefusal {
-                code: OwnerRefusalCode::PreferenceEmpty,
-                cause: anyhow::anyhow!(
-                    "nothing is left to record once the <private> parts are removed"
-                ),
-            });
-        }
-        if quote.chars().count() > MAX_BODY_CHARS {
-            return Err(OwnerRefusal {
-                code: OwnerRefusalCode::PreferenceTooLong,
-                cause: anyhow::anyhow!(
-                    "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
-                    quote.chars().count()
-                ),
-            });
-        }
+        let (c, quote) = directive_text(&settings, text, repo)?;
         let raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
         let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
         if let (Some(given), Some(label)) = (repo, &c.event.repo) {
@@ -883,6 +863,38 @@ impl Directive {
             k,
         })
     }
+}
+
+/// What `Directive::checked` checks of `text` alone (#1083's R2b: the work-view's approval checks it
+/// on the handles it holds): the event and its ledger as the gate stores them, and its quote, its
+/// whole text there; refused, before anything is appended, when it cannot be a claim.
+pub(crate) fn directive_text(
+    settings: &crate::capture::Settings,
+    text: &str,
+    repo: Option<&str>,
+) -> std::result::Result<(crate::capture::Captured, String), OwnerRefusal> {
+    let c = crate::capture::directive(text, crate::db::now_ms(), settings, repo);
+    // What the gate stores: the quote reads verbatim there. Checked before either append, so a
+    // preference that cannot be a claim leaves no event behind.
+    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
+    if quote.trim().is_empty() {
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::PreferenceEmpty,
+            cause: anyhow::anyhow!(
+                "nothing is left to record once the <private> parts are removed"
+            ),
+        });
+    }
+    if quote.chars().count() > MAX_BODY_CHARS {
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::PreferenceTooLong,
+            cause: anyhow::anyhow!(
+                "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
+                quote.chars().count()
+            ),
+        });
+    }
+    Ok((c, quote))
 }
 
 /// The preference op of a directive appended at `seq` on `device` whose whole text is `quote`, and
@@ -974,12 +986,20 @@ pub(crate) fn pref_add_recorded(
     Ok(preference_kept(&k, &device, seqs[0], uid))
 }
 
+/// What an approval's append wrote (#1083's R2b), for its receipt: the preference's uid and the seqs
+/// of its preference and its decision.
+pub(crate) struct Approved {
+    pub uid: String,
+    pub preference: i64,
+    pub decision: i64,
+}
+
 /// #1083's R2b: suggestion `id` approved as the owner's preference of `text`, of every repository
 /// or of `repo`. Its directive, its preference and its decision, which names the preference, are
-/// written in one transaction (`Raw::append_event_with_ops`), checked as `pref add` checks a
-/// directive and as `append_ops` checks ops: an approval is recorded whole or not at all. Applied
-/// once the claims consumer kept the preference and the my_work consumer the decision, within one
-/// wait.
+/// written in one transaction (`approve_append`), checked as `pref add` checks a directive and as
+/// `append_ops` checks ops: an approval is recorded whole or not at all. Applied once the claims
+/// consumer kept the preference and the my_work consumer the decision, within one wait
+/// (`approve_receipt`).
 pub(crate) fn approve_recorded(
     home: &std::path::Path,
     id: &str,
@@ -988,31 +1008,53 @@ pub(crate) fn approve_recorded(
 ) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
     let Directive {
         settings,
-        captured: c,
+        captured,
         quote,
         mut raw,
         k,
     } = Directive::checked(home, text, repo)?;
     let device = raw.device().to_owned();
+    let approved = approve_append(&mut raw, &settings, (&captured, &quote), id, None);
+    drop(raw);
+    Ok(approve_receipt(home, &k, &device, id, &approved?))
+}
+
+/// An approval's directive (`c`, whose whole text is `quote`), its preference and its decision of
+/// suggestion `id`, appended in one transaction on `raw` (`Raw::append_event_with_ops`), gated as
+/// `pref add` gates its preference; for the work-view's approval, against `ruled`'s fence for its
+/// subject (`Raw::append_event_with_ops_ruled`), its moving an error that is `OpsMoved`.
+pub(crate) fn approve_append(
+    raw: &mut crate::raw::Raw,
+    settings: &crate::capture::Settings,
+    (c, quote): (&crate::capture::Captured, &str),
+    id: &str,
+    ruled: Option<(&crate::raw::RuleFence, &crate::raw::Subject<'_>)>,
+) -> std::result::Result<Approved, OwnerRefusal> {
+    let device = raw.device().to_owned();
     let in_repo = c.event.repo.is_some();
     // Owner decision 43, as `pref add` gates its preference.
     raw.gates_with(&settings.rules);
     let mut named = None;
-    let written =
-        raw.append_event_with_ops(&c.event, (&c.ledger, settings.rules.version()), |seq| {
-            let (uid, op) = preference_at(&device, seq, &quote, in_repo)?;
-            let decision = json!({"action": "approve", "claim": uid});
-            let mut ops = vec![(crate::raw::OpKind::Claim, serde_json::to_value(op)?)];
-            ops.extend(crate::my_work_ops::bodies(
-                crate::my_work_rules::RULE,
-                vec![(id.to_owned(), decision)],
-            )?);
-            named = Some(uid);
-            Ok(ops)
-        });
-    drop(raw);
-    let seqs = match written {
-        Ok(Some((_, seqs))) => seqs,
+    let ops = |seq: i64| -> anyhow::Result<Vec<(crate::raw::OpKind, serde_json::Value)>> {
+        let (uid, op) = preference_at(&device, seq, quote, in_repo)?;
+        let decision = json!({"action": "approve", "claim": uid});
+        let mut ops = vec![(crate::raw::OpKind::Claim, serde_json::to_value(op)?)];
+        ops.extend(crate::my_work_ops::bodies(
+            crate::my_work_rules::RULE,
+            vec![(id.to_owned(), decision)],
+        )?);
+        named = Some(uid);
+        Ok(ops)
+    };
+    let version = settings.rules.version();
+    let written = match ruled {
+        None => raw.append_event_with_ops(&c.event, (&c.ledger, version), ops),
+        Some((fence, subject)) => {
+            raw.append_event_with_ops_ruled(&c.event, (&c.ledger, version), ops, fence, subject)
+        }
+    };
+    let (_directive, seqs) = match written {
+        Ok(Some(written)) => written,
         Ok(None) => {
             return Err(OwnerRefusal::unavailable(anyhow::anyhow!(
                 "its session is forgotten: not recorded"
@@ -1025,53 +1067,71 @@ pub(crate) fn approve_recorded(
             "an approval records its preference and its decision"
         )));
     };
+    Ok(Approved {
+        uid,
+        preference: *preference,
+        decision: *decision,
+    })
+}
+
+/// An approval's receipt (#1083's R2b): applied once the claims consumer kept its preference and
+/// the my_work consumer its decision of suggestion `id`, both waited for within one deadline and
+/// read in one read of knowledge.db; else pending, and why.
+pub(crate) fn approve_receipt(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    id: &str,
+    a: &Approved,
+) -> OwnerReceipt {
+    let uid = a.uid.clone();
     let deadline = deadline();
     let waited = applied_by(
         home,
-        &k,
-        &device,
-        &[*preference],
+        k,
+        device,
+        &[a.preference],
         ("preference", "claims"),
         deadline,
     )
     .and_then(|()| {
         applied_by(
             home,
-            &k,
-            &device,
-            &[*decision],
+            k,
+            device,
+            &[a.decision],
             ("decision", "my_work"),
             deadline,
         )
     });
     if let Err(cause) = waited {
-        return Ok(OwnerReceipt::Pending {
+        return OwnerReceipt::Pending {
             uid,
             reason: PendingReason::Application,
             cause,
-        });
+        };
     }
     // Both kept, read in one read of knowledge.db.
     #[cfg(test)]
     if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let decided = json!({"action": "approve", "claim": uid});
+    let decided = json!({"action": "approve", "claim": a.uid});
     let kept = k
         .unchecked_transaction()
         .map_err(anyhow::Error::from)
         .and_then(|read| {
             crate::my_work_ops::kept(
                 &read,
-                &device,
-                *decision,
+                device,
+                a.decision,
                 (crate::my_work_rules::RULE, id),
                 &decided,
             )
             .map(|kept| (read, kept))
         });
-    Ok(match kept {
-        Ok((read, true)) => preference_kept(&read, &device, *preference, uid),
+    match kept {
+        Ok((read, true)) => preference_kept(&read, device, a.preference, uid),
         Ok((_, false)) => OwnerReceipt::Pending {
             uid,
             reason: PendingReason::NotKept,
@@ -1085,7 +1145,7 @@ pub(crate) fn approve_recorded(
             reason: PendingReason::Application,
             cause,
         },
-    })
+    }
 }
 
 /// What an undo of an approval did (#1083's R2b).

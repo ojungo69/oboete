@@ -2740,6 +2740,7 @@ impl Viewer {
         let write = match posted.action.as_str() {
             "turn-off" => Write::Switch(true),
             "turn-on" => Write::Switch(false),
+            "approve" => Write::Decide(crate::work_view::Decision::Approve),
             "dismiss" => Write::Decide(crate::work_view::Decision::Dismiss),
             "restore-suggestion" => Write::Decide(crate::work_view::Decision::Restore),
             _ => return unread(),

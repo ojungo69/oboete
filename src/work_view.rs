@@ -382,6 +382,9 @@ pub(crate) fn switch<'a>(
 /// What a suggestion's decision from the pages does (#1083's R2b).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Decision {
+    /// Approve a suggestion that waits, its own statement as the owner's preference of every
+    /// repository (`approve`), as the main page's plain Approve does.
+    Approve,
     /// Reject a suggestion that waits (`dismiss`).
     Dismiss,
     /// Undo a suggestion's rejection (`restore-suggestion`).
@@ -427,9 +430,10 @@ pub(crate) fn decide<'a>(
         Err(refused) => return Ok(refused),
     };
     let (fields, left) = match (what, row.of["rule"].as_str()) {
+        (Decision::Approve, Some("waiting")) => (json!({"action": "approve"}), "approved"),
         (Decision::Dismiss, Some("waiting")) => (json!({"action": "reject"}), "rejected"),
         (Decision::Restore, Some("rejected")) => (json!({"action": "undo"}), "waiting"),
-        (Decision::Dismiss, _) => {
+        (Decision::Approve | Decision::Dismiss, _) => {
             return Ok(Switched::State("This suggestion is decided already."));
         }
         (Decision::Restore, _) => {
@@ -458,6 +462,18 @@ pub(crate) fn decide<'a>(
     if behind(&raw, &tx, &subject)? {
         return Ok(Switched::Behind);
     }
+    // An approval's statement: the suggestion's own, stored, as the main page's approve takes it.
+    let statement = match what {
+        Decision::Approve => {
+            let shown = crate::my_work_rules::shown(&raw, &tx)?;
+            let sg = (shown.suggestions.into_iter()).find(|sg| sg.id == id);
+            let Some(sg) = sg else {
+                return Ok(Switched::NotFound);
+            };
+            Some(sg.statement)
+        }
+        Decision::Dismiss | Decision::Restore => None,
+    };
     drop(tx);
     #[cfg(test)]
     if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
@@ -465,11 +481,25 @@ pub(crate) fn decide<'a>(
     }
     raw.gates_with(&settings.rules);
     let rule = crate::my_work_rules::RULE;
-    let ops = crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])?;
-    let appended = raw.append_ops_ruled(&ops, &fence, &subject);
+    let wrote = match &statement {
+        Some(statement) => {
+            let Ok((c, quote)) = crate::claims::directive_text(&settings, statement, None) else {
+                return Ok(Switched::State(
+                    "This suggestion cannot be approved as it reads.",
+                ));
+            };
+            let ruled = Some((&fence, &subject));
+            (crate::claims::approve_append(&mut raw, &settings, (&c, &quote), id, ruled))
+                .map(Wrote::Approval)
+                .map_err(|refused| refused.cause)
+        }
+        None => crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])
+            .and_then(|ops| raw.append_ops_ruled(&ops, &fence, &subject))
+            .map(Wrote::Decision),
+    };
     drop((read, raw, config, saving));
-    let seqs = match appended {
-        Ok(seqs) => seqs,
+    let wrote = match wrote {
+        Ok(wrote) => wrote,
         Err(e) if e.is::<crate::raw::OpsMoved>() => return Ok(Switched::Behind),
         Err(e) => return Err(e),
     };
@@ -477,25 +507,55 @@ pub(crate) fn decide<'a>(
     if let Some(hook) = SWITCHED.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    let what = ("decision", "my_work");
-    match crate::claims::applied_by(home, &k, &device, &seqs, what, crate::claims::deadline()) {
-        Err(e) if e.is::<crate::claims::NotYet>() => return Ok(Switched::Pending),
-        Err(e) => return Err(e),
-        Ok(()) => {}
-    }
-    let Some(&seq) = seqs.first() else {
-        return Ok(Switched::Pending);
-    };
-    // Saved: a proof that cannot be read leaves it pending, not an error.
-    if !crate::my_work_ops::kept(&k, &device, seq, (rule, id), &fields).unwrap_or(false) {
-        return Ok(Switched::Pending);
-    }
     let file = row.of["file"].as_str().map(str::to_owned);
-    let expected = match left {
-        "rejected" => rejected_of(id, kept, Some(seq), Some(seq), &file),
-        _ => waiting_of(id, kept, Some(seq), &file),
+    let expected = match wrote {
+        Wrote::Decision(seqs) => {
+            let what = ("decision", "my_work");
+            let deadline = crate::claims::deadline();
+            match crate::claims::applied_by(home, &k, &device, &seqs, what, deadline) {
+                Err(e) if e.is::<crate::claims::NotYet>() => return Ok(Switched::Pending),
+                Err(e) => return Err(e),
+                Ok(()) => {}
+            }
+            let Some(&seq) = seqs.first() else {
+                return Ok(Switched::Pending);
+            };
+            // Saved: a proof that cannot be read leaves it pending, not an error.
+            if !crate::my_work_ops::kept(&k, &device, seq, (rule, id), &fields).unwrap_or(false) {
+                return Ok(Switched::Pending);
+            }
+            match left {
+                "rejected" => rejected_of(id, kept, Some(seq), Some(seq), &file),
+                _ => waiting_of(id, kept, Some(seq), &file),
+            }
+        }
+        Wrote::Approval(a) => {
+            let receipt = crate::claims::approve_receipt(home, &k, &device, id, &a);
+            if !matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }) {
+                return Ok(Switched::Pending);
+            }
+            // What decides the preference, as the approval left it: derived by its own op, and
+            // no correction deciding it; else the pages offer no Undo.
+            let by = crate::claims::decided_by(&k, &a.uid).ok().flatten();
+            let left_so = |by: &Value| {
+                by["derivation"] == json!([device, a.preference])
+                    && by["by"] == json!([null, null, null])
+                    && by["muted"] == false
+            };
+            let Some(by) = by.filter(left_so) else {
+                return Ok(Switched::Applied(None));
+            };
+            approved_of(id, &a.uid, &by, Some(a.decision), Some(a.decision), &file)
+        }
     };
     Ok(Switched::Applied(fresh_version(home, reference, &expected)))
+}
+
+/// What a suggestion's decision appended (#1083's R2b): a decision's op seqs, or an approval's
+/// directive, preference and decision.
+enum Wrote {
+    Decision(Vec<i64>),
+    Approval(crate::claims::Approved),
 }
 
 /// The version of the row by `reference` that a read of My Rules after a write gives (#1083's R2b;

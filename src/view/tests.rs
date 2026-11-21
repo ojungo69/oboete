@@ -11026,7 +11026,8 @@ fn the_work_views_switch_turns_a_rule_off_and_its_undo_on_again() {
     assert_eq!(undone["rules"][0]["status"], "on");
     let version = &rule["ruleVersion"];
     for body in [
-        json!({"action": "approve", "ruleId": rule["ruleId"], "ruleVersion": version}),
+        json!({"action": "edit", "ruleId": rule["ruleId"], "ruleVersion": version}),
+        json!({"action": "add", "ruleId": rule["ruleId"], "ruleVersion": version}),
         json!({"action": "turn-off", "ruleId": rule["ruleId"]}),
         json!({"action": "turn-off", "ruleId": "u:nope", "ruleVersion": version}),
         json!({"action": "turn-off", "ruleId": rule["ruleId"], "ruleVersion": "nope"}),
@@ -11128,4 +11129,22 @@ fn the_work_views_rules_route_dismisses_a_suggestion_and_undoes_it() {
     );
     assert_ne!(back["ruleVersion"], rule["ruleVersion"]);
     assert_eq!(back["ruleVersion"], answer["savedRuleVersion"]);
+}
+
+/// #1083's R2b: the work-view's rules route approves a suggestion by its version: the snapshot
+/// then lists it as the owner's approved rule, on, by the same reference, at the version the
+/// answer names.
+#[test]
+fn the_work_views_rules_route_approves_a_suggestion() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let body = switch_body(&rule, "approve", &rule["ruleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let approved = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let fields = (&approved["ruleId"], &approved["setBy"], &approved["status"]);
+    assert_eq!(fields, (&rule["ruleId"], &json!("approved"), &json!("on")));
+    assert_eq!(approved["ruleVersion"], answer["savedRuleVersion"]);
 }

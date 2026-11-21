@@ -4267,3 +4267,60 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         .is_ok()
     );
 }
+
+/// #1083's R2b: an event and its ops written against a rule's fence (the work-view's approval) are
+/// refused, and nothing is written, when a decision of the subject's suggestion was appended since
+/// the fence, or the fence read another raw.db file; a fence nothing moved since lets them in.
+#[test]
+fn an_event_and_its_ops_against_a_rules_fence_are_refused_when_it_moved() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let ops = |seq: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        Ok(vec![(OpKind::Claim, serde_json::json!({"seq": seq}))])
+    };
+    let subject = Subject {
+        uid: None,
+        suggestion: Some("s1"),
+        sources: None,
+    };
+    let event = || test_event(r#"{"prompt":"x"}"#);
+    let count = |raw: &Raw| {
+        raw.ops_after(&raw.device().to_owned(), 0, 100)
+            .unwrap()
+            .len()
+    };
+    let fence = raw.rule_fence().unwrap();
+    let decision = crate::my_work_ops::MyWorkOp {
+        job: crate::my_work_rules::RULE.into(),
+        about: "s1".into(),
+        entry: String::new(),
+        ts: 1,
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: serde_json::json!({"action": "reject"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let decision = serde_json::to_value(decision).unwrap();
+    raw.append_ops(&[(OpKind::MyWork, decision)]).unwrap();
+    let before = count(&raw);
+    let moved = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &fence, &subject);
+    assert!(moved.unwrap_err().is::<OpsMoved>());
+    assert_eq!(count(&raw), before);
+    let fence = raw.rule_fence().unwrap();
+    let elsewhere = RuleFence {
+        file: Some("another raw.db".into()),
+        ..raw.rule_fence().unwrap()
+    };
+    let moved = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &elsewhere, &subject);
+    assert!(moved.unwrap_err().is::<OpsMoved>());
+    assert_eq!(count(&raw), before);
+    let quiet = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &fence, &subject);
+    assert!(quiet.unwrap().is_some());
+    assert_eq!(count(&raw), before + 1);
+}
