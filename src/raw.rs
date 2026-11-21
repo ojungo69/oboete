@@ -10407,8 +10407,8 @@ const OP_NAMES: &[&str] = &[
 /// checkpoint and hashes) and a hide's (what it names, by oboete's word and ids) hold no text:
 /// a rule for `card` would make a hide op name nothing (Codex on #658). A rule decision's `action`
 /// and the `claim` it names are kept where they are exactly what a decision writes, one of its three
-/// actions and a uid, which the my_work consumer and an approval's undo read by their values
-/// (#1131 item 1). Unlike a record's masks, which keep its bytes for the
+/// actions and an approval's uid, which the my_work consumer and an approval's undo read by their
+/// values (#1131 item 1). Unlike a record's masks, which keep its bytes for the
 /// ledger's offsets, these never lengthen a text: a correction or a claim stays under its
 /// character cap (Codex on #487).
 pub(crate) fn masked_op_text(
@@ -10480,13 +10480,20 @@ pub(crate) fn masked_op_text(
             .get_mut("fields")
             .and_then(serde_json::Value::as_object_mut)
     {
+        // An approval is the one decision that names a preference (Sourcery on #1136).
+        let approval = f.get("action").and_then(serde_json::Value::as_str) == Some("approve");
         for key in ["action", "claim"] {
             let Some(slot) = f.get_mut(key) else {
                 continue;
             };
             let exact = slot.as_str().is_some_and(|s| match key {
                 "action" => matches!(s, "approve" | "reject" | "undo"),
-                _ => crate::consumer::claims::is_uid(s),
+                // A uid as `claims::uid` writes it: 64 lower-case hex digits (Codex on #1136).
+                _ => {
+                    approval
+                        && s.len() == 64
+                        && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                }
             });
             if exact {
                 words.push((key, std::mem::take(slot)));

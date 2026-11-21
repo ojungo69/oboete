@@ -1682,7 +1682,8 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   knowledge.db first, and its purge writes that uid's forget later (`purge_record_claims`), so in
   between the undo is refused as pending too. The suggestion
   waits again, and a second approve makes a new preference. A rescan keeps a decision's `action`
-  and `claim` where they are exactly what a decision writes, one of its three actions and a uid,
+  and `claim` where they are exactly what a decision writes, one of its three actions and an
+  approval's uid,
   whatever a redaction rule finds in them, and masks the rest of its fields as before (#1131 item
   1); a decision a rescan masked before this keeps that mask. A decided suggestion is refused another
   approve or reject (409), an undecided one an undo. A suggestion's decisions are taken newest op

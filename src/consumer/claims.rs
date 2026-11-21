@@ -297,7 +297,7 @@ pub(crate) fn any_passed(raw: &Raw, k: &Connection) -> Result<bool> {
     Ok(!passed(raw, k)?.is_empty())
 }
 
-pub(crate) fn is_uid(s: &str) -> bool {
+fn is_uid(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 

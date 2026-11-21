@@ -1525,7 +1525,7 @@ fn a_rule_decisions_action_and_claim_stay_through_an_ops_mask() {
     let uid = "ab".repeat(32);
     std::fs::write(
         home.path().join("config.toml"),
-        "[redaction]\nextra_rules = [{ id = \"x\", regex = 'approve|reject|undo|[0-9a-f]{64}' }]\n",
+        "[redaction]\nextra_rules = [{ id = \"x\", regex = 'approve|reject|undo|[0-9a-fA-F]{64}' }]\n",
     )
     .unwrap();
     let rules = crate::redact::Rules::load(home.path()).unwrap();
@@ -1571,9 +1571,13 @@ fn a_rule_decisions_action_and_claim_stay_through_an_ops_mask() {
             &serde_json::json!("******* it")
         )
     );
-    // A value of another shape, and another key, are text.
+    // A value of another shape, another key, and a claim of a decision that names none, are text.
     for fields in [
-        serde_json::json!({"action": "approved", "claim": uid}),
+        serde_json::json!({"action": "reject", "claim": uid}),
+        serde_json::json!({"action": "undo", "claim": uid}),
+        serde_json::json!({"action": "approve", "claim": uid.to_uppercase()}),
+        // Alone: with a claim, the claim's own mask would change the body whatever the action.
+        serde_json::json!({"action": "approved"}),
         serde_json::json!({"action": "approve", "claim": format!("{uid}0")}),
         serde_json::json!({"action": "approve", "claimed": uid}),
     ] {
