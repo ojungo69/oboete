@@ -2028,9 +2028,10 @@ pub struct Subject<'a> {
 /// repositories the exclusion list held when the write read them (`Raw::exclusions_read`), the
 /// sessions already excluded then (`Raw::excluded_through`), as `agent` NUL `session`, and the test
 /// that reads a repository label as one never recorded (#1131 item 10). A session that first
-/// touches an excluded repository between the read and the append refuses the write: a session the
-/// suggestion was learned from is one of them, so no walk of its sources is needed (#1131 items 13
-/// and 17).
+/// touches an excluded repository between the read and the append refuses the write, a session the
+/// suggestion was learned from among them, so no walk of its sources is needed (#1131 items 13 and
+/// 17). A session excluded already when the write read is the read's to judge
+/// (`my_work_ops::hidden`): its next event refuses nothing.
 #[derive(Debug, Default)]
 pub struct Sources {
     pub repos: Vec<String>,
@@ -10639,9 +10640,10 @@ fn fence_moved(
 /// Whether this device recorded, since record `after`, a session's first event in an excluded
 /// repository (#1083's R2b; #1132's review): an event in one of `sources`' repositories, or under a
 /// label its test reads as never recorded (#1131 item 10), of a session not already excluded when
-/// the write read. A session that touches one is excluded, and what was learned from it with it;
-/// a suggestion's sources are sessions, so this refuses every write the suggestion's own sources
-/// would, and a write while any other session first touches one. Read inside the write: at most
+/// the write read. A session that touches one is excluded, and what was learned from it with it:
+/// this refuses a write while any session, one the suggestion was learned from among them, first
+/// touches one. A session excluded already when the write read was the read's to judge
+/// (`my_work_ops::hidden`), and is not refused again. Read inside the write: at most
 /// `SOURCES_READ` records, more than that refusing too. None to read while no repository is
 /// excluded.
 fn sources_moved(tx: &Connection, device: &str, after: i64, sources: &Sources) -> Result<bool> {

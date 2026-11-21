@@ -341,10 +341,11 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   own page undoes an approval whose preference is forgotten, writing the decision alone. A decision's write is refused, nothing recorded, when since the check a decision of the
   suggestion, a rules job's op of it, or a correction of its rule's claim was appended, and when a
   session that had no event in a repository the exclusion list holds recorded its first one there
-  (that session is then excluded, and what was learned from it with it). A session the suggestion
-  was learned from is such a session, and so is any other, so that a retry goes through once the
-  write's read holds it, unless the exclusion hid the suggestion, when the retry answers not found
-  or stale. While the list holds a repository, this device's records since the check are read
+  (that session is then excluded, and what was learned from it with it). Any session's first one
+  refuses it, one the suggestion was learned from or another, so that a retry goes through once the
+  write's read holds the session, unless the exclusion hid the suggestion, when the retry answers
+  not found or stale. A session excluded already when the write read was the read's to judge: its
+  next event refuses nothing. While the list holds a repository, this device's records since the check are read
   inside the write, at most 64, more refusing too, each label read as the write's read reads one
   never recorded. Its answer's version is the one a read of My Rules after the write gives the row
   by its reference, only while the row is the one the write left (an approval's preference derived

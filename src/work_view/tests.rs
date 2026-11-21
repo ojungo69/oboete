@@ -3487,6 +3487,29 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
     }
 }
 
+/// #1131 item 10: a decision is refused, nothing written, when a session's first event since its read
+/// comes under a label first recorded then that a repository never recorded may be (a mask in it):
+/// the write reads that label as its read reads one. The event itself is recorded: the capture gate
+/// lets through a label that only may name one.
+#[test]
+fn a_label_a_never_recorded_repository_may_be_refuses_a_decision() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    (crate::raw::open(h.home.path()).unwrap())
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    let (reference, version, _) = row_of(&h, "s1");
+    let (records, decisions) = (stored(&h).0, decisions_of(&h, "s1"));
+    let home = h.home.path().to_owned();
+    let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+    CHECKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || recorded(&home, "newcomer", &masked)))
+    });
+    let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
+    assert_eq!(stored(&h).0, records + 1, "the hook's event is recorded");
+}
+
 /// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection
 /// undoes it, even when its time is older than the rejection's.
 #[test]
