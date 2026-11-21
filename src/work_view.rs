@@ -286,8 +286,9 @@ pub(crate) enum Switched {
 /// (`my_rules_on`), the one rule that goes by `reference` found in it; refused when what the switch
 /// reads of it is not applied yet (`behind`). The correction (`claims::mute_op`) is appended against
 /// the fence, and the locks let go before the wait for the claims consumer (`claims::receipt_after`).
-/// Applied and kept, the rule's version after it is the one its read gave with the switch's own
-/// correction deciding its mute, when what decides the rule now is that.
+/// Applied and kept, the rule's version after it is the one a read after it gives the rule its read
+/// gave with the switch's own correction deciding its mute, while nothing pending decides it
+/// (`fresh_version`; #1128 item 3: a rule My Rules no longer lists so has no version).
 pub(crate) fn switch<'a>(
     home: &Path,
     (reference, version): (&str, &str),
@@ -362,21 +363,17 @@ pub(crate) fn switch<'a>(
     }
     match crate::claims::receipt_after(home, &k, &device, &seqs, uid) {
         crate::claims::OwnerReceipt::Applied { .. } => {
-            // What decides the rule as the switch's read gave it, with the switch's correction
-            // deciding its mute.
-            let mut expected = row.of["by"].clone();
-            if !expected["by"].is_array() {
-                return Ok(Switched::Applied(None));
-            }
-            expected["muted"] = json!(muted);
-            expected["by"][2] = json!([device, seqs.last()]);
-            // The correction is saved: a proof that cannot be read gives no Undo, not an error.
-            if crate::claims::decided_by(&k, uid).ok().flatten().as_ref() != Some(&expected) {
-                return Ok(Switched::Applied(None));
-            }
+            // The rule as the switch's read gave it, with the switch's correction deciding its
+            // mute.
             let mut of = row.of;
-            of["by"] = expected;
-            Ok(Switched::Applied(versioned(&of, home, &mut None).ok()))
+            if !of["by"]["by"].is_array() {
+                return Ok(Switched::Applied(None));
+            }
+            of["by"]["muted"] = json!(muted);
+            of["by"]["by"][2] = json!([device, seqs.last()]);
+            Ok(Switched::Applied(fresh_version(
+                home, reference, &of, false,
+            )))
         }
         _ => Ok(Switched::Pending),
     }
@@ -400,7 +397,8 @@ pub(crate) enum Decision {
 /// is not applied yet (`behind`), and when anything moved it between the read and the append, a
 /// record of its sources' in a repository the exclusion list held included
 /// (`Raw::append_ops_ruled`). Applied and kept, the row's version after is the one a read after the
-/// write gives it while it is the row the write left (`fresh_version`).
+/// write gives it while it is the row the write left and nothing pending decides it
+/// (`fresh_version`).
 pub(crate) fn decide<'a>(
     home: &Path,
     (reference, version): (&str, &str),
@@ -586,7 +584,9 @@ pub(crate) fn decide<'a>(
             approved_of(id, &a.uid, &by, Some(a.decision), Some(a.decision), &file)
         }
     };
-    Ok(Switched::Applied(fresh_version(home, reference, &expected)))
+    Ok(Switched::Applied(fresh_version(
+        home, reference, &expected, true,
+    )))
 }
 
 /// What a suggestion's decision appended (#1083's R2b): a decision's op seqs, an approval's
@@ -600,9 +600,12 @@ enum Wrote {
 
 /// The version of the row by `reference` that a read of My Rules after a write gives (#1083's R2b;
 /// #1128 item 3), read as the writes read it, on handles of its own under the readers' hold, while
-/// that row's whole `of` is `expected`, what the write left; else none. A read that fails gives none:
-/// the write is saved, and the pages offer no Undo.
-fn fresh_version(home: &Path, reference: &str, expected: &Value) -> Option<String> {
+/// that row's whole `of` is `expected`, what the write left, and nothing pending decides it: the
+/// check the write that follows makes first (`behind`, on the row as read; #1131 item 11), a
+/// suggestion's decision's (`learning`: an approval's Undo, a dismissal's, an undo's) or a
+/// switch's. Else none, and none for a read that fails: the write is saved, and the pages offer no
+/// Undo.
+fn fresh_version(home: &Path, reference: &str, expected: &Value, learning: bool) -> Option<String> {
     let read = || -> anyhow::Result<Option<String>> {
         let settings = crate::capture::Settings::load(home)?;
         let Some((raw, k)) = crate::search::b::stores(home)? else {
@@ -612,7 +615,16 @@ fn fresh_version(home: &Path, reference: &str, expected: &Value) -> Option<Strin
         let tx = k.unchecked_transaction()?;
         let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
         let row = the_one(found.rows, reference).ok();
-        Ok(row.filter(|row| row.of == *expected).map(|row| row.version))
+        let Some(row) = row.filter(|row| row.of == *expected) else {
+            return Ok(None);
+        };
+        let none = crate::raw::Sources::default();
+        let subject = crate::raw::Subject {
+            uid: row.uid.as_deref(),
+            suggestion: row.of["suggestion"].as_str(),
+            sources: learning.then_some(&none),
+        };
+        Ok((!behind(&raw, &tx, &subject)?).then_some(row.version))
     };
     read().ok().flatten()
 }

@@ -3089,7 +3089,12 @@ fn a_correction_applied_while_my_rules_is_read_reaches_neither_its_text_nor_its_
     crate::my_work_rules::READ.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             let body = Some("Answer in Japanese, briefly.");
-            crate::claims::correct_recorded(&home, &uid, None, body).unwrap();
+            let receipt = crate::claims::correct_recorded(&home, &uid, None, body).unwrap();
+            // #1128 item 11: the correction the test reads around is applied.
+            assert!(
+                matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }),
+                "the hook's correction is applied"
+            );
         }))
     });
     let shown = answer(h.home.path(), now).unwrap();
@@ -3531,6 +3536,163 @@ fn a_dismissal_whose_row_moved_before_its_receipt_answers_no_version() {
     let got = decided(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Applied(None));
     assert_eq!(row_of(&h, "s1").2["rule"], "rejected");
+}
+
+/// #1128 item 3: a switch whose rule My Rules no longer lists once its correction is applied (its
+/// claim forgotten there) is saved and answers no version, though what decides its mute is still its
+/// correction: the version is a read's of the rule, not its claim's provenance's.
+#[test]
+fn a_switch_whose_rule_is_gone_before_its_receipt_answers_no_version() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let uid = changelog_uid(&h, &repo);
+    let (home, gone) = (h.home.path().to_owned(), uid.clone());
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            (crate::raw::open(&home).unwrap())
+                .append_ops(&[(OpKind::Forget, json!({"uid": gone, "job": "j"}))])
+                .unwrap();
+        }))
+    });
+    assert_eq!(switched(&h, &id, &version, true), Switched::Applied(None));
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    let by = crate::claims::decided_by(&k, &uid).unwrap().unwrap();
+    assert_eq!(by["muted"], true, "its correction still decides its mute");
+}
+
+/// #1131 item 11: a dismissal applied and kept whose receipt reads My Rules while a later decision
+/// of its suggestion, or a rules job's op of it, is recorded and not applied answers no version: the
+/// row the write left is read, but the write that follows would be judged against that op.
+#[test]
+fn a_dismissal_whose_suggestion_moved_and_is_not_applied_answers_no_version() {
+    for case in ["a later decision", "a rules job's op"] {
+        let (h, now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                crate::worker::run_once(&home).unwrap();
+                crate::my_work_rules::READ.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        if case == "a later decision" {
+                            decision_waiting(&home, "s1", json!({"action": "undo"}));
+                        } else {
+                            let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+                            (crate::raw::open(&home).unwrap())
+                                .append_ops(&[(OpKind::MyWork, op)])
+                                .unwrap();
+                        }
+                    }))
+                });
+            }))
+        });
+        let got = decided(&h, &reference, &version, Decision::Dismiss);
+        let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+        assert!(ran, "{case}: the hook ran");
+        assert_eq!(got, Switched::Applied(None), "{case}");
+        assert_eq!(row_of(&h, "s1").2["rule"], "rejected", "{case}: saved");
+    }
+}
+
+/// #1131 item 11 (#1132's plan review): an approval applied and kept whose receipt reads My Rules
+/// while a correction of its new preference is recorded and not applied answers no version: the
+/// check its Undo makes goes by the preference the row the write left names, not the waiting row's.
+#[test]
+fn an_approval_whose_preference_has_a_correction_not_applied_answers_no_version() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            crate::my_work_rules::READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    muted_elsewhere(&home, &approved_uid(&home, "s1"), true);
+                }))
+            });
+        }))
+    });
+    let got = decided(&h, &reference, &version, Decision::Approve);
+    let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+    assert!(ran, "the hook ran");
+    assert_eq!(got, Switched::Applied(None));
+    assert_eq!(row_of(&h, "s1").2["rule"], "approved", "saved");
+}
+
+/// #1131 item 11: a switch of an approved rule whose receipt reads while a rules job's op of its
+/// suggestion is recorded and not applied answers its version: the switch that undoes it does not
+/// read that op, and the version leaves it out, so that Undo goes through once it is applied.
+#[test]
+fn an_approved_rules_switch_answers_its_version_past_a_rules_jobs_op_not_applied() {
+    let (h, now, _place, _repo, _off) = ruled();
+    let (reference, version, of) = row_of(&h, "s2");
+    assert_eq!(of["rule"], "approved");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            crate::my_work_rules::READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let op = learned_op("s2", "Run the tests before a push.", now, vec![]);
+                    (crate::raw::open(&home).unwrap())
+                        .append_ops(&[(OpKind::MyWork, op)])
+                        .unwrap();
+                }))
+            });
+        }))
+    });
+    let off = left(switched(&h, &reference, &version, true));
+    let ran = crate::my_work_rules::READ.with(|hook| hook.borrow().is_none());
+    assert!(ran, "the hook ran");
+    h.run();
+    left(switched(&h, &reference, &off, false));
+}
+
+/// #1131 item 14: a dismissal whose op the my_work consumer passed without keeping it (a worker of
+/// an older oboete moved the checkpoint past it, or it was skipped) is saved and pending: the
+/// checkpoint alone is no proof that it decides the row.
+#[test]
+fn a_dismissal_passed_but_not_kept_is_pending() {
+    for skipped in [false, true] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let before = decisions_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let raw = crate::raw::open(&home).unwrap();
+                let device = raw.device().to_owned();
+                let seq = raw
+                    .ops_after(&device, 0, 100_000)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .op_seq;
+                let k = crate::knowledge::open(&home).unwrap();
+                if skipped {
+                    crate::worker::run_once(&home).unwrap();
+                    let n = k
+                        .execute(
+                            "UPDATE my_work SET skipped = 1 WHERE device = ?1 AND op_seq = ?2",
+                            rusqlite::params![device, seq],
+                        )
+                        .unwrap();
+                    assert_eq!(n, 1, "the dismissal's row");
+                } else {
+                    let ops = crate::knowledge::checkpoint::OPS;
+                    crate::knowledge::checkpoint::set_in(&k, ops, "my_work", &device, seq).unwrap();
+                }
+            }))
+        });
+        let got = decided(&h, &reference, &version, Decision::Dismiss);
+        assert_eq!(got, Switched::Pending, "skipped: {skipped}");
+        assert_eq!(
+            decisions_of(&h, "s1"),
+            before + 1,
+            "skipped: {skipped}: saved"
+        );
+    }
 }
 
 /// raw.db's records, ledger rows and ops of `h`'s home, read on a connection of their own.
