@@ -3615,7 +3615,11 @@ fn a_receipts_failed_read_is_told_on_stderr() {
     };
     let (stdout, stderr) = run("fail", std::process::Stdio::piped());
     assert!(stdout.contains("ANSWER Applied(None)"), "{stdout}");
-    assert_eq!(call(&stderr), format!("{RECEIPT_READ_FAILED}\n"));
+    // The sentence itself, not the constant, so that an emptied constant fails (Codex on #1141).
+    assert_eq!(
+        call(&stderr),
+        "oboete: the read after a rule's write failed; the change is saved, with no Undo\n"
+    );
     assert_eq!(call(&stdout), "");
     let (stdout, stderr) = run("ok", std::process::Stdio::piped());
     assert!(stdout.contains("ANSWER Applied(Some("), "{stdout}");
@@ -3626,8 +3630,10 @@ fn a_receipts_failed_read_is_told_on_stderr() {
 }
 
 /// The case a child run of the receipt's test does (`fail`, `ok`, `closed`). Only
-/// `a_receipts_read_in_a_child` reads it, and it runs only when named with `--ignored`, so a value
-/// the test process inherited diverts no test (Sourcery and Codex on #1141).
+/// `a_receipts_read_in_a_child` reads it, which the parent runs with `--ignored --exact`. A run with
+/// `--include-ignored` runs it too, and it does nothing unless this is set: a value the test process
+/// inherited diverts no test, though its `closed` case then needs a stderr that takes no write
+/// (Sourcery and Codex on #1141).
 const RECEIPT_CHILD: &str = "OBOETE_RECEIPT_READ_CHILD";
 /// The marks around the receipt's call, on both of the child's streams.
 const RECEIPT_FROM: &str = "<<< the receipt's call\n";
