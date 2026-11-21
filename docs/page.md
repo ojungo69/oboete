@@ -301,8 +301,20 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   takes (config.lock with the token asked again, raw.db and the readers' hold), reads My Rules on the
   handles it appends on, and appends its correction against a fence of what it read of the rule (an
   op naming its claim, an exclusion, a tombstone, a forget, another raw.db file; curation's other ops
-  leave it be). Applied and kept, its answer names the version it left the rule at
-  (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
+  leave it be). A claim op names it by the uid it derives or by its `supersedes`, a correction by its
+  `uid`, a rule decision by its `claim` or by the rule's suggestion (`about`); a claim that only
+  quotes the uid does not (#1128). Before its locks the switch waits for the claims consumer past
+  this device's newest correction and for the my_work consumer past its newest rule decision; and
+  where a correction a worker of an older oboete passed waits, a viewer that runs its own passes
+  runs one, whose claims step keeps it. Once the posted version and the rule's state are checked,
+  it is refused as pending (409) while a claim or correction op naming the rule is past the claims
+  consumer's checkpoint, a rule decision of it or of its suggestion is past the my_work consumer's,
+  a correction of it that an older worker passed waits, or a tombstone is past the anchors
+  consumer's. The viewer's save lock
+  is held from the switch's locks to its append: through its waits for those locks, each within
+  its own time, and through none of its waits for a consumer. As many switches as may wait for
+  that lock are let in at once (503 busy past them). Applied and kept, its answer names the version
+  it left the rule at (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
   also decides the rule, and the pages then offer no Undo; not applied yet, it is saved, and its
   receipt says so, with no Undo. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by
   that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is

@@ -247,32 +247,54 @@ fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
 /// to a consumer that knew none) and moves its checkpoint beyond it: the first step of a consumer
 /// that understands it keeps it, with no rewind. One that corrects nothing is only read.
 fn retry(raw: &Raw, k: &Connection) -> Result<()> {
-    let passed: Vec<(String, i64)> = k
+    for (op, _) in passed(raw, k)? {
+        if let Some(uid) = correction(k, &op)? {
+            k.execute(
+                "DELETE FROM claim_skips WHERE op_device = ?1 AND op_seq = ?2",
+                params![op.device, op.op_seq],
+            )?;
+            activate(k, &uid)?;
+        }
+    }
+    Ok(())
+}
+
+/// The corrections a consumer passed that this one keeps, which `retry` applies at the next step:
+/// each op read again by its device and seq, and its body read as a correction that corrects
+/// something.
+fn passed(raw: &Raw, k: &Connection) -> Result<Vec<(Op, CorrectionOp)>> {
+    let skipped: Vec<(String, i64)> = k
         .prepare(
             "SELECT op_device, op_seq FROM claim_skips
              WHERE reason IN ('corrects nothing', 'not a correction')",
         )?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    for (device, seq) in passed {
+    let mut kept = Vec::new();
+    for (device, seq) in skipped {
         let op = raw.ops_after(&device, seq - 1, 1)?.into_iter().next();
         let Some(op) = op.filter(|o| o.op_seq == seq && o.kind == OpKind::Correction) else {
             continue;
         };
-        let kept = serde_json::from_value::<CorrectionOp>(op.body.clone())
-            .is_ok_and(|c| c.fault().is_none());
-        if !kept {
-            continue;
-        }
-        if let Some(uid) = correction(k, &op)? {
-            k.execute(
-                "DELETE FROM claim_skips WHERE op_device = ?1 AND op_seq = ?2",
-                params![device, seq],
-            )?;
-            activate(k, &uid)?;
+        if let Ok(c) = serde_json::from_value::<CorrectionOp>(op.body.clone())
+            && c.fault().is_none()
+        {
+            kept.push((op, c));
         }
     }
-    Ok(())
+    Ok(kept)
+}
+
+/// #1128 item 13: whether a correction of claim `uid` that a worker of an older oboete passed waits
+/// for this consumer's next step (`retry`), below the checkpoint that reads as though it were
+/// applied: a rule's switch read before it would be judged against the rule as it was.
+pub(crate) fn passed_correction_of(raw: &Raw, k: &Connection, uid: &str) -> Result<bool> {
+    Ok(passed(raw, k)?.iter().any(|(_, c)| c.uid == uid))
+}
+
+/// Whether any correction a consumer passed waits for this one's next step (`retry`).
+pub(crate) fn any_passed(raw: &Raw, k: &Connection) -> Result<bool> {
+    Ok(!passed(raw, k)?.is_empty())
 }
 
 fn is_uid(s: &str) -> bool {

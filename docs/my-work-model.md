@@ -1667,12 +1667,23 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   slice 8b adds one.
 - **The actions** (R3), `POST /api/my-rules` through `save_gate` (`settings::claims::rule`):
   approve, with the suggestion's words or edited ones, and `scope` `global` (it stands for
-  `/api/preferences`' confirmation, spec 3.3); reject; undo. An approve records the preference as
-  `pref add` does (`claims::pref_add_recorded`, its caps and refusals), then the `rule` op naming
-  its uid; when that op cannot be written after the preference was, the answer says so
-  (`rule_partly_recorded`), so the owner does not approve it twice. An undo of an approve retracts that preference (`correct` with status `retracted`;
-  one forgotten since has nothing left to retract), then writes the undo op; the suggestion waits
-  again, and a second approve makes a new preference. A decided suggestion is refused another
+  `/api/preferences`' confirmation, spec 3.3) or, slice 8b, `repo` with its repository; reject;
+  undo. An approve records the directive and its preference as `pref add` does (its caps and
+  refusals), and the `rule` op naming the preference's uid, in one transaction
+  (`claims::approve_recorded`, #1083's R2b): all of them or none. A retry in the same viewer finds
+  the decision, applied or not yet, and is refused, so it makes no second preference; what the page
+  shows and what is not applied yet are read in one read of knowledge.db for that. Two viewers of
+  one home approving the same suggestion at once can each record one (#1131). An undo of an
+  approve retracts that preference (status `retracted`) and writes the undo op in one append
+  (`claims::undo_approval_recorded`); one forgotten since (raw.db's proof) has nothing left to
+  retract, and the undo op alone is written, while one not in knowledge.db for another reason (its
+  approval not applied yet) is refused as pending (409 `rule_pending`) until it is. The forgotten case
+  needs the preference's uid forget: a forget of the directive's record takes the preference out of
+  knowledge.db first, and its purge writes that uid's forget later (`purge_record_claims`), so in
+  between the undo is refused as pending too. The suggestion
+  waits again, and a second approve makes a new preference. A redaction rule of the owner's that
+  finds a decision's `action` or `claim` masks it on a rescan, and that decision then names no
+  preference (#1131). A decided suggestion is refused another
   approve or reject (409), an undecided one an undo. Edit, on/off and add are the existing
   `/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. After an approve or a reject
   the page shows what it did with Undo, and the rule's Undo approval and the Rejected list undo it

@@ -274,22 +274,26 @@ pub(crate) enum Switched {
 /// #1083 (R2a): the rule the pages name by `reference` turned off (`muted`) or on, only while its
 /// version is `version`, as W4's Mark finished takes its locks (`my_work_subagents::finish`): first
 /// the claims consumer past this device's newest correction, waited for (the check under the
-/// locks looks again); then config.lock, which a new token takes, `authorized` asked as soon as it
-/// is had; raw.db and the readers' hold; the fence of the write (`Raw::rule_fence`); My Rules read
-/// as the snapshot reads it, on the handles the write appends on, its knowledge.db in one read
+/// locks looks again); then the viewer's save lock, which `saving` takes (#1128 item 5: none of the
+/// waits holds it), and config.lock, which a new token takes, `authorized` asked as soon as it is
+/// had; raw.db and the readers' hold; the fence of the write (`Raw::rule_fence`); My Rules read as
+/// the snapshot reads it, on the handles the write appends on, its knowledge.db in one read
 /// (`my_rules_on`), the one rule that goes by `reference` found in it; refused when what the switch
 /// reads of it is not applied yet (`behind`). The correction (`claims::mute_op`) is appended against
 /// the fence, and the locks let go before the wait for the claims consumer (`claims::receipt_after`).
 /// Applied and kept, the rule's version after it is the one its read gave with the switch's own
 /// correction deciding its mute, when what decides the rule now is that.
-pub(crate) fn switch(
+pub(crate) fn switch<'a>(
     home: &Path,
-    reference: &str,
-    version: &str,
+    (reference, version): (&str, &str),
     muted: bool,
+    saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
     authorized: &dyn Fn() -> bool,
 ) -> anyhow::Result<Switched> {
     caught_up(home)?;
+    let Some(saving) = saving() else {
+        return Ok(Switched::Busy);
+    };
     let wait = crate::db::OPEN_WRITE_WAIT;
     let Some(config) = crate::settings::config_lock_within(home, wait)? else {
         return Ok(Switched::Busy);
@@ -321,7 +325,8 @@ pub(crate) fn switch(
     if on != muted {
         return Ok(Switched::Already);
     }
-    if behind(&raw, &tx, uid)? {
+    let suggestion = row.of["suggestion"].as_str();
+    if behind(&raw, &tx, uid, suggestion)? {
         return Ok(Switched::Behind);
     }
     let Some(op) = crate::claims::mute_op(&tx, uid, muted)? else {
@@ -334,8 +339,9 @@ pub(crate) fn switch(
     }
     // Owner decision 43, as every correction is appended.
     raw.gates_with(&settings.rules);
-    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, uid);
-    drop((read, raw, config));
+    let named = (uid, suggestion);
+    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, named);
+    drop((read, raw, config, saving));
     let seqs = match appended {
         Ok(seqs) => seqs,
         Err(e) if e.is::<crate::raw::OpsMoved>() => return Ok(Switched::Behind),
@@ -387,41 +393,65 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The claims consumer past this device's newest correction, waited for within `claims::applied`'s
-/// time (the worker's pass run here where this process may run it): a switch made just after
-/// another correction finds it applied. Still behind once the wait ran out, the check under the
-/// locks refuses (`behind`).
+/// Some of what the check under the locks refuses (`behind`), waited for first within
+/// `claims::applied`'s time, the worker's pass run here where this process may run it: the claims
+/// consumer past this device's newest correction, and the my_work consumer past its newest rule
+/// decision; and, where this process may run a pass and a correction an older worker passed waits,
+/// a pass, whose claims step keeps it (#1130's review: a viewer with no worker running of its own
+/// would else refuse each try). A switch made just after another correction finds it applied.
+/// Still behind once the wait ran out, or behind for what is not waited for here, the check under
+/// the locks refuses.
 fn caught_up(home: &Path) -> anyhow::Result<()> {
+    use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());
     };
-    let device = raw.device().to_owned();
-    let at = crate::knowledge::checkpoint::get_in(
-        &k,
-        crate::knowledge::checkpoint::OPS,
-        "claims",
-        &device,
-    )?;
-    let Some(op) = raw.correction_after(at)? else {
-        return Ok(());
-    };
-    drop(raw);
     let deadline = crate::claims::deadline();
-    match crate::claims::applied_by(home, &k, &device, &[op], ("correction", "claims"), deadline) {
-        Err(e) if !e.is::<crate::claims::NotYet>() => Err(e),
-        _ => Ok(()),
+    let device = raw.device().to_owned();
+    let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
+    let decision = raw.rule_decision_after(get_in(&k, OPS, "my_work", &device)?)?;
+    // The passed corrections are read only where a pass may follow (#1130's security review).
+    let may_run = crate::executable::may_run_worker();
+    let passed = may_run && crate::consumer::claims::any_passed(&raw, &k)?;
+    drop(raw);
+    let wait =
+        |op: i64, what| match crate::claims::applied_by(home, &k, &device, &[op], what, deadline) {
+            Err(e) if !e.is::<crate::claims::NotYet>() => Err(e),
+            _ => Ok(()),
+        };
+    if let Some(op) = correction {
+        wait(op, ("correction", "claims"))?;
     }
+    if let Some(op) = decision {
+        wait(op, ("decision", "my_work"))?;
+    }
+    if passed && std::time::Instant::now() < deadline {
+        crate::worker::run_once(home)?;
+    }
+    Ok(())
 }
 
-/// Whether what a switch of claim `uid` reads is not applied yet, read on `k` (the switch's read):
-/// a claim or correction op of this device that names `uid` past the claims consumer's checkpoint,
-/// or a tombstone past the anchors consumer's (a forget or a mask of the record the rule quotes).
-fn behind(raw: &crate::raw::Raw, k: &rusqlite::Connection, uid: &str) -> anyhow::Result<bool> {
+/// Whether what a switch of claim `uid`, of suggestion `suggestion` where it is an approved rule,
+/// reads is not applied yet, read on `k` (the switch's read): a claim or correction op of this
+/// device that names `uid` past the claims consumer's checkpoint; a rule decision of it or of its
+/// suggestion past the my_work consumer's (#1128 item 2); a correction of it that a worker of an
+/// older oboete passed, which the claims consumer's next step keeps (#1128 item 13); or a tombstone
+/// past the anchors consumer's (a forget or a mask of the record the rule quotes).
+fn behind(
+    raw: &crate::raw::Raw,
+    k: &rusqlite::Connection,
+    uid: &str,
+    suggestion: Option<&str>,
+) -> anyhow::Result<bool> {
     use crate::knowledge::checkpoint::{OPS, SEQS, get_in};
     let device = raw.device();
     let claims = get_in(k, OPS, "claims", device)?;
+    let my_work = get_in(k, OPS, "my_work", device)?;
     let anchors = get_in(k, SEQS, "anchors", device)?;
-    Ok(raw.names_after(claims, uid)? || raw.tombstone_after(anchors)?)
+    Ok(raw.names_after(claims, uid)?
+        || raw.decides_after(my_work, uid, suggestion)?
+        || crate::consumer::claims::passed_correction_of(raw, k, uid)?
+        || raw.tombstone_after(anchors)?)
 }
 
 /// My Rules' scope of every repository.

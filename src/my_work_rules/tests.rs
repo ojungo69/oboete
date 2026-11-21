@@ -563,6 +563,318 @@ fn an_approved_rule_is_a_decided_preference_in_every_agents_session_start() {
     assert_eq!(rule["quotes"][0]["text"], "write the tests first");
 }
 
+/// The tops of `h`'s raw.db for its device: its last record's seq and its last op's.
+fn tops(h: &Home) -> (i64, i64) {
+    let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
+    c.query_row(
+        "SELECT (SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1),
+                (SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1)",
+        [h.s.raw.device()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// What an approval recorded in `h` past `before` (`tops`): each directive's columns but its
+/// device, seq and time; and each preference op `pref add` writes and each rule decision, as
+/// `(type, batch, body)`, the device, seq and time they hold and the preference's uid named apart.
+fn approval_since(h: &Home, (records, ops): (i64, i64)) -> (Vec<Value>, Vec<(String, i64, Value)>) {
+    let device = h.s.raw.device().to_owned();
+    let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
+    let mut s = c
+        .prepare(
+            "SELECT type, kind, agent, session, repo, branch, head, gitdir, cwd, source, enc,
+                    CAST(body AS TEXT)
+             FROM records WHERE device = ?1 AND seq > ?2 AND kind = 'directive' ORDER BY seq",
+        )
+        .unwrap();
+    let events = (s.query_map(rusqlite::params![device, records], |r| {
+        let column = |i| r.get::<_, Option<String>>(i);
+        Ok(json!([
+            column(0)?,
+            column(1)?,
+            column(2)?,
+            column(3)?,
+            column(4)?,
+            column(5)?,
+            column(6)?,
+            column(7)?,
+            column(8)?,
+            column(9)?,
+            column(10)?,
+            column(11)?
+        ]))
+    }))
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap();
+    let mut s = c
+        .prepare(
+            "SELECT type, batch, body FROM ops WHERE device = ?1 AND op_seq > ?2 ORDER BY op_seq",
+        )
+        .unwrap();
+    let all = (s.query_map(rusqlite::params![device, ops], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    }))
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap();
+    let mut uid = None;
+    let mut kept = Vec::new();
+    for (kind, batch, body) in all {
+        let mut v: Value = serde_json::from_str(&body).unwrap();
+        if kind == "claim" && v["recipe"] == crate::claims::PREF_RECIPE {
+            uid = crate::claims::op_uid(&v);
+            for e in v["evidence"].as_array_mut().unwrap() {
+                e["device"] = json!("D");
+                e["seq"] = json!(0);
+            }
+        } else if kind == "my_work" && v["job"] == "rule" {
+            assert_eq!(v["fields"]["claim"].as_str(), uid.as_deref(), "{v}");
+            v["ts"] = json!(0);
+            v["fields"]["claim"] = json!("U");
+        } else {
+            continue;
+        }
+        kept.push((kind, batch, v));
+    }
+    (events, kept)
+}
+
+/// #1083's R2b (PR 1): an approval records what `pref add` and its decision record apart (the
+/// directive, its preference, the decision naming it), their device, seqs and times aside, and
+/// holds its preference and its decision in one batch.
+#[test]
+fn an_approval_records_what_pref_add_and_its_decision_record_apart_in_one_batch() {
+    let mut a = Home::new();
+    suggested(&mut a);
+    let before = tops(&a);
+    let got = (a.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let (events, ops) = approval_since(&a, before);
+    let mut b = Home::new();
+    suggested(&mut b);
+    let before = tops(&b);
+    let home = b.s.home.path();
+    let Ok(crate::claims::OwnerReceipt::Applied { uid }) =
+        crate::claims::pref_add_recorded(home, RULE_TEXT, None)
+    else {
+        panic!("the preference is not applied");
+    };
+    assert!(record(home, "s1", json!({"action": "approve", "claim": uid})).unwrap());
+    let (events_apart, ops_apart) = approval_since(&b, before);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events, events_apart);
+    let bodies = |ops: &[(String, i64, Value)]| -> Vec<(String, Value)> {
+        (ops.iter())
+            .map(|(t, _, b)| (t.clone(), b.clone()))
+            .collect()
+    };
+    assert_eq!(bodies(&ops), bodies(&ops_apart));
+    assert_eq!(ops.len(), 2);
+    assert_eq!(
+        ops[0].1, ops[1].1,
+        "the preference and its decision in one batch"
+    );
+}
+
+/// #1083's R2b (PR 1): an approval whose ops are refused once its event is checked, as a forget
+/// committed in between refuses them, records nothing: no directive is left without its
+/// preference, and the suggestion waits as it did.
+#[test]
+fn an_approval_refused_after_its_event_is_checked_leaves_no_directive() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let before = tops(&h);
+    crate::raw::OPS_REFUSED.set(true);
+    let got = h.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}));
+    crate::raw::OPS_REFUSED.set(false);
+    let (events, ops) = approval_since(&h, before);
+    assert_eq!((events.len(), ops.len()), (0, 0), "{got:?}");
+    assert!(got.is_err(), "{got:?}");
+    assert_eq!(h.waiting(), ["s1"]);
+}
+
+/// The op checkpoint of `consumer` for `device` in `home`'s knowledge.db, read on a handle of its
+/// own.
+fn checkpoint(home: &std::path::Path, device: &str, consumer: &str) -> i64 {
+    let k = crate::knowledge::open(home).unwrap();
+    let ops = crate::knowledge::checkpoint::OPS;
+    crate::knowledge::checkpoint::get_in(&k, ops, consumer, device).unwrap()
+}
+
+/// `f` with `claims::applied`'s wait set to `wait`.
+fn waiting<T>(wait: std::time::Duration, f: impl FnOnce() -> T) -> T {
+    crate::claims::WAIT.with(|w| w.set(Some(wait)));
+    let got = f();
+    crate::claims::WAIT.with(|w| w.set(None));
+    got
+}
+
+/// #1083's R2b (PR 1): an undo of an approval whose decision the my_work consumer applied while the
+/// claims consumer has not kept its preference yet is refused, as pending, and records nothing: the
+/// preference would be kept after it, active with its approval undone. Once the claims consumer
+/// keeps it, the undo retracts it.
+#[test]
+fn an_undo_before_the_approvals_preference_is_kept_waits_for_it() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let got = waiting(std::time::Duration::ZERO, || h.act(approve)).unwrap();
+    assert_eq!(got["state"], "pending", "{got}");
+    let my_work: Vec<Box<dyn crate::worker::Consumer>> =
+        vec![Box::new(crate::consumer::my_work::MyWork)];
+    crate::worker::run_consumers(h.s.home.path(), 0, my_work).unwrap();
+    let before = tops(&h);
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    let refused = h.act(undo.clone()).unwrap_err();
+    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert_eq!(tops(&h), before, "nothing recorded");
+    h.s.run();
+    let got = h.act(undo).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    assert_eq!(
+        (h.yours(), h.waiting()),
+        (Vec::<(String, bool)>::new(), vec!["s1".to_owned()])
+    );
+    assert_eq!(h.started_with(RULE_TEXT), [false; 3]);
+}
+
+/// #1083's R2b (PR 1): a retry of an approval whose decision the my_work consumer applies while the
+/// retry reads, between what My Rules shows and what is not applied yet, reads one state of
+/// knowledge.db: it is refused, and one directive and one preference stand.
+#[test]
+fn a_retry_while_its_approval_is_applied_records_no_second_preference() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let before = tops(&h);
+    let got = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap();
+    assert_eq!(got["state"], "pending", "{got}");
+    let home = h.s.home.path().to_owned();
+    let (device, decision) = (h.s.raw.device().to_owned(), before.1 + 2);
+    crate::settings::claims::BETWEEN_READS.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            let at = checkpoint(&home, &device, "my_work");
+            assert!(
+                at >= decision,
+                "the decision is applied between the reads: {at}"
+            );
+        }));
+    });
+    let retried = h.act(approve).unwrap_err();
+    assert_eq!((retried.status, retried.code), (409, "rule_pending"));
+    h.s.run();
+    let (events, ops) = approval_since(&h, before);
+    assert_eq!((events.len(), ops.len()), (1, 2));
+    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// #1083's R2b (PR 1): an approval's receipt takes its decision as kept only from its own row, with
+/// the subject and the fields it wrote, neither skipped nor forgotten.
+#[test]
+fn an_approvals_decision_is_kept_only_as_it_was_written() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let before = tops(&h);
+    let got = (h.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let uid = got["uid"].as_str().unwrap();
+    let device = h.s.raw.device().to_owned();
+    let k = crate::knowledge::open(h.s.home.path()).unwrap();
+    let seq: i64 = k
+        .query_row(
+            "SELECT op_seq FROM my_work WHERE device = ?1 AND job = 'rule' AND op_seq > ?2",
+            rusqlite::params![device, before.1],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let fields = json!({"action": "approve", "claim": uid});
+    let kept = |about: &str, fields: &Value| {
+        crate::my_work_ops::kept(&k, &device, seq, (RULE, about), fields).unwrap()
+    };
+    assert!(kept("s1", &fields));
+    assert!(!kept("s2", &fields));
+    assert!(!kept("s1", &json!({"action": "approve"})));
+    k.execute(
+        "UPDATE my_work SET skipped = 1 WHERE device = ?1 AND op_seq = ?2",
+        rusqlite::params![device, seq],
+    )
+    .unwrap();
+    assert!(!kept("s1", &fields), "skipped");
+}
+
+/// #1130's review: an approval's and an undo's receipts are applied only on the rows they wrote, as
+/// written: a decision row the consumer kept unusable, or a retraction's row of another status or
+/// another uid, leaves them pending.
+#[test]
+fn receipts_stay_pending_on_rows_not_as_written() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let tamper = |h: &Home, sql: &'static str| {
+        let home = h.s.home.path().to_owned();
+        crate::claims::PROVING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let k = crate::knowledge::open(&home).unwrap();
+                assert_eq!(k.execute(sql, []).unwrap(), 1, "{sql}");
+            }));
+        });
+    };
+    let mut h = Home::new();
+    suggested(&mut h);
+    tamper(&h, "UPDATE my_work SET skipped = 1 WHERE job = 'rule'");
+    let got = h.act(approve.clone()).unwrap();
+    assert_eq!(got["state"], "pending", "an approval: {got}");
+    for sql in [
+        "UPDATE corrections SET status = 'decided' WHERE status = 'retracted'",
+        "UPDATE corrections SET uid = 'x' || uid WHERE status = 'retracted'",
+    ] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        assert_eq!(h.act(approve.clone()).unwrap()["state"], "applied");
+        tamper(&h, sql);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(got["state"], "pending", "an undo, {sql}: {got}");
+    }
+}
+
+/// #1083's R2b (PR 1): an approval's two waits share one deadline: one that the claims consumer's
+/// wait spends leaves the my_work consumer's none, and the approval is pending.
+#[test]
+fn an_approvals_waits_share_one_deadline() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let home = h.s.home.path().to_owned();
+    let before = tops(&h);
+    let (device, preference, decision) = (h.s.raw.device().to_owned(), before.1 + 1, before.1 + 2);
+    let wait = std::time::Duration::from_millis(300);
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let claims: Vec<Box<dyn crate::worker::Consumer>> =
+                vec![Box::new(crate::consumer::claims::Claims)];
+            crate::worker::run_consumers(&home, 0, claims).unwrap();
+            assert!(
+                checkpoint(&home, &device, "claims") >= preference,
+                "the first wait's"
+            );
+            assert!(
+                checkpoint(&home, &device, "my_work") < decision,
+                "the second wait's"
+            );
+            std::thread::sleep(wait * 2);
+        }));
+    });
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let got = waiting(wait, || h.act(approve)).unwrap();
+    assert_eq!(got["state"], "pending", "{got}");
+}
+
 /// Slice 8b (R2, R4): a suggestion approved for one repository is a decided preference of it,
 /// at the start of each of the three agents' sessions there under a heading of its own, once,
 /// and in no other repository's. A preference the curator found there is no rule of the owner's:
@@ -1068,26 +1380,31 @@ fn my_rules_orders_each_list() {
 }
 
 /// R3: an approve whose preference was forgotten since is still undone: there is nothing left
-/// to retract, and the suggestion waits again.
+/// to retract, and the suggestion waits again. Before the forget's purge too, while knowledge.db
+/// still holds the preference (#1083's R2b): a retraction of it would be refused.
 #[test]
 fn an_approve_whose_rule_was_forgotten_is_still_undone() {
-    let mut h = Home::new();
-    suggested(&mut h);
-    let got = h
-        .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
-        .unwrap();
-    let uid = got["uid"].as_str().unwrap().to_owned();
-    let h = h.closed(|home| {
-        let target = crate::forget::Target::Uid { uid };
-        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
-        crate::forget::purge(home).unwrap();
-    });
-    assert_eq!(h.yours(), Vec::<(String, bool)>::new());
-    let got = h
-        .act(json!({"suggestion": "s1", "action": "undo"}))
-        .unwrap();
-    assert_eq!(got["state"], "applied");
-    assert_eq!(h.waiting(), ["s1"]);
+    for purged in [true, false] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))
+            .unwrap();
+        let uid = got["uid"].as_str().unwrap().to_owned();
+        let h = h.closed(|home| {
+            let target = crate::forget::Target::Uid { uid };
+            crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            if purged {
+                crate::forget::purge(home).unwrap();
+            }
+        });
+        assert_eq!(h.yours(), Vec::<(String, bool)>::new());
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(got["state"], "applied", "purged: {purged}");
+        assert_eq!(h.waiting(), ["s1"], "purged: {purged}");
+    }
 }
 
 /// #737: a new suggestion's id is past every id an op names, a purged one's (its fields

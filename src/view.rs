@@ -93,6 +93,8 @@ struct Viewer {
     saving: Mutex<()>,
     /// The work-view's writes waiting for `saving` (W3b-3), `my_work::WAITERS` at most.
     saving_waiters: AtomicUsize,
+    /// The work-view's rule switches in flight (`work_view_rules`).
+    rule_switches: AtomicUsize,
     /// A port saved and the listener moved onto it, one at a time, a page's new token's too: the
     /// moves take effect in the order their ports were written (Codex on W6).
     moving: Mutex<()>,
@@ -1329,6 +1331,26 @@ fn work_view_refresh_answer(answer: &Value) -> Response {
     work_view_refused(409, state, &error)
 }
 
+/// One of at most so many requests that wait at once, counted in `count` while it lives (W3b-3's
+/// save lock; #1083's rule switches).
+struct Admitted<'a>(&'a AtomicUsize);
+
+impl<'a> Admitted<'a> {
+    fn take(count: &'a AtomicUsize, most: usize) -> Option<Self> {
+        if count.fetch_add(1, Ordering::SeqCst) >= most {
+            count.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self(count))
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The snapshot a write's answer on the work-view's origin carries (`Viewer::carried`).
 enum Carried {
     /// Read, and the request's token still the work-view's.
@@ -1385,6 +1407,7 @@ impl Viewer {
             token,
             saving: Mutex::new(()),
             saving_waiters: AtomicUsize::new(0),
+            rule_switches: AtomicUsize::new(0),
             moving: Mutex::new(()),
             recovery: crate::settings::recovery::Recovery::default(),
             maintenance: crate::settings::maintenance::Maintenance::default(),
@@ -2681,8 +2704,9 @@ impl Viewer {
 
     /// #1083 (R2a): a rule turned on or off from the work-view's pages (`saveRuleChange`,
     /// `{action, ruleId, ruleVersion}`: `turn-on` or `turn-off`, the rule's `u:` or `l:` reference
-    /// and the version the pages read of it), with `saving` held from before the switch's locks to
-    /// its receipt (`work_view::switch`), let go before the snapshot after it, which goes only while
+    /// and the version the pages read of it), with `saving` held from the switch's locks to its
+    /// append (`work_view::switch`; #1128 item 5: not through its waits), and the snapshot after
+    /// it, which goes only while
     /// the request's token is still the work-view's (`carried`). Applied, the answer names the rule
     /// (`savedRuleId`) and the version the switch left it at (`savedRuleVersion`), which the pages'
     /// Undo posts back; none when a record came after the switch that also decides the rule. A
@@ -2720,22 +2744,25 @@ impl Viewer {
         if !referenced || !hex(&posted.rule_version) {
             return unread();
         }
+        // Its catch-up waits before the save lock (#1128 item 5): so many switches at most in
+        // flight, as many as may wait for that lock, so that its waits keep no more of the viewer's
+        // connections (Codex's security review of #1130).
+        let Some(_switching) = Admitted::take(&self.rule_switches, crate::my_work::WAITERS) else {
+            return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
+        };
         let wait = crate::db::OPEN_WRITE_WAIT;
         #[cfg(test)]
         let wait = SAVING_WAIT.with(std::cell::Cell::get).unwrap_or(wait);
-        let Some(saving) = self.saving_within(wait) else {
-            return work_view_refused(503, "busy", "oboete is busy for a moment. Try again.");
-        };
+        let saving = || self.saving_within(wait);
         let authorized = || self.work_view_token_ok(Some(given));
         let reference = &posted.rule_id;
         let switched = crate::work_view::switch(
             &self.home,
-            reference,
-            &posted.rule_version,
+            (reference, &posted.rule_version),
             muted,
+            &saving,
             &authorized,
         );
-        drop(saving);
         let refusal = |status, code, error| self.refusal_carrying(given, status, code, error);
         use crate::work_view::Switched;
         let (version, pending) = match switched {
@@ -2796,17 +2823,7 @@ impl Viewer {
     /// keeps no more of the viewer's connections waiting than the reviews' lock does; a poisoned
     /// one is taken, as `my_work_judge::act` takes it.
     fn saving_within(&self, wait: Duration) -> Option<std::sync::MutexGuard<'_, ()>> {
-        struct Waiting<'a>(&'a AtomicUsize);
-        impl Drop for Waiting<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-        if self.saving_waiters.fetch_add(1, Ordering::SeqCst) >= crate::my_work::WAITERS {
-            self.saving_waiters.fetch_sub(1, Ordering::SeqCst);
-            return None;
-        }
-        let _waiting = Waiting(&self.saving_waiters);
+        let _waiting = Admitted::take(&self.saving_waiters, crate::my_work::WAITERS)?;
         let deadline = Instant::now() + wait;
         loop {
             match self.saving.try_lock() {

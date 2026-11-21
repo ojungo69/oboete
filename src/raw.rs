@@ -521,6 +521,9 @@ thread_local! {
     /// registers a history forget there (decision 109, 5d).
     pub(crate) static BEFORE_IMPORT_APPEND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// The next op append of this thread refused once its transaction is open, as a forget
+    /// committed in between refuses one (#1083's R2b): a test's look at what is left.
+    pub(crate) static OPS_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs what a test set to happen between an import's checks and its append.
@@ -5116,21 +5119,37 @@ impl Raw {
         // docs/store-format.md: a handle opened before a newer oboete stamped raw.db appends
         // nothing after (CodeRabbit on #503).
         format_of(&tx)?;
-        let never = capture_exclusions_in(&tx)?;
-        let now = settings.map(|s| crate::capture::never_recorded(&never, s));
-        if scope_tombstoned(
-            &tx,
-            &self.device,
-            &crate::forget::session(&e.agent, &e.session),
-            e,
-            ledger,
-        )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)
-        {
+        let Some(seq) = event_in(&tx, &self.device, e, (ledger, ruleset), settings, read)? else {
             return Ok(None);
-        }
-        let seq = insert_event(&tx, &self.device, e, ledger, ruleset)?;
+        };
         tx.commit()?;
         Ok(Some(seq))
+    }
+
+    /// #1083's R2b: `e` and the ops `ops` makes of its seq as this device's next records, in one
+    /// transaction, each checked as `append_with_ledger` and `append_ops` check them: an owner's
+    /// approval writes its directive, its preference and its decision so, none of them without
+    /// the others. None, and nothing written, when the event is refused; an op refused fails the
+    /// whole write.
+    pub fn append_event_with_ops(
+        &mut self,
+        e: &Event,
+        (ledger, ruleset): (&[(String, crate::redact::Finding)], &str),
+        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+    ) -> Result<Option<(i64, Vec<i64>)>> {
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
+        let Some(seq) = event_in(&tx, &self.device, e, (ledger, ruleset), None, None)? else {
+            return Ok(None);
+        };
+        let ops = ops(seq)?;
+        let bodies = within_batch_cap(&ops)?;
+        let seqs = ops_in(&tx, &self.device, &ops, &bodies, (None, None, None), None)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
+        tx.commit()?;
+        Ok(Some((seq, seqs.unwrap_or_default())))
     }
 
     /// The consumed offset of a kept file. A completed file's receipt also covers receipts
@@ -6825,56 +6844,11 @@ impl Raw {
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
-        // Decision 109 (5d): what a history forget committed since the caller checked, asked before
-        // what the batch would repeat: a note saved before the forget is forgotten, not kept.
-        for (kind, body) in ops {
-            if crate::forget::history::covered_op(&tx, *kind, body)? {
-                return Err(HistoryCovered.into());
-            }
-        }
-        // What the batch would repeat, asked in its own transaction (`append_note`): nothing is
-        // written, and no seq returned.
-        if let Some(kept) = kept
-            && kept(&tx)?
-        {
+        // What the batch would repeat (`append_note`): nothing is written, and no seq returned.
+        let Some(seqs) = ops_in(&tx, &self.device, ops, &bodies, (cwd, settings, read), kept)?
+        else {
             return Ok(Vec::new());
-        }
-        // An agent's own writes: its work state, and the notes it saves (`append_note`).
-        let fenced = |kind: OpKind, body: &serde_json::Value| {
-            kind == OpKind::WorkState || kind == OpKind::Import && body["source"] == NOTE_SOURCE
         };
-        let lists = ops.iter().any(|(kind, body)| fenced(*kind, body));
-        let never = lists.then(|| capture_exclusions_in(&tx)).transpose()?;
-        let now = never
-            .as_ref()
-            .zip(settings)
-            .map(|(never, s)| crate::capture::never_recorded(never, s));
-        for (kind, body) in ops {
-            anyhow::ensure!(
-                !forgotten_op(&tx, *kind, body)?,
-                "a forget request invalidated this derived batch; it was not recorded"
-            );
-            // A list imported from claude-mem is matched by its project's name too; a note, by its
-            // repository's key alone.
-            let (repo, imported) = (
-                body["repo"].as_str().unwrap_or_default(),
-                *kind == OpKind::WorkState && !body["source"].is_null(),
-            );
-            let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
-            if let Some(never) = &never
-                && fenced(*kind, body)
-                && (never.refuses(now.as_ref(), (None, cwd), read)
-                    || never.covers_work_state(repo, imported)
-                    || now
-                        .as_ref()
-                        .is_some_and(|now| now.covers_work_state(repo, imported))
-                    || imported
-                        && settings.is_some_and(|s| never.covers_work_state(&labelled(s), true)))
-            {
-                return Err(NeverRecorded.into());
-            }
-        }
-        let seqs = insert_ops(&tx, &self.device, &bodies)?;
         if self.gated_off || settings.is_some_and(|s| s.rules.is_off()) {
             owe_op_text_scan(&tx)?;
         }
@@ -7005,15 +6979,51 @@ impl Raw {
             .optional()?)
     }
 
-    /// Whether this device has a claim or correction op past `after` whose body names `uid` (#1083,
-    /// R2a: one the claims consumer has not applied to the rule a switch reads).
+    /// Whether this device has a claim or correction op past `after` that names claim `uid`
+    /// (`names_claim`; #1083, R2a: one the claims consumer has not applied to the rule a switch
+    /// reads).
     pub fn names_after(&self, after: i64, uid: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2
-               AND type IN ('claim', 'correction') AND instr(body, ?3) > 0)",
-            params![self.device, after, uid],
-            |r| r.get(0),
-        )?)
+        self.any_op_after(after, "type IN ('claim', 'correction')", |kind, body| {
+            names_claim(kind, body, uid)
+        })
+    }
+
+    /// Whether this device has a rule decision past `after` that names claim `uid` or is about
+    /// suggestion `suggestion` (`decides`; #1128 item 2: one the my_work consumer has not applied
+    /// to the rule a switch reads).
+    pub fn decides_after(&self, after: i64, uid: &str, suggestion: Option<&str>) -> Result<bool> {
+        self.any_op_after(after, "type = 'my_work'", |kind, body| {
+            decides(kind, body, uid, suggestion)
+        })
+    }
+
+    /// This device's newest rule decision past `after` (a `my_work` op of job `rule`): one the
+    /// my_work consumer has not applied, which a rule's switch waits for first (#1130's review).
+    pub fn rule_decision_after(&self, after: i64) -> Result<Option<i64>> {
+        let mut s = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
+             ORDER BY op_seq DESC",
+        )?;
+        let mut rows = s.query(params![self.device, after])?;
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(1)?;
+            let decision = serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|v| v["job"] == crate::my_work_rules::RULE);
+            if decision {
+                return Ok(Some(row.get(0)?));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether an op of this device past `after` whose type `kinds` takes is one `found` finds.
+    fn any_op_after(
+        &self,
+        after: i64,
+        kinds: &str,
+        found: impl Fn(&str, &str) -> bool,
+    ) -> Result<bool> {
+        any_op_in(&self.conn, &self.device, after, kinds, found)
     }
 
     /// Whether this device has a tombstone past record `after` (#1083, R2a: one the anchors consumer
@@ -7040,14 +7050,15 @@ impl Raw {
 
     /// `append_ops` for a rule's write on claim `uid` (#1083, R2a), only while the stores stand as
     /// `fence` read them for it: the same raw.db file, forget denying what it denied, retention
-    /// having expired no row, and since its `top` this device having appended no exclusion and no op
-    /// whose body names `uid`, and since its `records` no tombstone, compared inside the write; else
-    /// nothing is written and the error is `OpsMoved`.
+    /// having expired no row, and since its `top` this device having appended no exclusion, no op
+    /// that names `uid` (`names_claim`) and no rule decision of it or of its suggestion `suggestion`
+    /// (`decides`), and since its `records` no tombstone, compared inside the write; else nothing is
+    /// written and the error is `OpsMoved`.
     pub fn append_ops_ruled(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
         fence: &RuleFence,
-        uid: &str,
+        (uid, suggestion): (&str, Option<&str>),
     ) -> Result<Vec<i64>> {
         anyhow::ensure!(!uid.is_empty(), "a rule's write names its claim");
         if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
@@ -7057,12 +7068,9 @@ impl Raw {
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
         let forget: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
-        let named: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2
-               AND (type = 'exclusion' OR instr(body, ?3) > 0))",
-            params![self.device, fence.top, uid],
-            |r| r.get(0),
-        )?;
+        let named = any_op_in(&tx, &self.device, fence.top, "1", |kind, body| {
+            names_claim(kind, body, uid) || decides(kind, body, uid, suggestion)
+        })?;
         let tombstoned: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2
                AND type = 'tombstone')",
@@ -10386,6 +10394,156 @@ fn kept_progress_in(conn: &Connection, hash: &str, total: usize) -> Result<usize
 }
 
 /// `e` and its ledger rows as `device`'s next seq, inside a write transaction.
+/// Whether an op of `device` past `after` whose type `kinds` (an SQL condition) takes is one `found`
+/// finds by its type and body.
+fn any_op_in(
+    conn: &Connection,
+    device: &str,
+    after: i64,
+    kinds: &str,
+    found: impl Fn(&str, &str) -> bool,
+) -> Result<bool> {
+    let mut s = conn.prepare(&format!(
+        "SELECT type, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND {kinds}"
+    ))?;
+    let mut rows = s.query(params![device, after])?;
+    while let Some(row) = rows.next()? {
+        if found(&row.get::<_, String>(0)?, &row.get::<_, String>(1)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// #1128 item 1: whether op `body` of type `kind` names claim `uid` for a rule's write. By field for
+/// the ops that name claims: a claim op that derives the uid (`claims::op_uid`), as a purge's
+/// preference op does without its body naming it, or supersedes it; a correction of it. Not a claim
+/// that only quotes it. An exclusion always, as it may take any rule's sessions; an op of another
+/// kind by its text, as before.
+fn names_claim(kind: &str, body: &str, uid: &str) -> bool {
+    let named = |found: &dyn Fn(&serde_json::Value) -> bool| {
+        serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| found(&v))
+    };
+    match kind {
+        "claim" => named(&|v| {
+            crate::claims::op_uid(v).as_deref() == Some(uid)
+                || (v["supersedes"].as_array()).is_some_and(|s| s.iter().any(|x| x == uid))
+        }),
+        "correction" => named(&|v| v["uid"] == uid),
+        "exclusion" => true,
+        _ => body.contains(uid),
+    }
+}
+
+/// #1128 item 2: whether op `body` of type `kind` is a rule decision that names claim `uid` (an
+/// approval) or is about suggestion `suggestion`, compared whole (an undo, a rejection).
+fn decides(kind: &str, body: &str, uid: &str, suggestion: Option<&str>) -> bool {
+    kind == "my_work"
+        && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
+            v["job"] == crate::my_work_rules::RULE
+                && (v["fields"]["claim"] == uid || suggestion.is_some_and(|s| v["about"] == s))
+        })
+}
+
+/// `append_under`'s checks of event `e` and its insert, in `tx` (#1083's R2b: `append_event_with_ops`
+/// makes the same ones): none when its session is forgotten or what is never recorded refuses it,
+/// matched as labelled under `settings` too when they are given.
+fn event_in(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    e: &Event,
+    (ledger, ruleset): (&[(String, crate::redact::Finding)], &str),
+    settings: Option<&crate::capture::Settings>,
+    read: Option<(&str, Option<&str>)>,
+) -> Result<Option<i64>> {
+    let never = capture_exclusions_in(tx)?;
+    let now = settings.map(|s| crate::capture::never_recorded(&never, s));
+    if scope_tombstoned(
+        tx,
+        device,
+        &crate::forget::session(&e.agent, &e.session),
+        e,
+        ledger,
+    )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)
+    {
+        return Ok(None);
+    }
+    insert_event(tx, device, e, ledger, ruleset).map(Some)
+}
+
+/// What an op writer's own check read its batch under (`append_ops_from`): the writer's folder,
+/// the settings, and the labels as that check read them.
+type OpLabels<'a> = (
+    Option<&'a str>,
+    Option<&'a crate::capture::Settings>,
+    Option<(&'a str, Option<&'a str>)>,
+);
+
+/// `append_ops_from`'s checks of `ops` (`bodies`, as `within_batch_cap` gave them) and their insert,
+/// in `tx` (#1083's R2b: `append_event_with_ops` makes the same ones): none, and nothing written,
+/// when `kept` says the batch would repeat one. `labels`: the writer's folder, the settings and the
+/// labels as its own check read them (`append_ops_from`).
+fn ops_in(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    ops: &[(OpKind, serde_json::Value)],
+    bodies: &[(&str, String)],
+    (cwd, settings, read): OpLabels<'_>,
+    kept: Option<Repeats<'_>>,
+) -> Result<Option<Vec<i64>>> {
+    #[cfg(test)]
+    anyhow::ensure!(!OPS_REFUSED.take(), "a test refused this batch");
+    // Decision 109 (5d): what a history forget committed since the caller checked, asked before
+    // what the batch would repeat: a note saved before the forget is forgotten, not kept.
+    for (kind, body) in ops {
+        if crate::forget::history::covered_op(tx, *kind, body)? {
+            return Err(HistoryCovered.into());
+        }
+    }
+    // What the batch would repeat, asked in its own transaction (`append_note`).
+    if let Some(kept) = kept
+        && kept(tx)?
+    {
+        return Ok(None);
+    }
+    // An agent's own writes: its work state, and the notes it saves (`append_note`).
+    let fenced = |kind: OpKind, body: &serde_json::Value| {
+        kind == OpKind::WorkState || kind == OpKind::Import && body["source"] == NOTE_SOURCE
+    };
+    let lists = ops.iter().any(|(kind, body)| fenced(*kind, body));
+    let never = lists.then(|| capture_exclusions_in(tx)).transpose()?;
+    let now = never
+        .as_ref()
+        .zip(settings)
+        .map(|(never, s)| crate::capture::never_recorded(never, s));
+    for (kind, body) in ops {
+        anyhow::ensure!(
+            !forgotten_op(tx, *kind, body)?,
+            "a forget request invalidated this derived batch; it was not recorded"
+        );
+        // A list imported from claude-mem is matched by its project's name too; a note, by its
+        // repository's key alone.
+        let (repo, imported) = (
+            body["repo"].as_str().unwrap_or_default(),
+            *kind == OpKind::WorkState && !body["source"].is_null(),
+        );
+        let labelled = |settings| crate::capture::exclusion_label("repo", repo, settings);
+        if let Some(never) = &never
+            && fenced(*kind, body)
+            && (never.refuses(now.as_ref(), (None, cwd), read)
+                || never.covers_work_state(repo, imported)
+                || now
+                    .as_ref()
+                    .is_some_and(|now| now.covers_work_state(repo, imported))
+                || imported
+                    && settings.is_some_and(|s| never.covers_work_state(&labelled(s), true)))
+        {
+            return Err(NeverRecorded.into());
+        }
+    }
+    insert_ops(tx, device, bodies).map(Some)
+}
+
 fn insert_event(
     tx: &rusqlite::Transaction,
     device: &str,

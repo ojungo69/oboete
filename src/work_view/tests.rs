@@ -2574,7 +2574,9 @@ fn corrections(h: &Store) -> usize {
 
 /// `switch` on `h`'s home, its token asked and taken.
 fn switched(h: &Store, reference: &str, version: &str, muted: bool) -> Switched {
-    switch(h.home.path(), reference, version, muted, &|| true).unwrap()
+    let saving = std::sync::Mutex::new(());
+    let take = || saving.lock().ok();
+    switch(h.home.path(), (reference, version), muted, &take, &|| true).unwrap()
 }
 
 /// The version an applied switch left its rule at.
@@ -2788,6 +2790,267 @@ fn a_correction_not_applied_yet_refuses_the_switch() {
     crate::claims::WAIT.with(|wait| wait.set(None));
     assert_eq!(got, Switched::Behind);
     assert_eq!(corrections(&h), before);
+}
+
+/// The claim op `pref add` wrote for `text`, as a purge writes it again from its directive's masked
+/// text (`masked_preferences`): the same evidence, so the same uid, which its body does not name.
+fn preference_again(h: &Store, uid: &str, text: &str) -> Value {
+    let device = h.raw.device().to_owned();
+    let ops = h.raw.ops_after(&device, 0, 100_000).unwrap();
+    let op = (ops.into_iter())
+        .find(|op| {
+            op.kind == OpKind::Claim
+                && op.body["recipe"] == crate::claims::PREF_RECIPE
+                && op.body["body"] == text
+        })
+        .unwrap();
+    assert_eq!(crate::claims::op_uid(&op.body).as_deref(), Some(uid));
+    assert!(
+        !op.body.to_string().contains(uid),
+        "its body does not name it"
+    );
+    op.body
+}
+
+/// The uid of the rule the owner wrote for the repository of `ruled`.
+fn changelog_uid(h: &Store, repo: &str) -> String {
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    crate::claims::owned(&k, repo).unwrap().remove(0).uid
+}
+
+/// #1128 item 1: a claim op of the rule's claim that the claims consumer has not applied refuses
+/// the switch though its body does not name the uid, as a purge's preference op does not: the
+/// switch would read the rule as it was before it.
+#[test]
+fn a_rederivation_of_the_rules_claim_not_applied_yet_refuses_the_switch() {
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let op = preference_again(&h, &changelog_uid(&h, &repo), "Write the changelog.");
+    crate::raw::open(h.home.path())
+        .unwrap()
+        .append_ops(&[(OpKind::Claim, op)])
+        .unwrap();
+    let before = corrections(&h);
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = switched(&h, &id, &version, true);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(corrections(&h), before);
+}
+
+/// #1128 item 1: between the switch's check and its append, a claim op of the rule's claim whose
+/// body does not name its uid refuses it, and so does a claim superseding it, which names it in
+/// `supersedes` only.
+#[test]
+fn a_rederivation_or_a_superseding_claim_between_the_check_and_the_append_refuses_the_switch() {
+    for superseding in [false, true] {
+        let (h, _now, _place, repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Write the changelog.");
+        let uid = changelog_uid(&h, &repo);
+        let op = if superseding {
+            json!({"supersedes": [uid], "curated": "a claim superseding it"})
+        } else {
+            preference_again(&h, &uid, "Write the changelog.")
+        };
+        let home = h.home.path().to_owned();
+        CHECKED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                (crate::raw::open(&home).unwrap())
+                    .append_ops(&[(OpKind::Claim, op)])
+                    .unwrap();
+            }))
+        });
+        let before = corrections(&h);
+        let got = switched(&h, &id, &version, true);
+        assert_eq!(got, Switched::Behind, "superseding: {superseding}");
+        assert_eq!(corrections(&h), before);
+    }
+}
+
+/// #1128 item 2: a rule whose approval is recorded and not applied yet (its preference applied, its
+/// decision not) reads as the owner's own until the decision is: a switch of it then is refused.
+#[test]
+fn a_switch_while_an_approval_of_its_rule_is_not_applied_is_refused() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let home = h.home.path();
+    let uid = uid_of(crate::claims::pref_add_recorded(home, "Keep it short.", None).unwrap());
+    let op = MyWorkOp {
+        job: "rule".into(),
+        about: "s1".into(),
+        entry: String::new(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: [("action", json!("approve")), ("claim", json!(uid))]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    (crate::raw::open(home).unwrap())
+        .append_ops(&[(OpKind::MyWork, op)])
+        .unwrap();
+    let (id, version, _) = read_rule(&h, "Keep it short.");
+    assert!(id.starts_with("u:"), "{id}");
+    let before = corrections(&h);
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = switched(&h, &id, &version, true);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(corrections(&h), before);
+}
+
+/// A rule decision of `about` with `fields`, appended on a raw.db handle of its own and not applied:
+/// as the settings page's approval leaves it until the my_work consumer runs.
+fn decision_waiting(home: &Path, about: &str, fields: Value) {
+    let op = MyWorkOp {
+        job: crate::my_work_rules::RULE.into(),
+        about: about.into(),
+        entry: String::new(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    (crate::raw::open(home).unwrap())
+        .append_ops(&[(OpKind::MyWork, op)])
+        .unwrap();
+}
+
+/// A mute of claim `uid` that a worker of an older oboete passed: in `claim_skips`, the claims
+/// checkpoint past it. `keepable`: one today's consumer keeps; else one that corrects nothing.
+fn passed_mute(h: &Store, uid: &str, keepable: bool) {
+    let k = crate::knowledge::open(h.home.path()).unwrap();
+    let mut op = crate::claims::mute_op(&k, uid, false).unwrap().unwrap();
+    if !keepable {
+        op.as_object_mut().unwrap().remove("muted");
+    }
+    let mut raw = crate::raw::open(h.home.path()).unwrap();
+    let seq = raw.append_ops(&[(OpKind::Correction, op)]).unwrap()[0];
+    let device = raw.device().to_owned();
+    k.execute(
+        "INSERT INTO claim_skips(op_device, op_seq, reason) VALUES(?1, ?2, 'corrects nothing')",
+        rusqlite::params![device, seq],
+    )
+    .unwrap();
+    let ops = crate::knowledge::checkpoint::OPS;
+    crate::knowledge::checkpoint::set_in(&k, ops, "claims", &device, seq).unwrap();
+}
+
+/// `switched` with `claims::applied`'s wait set to none.
+fn switched_at_once(h: &Store, reference: &str, version: &str, muted: bool) -> Switched {
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = switched(h, reference, version, muted);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    got
+}
+
+/// #1128 item 13: a correction of the rule's claim that a worker of an older oboete passed (in
+/// `claim_skips`, the claims checkpoint past it) refuses the switch while today's consumer would
+/// keep it, which its next step does; one no consumer can keep leaves the switch its append.
+#[test]
+fn a_correction_an_older_worker_passed_refuses_the_switch_while_it_can_be_kept() {
+    for keepable in [true, false] {
+        let (h, _now, _place, repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Write the changelog.");
+        passed_mute(&h, &changelog_uid(&h, &repo), keepable);
+        let before = corrections(&h);
+        let got = switched_at_once(&h, &id, &version, true);
+        if keepable {
+            assert_eq!(got, Switched::Behind);
+            assert_eq!(corrections(&h), before);
+        } else {
+            assert_eq!(got, Switched::Pending, "the switch is recorded");
+            assert_eq!(corrections(&h), before + 1);
+        }
+    }
+}
+
+/// #1130's review: a switch behind an approval of its rule not applied yet, or behind a correction
+/// an older worker passed, catches up by itself where this process runs its own passes, with no
+/// other activity: its catch-up applies what the switch waits on, so the reference the page read
+/// is gone or its version stale, and the next read's switches the rule.
+#[test]
+fn a_switch_behind_an_approval_or_a_passed_correction_catches_up_by_itself() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let home = h.home.path();
+    let uid = uid_of(crate::claims::pref_add_recorded(home, "Keep it short.", None).unwrap());
+    decision_waiting(home, "s1", json!({"action": "approve", "claim": uid}));
+    let (id, version, _) = read_rule(&h, "Keep it short.");
+    let first = switched(&h, &id, &version, true);
+    assert!(
+        matches!(first, Switched::NotFound | Switched::Stale),
+        "{first:?}"
+    );
+    let (id, version, _) = read_rule(&h, "Keep it short.");
+    assert!(id.starts_with("l:"), "{id}");
+    assert!(matches!(
+        switched(&h, &id, &version, true),
+        Switched::Applied(Some(_))
+    ));
+    let (h, _now, _place, repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    passed_mute(&h, &changelog_uid(&h, &repo), true);
+    assert_eq!(switched(&h, &id, &version, true), Switched::Stale);
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    assert!(matches!(
+        switched(&h, &id, &version, true),
+        Switched::Applied(Some(_))
+    ));
+}
+
+/// #1128 item 2: an undo of an approved rule's suggestion not applied yet refuses its switch, the
+/// suggestion compared whole: one of another suggestion whose id begins with it leaves the switch
+/// its append.
+#[test]
+fn a_decision_of_an_approved_rules_suggestion_not_applied_yet_refuses_its_switch() {
+    for (about, refuses) in [("s2", true), ("s22", false)] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Run the tests before a push.");
+        decision_waiting(h.home.path(), about, json!({"action": "undo"}));
+        let before = corrections(&h);
+        let got = switched_at_once(&h, &id, &version, true);
+        assert_eq!(got == Switched::Behind, refuses, "{about}: {got:?}");
+        assert_eq!(corrections(&h), before + usize::from(!refuses), "{about}");
+    }
+}
+
+/// #1128 item 1: a claim of another uid whose text quotes the rule's uid names no claim of it: not
+/// applied yet, or appended between the switch's check and its append, it leaves the switch its
+/// append.
+#[test]
+fn a_claim_that_only_quotes_the_rules_uid_leaves_the_switch_its_append() {
+    for between in [false, true] {
+        let (h, _now, _place, repo, _off) = ruled();
+        let (id, version, _) = read_rule(&h, "Write the changelog.");
+        let uid = changelog_uid(&h, &repo);
+        let mut op = preference_again(&h, &uid, "Write the changelog.");
+        let quoting = format!("Quoting {uid}.");
+        op["body"] = json!(quoting);
+        op["evidence"][0]["quote"] = json!(quoting);
+        op["evidence"][0]["seq"] = json!(op["evidence"][0]["seq"].as_i64().unwrap() + 100_000);
+        assert_ne!(crate::claims::op_uid(&op).as_deref(), Some(uid.as_str()));
+        let home = h.home.path().to_owned();
+        let append = move || {
+            (crate::raw::open(&home).unwrap())
+                .append_ops(&[(OpKind::Claim, op)])
+                .unwrap();
+        };
+        if between {
+            CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(append)));
+        } else {
+            append();
+        }
+        let before = corrections(&h);
+        let got = switched_at_once(&h, &id, &version, true);
+        assert_eq!(got, Switched::Pending, "between: {between}");
+        assert_eq!(corrections(&h), before + 1, "between: {between}");
+    }
 }
 
 /// A correction of the rule's claim recorded just before the switch, the claims consumer given its

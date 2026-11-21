@@ -1597,7 +1597,11 @@ fn run_as(home: &Path, idle_ms: u64, follow: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -> Result<()> {
+pub(crate) fn run_consumers(
+    home: &Path,
+    idle_ms: u64,
+    consumers: Vec<Box<dyn Consumer>>,
+) -> Result<()> {
     let Some(held) = lock(home)? else {
         return Ok(());
     };

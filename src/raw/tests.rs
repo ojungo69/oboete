@@ -1578,6 +1578,24 @@ fn a_my_work_ops_labels_are_names_and_its_fields_text() {
     );
 }
 
+/// #1083's R2b: a rule decision names its claim by its uid, 64 hex digits: nothing the bundled
+/// rules find, so the op-text scan leaves the decision naming its claim.
+#[test]
+fn a_rule_decisions_claim_is_nothing_the_bundled_rules_mask() {
+    let home = tempfile::tempdir().unwrap();
+    let rules = crate::redact::Rules::load(home.path()).unwrap();
+    let masked = (0..20_000)
+        .filter(|i| {
+            let uid = crate::curate::sha256_hex(&format!("preference\0d{i}\0{}\00", i * 7));
+            let body = serde_json::json!({"job": "rule", "about": format!("s{i}"), "entry": "",
+                "ts": 1, "read": {"spans": [], "ops": []}, "removed": [],
+                "fields": {"action": "approve", "claim": uid}, "skipped": false});
+            masked_op_text(OpKind::MyWork, &body.to_string(), &rules).is_some()
+        })
+        .count();
+    assert_eq!(masked, 0);
+}
+
 /// A hide op holds no text a rule masks: its target is oboete's word, so a rule that finds
 /// `card` or `summary` leaves it naming what it removed (Codex on #658).
 #[test]
@@ -2751,7 +2769,7 @@ fn a_scan_records_only_under_its_own_mark() {
 
 /// Owner decision 43 (Codex's security review of the switch): a handle whose ops' text was
 /// gated with the rules off owes the op text scan in each append's own transaction, the
-/// fenced one of curation too; a handle gated with rules on owes nothing.
+/// fenced one of curation and an approval's one too; a handle gated with rules on owes nothing.
 #[test]
 fn an_append_gated_off_owes_the_scan_in_its_transaction() {
     let home = tempfile::tempdir().unwrap();
@@ -2775,6 +2793,12 @@ fn an_append_gated_off_owes_the_scan_in_its_transaction() {
     scanned(&raw);
     let fence = raw.fence_count().unwrap();
     raw.append_ops_fenced(&claim(), fence).unwrap();
+    assert!(raw.ops_text_owed("v").unwrap());
+    // #1083's R2b: an event and its ops in one transaction, as an approval writes them.
+    scanned(&raw);
+    let made = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> { Ok(claim().to_vec()) };
+    raw.append_event_with_ops(&test_event(r#"{"prompt":"x"}"#), (&[], "v"), made)
+        .unwrap();
     assert!(raw.ops_text_owed("v").unwrap());
 }
 
@@ -3919,6 +3943,173 @@ fn an_answer_is_refused_after_retention_expires_a_row() {
     assert_eq!(raw.expired_rows().unwrap(), 2);
 }
 
+/// #1083's R2b: an event and the ops it makes of its seq are written in one transaction, each
+/// checked as `append_with_ledger` and `append_ops` check them: together with the event's ledger,
+/// its ops in one batch; nothing at all when the event is refused (what is never recorded), when an
+/// op is refused once the event is inserted, when an op is over the cap, or when a newer oboete
+/// stamped raw.db since this handle opened it.
+#[test]
+fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let found = crate::redact::Finding {
+        rule: "r".into(),
+        offset: 0,
+        length: 1,
+    };
+    let ledger = [("/prompt".to_owned(), found)];
+    // Gated with the rules off, an append owes the op-text scan in its own transaction: a refused
+    // one leaves the scan's markers as they were.
+    let off = crate::config::parse_capture(Some("[redaction]\nenabled = false\n")).unwrap();
+    raw.gates_with(&crate::redact::Rules::new(&off.redaction).unwrap());
+    let scanned = |raw: &Raw| {
+        let mark = raw.op_text_scan_begun().unwrap();
+        assert!(raw.ops_text_scanned("v", &mark).unwrap());
+        assert!(!raw.ops_text_owed("v").unwrap());
+    };
+    let counts = |raw: &Raw| -> (i64, i64, i64, i64) {
+        raw.conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM records), (SELECT COUNT(*) FROM ledger),
+                        (SELECT COUNT(*) FROM ops),
+                        (SELECT COUNT(*) FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning'))",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    };
+    let ops = |seq: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        Ok(vec![
+            (OpKind::Claim, serde_json::json!({"seq": seq})),
+            (OpKind::MyWork, serde_json::json!({"seq": seq})),
+        ])
+    };
+    let event = |text: &str| test_event(&format!(r#"{{"prompt":"{text}"}}"#));
+    let (seq, seqs) = (raw.append_event_with_ops(&event("x"), (&ledger, "test"), ops))
+        .unwrap()
+        .unwrap();
+    let written = counts(&raw);
+    assert_eq!((written.0, written.1, written.2), (1, 1, 2));
+    let device = raw.device().to_owned();
+    let written: Vec<_> = (raw.ops_after(&device, 0, 10).unwrap().into_iter())
+        .map(|o| (o.op_seq, o.batch, o.body["seq"].as_i64()))
+        .collect();
+    assert_eq!(
+        written,
+        [(seqs[0], seqs[0], Some(seq)), (seqs[1], seqs[0], Some(seq))]
+    );
+    raw.exclude_capture(("repo", "github.com/o/secret"), false)
+        .unwrap();
+    let excluded = Event {
+        repo: Some("github.com/o/secret".into()),
+        ..event("never")
+    };
+    let none = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        panic!("no ops are made for an event refused")
+    };
+    scanned(&raw);
+    let refused = counts(&raw);
+    assert!(refused.3 > 0, "{refused:?}");
+    assert_eq!(
+        (raw.append_event_with_ops(&excluded, (&ledger, "test"), none)).unwrap(),
+        None
+    );
+    assert_eq!(counts(&raw), refused, "an event refused");
+    OPS_REFUSED.set(true);
+    assert!(
+        raw.append_event_with_ops(&event("y"), (&ledger, "test"), ops)
+            .is_err()
+    );
+    assert_eq!(counts(&raw), refused, "an op refused");
+    let huge = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        Ok(vec![(
+            OpKind::Claim,
+            serde_json::json!({"text": "x".repeat(MAX_OP_BYTES)}),
+        )])
+    };
+    assert!(
+        raw.append_event_with_ops(&event("z"), (&ledger, "test"), huge)
+            .is_err()
+    );
+    assert_eq!(counts(&raw), refused, "an op over the cap");
+    raw.forget_apply(&[crate::forget::Request {
+        v: 2,
+        home: raw.home_id().into(),
+        job: "a".repeat(32),
+        started: 1,
+        target: crate::forget::Target::Uid {
+            uid: "f".repeat(64),
+        },
+        records: Vec::new(),
+    }])
+    .unwrap();
+    scanned(&raw);
+    let refused = counts(&raw);
+    let naming = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        let op = serde_json::json!({"uid": "f".repeat(64), "status": "retracted"});
+        Ok(vec![(OpKind::Correction, op)])
+    };
+    assert!(
+        raw.append_event_with_ops(&event("v"), (&ledger, "test"), naming)
+            .is_err()
+    );
+    assert_eq!(counts(&raw), refused, "an op of a forgotten uid");
+    Connection::open(home.path().join("raw.db"))
+        .unwrap()
+        .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
+        .unwrap();
+    assert!(
+        raw.append_event_with_ops(&event("w"), (&ledger, "test"), ops)
+            .is_err()
+    );
+    assert_eq!(counts(&raw), refused, "a newer format");
+    assert!(!raw.ops_text_owed("v").unwrap());
+}
+
+/// #1128 item 2: a rule decision appended since a rule's write was checked refuses it when it names
+/// the rule's claim (an approval) or is about the rule's suggestion (an undo, a rejection), compared
+/// whole: one about `s12` leaves a write of `s1`'s rule be.
+#[test]
+fn a_rule_decision_of_the_claim_or_its_suggestion_refuses_a_rules_write() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let uid = "a".repeat(64);
+    let write = || {
+        [(
+            OpKind::Correction,
+            serde_json::json!({"uid": "a".repeat(64), "muted": true}),
+        )]
+    };
+    let decision = |about: &str, fields: serde_json::Value| {
+        serde_json::json!({"job": "rule", "about": about, "entry": "", "ts": 1,
+            "read": {"spans": [], "ops": []}, "removed": [], "fields": fields, "skipped": false})
+    };
+    let cases = [
+        (
+            decision("s12", serde_json::json!({"action": "undo"})),
+            false,
+        ),
+        (decision("s1", serde_json::json!({"action": "undo"})), true),
+        (
+            decision("s9", serde_json::json!({"action": "approve", "claim": uid})),
+            true,
+        ),
+        (
+            decision("s9", serde_json::json!({"action": "reject"})),
+            false,
+        ),
+    ];
+    for (n, (op, refuses)) in cases.into_iter().enumerate() {
+        let fence = raw.rule_fence().unwrap();
+        raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        let got = raw.append_ops_ruled(&write(), &fence, (&uid, Some("s1")));
+        assert_eq!(got.is_err(), refuses, "case {n}: {got:?}");
+        if refuses {
+            assert!(got.unwrap_err().is::<OpsMoved>(), "case {n}");
+        }
+    }
+}
+
 /// #1083 (R2a): a rule's write is appended only while nothing it reads of its claim moved since its
 /// check (`rule_fence`): curation's ops in between, a correction of another claim among them,
 /// leave it be; an op naming its claim (a correction of it, a claim superseding it), an exclusion,
@@ -3948,9 +4139,13 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         serde_json::json!({"uid": other, "muted": true}),
     )])
     .unwrap();
+    // #1128 item 1: a claim that only quotes the uid names no claim of it.
+    let quoting = serde_json::json!({"text": format!("the rule {uid} again")});
+    raw.append_ops(&[(OpKind::Claim, quoting)]).unwrap();
     assert_eq!(
-        raw.append_ops_ruled(&write(), &fence, &uid).unwrap(),
-        vec![4]
+        raw.append_ops_ruled(&write(), &fence, (&uid, None))
+            .unwrap(),
+        vec![5]
     );
     let device = raw.device().to_owned();
     type Move = Box<dyn Fn(&mut Raw)>;
@@ -3992,7 +4187,9 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         let fence = raw.rule_fence().unwrap();
         moved(&mut raw);
         let before = written(&raw);
-        let refused = raw.append_ops_ruled(&write(), &fence, &uid).unwrap_err();
+        let refused = raw
+            .append_ops_ruled(&write(), &fence, (&uid, None))
+            .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "move {n}: {refused:#}");
         assert_eq!(written(&raw), before, "move {n}: nothing written");
     }
@@ -4003,7 +4200,9 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
             ..fence.clone()
         };
         let before = written(&raw);
-        let refused = raw.append_ops_ruled(&write(), &moved, &uid).unwrap_err();
+        let refused = raw
+            .append_ops_ruled(&write(), &moved, (&uid, None))
+            .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
     }
@@ -4011,7 +4210,9 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         expired: fence.expired - 1,
         ..fence.clone()
     };
-    let refused = raw.append_ops_ruled(&write(), &expired, &uid).unwrap_err();
+    let refused = raw
+        .append_ops_ruled(&write(), &expired, (&uid, None))
+        .unwrap_err();
     assert!(refused.is::<OpsMoved>(), "{refused:#}");
-    assert!(raw.append_ops_ruled(&write(), &fence, &uid).is_ok());
+    assert!(raw.append_ops_ruled(&write(), &fence, (&uid, None)).is_ok());
 }

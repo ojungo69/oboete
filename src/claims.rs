@@ -4,6 +4,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// Where a claim's quote is: its event (`device`, `seq`), its byte range in that event's long
 /// text (`curate::long_text`), the start of the sentence it starts in, and the quote itself.
@@ -770,6 +771,10 @@ thread_local! {
     /// pass (W3b-2: a test starts the worker that runs from there).
     pub(crate) static WAITING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// A test's hook, run once an owner's approval or undo has waited, before the read that proves
+    /// what it wrote is kept (#1083's R2b).
+    pub(crate) static PROVING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `pref_add_in` of every repository.
@@ -782,8 +787,9 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
 /// decided preference of global scope (spec 3.3: global scope only through this or the viewer),
 /// or, slice 8b, of repository `repo` (a key as records name it). Returns its uid, once the claims
 /// consumer has applied it: the next SessionStart shows it.
-// ponytail: two appends; a crash between them leaves the directive event with no claim. The
-// receipt reports that partial state without retrying. One transaction when raw supports both.
+// shortcut: two appends; a crash between them leaves the directive event with no claim, which
+// the receipt reports without retrying. An approval of a suggestion writes its directive and its
+// preference in one transaction (`approve_recorded`); `pref add` can, should a crash there matter.
 pub fn pref_add_in(home: &std::path::Path, text: &str, repo: Option<&str>) -> Result<String> {
     pref_add_recorded(home, text, repo)
         .map_err(|e| e.cause)?
@@ -815,90 +821,103 @@ pub(crate) fn preference_op(evidence: Evidence, in_repo: bool) -> ClaimOp {
     }
 }
 
-pub(crate) fn pref_add_recorded(
-    home: &std::path::Path,
-    text: &str,
-    repo: Option<&str>,
-) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
-    let settings = crate::capture::Settings::load(home).map_err(OwnerRefusal::unavailable)?;
-    let c = crate::capture::directive(text, crate::db::now_ms(), &settings, repo);
-    // What the gate stores: the quote reads verbatim there. Checked before either append, so a
-    // preference that cannot be a claim leaves no event behind.
-    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
-    if quote.trim().is_empty() {
-        return Err(OwnerRefusal {
-            code: OwnerRefusalCode::PreferenceEmpty,
-            cause: anyhow::anyhow!(
-                "nothing is left to record once the <private> parts are removed"
-            ),
-        });
-    }
-    if quote.chars().count() > MAX_BODY_CHARS {
-        return Err(OwnerRefusal {
-            code: OwnerRefusalCode::PreferenceTooLong,
-            cause: anyhow::anyhow!(
-                "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
-                quote.chars().count()
-            ),
-        });
-    }
-    let length = i64::try_from(quote.len()).map_err(OwnerRefusal::unavailable)?;
-    // raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
-    let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
-    let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
-    if let (Some(given), Some(label)) = (repo, &c.event.repo) {
-        // #743: a name the gate masks could stand for another repository's, and so could its
-        // directives' session (#745).
-        if label != given || c.event.session != format!("owner:{given}") {
+/// An owner's directive as `pref add` checks it before it appends anything: the event and its
+/// ledger as the gate stores them, its quote (its whole text there), raw.db and knowledge.db open,
+/// raw.db first, as every reader of knowledge.db holds it (a rebuild's swap waits for it).
+struct Directive {
+    settings: crate::capture::Settings,
+    captured: crate::capture::Captured,
+    quote: String,
+    raw: crate::raw::Raw,
+    k: Connection,
+}
+
+impl Directive {
+    /// `text` as a preference of every repository, or of `repo`, refused before anything is
+    /// appended when it cannot be a claim.
+    fn checked(
+        home: &std::path::Path,
+        text: &str,
+        repo: Option<&str>,
+    ) -> std::result::Result<Self, OwnerRefusal> {
+        let settings = crate::capture::Settings::load(home).map_err(OwnerRefusal::unavailable)?;
+        let c = crate::capture::directive(text, crate::db::now_ms(), &settings, repo);
+        // What the gate stores: the quote reads verbatim there. Checked before either append, so
+        // a preference that cannot be a claim leaves no event behind.
+        let quote = crate::curate::long_text(&c.event).unwrap_or_default();
+        if quote.trim().is_empty() {
             return Err(OwnerRefusal {
-                code: OwnerRefusalCode::PreferenceRepoMasked,
-                cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),
+                code: OwnerRefusalCode::PreferenceEmpty,
+                cause: anyhow::anyhow!(
+                    "nothing is left to record once the <private> parts are removed"
+                ),
             });
         }
-        repo_refusal(&raw, &k, &settings, (given, label))?;
+        if quote.chars().count() > MAX_BODY_CHARS {
+            return Err(OwnerRefusal {
+                code: OwnerRefusalCode::PreferenceTooLong,
+                cause: anyhow::anyhow!(
+                    "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
+                    quote.chars().count()
+                ),
+            });
+        }
+        let raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
+        let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
+        if let (Some(given), Some(label)) = (repo, &c.event.repo) {
+            // #743: a name the gate masks could stand for another repository's, and so could its
+            // directives' session (#745).
+            if label != given || c.event.session != format!("owner:{given}") {
+                return Err(OwnerRefusal {
+                    code: OwnerRefusalCode::PreferenceRepoMasked,
+                    cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),
+                });
+            }
+            repo_refusal(&raw, &k, &settings, (given, label))?;
+        }
+        Ok(Self {
+            settings,
+            captured: c,
+            quote,
+            raw,
+            k,
+        })
     }
-    let seq = raw
-        .append_with_ledger(&c.event, &c.ledger, settings.rules.version())
-        .and_then(|seq| anyhow::Context::context(seq, "its session is forgotten: not recorded"))
-        .map_err(OwnerRefusal::unavailable)?;
+}
+
+/// The preference op of a directive appended at `seq` on `device` whose whole text is `quote`, and
+/// its uid.
+fn preference_at(device: &str, seq: i64, quote: &str, in_repo: bool) -> Result<(String, ClaimOp)> {
     let evidence = Evidence {
-        device: raw.device().to_owned(),
+        device: device.to_owned(),
         seq,
         offset: 0,
-        length,
+        length: i64::try_from(quote.len())?,
         sentence: 0,
-        quote,
+        quote: quote.to_owned(),
         claim_at: None,
     };
-    let uid = uid("preference", &evidence);
-    let op = preference_op(evidence, c.event.repo.is_some());
-    // Owner decision 43: a text gated under rules turned off owes the op text scan.
-    raw.gates_with(&settings.rules);
-    let append = (|| -> Result<Vec<i64>> {
-        raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])
-    })();
-    let seqs = match append {
-        Ok(seqs) => seqs,
-        Err(cause) => return Ok(OwnerReceipt::DirectiveOnly { cause }),
-    };
-    let device = raw.device().to_owned();
-    drop(raw);
-    if let Err(cause) = applied(home, &k, &device, &seqs, ("preference", "claims")) {
-        return Ok(OwnerReceipt::Pending {
-            uid,
-            reason: PendingReason::Application,
-            cause,
-        });
-    }
-    // Passing the op is not enough: a consumer may skip it, or its quote may disappear before
-    // the consumer keeps it. Never report that a global preference was created without it.
-    let kept = k.query_row(
+    Ok((
+        uid("preference", &evidence),
+        preference_op(evidence, in_repo),
+    ))
+}
+
+/// Whether the claims consumer kept preference `uid` from op `op_seq` of `device`: passing the op is
+/// not enough, a consumer may skip it, or its quote may disappear before the consumer keeps it.
+fn kept_preference(k: &Connection, device: &str, op_seq: i64, uid: &str) -> Result<bool> {
+    Ok(k.query_row(
         "SELECT EXISTS(SELECT 1 FROM derivations
          WHERE op_device = ?1 AND op_seq = ?2 AND uid = ?3)",
-        rusqlite::params![device, seqs.last(), uid],
+        rusqlite::params![device, op_seq, uid],
         |r| r.get::<_, bool>(0),
-    );
-    Ok(match kept {
+    )?)
+}
+
+/// The receipt of preference `uid`, its op `op_seq` of `device` recorded: kept, or pending and why.
+fn preference_kept(k: &Connection, device: &str, op_seq: i64, uid: String) -> OwnerReceipt {
+    // Never report that a global preference was created without it.
+    match kept_preference(k, device, op_seq, &uid) {
         Ok(true) => OwnerReceipt::Applied { uid },
         Ok(false) => OwnerReceipt::Pending {
             uid,
@@ -911,9 +930,279 @@ pub(crate) fn pref_add_recorded(
         Err(cause) => OwnerReceipt::Pending {
             uid,
             reason: PendingReason::Application,
-            cause: cause.into(),
+            cause,
+        },
+    }
+}
+
+pub(crate) fn pref_add_recorded(
+    home: &std::path::Path,
+    text: &str,
+    repo: Option<&str>,
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    let Directive {
+        settings,
+        captured: c,
+        quote,
+        mut raw,
+        k,
+    } = Directive::checked(home, text, repo)?;
+    let seq = raw
+        .append_with_ledger(&c.event, &c.ledger, settings.rules.version())
+        .and_then(|seq| anyhow::Context::context(seq, "its session is forgotten: not recorded"))
+        .map_err(OwnerRefusal::unavailable)?;
+    let device = raw.device().to_owned();
+    // Owner decision 43: a text gated under rules turned off owes the op text scan.
+    raw.gates_with(&settings.rules);
+    let append = (|| -> Result<(String, Vec<i64>)> {
+        let (uid, op) = preference_at(&device, seq, &quote, c.event.repo.is_some())?;
+        let seqs = raw.append_ops(&[(crate::raw::OpKind::Claim, serde_json::to_value(op)?)])?;
+        Ok((uid, seqs))
+    })();
+    let (uid, seqs) = match append {
+        Ok(appended) => appended,
+        Err(cause) => return Ok(OwnerReceipt::DirectiveOnly { cause }),
+    };
+    drop(raw);
+    if let Err(cause) = applied(home, &k, &device, &seqs, ("preference", "claims")) {
+        return Ok(OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::Application,
+            cause,
+        });
+    }
+    Ok(preference_kept(&k, &device, seqs[0], uid))
+}
+
+/// #1083's R2b: suggestion `id` approved as the owner's preference of `text`, of every repository
+/// or of `repo`. Its directive, its preference and its decision, which names the preference, are
+/// written in one transaction (`Raw::append_event_with_ops`), checked as `pref add` checks a
+/// directive and as `append_ops` checks ops: an approval is recorded whole or not at all. Applied
+/// once the claims consumer kept the preference and the my_work consumer the decision, within one
+/// wait.
+pub(crate) fn approve_recorded(
+    home: &std::path::Path,
+    id: &str,
+    text: &str,
+    repo: Option<&str>,
+) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
+    let Directive {
+        settings,
+        captured: c,
+        quote,
+        mut raw,
+        k,
+    } = Directive::checked(home, text, repo)?;
+    let device = raw.device().to_owned();
+    let in_repo = c.event.repo.is_some();
+    // Owner decision 43, as `pref add` gates its preference.
+    raw.gates_with(&settings.rules);
+    let mut named = None;
+    let written =
+        raw.append_event_with_ops(&c.event, (&c.ledger, settings.rules.version()), |seq| {
+            let (uid, op) = preference_at(&device, seq, &quote, in_repo)?;
+            let decision = json!({"action": "approve", "claim": uid});
+            let mut ops = vec![(crate::raw::OpKind::Claim, serde_json::to_value(op)?)];
+            ops.extend(crate::my_work_ops::bodies(
+                crate::my_work_rules::RULE,
+                vec![(id.to_owned(), decision)],
+            )?);
+            named = Some(uid);
+            Ok(ops)
+        });
+    drop(raw);
+    let seqs = match written {
+        Ok(Some((_, seqs))) => seqs,
+        Ok(None) => {
+            return Err(OwnerRefusal::unavailable(anyhow::anyhow!(
+                "its session is forgotten: not recorded"
+            )));
+        }
+        Err(e) => return Err(OwnerRefusal::unavailable(e)),
+    };
+    let (Some(uid), [preference, decision]) = (named, seqs.as_slice()) else {
+        return Err(OwnerRefusal::unavailable(anyhow::anyhow!(
+            "an approval records its preference and its decision"
+        )));
+    };
+    let deadline = deadline();
+    let waited = applied_by(
+        home,
+        &k,
+        &device,
+        &[*preference],
+        ("preference", "claims"),
+        deadline,
+    )
+    .and_then(|()| {
+        applied_by(
+            home,
+            &k,
+            &device,
+            &[*decision],
+            ("decision", "my_work"),
+            deadline,
+        )
+    });
+    if let Err(cause) = waited {
+        return Ok(OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::Application,
+            cause,
+        });
+    }
+    // Both kept, read in one read of knowledge.db.
+    #[cfg(test)]
+    if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let decided = json!({"action": "approve", "claim": uid});
+    let kept = k
+        .unchecked_transaction()
+        .map_err(anyhow::Error::from)
+        .and_then(|read| {
+            crate::my_work_ops::kept(
+                &read,
+                &device,
+                *decision,
+                (crate::my_work_rules::RULE, id),
+                &decided,
+            )
+            .map(|kept| (read, kept))
+        });
+    Ok(match kept {
+        Ok((read, true)) => preference_kept(&read, &device, *preference, uid),
+        Ok((_, false)) => OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::NotKept,
+            cause: anyhow::anyhow!(
+                "the approval is recorded; the worker did not keep its decision: \
+                 check its state before retrying"
+            ),
+        },
+        Err(cause) => OwnerReceipt::Pending {
+            uid,
+            reason: PendingReason::Application,
+            cause,
         },
     })
+}
+
+/// What an undo of an approval did (#1083's R2b).
+pub(crate) enum Undone {
+    /// Its retraction and its decision recorded in one append, or the decision alone where the
+    /// preference is forgotten: whether both are applied and kept.
+    Recorded(bool),
+    /// The preference is not in knowledge.db, nor forgotten (not derived yet, or its derivation
+    /// removed by a mask before a purge writes it again): nothing is recorded.
+    Waiting,
+}
+
+/// #1083's R2b: the approval of suggestion `id`, whose preference is `uid`, undone: the preference
+/// retracted and the decision undone, in one append, so neither is kept without the other. The
+/// decision alone only on raw.db's proof that the preference is forgotten for good: one absent for
+/// another reason would be active again with its approval undone.
+pub(crate) fn undo_approval_recorded(
+    home: &std::path::Path,
+    id: &str,
+    uid: &str,
+) -> std::result::Result<Undone, OwnerRefusal> {
+    let rules = crate::capture::Settings::load(home)
+        .map_err(OwnerRefusal::unavailable)?
+        .rules;
+    // raw.db first, as every reader of knowledge.db holds it.
+    let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
+    let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
+    schema(&k).map_err(OwnerRefusal::unavailable)?;
+    // A preference forgotten since has nothing left to retract, though knowledge.db may still hold
+    // it until the forget's purge: an op naming it would be refused (`forgotten_op`).
+    let retraction = if raw.forgotten(uid).map_err(OwnerRefusal::unavailable)? {
+        None
+    } else {
+        let anchor = correction_anchor(&k, uid).map_err(OwnerRefusal::unavailable)?;
+        let Some(anchor) = anchor else {
+            return Ok(Undone::Waiting);
+        };
+        Some(CorrectionOp {
+            uid: uid.to_owned(),
+            anchor,
+            status: Some("retracted".to_owned()),
+            body: None,
+            muted: None,
+        })
+    };
+    let mut ops = Vec::new();
+    if let Some(op) = &retraction {
+        ops.push((
+            crate::raw::OpKind::Correction,
+            serde_json::to_value(op).map_err(OwnerRefusal::unavailable)?,
+        ));
+    }
+    let undo = json!({"action": "undo"});
+    ops.extend(
+        crate::my_work_ops::bodies(
+            crate::my_work_rules::RULE,
+            vec![(id.to_owned(), undo.clone())],
+        )
+        .map_err(OwnerRefusal::unavailable)?,
+    );
+    // Owner decision 43, as every correction is appended.
+    raw.gates_with(&rules);
+    let seqs = raw.append_ops(&ops).map_err(OwnerRefusal::unavailable)?;
+    let device = raw.device().to_owned();
+    drop(raw);
+    let deadline = deadline();
+    let decision = seqs.last().copied().unwrap_or_default();
+    let retracted = seqs.len() > 1;
+    let waited = (if retracted {
+        applied_by(
+            home,
+            &k,
+            &device,
+            &seqs[..1],
+            ("correction", "claims"),
+            deadline,
+        )
+    } else {
+        Ok(())
+    })
+    .and_then(|()| {
+        applied_by(
+            home,
+            &k,
+            &device,
+            &[decision],
+            ("decision", "my_work"),
+            deadline,
+        )
+    });
+    if waited.is_err() {
+        return Ok(Undone::Recorded(false));
+    }
+    // Both kept, read in one read of knowledge.db.
+    #[cfg(test)]
+    if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let kept = (|| -> Result<bool> {
+        let read = k.unchecked_transaction()?;
+        let corrected = !retracted
+            || read.query_row(
+                "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2
+                   AND uid = ?3 AND status = 'retracted')",
+                rusqlite::params![device, seqs[0], uid],
+                |r| r.get::<_, bool>(0),
+            )?;
+        Ok(corrected
+            && crate::my_work_ops::kept(
+                &read,
+                &device,
+                decision,
+                (crate::my_work_rules::RULE, id),
+                &undo,
+            )?)
+    })();
+    Ok(Undone::Recorded(kept.unwrap_or(false)))
 }
 
 /// Slice 8b: why a preference of repository `given`, labelled `label` by the gate, is refused before

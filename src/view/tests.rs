@@ -10848,6 +10848,149 @@ fn correction_ops(s: &Store) -> usize {
         .count()
 }
 
+/// The one rule of `rules` whose `then` is `then`.
+fn rule_then<'a>(rules: &'a Value, then: &str) -> &'a Value {
+    let mut found = (rules.as_array().unwrap().iter()).filter(|r| r["then"] == then);
+    let rule = found.next().unwrap();
+    assert!(found.next().is_none(), "{then}");
+    rule
+}
+
+/// A rule of `s`'s home besides the fixture's, written by the owner, and a mute of it appended on a
+/// handle of its own that the claims consumer has not applied: what the switch's catch-up waits for.
+fn another_rules_mute_waiting(s: &Store) {
+    let home = s.home.path();
+    let uid = match crate::claims::pref_add_recorded(home, "Keep it short.", None).unwrap() {
+        crate::claims::OwnerReceipt::Applied { uid } => uid,
+        other => panic!("{other:?}"),
+    };
+    let k = crate::knowledge::open(home).unwrap();
+    let op = crate::claims::mute_op(&k, &uid, true).unwrap().unwrap();
+    (crate::raw::open(home).unwrap())
+        .append_ops(&[(crate::raw::OpKind::Correction, op)])
+        .unwrap();
+}
+
+/// #1128 item 5: the work-view's switch holds `saving` from its locks to its append and through none
+/// of its waits: while it waits for its catch-up, and again for its receipt, the viewer's save lock
+/// is free for another save.
+#[test]
+fn the_work_views_switch_holds_saving_through_none_of_its_waits() {
+    for in_catch_up in [true, false] {
+        let (s, v) = rules_fixture(Token::Run("t0k".into()));
+        if in_catch_up {
+            another_rules_mute_waiting(&s);
+        }
+        let v: &'static Viewer = Box::leak(Box::new(v));
+        let rule = rule_then(&work_view_of(v, "t0k")["rules"], "Answer in Japanese.").clone();
+        let body = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+        let (paused, pause) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let switching = std::thread::spawn(move || {
+            let hook: Box<dyn FnOnce()> = Box::new(move || {
+                paused.send(()).unwrap();
+                gone.recv().unwrap();
+            });
+            if in_catch_up {
+                crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(hook));
+            } else {
+                crate::work_view::SWITCHED.with(|w| {
+                    *w.borrow_mut() = Some(Box::new(move || {
+                        crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(hook));
+                    }))
+                });
+            }
+            post_work_view(v, RULES, "t0k", &body)
+        });
+        pause.recv_timeout(Duration::from_secs(60)).unwrap();
+        let free = v.saving.try_lock().is_ok();
+        go.send(()).unwrap();
+        let (status, answer) = switching.join().unwrap();
+        assert!(free, "in the catch-up: {in_catch_up}");
+        assert_eq!(status, 200, "{answer}");
+    }
+}
+
+/// The switch's catch-up waits before the save lock (#1128 item 5), so the switches in flight are
+/// admitted only as many as may wait for that lock (Codex's security review of #1130): one more is
+/// refused at once, busy, before its catch-up, records nothing and leaves the count as it was; one
+/// admitted holds its place through its waits and lets it go with its answer.
+#[test]
+fn the_work_views_switches_in_flight_are_admitted_a_bounded_number() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    // What an admitted switch's catch-up would wait for.
+    another_rules_mute_waiting(&s);
+    let v: &'static Viewer = Box::leak(Box::new(v));
+    let rule = rule_then(&work_view_of(v, "t0k")["rules"], "Answer in Japanese.").clone();
+    let body = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+    let before = correction_ops(&s);
+    let in_flight = &v.rule_switches;
+    in_flight.store(crate::my_work::WAITERS, SeqCst);
+    let waited = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = waited.clone();
+    crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(Box::new(move || flag.set(true))));
+    let (status, answer) = post_work_view(v, RULES, "t0k", &body);
+    let untaken = crate::claims::WAITING
+        .with(|w| w.borrow_mut().take())
+        .is_some();
+    assert_eq!((status, &answer["code"]), (503, &json!("busy")), "{answer}");
+    assert!(untaken && !waited.get(), "refused before its catch-up");
+    assert_eq!(
+        in_flight.load(SeqCst),
+        crate::my_work::WAITERS,
+        "the count as it was"
+    );
+    assert_eq!(correction_ops(&s), before);
+    in_flight.store(0, SeqCst);
+    let (paused, pause) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let switching = std::thread::spawn(move || {
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            paused.send(()).unwrap();
+            gone.recv().unwrap();
+        });
+        crate::work_view::SWITCHED.with(|w| {
+            *w.borrow_mut() = Some(Box::new(move || {
+                crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(hook));
+            }))
+        });
+        post_work_view(v, RULES, "t0k", &body)
+    });
+    pause.recv_timeout(Duration::from_secs(60)).unwrap();
+    let held = in_flight.load(SeqCst);
+    go.send(()).unwrap();
+    let (status, answer) = switching.join().unwrap();
+    assert_eq!(held, 1, "its place held through its receipt's wait");
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(in_flight.load(SeqCst), 0, "let go");
+}
+
+/// The switch's receipt waits within a deadline of its own: a catch-up that spent its whole wait
+/// leaves it its pass, which applies the switch.
+#[test]
+fn a_switch_whose_catch_up_spent_its_wait_is_still_applied() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    another_rules_mute_waiting(&s);
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Answer in Japanese.").clone();
+    let body = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+    let wait = Duration::from_millis(300);
+    crate::claims::WAIT.with(|w| w.set(Some(wait)));
+    crate::claims::WAITING
+        .with(|w| *w.borrow_mut() = Some(Box::new(move || std::thread::sleep(wait * 2))));
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    crate::claims::WAIT.with(|w| w.set(None));
+    assert_eq!(status, 200, "{answer}");
+    assert!(
+        answer["save"].get("localMaterialization").is_none(),
+        "{answer}"
+    );
+    assert_eq!(
+        rule_then(&answer["rules"], "Answer in Japanese.")["status"],
+        "off"
+    );
+}
+
 /// #1083 (R2a): the work-view's switch turns a rule off and answers the snapshot after it, the
 /// rule it saved and the version it left the rule at, which its Undo posts back to turn it on
 /// again; the first read's version is refused then, with the snapshot it was refused against; and

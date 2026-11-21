@@ -291,6 +291,29 @@ pub(crate) fn append_at(
     Ok((k, raw.device().to_owned(), seqs))
 }
 
+/// Whether the my_work consumer kept op `op_seq` of `device` as an op of `job` about `about` whose
+/// fields are `fields`, neither skipped nor forgotten: the proof an owner's receipt names (#1083's
+/// R2b), since the consumer passes a body it cannot read as it passes one it keeps.
+pub(crate) fn kept(
+    k: &Connection,
+    device: &str,
+    op_seq: i64,
+    (job, about): (&str, &str),
+    fields: &Value,
+) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let row = k
+        .query_row(
+            "SELECT fields FROM my_work WHERE device = ?1 AND op_seq = ?2 AND job = ?3
+               AND about = ?4 AND NOT skipped AND forgotten IS NULL",
+            rusqlite::params![device, op_seq, job, about],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(row
+        .is_some_and(|kept| serde_json::from_str::<Value>(&kept).is_ok_and(|kept| &kept == fields)))
+}
+
 /// Whether the my_work consumer applied `device`'s ops `seqs` of `job` within 10 seconds.
 pub(crate) fn applied(
     home: &std::path::Path,
@@ -303,7 +326,10 @@ pub(crate) fn applied(
 }
 
 /// The owner's ops of `job` as raw.db takes them.
-fn bodies(job: &str, ops: Vec<(String, Value)>) -> Result<Vec<(crate::raw::OpKind, Value)>> {
+pub(crate) fn bodies(
+    job: &str,
+    ops: Vec<(String, Value)>,
+) -> Result<Vec<(crate::raw::OpKind, Value)>> {
     let ts = crate::db::now_ms();
     let mut bodies = Vec::new();
     for (about, fields) in ops {
