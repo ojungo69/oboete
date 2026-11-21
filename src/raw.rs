@@ -7067,10 +7067,11 @@ impl Raw {
         })
     }
 
-    /// This device's newest My Rules op past `after` (a `my_work` op of job `rule`, a decision, or of
-    /// job `rules`, the learning job's): one the my_work consumer has not applied, which a rule's
-    /// write waits for first (#1130's review; #1083's R2b).
-    pub fn my_rules_op_after(&self, after: i64) -> Result<Option<i64>> {
+    /// This device's newest My Rules op past `after` (a `my_work` op of job `rule`, a decision, and
+    /// with `learning` of job `rules` too, the learning job's): one the my_work consumer has not
+    /// applied, which a rule's write waits for first (#1130's review; #1083's R2b: a suggestion's
+    /// decision reads its learning op, a rule's switch none).
+    pub fn my_rules_op_after(&self, after: i64, learning: bool) -> Result<Option<i64>> {
         let mut s = self.conn.prepare(
             "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
              ORDER BY op_seq DESC",
@@ -7079,7 +7080,8 @@ impl Raw {
         while let Some(row) = rows.next()? {
             let body: String = row.get(1)?;
             let decision = serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|v| {
-                v["job"] == crate::my_work_rules::RULE || v["job"] == crate::my_work_rules::NAME
+                v["job"] == crate::my_work_rules::RULE
+                    || (learning && v["job"] == crate::my_work_rules::NAME)
             });
             if decision {
                 return Ok(Some(row.get(0)?));

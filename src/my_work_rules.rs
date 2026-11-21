@@ -141,17 +141,28 @@ pub(crate) fn decided(
     device: &str,
     hidden: &Hidden,
 ) -> Result<BTreeMap<String, Decision>> {
-    let mut out = BTreeMap::new();
-    let mut seen = HashSet::new();
+    Ok(decisions(k, device, hidden)?.0)
+}
+
+/// `decided`, and (#1083's R2b) each suggestion's newest `rule` op of any action, an undo included:
+/// what moves a suggestion's row each time it is decided or a decision undone. One read of the
+/// decisions for both.
+pub(crate) fn decisions(
+    k: &rusqlite::Connection,
+    device: &str,
+    hidden: &Hidden,
+) -> Result<(BTreeMap<String, Decision>, BTreeMap<String, i64>)> {
+    let (mut out, mut transitions) = (BTreeMap::new(), BTreeMap::new());
     let mut ops =
         crate::my_work_ops::shown(k, (RULE, None), Some(device), hidden, true, usize::MAX)?;
     // This device's decisions, the newest op first (#1131 item 2): the one appended last decides,
     // whatever its clock said.
     ops.sort_by_key(|op| std::cmp::Reverse(op.op_seq));
     for op in ops {
-        if !seen.insert(op.op.about.clone()) {
+        if transitions.contains_key(&op.op.about) {
             continue;
         }
+        transitions.insert(op.op.about.clone(), op.op_seq);
         let action = op.op.fields.get("action").and_then(Value::as_str);
         let state = match action {
             Some("approve") => "approved",
@@ -168,22 +179,7 @@ pub(crate) fn decided(
             },
         );
     }
-    Ok(out)
-}
-
-/// #1083's R2b: each suggestion's newest `rule` op of this device, of any action (an undo
-/// included): what moves a suggestion's row each time it is decided or a decision undone.
-pub(crate) fn transitions(
-    k: &rusqlite::Connection,
-    device: &str,
-    hidden: &Hidden,
-) -> Result<BTreeMap<String, i64>> {
-    let mut out = BTreeMap::new();
-    for op in crate::my_work_ops::shown(k, (RULE, None), Some(device), hidden, true, usize::MAX)? {
-        let seq = out.entry(op.op.about.clone()).or_insert(op.op_seq);
-        *seq = (*seq).max(op.op_seq);
-    }
-    Ok(out)
+    Ok((out, transitions))
 }
 
 /// What My Rules reads (V3): this device's newest answered rules op's suggestions, the op seq
@@ -200,11 +196,12 @@ pub(crate) fn shown(raw: &crate::raw::Raw, k: &rusqlite::Connection) -> Result<S
     let hidden = crate::my_work_ops::hidden(raw, k, &reading)?;
     let device = raw.device().to_owned();
     let (suggestions, seqs, _) = carried(k, &device, &hidden)?;
+    let (decided, transitions) = decisions(k, &device, &hidden)?;
     Ok(Shown {
         suggestions,
         seqs,
-        decided: decided(k, &device, &hidden)?,
-        transitions: transitions(k, &device, &hidden)?,
+        decided,
+        transitions,
     })
 }
 

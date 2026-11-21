@@ -2711,7 +2711,9 @@ impl Viewer {
     /// (`savedRuleId`) and the version the switch left it at (`savedRuleVersion`), which the pages'
     /// Undo posts back; none when a record came after the switch that also decides the rule. A
     /// correction recorded and not applied yet is saved, and its receipt says the local copy is still
-    /// updating. The other actions wait for the writes that bring them (R2b, R2c).
+    /// updating. A suggestion's decisions (#1083's R2b: `approve` and `dismiss` one that waits,
+    /// `restore-suggestion` a rejected or an approved one) go to `work_view::decide` the same way;
+    /// editing and adding a rule wait for R2c.
     fn work_view_rules(&self, body: &[u8], given: &str) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]

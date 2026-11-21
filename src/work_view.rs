@@ -295,7 +295,7 @@ pub(crate) fn switch<'a>(
     saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
     authorized: &dyn Fn() -> bool,
 ) -> anyhow::Result<Switched> {
-    caught_up(home)?;
+    caught_up(home, false)?;
     let Some(saving) = saving() else {
         return Ok(Switched::Busy);
     };
@@ -408,7 +408,7 @@ pub(crate) fn decide<'a>(
     saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
     authorized: &dyn Fn() -> bool,
 ) -> anyhow::Result<Switched> {
-    caught_up(home)?;
+    caught_up(home, true)?;
     let Some(saving) = saving() else {
         return Ok(Switched::Busy);
     };
@@ -532,10 +532,9 @@ pub(crate) fn decide<'a>(
         Wrote::Decision(seqs) => {
             let what = ("decision", "my_work");
             let deadline = crate::claims::deadline();
-            match crate::claims::applied_by(home, &k, &device, &seqs, what, deadline) {
-                Err(e) if e.is::<crate::claims::NotYet>() => return Ok(Switched::Pending),
-                Err(e) => return Err(e),
-                Ok(()) => {}
+            // Saved: a wait that runs out, or a checkpoint that cannot be read, leaves it pending.
+            if crate::claims::applied_by(home, &k, &device, &seqs, what, deadline).is_err() {
+                return Ok(Switched::Pending);
             }
             let Some(&seq) = seqs.first() else {
                 return Ok(Switched::Pending);
@@ -575,7 +574,15 @@ pub(crate) fn decide<'a>(
             let Some(by) = by.filter(left_so) else {
                 return Ok(Switched::Applied(None));
             };
-            approved_of(id, &a.uid, &by, Some(a.decision), Some(a.decision), &file)
+            approved_of(
+                id,
+                &a.uid,
+                &by,
+                kept,
+                Some(a.decision),
+                Some(a.decision),
+                &file,
+            )
         }
     };
     Ok(Switched::Applied(fresh_version(home, reference, &expected)))
@@ -632,12 +639,14 @@ thread_local! {
 /// Some of what the check under the locks refuses (`behind`), waited for first within
 /// `claims::applied`'s time, the worker's pass run here where this process may run it: the claims
 /// consumer past this device's newest correction, and the my_work consumer past its newest rule
-/// decision; and, where this process may run a pass and a correction an older worker passed waits,
+/// decision, and for a suggestion's decision (`learning`) past its newest learning op too, which a
+/// switch does not read (#1132's review); and, where this process may run a pass and a correction an
+/// older worker passed waits,
 /// a pass, whose claims step keeps it (#1130's review: a viewer with no worker running of its own
 /// would else refuse each try). A switch made just after another correction finds it applied.
 /// Still behind once the wait ran out, or behind for what is not waited for here, the check under
 /// the locks refuses.
-fn caught_up(home: &Path) -> anyhow::Result<()> {
+fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
     use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());
@@ -645,7 +654,7 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     let deadline = crate::claims::deadline();
     let device = raw.device().to_owned();
     let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
-    let decision = raw.my_rules_op_after(get_in(&k, OPS, "my_work", &device)?)?;
+    let decision = raw.my_rules_op_after(get_in(&k, OPS, "my_work", &device)?, learning)?;
     // The passed corrections are read only where a pass may follow (#1130's security review).
     let may_run = crate::executable::may_run_worker();
     let passed = may_run && crate::consumer::claims::any_passed(&raw, &k)?;
@@ -731,16 +740,18 @@ pub(crate) fn rejected_of(
 }
 
 /// What an approved rule's row is read from (R2a): its suggestion, its claim and what decides it
-/// (`by`), its approval's op, and (R2b) its newest decision op of any action, the raw.db file.
+/// (`by`), its approval's op, and (R2b) its suggestion's kept learning op and newest decision op of
+/// any action, the raw.db file.
 pub(crate) fn approved_of(
     suggestion: &str,
     uid: &str,
     by: &Value,
+    kept: Option<i64>,
     decision: Option<i64>,
     transition: Option<i64>,
     file: &Option<String>,
 ) -> Value {
-    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by,
+    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by, "kept": kept,
         "decision": decision, "transition": transition, "file": file})
 }
 
@@ -885,7 +896,8 @@ fn my_rules(
                 Some(s) => {
                     let decision = states.decisions.get(&s).copied();
                     let transition = states.transitions.get(&s).copied();
-                    let of = approved_of(&s, uid, &by, decision, transition, file);
+                    let kept = states.kept.get(&s).copied();
+                    let of = approved_of(&s, uid, &by, kept, decision, transition, file);
                     (format!("l:{}", sg[&s]), "approved", "request-progress", of)
                 }
                 None => {
