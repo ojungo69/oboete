@@ -3958,6 +3958,15 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
         length: 1,
     };
     let ledger = [("/prompt".to_owned(), found)];
+    // Gated with the rules off, an append owes the op-text scan in its own transaction: a refused
+    // one leaves the scan's markers as they were.
+    let off = crate::config::parse_capture(Some("[redaction]\nenabled = false\n")).unwrap();
+    raw.gates_with(&crate::redact::Rules::new(&off.redaction).unwrap());
+    let scanned = |raw: &Raw| {
+        let mark = raw.op_text_scan_begun().unwrap();
+        assert!(raw.ops_text_scanned("v", &mark).unwrap());
+        assert!(!raw.ops_text_owed("v").unwrap());
+    };
     let counts = |raw: &Raw| -> (i64, i64, i64, i64) {
         raw.conn
             .query_row(
@@ -3998,7 +4007,9 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
     let none = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
         panic!("no ops are made for an event refused")
     };
+    scanned(&raw);
     let refused = counts(&raw);
+    assert!(refused.3 > 0, "{refused:?}");
     assert_eq!(
         (raw.append_event_with_ops(&excluded, (&ledger, "test"), none)).unwrap(),
         None
@@ -4032,6 +4043,7 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
         records: Vec::new(),
     }])
     .unwrap();
+    scanned(&raw);
     let refused = counts(&raw);
     let naming = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
         let op = serde_json::json!({"uid": "f".repeat(64), "status": "retracted"});
@@ -4051,6 +4063,7 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
             .is_err()
     );
     assert_eq!(counts(&raw), refused, "a newer format");
+    assert!(!raw.ops_text_owed("v").unwrap());
 }
 
 /// #1128 item 2: a rule decision appended since a rule's write was checked refuses it when it names

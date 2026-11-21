@@ -1677,7 +1677,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   approve retracts that preference (status `retracted`) and writes the undo op in one append
   (`claims::undo_approval_recorded`); one forgotten since (raw.db's proof) has nothing left to
   retract, and the undo op alone is written, while one not in knowledge.db for another reason (its
-  approval not applied yet) is refused as pending (409 `rule_pending`) until it is. The suggestion
+  approval not applied yet) is refused as pending (409 `rule_pending`) until it is. The forgotten case
+  needs the preference's uid forget: a forget of the directive's record takes the preference out of
+  knowledge.db first, and its purge writes that uid's forget later (`purge_record_claims`), so in
+  between the undo is refused as pending too. The suggestion
   waits again, and a second approve makes a new preference. A redaction rule of the owner's that
   finds a decision's `action` or `claim` masks it on a rescan, and that decision then names no
   preference (#1131). A decided suggestion is refused another

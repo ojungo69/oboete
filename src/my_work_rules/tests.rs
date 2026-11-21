@@ -810,8 +810,8 @@ fn an_approvals_decision_is_kept_only_as_it_was_written() {
 }
 
 /// #1130's review: an approval's and an undo's receipts are applied only on the rows they wrote, as
-/// written: a decision row the consumer kept unusable, or a retraction's row that is none, leaves
-/// them pending.
+/// written: a decision row the consumer kept unusable, or a retraction's row of another status or
+/// another uid, leaves them pending.
 #[test]
 fn receipts_stay_pending_on_rows_not_as_written() {
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
@@ -829,17 +829,19 @@ fn receipts_stay_pending_on_rows_not_as_written() {
     tamper(&h, "UPDATE my_work SET skipped = 1 WHERE job = 'rule'");
     let got = h.act(approve.clone()).unwrap();
     assert_eq!(got["state"], "pending", "an approval: {got}");
-    let mut h = Home::new();
-    suggested(&mut h);
-    assert_eq!(h.act(approve).unwrap()["state"], "applied");
-    tamper(
-        &h,
+    for sql in [
         "UPDATE corrections SET status = 'decided' WHERE status = 'retracted'",
-    );
-    let got = h
-        .act(json!({"suggestion": "s1", "action": "undo"}))
-        .unwrap();
-    assert_eq!(got["state"], "pending", "an undo: {got}");
+        "UPDATE corrections SET uid = 'x' || uid WHERE status = 'retracted'",
+    ] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        assert_eq!(h.act(approve.clone()).unwrap()["state"], "applied");
+        tamper(&h, sql);
+        let got = h
+            .act(json!({"suggestion": "s1", "action": "undo"}))
+            .unwrap();
+        assert_eq!(got["state"], "pending", "an undo, {sql}: {got}");
+    }
 }
 
 /// #1083's R2b (PR 1): an approval's two waits share one deadline: one that the claims consumer's

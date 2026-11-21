@@ -10913,32 +10913,57 @@ fn the_work_views_switch_holds_saving_through_none_of_its_waits() {
 
 /// The switch's catch-up waits before the save lock (#1128 item 5), so the switches in flight are
 /// admitted only as many as may wait for that lock (Codex's security review of #1130): one more is
-/// refused at once, busy, and records nothing.
+/// refused at once, busy, before its catch-up, records nothing and leaves the count as it was; one
+/// admitted holds its place through its waits and lets it go with its answer.
 #[test]
 fn the_work_views_switches_in_flight_are_admitted_a_bounded_number() {
+    use std::sync::atomic::Ordering::SeqCst;
     let (s, v) = rules_fixture(Token::Run("t0k".into()));
-    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Answer in Japanese.").clone();
+    // What an admitted switch's catch-up would wait for.
+    another_rules_mute_waiting(&s);
+    let v: &'static Viewer = Box::leak(Box::new(v));
+    let rule = rule_then(&work_view_of(v, "t0k")["rules"], "Answer in Japanese.").clone();
     let body = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
     let before = correction_ops(&s);
     let in_flight = &v.rule_switches;
-    in_flight.store(crate::my_work::WAITERS, std::sync::atomic::Ordering::SeqCst);
-    let started = Instant::now();
-    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    in_flight.store(crate::my_work::WAITERS, SeqCst);
+    let waited = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = waited.clone();
+    crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(Box::new(move || flag.set(true))));
+    let (status, answer) = post_work_view(v, RULES, "t0k", &body);
+    let untaken = crate::claims::WAITING
+        .with(|w| w.borrow_mut().take())
+        .is_some();
     assert_eq!((status, &answer["code"]), (503, &json!("busy")), "{answer}");
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
+    assert!(untaken && !waited.get(), "refused before its catch-up");
+    assert_eq!(
+        in_flight.load(SeqCst),
+        crate::my_work::WAITERS,
+        "the count as it was"
     );
     assert_eq!(correction_ops(&s), before);
-    in_flight.store(0, std::sync::atomic::Ordering::SeqCst);
-    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    in_flight.store(0, SeqCst);
+    let (paused, pause) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let switching = std::thread::spawn(move || {
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            paused.send(()).unwrap();
+            gone.recv().unwrap();
+        });
+        crate::work_view::SWITCHED.with(|w| {
+            *w.borrow_mut() = Some(Box::new(move || {
+                crate::claims::WAITING.with(|w| *w.borrow_mut() = Some(hook));
+            }))
+        });
+        post_work_view(v, RULES, "t0k", &body)
+    });
+    pause.recv_timeout(Duration::from_secs(60)).unwrap();
+    let held = in_flight.load(SeqCst);
+    go.send(()).unwrap();
+    let (status, answer) = switching.join().unwrap();
+    assert_eq!(held, 1, "its place held through its receipt's wait");
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(
-        in_flight.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "let go"
-    );
+    assert_eq!(in_flight.load(SeqCst), 0, "let go");
 }
 
 /// The switch's receipt waits within a deadline of its own: a catch-up that spent its whole wait

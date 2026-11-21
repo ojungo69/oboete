@@ -393,24 +393,27 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// What the check under the locks refuses (`behind`), waited for first within `claims::applied`'s
-/// time, the worker's pass run here where this process may run it: the claims consumer past this
-/// device's newest correction, and the my_work consumer past its newest rule decision; and a pass
-/// where a correction an older worker passed waits, which the claims consumer's next step keeps
-/// (#1130's review: a viewer with no worker running of its own would else refuse each try). A
-/// switch made just after another correction finds it applied. Still behind once the wait ran out,
-/// the check under the locks refuses.
+/// Some of what the check under the locks refuses (`behind`), waited for first within
+/// `claims::applied`'s time, the worker's pass run here where this process may run it: the claims
+/// consumer past this device's newest correction, and the my_work consumer past its newest rule
+/// decision; and, where this process may run a pass and a correction an older worker passed waits,
+/// a pass, whose claims step keeps it (#1130's review: a viewer with no worker running of its own
+/// would else refuse each try). A switch made just after another correction finds it applied.
+/// Still behind once the wait ran out, or behind for what is not waited for here, the check under
+/// the locks refuses.
 fn caught_up(home: &Path) -> anyhow::Result<()> {
     use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());
     };
+    let deadline = crate::claims::deadline();
     let device = raw.device().to_owned();
     let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
     let decision = raw.rule_decision_after(get_in(&k, OPS, "my_work", &device)?)?;
-    let passed = crate::consumer::claims::any_passed(&raw, &k)?;
+    // The passed corrections are read only where a pass may follow (#1130's security review).
+    let may_run = crate::executable::may_run_worker();
+    let passed = may_run && crate::consumer::claims::any_passed(&raw, &k)?;
     drop(raw);
-    let deadline = crate::claims::deadline();
     let wait =
         |op: i64, what| match crate::claims::applied_by(home, &k, &device, &[op], what, deadline) {
             Err(e) if !e.is::<crate::claims::NotYet>() => Err(e),
@@ -422,7 +425,7 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     if let Some(op) = decision {
         wait(op, ("decision", "my_work"))?;
     }
-    if passed && crate::executable::may_run_worker() && std::time::Instant::now() < deadline {
+    if passed && std::time::Instant::now() < deadline {
         crate::worker::run_once(home)?;
     }
     Ok(())
