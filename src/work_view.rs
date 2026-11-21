@@ -574,15 +574,7 @@ pub(crate) fn decide<'a>(
             let Some(by) = by.filter(left_so) else {
                 return Ok(Switched::Applied(None));
             };
-            approved_of(
-                id,
-                &a.uid,
-                &by,
-                kept,
-                Some(a.decision),
-                Some(a.decision),
-                &file,
-            )
+            approved_of(id, &a.uid, &by, Some(a.decision), Some(a.decision), &file)
         }
     };
     Ok(Switched::Applied(fresh_version(home, reference, &expected)))
@@ -740,18 +732,18 @@ pub(crate) fn rejected_of(
 }
 
 /// What an approved rule's row is read from (R2a): its suggestion, its claim and what decides it
-/// (`by`), its approval's op, and (R2b) its suggestion's kept learning op and newest decision op of
-/// any action, the raw.db file.
+/// (`by`), its approval's op, and (R2b) its newest decision op of any action, the raw.db file. Not
+/// its suggestion's learning op, which changes only its quotes: the switch's Undo goes by this
+/// version, and a rules round between the switch and its Undo would refuse it (#1132's round 2).
 pub(crate) fn approved_of(
     suggestion: &str,
     uid: &str,
     by: &Value,
-    kept: Option<i64>,
     decision: Option<i64>,
     transition: Option<i64>,
     file: &Option<String>,
 ) -> Value {
-    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by, "kept": kept,
+    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by,
         "decision": decision, "transition": transition, "file": file})
 }
 
@@ -896,8 +888,7 @@ fn my_rules(
                 Some(s) => {
                     let decision = states.decisions.get(&s).copied();
                     let transition = states.transitions.get(&s).copied();
-                    let kept = states.kept.get(&s).copied();
-                    let of = approved_of(&s, uid, &by, kept, decision, transition, file);
+                    let of = approved_of(&s, uid, &by, decision, transition, file);
                     (format!("l:{}", sg[&s]), "approved", "request-progress", of)
                 }
                 None => {

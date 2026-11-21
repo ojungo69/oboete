@@ -296,9 +296,9 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   it on or off from the pages (#1083's R2a, `POST /api/work-view/rules`, `{action, ruleId,
   ruleVersion}`, `turn-on` or `turn-off`): each rule carries a version (`ruleVersion`), the keyed
   hash of what its row was read from (its claim's derivation, the correction the `active` view takes
-  for each of its status, body and mute, an approved rule's decision, a suggestion's kept learning op
-  and its newest decision op of any action, so that an undo leaves it at a version no read gave it
-  before, the raw.db file), and a switch
+  for each of its status, body and mute, an approved rule's decision, a waiting or rejected
+  suggestion's kept learning op, and a suggestion's newest decision op of any action, so that an
+  undo leaves it at a version no read gave it before, the raw.db file), and a switch
   whose rule is not at the version it posts is refused (409 `stale`) and records nothing, so that an
   Undo after another change of the rule undoes none. The switch takes the locks W4's Mark finished
   takes (config.lock with the token asked again, raw.db and the readers' hold), reads My Rules on the
@@ -330,8 +330,10 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   repository, as the main page's plain Approve does, and writes its directive, preference and
   decision in one transaction against the fence; an undo of an approved rule retracts its preference
   and undoes the decision in one append, the decision alone where raw.db proves the preference
-  forgotten (its rule stays listed until the forget's purge takes it out of knowledge.db), and is
-  refused as pending while the preference is neither in knowledge.db nor forgotten. A decision's write is refused, nothing recorded, when since the check a decision of the
+  forgotten, and is refused as pending while the preference is neither in knowledge.db nor
+  forgotten. My Rules lists no rule raw.db proves forgotten, so the pages' undo meets that case only
+  when the forget lands while the undo runs; oboete's own page undoes such an approval by its
+  suggestion. A decision's write is refused, nothing recorded, when since the check a decision of the
   suggestion, a rules job's op of it, or a correction of its rule's claim was appended, and when a
   session it was learned from recorded an event in a repository the exclusion list held (that
   session is then excluded, and what was learned from it with it): this device's records since the

@@ -3715,40 +3715,51 @@ fn an_approved_rules_undo_is_refused_when_its_rule_moved() {
 }
 
 /// #1083's R2b (#1132's review): a rule's switch waits for no learning op, which it does not read.
-/// With one the my_work consumer has not applied, and a viewer that may not run the worker's pass,
-/// the switch's catch-up is done at once.
+/// With one the my_work consumer has not applied, the switch's first wait is its own receipt's,
+/// after its correction is appended.
 #[test]
-fn a_switchs_catch_up_waits_for_no_learning_op() {
+fn a_switch_waits_for_no_learning_op() {
     let (mut h, now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = read_rule(&h, "Write the changelog.");
     let op = learned_op("s9", "Use spaces.", now, vec![]);
     h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-    crate::executable::RESUMED_AS.set(Some(crate::executable::Role::Viewer));
-    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::from_secs(20))));
-    let started = std::time::Instant::now();
-    let got = caught_up(h.home.path(), false);
-    let took = started.elapsed();
-    crate::claims::WAIT.with(|wait| wait.set(None));
-    crate::executable::RESUMED_AS.set(None);
-    got.unwrap();
-    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    let before = corrections(&h);
+    let raw = h.home.path().join("raw.db");
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let saw = seen.clone();
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let c = rusqlite::Connection::open(&raw).unwrap();
+            let sql = "SELECT COUNT(*) FROM ops WHERE type = 'correction'";
+            saw.set(Some(
+                c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+            ));
+        }))
+    });
+    let got = switched(&h, &reference, &version, true);
+    assert!(matches!(got, Switched::Applied(Some(_))), "{got:?}");
+    assert_eq!(
+        seen.get(),
+        Some(before + 1),
+        "its first wait is its receipt's"
+    );
 }
 
-/// #1083's R2b (#1132's review): an approved rule's version moves with its suggestion's kept
-/// learning op, as a waiting or a rejected one's does: an undo at the version read before a new
-/// learning op of it is stale, and records nothing.
+/// #1083's R2b (#1132's round 2): an approved rule's version goes by what its switch and its undo
+/// act on, its claim and its decision, not by its suggestion's learning op: after a rules round that
+/// only adds a quote to it, the switch's Undo still goes through, as on main.
 #[test]
-fn an_approved_rules_version_moves_with_its_learning_op() {
+fn an_approved_rules_switch_is_undone_after_a_learning_op_of_it() {
     let (mut h, now, _place, _repo, _off) = ruled();
-    let (reference, before, _) = row_of(&h, "s2");
+    let (reference, version, _) = row_of(&h, "s2");
+    let off = left(switched(&h, &reference, &version, true));
     let op = learned_op("s2", "Run the tests before a push.", now, vec![]);
     h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
     h.run();
-    let (again, after, of) = row_of(&h, "s2");
+    let (again, at, of) = row_of(&h, "s2");
     let state = (again.as_str(), of["rule"].as_str());
     assert_eq!(state, (reference.as_str(), Some("approved")));
-    assert_ne!(before, after);
-    let decisions = decisions_of(&h, "s2");
-    let got = decided(&h, &reference, &before, Decision::Restore);
-    assert_eq!(got, Switched::Stale);
-    assert_eq!(decisions_of(&h, "s2"), decisions);
+    assert_eq!(at, off, "a quote added moves no version");
+    let on = switched(&h, &reference, &off, false);
+    assert!(matches!(on, Switched::Applied(Some(_))), "{on:?}");
 }
