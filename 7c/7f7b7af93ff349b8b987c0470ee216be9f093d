@@ -1,0 +1,27 @@
+docs/my-work-model.md
+  s_52c3955e48bff4::t_27e61fac0ace8b 1684-1687
+src/consumer/claims.rs
+  s_52c3955e48bff4::t_fa0ea3d5830f12 300
+src/my_work_rules/tests.rs
+  s_52c3955e48bff4::t_6af6e0ca3e08f7 566-608
+src/raw.rs
+  s_52c3955e48bff4::t_f0196994c92fbe 10408-10411,10473,10475-10495,10497-10506
+src/raw/tests.rs
+  s_52c3955e48bff4::t_556250a88f5b5e 1518-1592
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7c7f7b7af93ff349b8b987c0470ee216be9f093d",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
