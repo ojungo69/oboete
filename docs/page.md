@@ -336,15 +336,17 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   decision in one transaction against the fence; an undo of an approved rule retracts its preference
   and undoes the decision in one append, and is refused as pending while knowledge.db does not hold
   the preference's derivation; My Rules lists no approved rule whose derivation knowledge.db does not
-  hold, so in practice such an undo answers not found (404), the pending refusal guarding a race. It always meets a preference not forgotten: My Rules lists no rule
+  hold, and the undo reads that row and its derivation in one read, so such an undo answers not
+  found (404), the pending refusal a defensive check. It always meets a preference not forgotten: My Rules lists no rule
   raw.db proves forgotten, and no forget commits while the undo holds the readers' hold. oboete's
   own page undoes an approval whose preference is forgotten, writing the decision alone. A decision's write is refused, nothing recorded, when since the check a decision of the
   suggestion, a rules job's op of it, or a correction of its rule's claim was appended, and when a
   session that had no event in a repository the exclusion list holds recorded its first one there
   (that session is then excluded, and what was learned from it with it). Any session's first one
-  refuses it, one the suggestion was learned from or another, so that a retry goes through once the
-  write's read holds the session, unless the exclusion hid the suggestion, when the retry answers
-  not found or stale. A session excluded already when the write read was the read's to judge: its
+  refuses it, one the suggestion was learned from or another. A retry, under a fence of its own, is
+  not refused for that session again, unless the exclusion hid the suggestion, when it answers not
+  found or stale; the 64-record limit, another session's first event and the fence's other checks
+  still apply to it. A session excluded already when the write read was the read's to judge: its
   next event refuses nothing. While the list holds a repository, this device's records since the check are read
   inside the write, at most 64, more refusing too, each label read as the write's read reads one
   never recorded. Its answer's version is the one a read of My Rules after the write gives the row

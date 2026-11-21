@@ -2016,8 +2016,9 @@ pub struct RuleFence {
 }
 
 /// What a rule's write on the pages is about (#1083's R2b): its claim's uid where its rule has one,
-/// its suggestion where it is a suggestion's, and for a write that goes by its suggestion, the
-/// suggestion's sources.
+/// its suggestion where it is a suggestion's, and for a write that goes by its suggestion what its
+/// window is checked against (`Sources`), which also turns on the checks of a rules job's ops of
+/// the suggestion (`learns`).
 pub struct Subject<'a> {
     pub uid: Option<&'a str>,
     pub suggestion: Option<&'a str>,
@@ -10608,8 +10609,8 @@ fn moves(kind: &str, body: &str, subject: &Subject<'_>) -> bool {
 
 /// Whether the stores moved, inside `tx`, from what `fence` read for a rule's write on `subject`
 /// (#1083, R2a and R2b): forget denying more than it did, an op since its `top` that moves the
-/// subject (`moves`), a tombstone since its `records`, retention having expired a row, or a record
-/// of the subject's sources since its `records` (`sources_moved`).
+/// subject (`moves`), a tombstone since its `records`, retention having expired a row, or, while a
+/// repository is excluded, a session's first event in one since its `records` (`sources_moved`).
 fn fence_moved(
     tx: &Connection,
     device: &str,

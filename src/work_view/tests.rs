@@ -3376,10 +3376,12 @@ fn a_learning_op_of_the_suggestion_refuses_its_dismissal() {
 /// by the learning op itself or, as the rules job reads in production, by a review it took, from
 /// records or a session's summary; so does any other session's first event in an excluded
 /// repository (#1132's review: the write checks who first touches one, not the suggestion's
-/// sources), right after the fence too, and in an excluded repository with no event yet. The same
-/// session's record in another repository leaves the write its append, as does a session excluded
-/// before the read recording again, and 64 records since the check; more than the write reads
-/// refuse it, but not while no repository is excluded.
+/// sources), right after the fence too, and in an excluded repository with no event yet; a retry is
+/// not refused for that session again. The same session's record in another repository leaves the
+/// write its append, as does a session excluded before the read recording again, a source among them
+/// whose one record in what was learned is its start (which the source walk this check replaced
+/// refused), and 64 records since the check; more than the write reads refuse it, but not while no
+/// repository is excluded.
 #[test]
 fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_write() {
     let cases = [
@@ -3394,6 +3396,7 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
         "a first event right after the fence",
         "nothing excluded, 65 records",
         "an excluded repository with no event yet",
+        "a source session excluded before the read",
     ];
     for case in cases {
         let mut h = Store::new();
@@ -3411,6 +3414,18 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             "other",
             now - 5 * 60_000,
         );
+        // A source whose one record in what was learned is its start, in a repository excluded
+        // before the read: the read does not hide the suggestion, a start being no line.
+        let start = (case == "a source session excluded before the read").then(|| {
+            let e = Event {
+                kind: "start".into(),
+                session: "lifecycle".into(),
+                repo: Some(secret.clone()),
+                ts: now - 4 * 60_000,
+                ..crate::raw::test_event("{}")
+            };
+            h.raw.append(&e).unwrap()
+        });
         let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
         let at = now - 4 * 60_000;
         // As the rules job reads in production: the reviews it took, by their ops, and what each
@@ -3437,7 +3452,12 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
                 op["read"]["ops"] = json!([review]);
                 op
             }
-            _ => learned_op("s1", "Keep commits small.", at, vec![(seq, seq)]),
+            _ => learned_op(
+                "s1",
+                "Keep commits small.",
+                at,
+                vec![(start.unwrap_or(seq), seq)],
+            ),
         };
         h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
         let empty = "github.com/x/empty";
@@ -3461,6 +3481,7 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
                 recorded(&home, "newcomer", &secret)
             }
             "a session excluded before the read" => recorded(&home, "other", &secret),
+            "a source session excluded before the read" => recorded(&home, "lifecycle", &secret),
             "nothing excluded, 65 records" => (0..65).for_each(|_| recorded(&home, "third", &open)),
             "an excluded repository with no event yet" => recorded(&home, "newcomer", empty),
             _ => recorded(&home, "learned", &secret),
@@ -3475,6 +3496,7 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             "elsewhere",
             "sixty-four",
             "a session excluded before the read",
+            "a source session excluded before the read",
             "nothing excluded, 65 records",
         ];
         if through.contains(&case) {
@@ -3484,13 +3506,18 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             assert_eq!(got, Switched::Behind, "{case}");
             assert_eq!(decisions_of(&h, "s1"), 0, "{case}");
         }
+        if case == "another session's first event" {
+            // A retry, under a fence of its own, is not refused for that session again.
+            let again = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+            assert_eq!(again, Switched::Pending, "{case}: the retry");
+            assert_eq!(decisions_of(&h, "s1"), 1, "{case}: the retry is saved");
+        }
     }
 }
 
 /// #1131 item 10: a decision is refused, nothing written, when a session's first event since its read
 /// comes under a label first recorded then that a repository never recorded may be (a mask in it):
-/// the write reads that label as its read reads one. The event itself is recorded: the capture gate
-/// lets through a label that only may name one.
+/// the write reads that label as its read reads one. The event itself is stored, under that label.
 #[test]
 fn a_label_a_never_recorded_repository_may_be_refuses_a_decision() {
     let (h, _now, _place, _repo, _off) = ruled();
