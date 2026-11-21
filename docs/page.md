@@ -323,7 +323,9 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   it that also decides the rule, or My Rules no longer lists the rule), while something not applied
   yet would refuse the Undo as pending, and when the read fails: the change is saved, and the
   receipt's Undo stays on screen, disabled, for as long as the rule does (the pages drop the receipt
-  of a rule they no longer show). Not applied yet, it is saved, and its receipt says so, with no
+  of a rule they no longer show). When the snapshot after the write cannot be given, the answer is
+  the save's receipt alone, with no `savedRuleVersion`, which the pages read as none; a decision's
+  answer is made the same way. Not applied yet, it is saved, and its receipt says so, with no
   Undo.
 - A suggestion's decisions take the same route, the same locks in the same order and the same
   refusals (#1083's R2b): `approve` and `dismiss` a suggestion that waits, `restore-suggestion` a

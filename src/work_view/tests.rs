@@ -3805,7 +3805,8 @@ fn an_approval_from_the_pages_records_the_main_pages_approval() {
 /// #1083's R2b: an approval from the pages is refused, and writes nothing (no directive, ledger
 /// row, preference or decision), when a decision of its suggestion is appended between the check
 /// and the append, and when a session it was learned from records an event in a repository the
-/// exclusion list holds there.
+/// exclusion list holds there, or under a label first recorded there that a repository never
+/// recorded may be (#1131 item 10).
 #[test]
 fn an_approval_from_the_pages_is_refused_whole_when_its_suggestion_moved() {
     let (h, _now, _place, _repo, _off) = ruled();
@@ -3857,6 +3858,42 @@ fn an_approval_from_the_pages_is_refused_whole_when_its_suggestion_moved() {
         stored(&h),
         (before.0 + 1, before.1, before.2),
         "the hook's record alone"
+    );
+    // #1131 item 10: the source's first event under a label first recorded since the read, one a
+    // repository never recorded may be (a mask in it).
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let place = tempfile::tempdir().unwrap();
+    let open = started_in(
+        &mut h,
+        &place.path().join("open"),
+        "learned",
+        now - 5 * 60_000,
+    );
+    let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+    let op = learned_op(
+        "s1",
+        "Keep commits small.",
+        now - 4 * 60_000,
+        vec![(seq, seq)],
+    );
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    (h.raw)
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    h.run();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+    let excluded = move || recorded(&home, "learned", &masked);
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(excluded)));
+    let before = stored(&h);
+    let got = decided_at_once(&h, &reference, &version, Decision::Approve);
+    assert_eq!(got, Switched::Behind, "a masked label");
+    assert_eq!(
+        stored(&h),
+        (before.0 + 1, before.1, before.2),
+        "a masked label: the hook's record alone"
     );
 }
 
