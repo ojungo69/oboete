@@ -3121,6 +3121,7 @@ fn two_rows_of_one_reference_are_neither() {
         on: Some(true),
         version: "v".into(),
         of: Value::Null,
+        kept: None,
     };
     assert_eq!(
         the_one(vec![row("a"), row("b")], "u:same").err(),
@@ -3246,8 +3247,8 @@ fn a_dismissal_and_its_undo_go_by_the_versions_each_answers() {
 }
 
 /// #1083's R2b: a decision takes only the rows it decides: an approval and a dismissal a suggestion
-/// waiting, an undo a rejected one (an approved one's undo comes with the approval's writes); a
-/// version not the row's is stale. None records anything.
+/// waiting, an undo a rejected or an approved one; a version not the row's is stale. None records
+/// anything.
 #[test]
 fn a_decision_takes_only_the_rows_it_decides() {
     let (h, _now, _place, _repo, _off) = ruled();
@@ -3276,12 +3277,6 @@ fn a_decision_takes_only_the_rows_it_decides() {
         &h,
         &waiting,
         &at_waiting,
-        Decision::Restore
-    )));
-    assert!(refused(decided(
-        &h,
-        &approved,
-        &at_approved,
         Decision::Restore
     )));
     let stale = decided(&h, &waiting, &at_rejected, Decision::Dismiss);
@@ -3576,4 +3571,80 @@ fn an_approval_whose_preference_moved_before_its_receipt_answers_no_version() {
     let got = decided(&h, &reference, &version, Decision::Approve);
     assert_eq!(got, Switched::Applied(None));
     assert_eq!(row_of(&h, "s1").2["rule"], "approved");
+}
+
+/// #1083's R2b: an approved rule, on or off, is undone from the pages by its reference at its
+/// version (`restore-suggestion`): its preference retracted and its approval undone in one append,
+/// its suggestion waits again by the same reference, at the version the undo answered.
+#[test]
+fn an_approved_rules_undo_from_the_pages_brings_its_suggestion_back() {
+    for off in [false, true] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (reference, mut version, of) = row_of(&h, "s2");
+        assert_eq!(of["rule"], "approved");
+        if off {
+            version = left(switched(&h, &reference, &version, true));
+        }
+        let before = corrections(&h);
+        let restored = left(decided(&h, &reference, &version, Decision::Restore));
+        let (again, at, of) = row_of(&h, "s2");
+        let state = (again.as_str(), of["rule"].as_str());
+        assert_eq!(state, (reference.as_str(), Some("waiting")), "off: {off}");
+        assert_eq!(at, restored);
+        assert_eq!(corrections(&h), before + 1, "its retraction");
+        let (_, _, rule) = read_rule(&h, "Run the tests before a push.");
+        assert_eq!(rule["status"], "suggested");
+    }
+}
+
+/// #1083's R2b: an approved rule's undo is refused, and records nothing, when between the check and
+/// the append a session its suggestion was learned from records an event in a repository the
+/// exclusion list holds, or a correction of its preference is appended: its preference and its
+/// approval are as they were, the preference listed still.
+#[test]
+fn an_approved_rules_undo_is_refused_when_its_rule_moved() {
+    for case in ["excluded", "muted"] {
+        let mut h = Store::new();
+        let now = crate::db::now_ms();
+        let place = tempfile::tempdir().unwrap();
+        let open = started_in(
+            &mut h,
+            &place.path().join("open"),
+            "learned",
+            now - 5 * 60_000,
+        );
+        let secret = started_in(
+            &mut h,
+            &place.path().join("secret"),
+            "other",
+            now - 5 * 60_000,
+        );
+        let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+        let op = learned_op(
+            "s1",
+            "Keep commits small.",
+            now - 4 * 60_000,
+            vec![(seq, seq)],
+        );
+        h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.raw.exclude(&secret, false).unwrap();
+        h.run();
+        let (reference, version, _) = row_of(&h, "s1");
+        let version = left(decided(&h, &reference, &version, Decision::Approve));
+        let home = h.home.path().to_owned();
+        let moved = move || match case {
+            "excluded" => recorded(&home, "learned", &secret),
+            _ => muted_elsewhere(&home, &approved_uid(&home, "s1"), true),
+        };
+        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(moved)));
+        let (before, decisions) = (corrections(&h), decisions_of(&h, "s1"));
+        let got = decided_at_once(&h, &reference, &version, Decision::Restore);
+        assert_eq!(got, Switched::Behind, "{case}");
+        let theirs = usize::from(case == "muted");
+        assert_eq!(corrections(&h), before + theirs, "{case}");
+        assert_eq!(decisions_of(&h, "s1"), decisions, "{case}");
+        // The preference stands: listed by its suggestion, or, its source excluded since, as the
+        // owner's own.
+        assert!(listed(&h, "Keep commits small."), "{case}");
+    }
 }

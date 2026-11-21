@@ -11148,3 +11148,26 @@ fn the_work_views_rules_route_approves_a_suggestion() {
     assert_eq!(fields, (&rule["ruleId"], &json!("approved"), &json!("on")));
     assert_eq!(approved["ruleVersion"], answer["savedRuleVersion"]);
 }
+
+/// #1083's R2b: the work-view's rules route undoes an approved rule (`restore-suggestion`) by the
+/// version its approval answered: its suggestion is then listed as waiting again, at the version
+/// the undo's answer names.
+#[test]
+fn the_work_views_rules_route_undoes_an_approval() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let body = switch_body(&rule, "approve", &rule["ruleVersion"]);
+    let (status, approved) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{approved}");
+    let body = switch_body(&rule, "restore-suggestion", &approved["savedRuleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let back = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(
+        (&back["ruleId"], &back["status"]),
+        (&rule["ruleId"], &json!("suggested"))
+    );
+    assert_eq!(back["ruleVersion"], answer["savedRuleVersion"]);
+}

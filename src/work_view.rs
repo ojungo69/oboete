@@ -214,6 +214,9 @@ pub(crate) struct Row {
     pub on: Option<bool>,
     pub version: String,
     pub of: Value,
+    /// A suggestion's kept learning op (#1083's R2b), which an approved row's version leaves out:
+    /// the row its undo leaves is made of it.
+    pub kept: Option<i64>,
 }
 
 /// A rule's version (R2a): the keyed hash of what it was read from (`Row::of`), so that two reads
@@ -432,12 +435,14 @@ pub(crate) fn decide<'a>(
     let (fields, left) = match (what, row.of["rule"].as_str()) {
         (Decision::Approve, Some("waiting")) => (json!({"action": "approve"}), "approved"),
         (Decision::Dismiss, Some("waiting")) => (json!({"action": "reject"}), "rejected"),
-        (Decision::Restore, Some("rejected")) => (json!({"action": "undo"}), "waiting"),
+        (Decision::Restore, Some("rejected" | "approved")) => {
+            (json!({"action": "undo"}), "waiting")
+        }
         (Decision::Approve | Decision::Dismiss, _) => {
             return Ok(Switched::State("This suggestion is decided already."));
         }
         (Decision::Restore, _) => {
-            return Ok(Switched::State("There is no rejection to undo here."));
+            return Ok(Switched::State("There is no decision to undo here."));
         }
     };
     if row.version != version {
@@ -446,7 +451,7 @@ pub(crate) fn decide<'a>(
     let Some(id) = row.of["suggestion"].as_str() else {
         return Ok(Switched::NotFound);
     };
-    let kept = row.of["kept"].as_i64();
+    let kept = row.kept;
     let mut sources = crate::raw::Sources {
         repos: raw.exclusions_now()?,
         ..Default::default()
@@ -455,7 +460,7 @@ pub(crate) fn decide<'a>(
         sources.sessions = crate::my_work_ops::sources(&raw, &tx, &device, kept)?;
     }
     let subject = crate::raw::Subject {
-        uid: None,
+        uid: row.uid.as_deref(),
         suggestion: Some(id),
         sources: Some(&sources),
     };
@@ -473,6 +478,15 @@ pub(crate) fn decide<'a>(
             Some(sg.statement)
         }
         Decision::Dismiss | Decision::Restore => None,
+    };
+    // An approved rule's undo: its preference's retraction and the undo decision, built on the
+    // read's knowledge.db, or nothing while the preference is neither there nor forgotten.
+    let undo = match (what, row.uid.as_deref()) {
+        (Decision::Restore, Some(uid)) => match crate::claims::undo_ops(&raw, &tx, id, uid)? {
+            Some(ops) => Some(ops),
+            None => return Ok(Switched::Behind),
+        },
+        _ => None,
     };
     drop(tx);
     #[cfg(test)]
@@ -493,9 +507,14 @@ pub(crate) fn decide<'a>(
                 .map(Wrote::Approval)
                 .map_err(|refused| refused.cause)
         }
-        None => crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])
-            .and_then(|ops| raw.append_ops_ruled(&ops, &fence, &subject))
-            .map(Wrote::Decision),
+        None => match undo {
+            Some(ops) => raw
+                .append_ops_ruled(&ops, &fence, &subject)
+                .map(Wrote::Undo),
+            None => crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])
+                .and_then(|ops| raw.append_ops_ruled(&ops, &fence, &subject))
+                .map(Wrote::Decision),
+        },
     };
     drop((read, raw, config, saving));
     let wrote = match wrote {
@@ -529,6 +548,16 @@ pub(crate) fn decide<'a>(
                 _ => waiting_of(id, kept, Some(seq), &file),
             }
         }
+        Wrote::Undo(seqs) => {
+            let uid = row.uid.as_deref().unwrap_or_default();
+            if !crate::claims::undo_receipt(home, &k, &device, (id, uid), &seqs) {
+                return Ok(Switched::Pending);
+            }
+            let Some(&seq) = seqs.last() else {
+                return Ok(Switched::Pending);
+            };
+            waiting_of(id, kept, Some(seq), &file)
+        }
         Wrote::Approval(a) => {
             let receipt = crate::claims::approve_receipt(home, &k, &device, id, &a);
             if !matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }) {
@@ -551,11 +580,13 @@ pub(crate) fn decide<'a>(
     Ok(Switched::Applied(fresh_version(home, reference, &expected)))
 }
 
-/// What a suggestion's decision appended (#1083's R2b): a decision's op seqs, or an approval's
-/// directive, preference and decision.
+/// What a suggestion's decision appended (#1083's R2b): a decision's op seqs, an approval's
+/// preference and decision, or an approved rule's undo's ops (its retraction where it has one, and
+/// its decision).
 enum Wrote {
     Decision(Vec<i64>),
     Approval(crate::claims::Approved),
+    Undo(Vec<i64>),
 }
 
 /// The version of the row by `reference` that a read of My Rules after a write gives (#1083's R2b;
@@ -809,6 +840,7 @@ fn my_rules(
             on: None,
             version: v,
             of,
+            kept: states.kept.get(id).copied(),
         });
     }
     for c in arr(&page["rejected"]) {
@@ -831,6 +863,7 @@ fn my_rules(
             on: None,
             version,
             of,
+            kept,
         });
     }
     for g in yours {
@@ -868,12 +901,14 @@ fn my_rules(
                 "latestAt": newest.or(since).map_or(Value::Null, iso), "quotes": quotes,
                 "replacedBy": null, "replacedAt": null,
                 "savedAt": since.map_or(Value::Null, iso), "ruleVersion": v}));
+            let kept = from(r).and_then(|s| states.kept.get(&s).copied());
             rows.push(Row {
                 reference: id,
                 uid: Some(uid.to_owned()),
                 on: Some(on),
                 version: v,
                 of,
+                kept,
             });
         }
     }
