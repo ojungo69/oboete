@@ -1,0 +1,27 @@
+src/consumer/claims.rs
+  s_52c3955e48bff4::t_3146ceb14d6940 300
+src/raw.rs
+  s_52c3955e48bff4::t_b93646b8e61e7a 10410-10411,10483-10484,10491-10496
+docs/my-work-model.md
+  s_52c3955e48bff4::t_e15a3aece52653 1685-1686
+src/raw/tests.rs
+  s_52c3955e48bff4::t_556250a88f5b5e 1579
+  s_52c3955e48bff4::t_e42ceaff012a0a 1528,1574,1576-1578
+  s_52c3955e48bff4::t_dcc98d21fed4cc 1580
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a2e109fac3f67a27275cf33c4a7ffcf2decb5e9",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
