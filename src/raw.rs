@@ -6997,6 +6997,25 @@ impl Raw {
         })
     }
 
+    /// This device's newest rule decision past `after` (a `my_work` op of job `rule`): one the
+    /// my_work consumer has not applied, which a rule's switch waits for first (#1130's review).
+    pub fn rule_decision_after(&self, after: i64) -> Result<Option<i64>> {
+        let mut s = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
+             ORDER BY op_seq DESC",
+        )?;
+        let mut rows = s.query(params![self.device, after])?;
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(1)?;
+            let decision = serde_json::from_str::<serde_json::Value>(&body)
+                .is_ok_and(|v| v["job"] == crate::my_work_rules::RULE);
+            if decision {
+                return Ok(Some(row.get(0)?));
+            }
+        }
+        Ok(None)
+    }
+
     /// Whether an op of this device past `after` whose type `kinds` takes is one `found` finds.
     fn any_op_after(
         &self,

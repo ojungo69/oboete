@@ -292,6 +292,11 @@ pub(crate) fn passed_correction_of(raw: &Raw, k: &Connection, uid: &str) -> Resu
     Ok(passed(raw, k)?.iter().any(|(_, c)| c.uid == uid))
 }
 
+/// Whether any correction a consumer passed waits for this one's next step (`retry`).
+pub(crate) fn any_passed(raw: &Raw, k: &Connection) -> Result<bool> {
+    Ok(!passed(raw, k)?.is_empty())
+}
+
 fn is_uid(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }

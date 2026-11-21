@@ -10911,6 +10911,36 @@ fn the_work_views_switch_holds_saving_through_none_of_its_waits() {
     }
 }
 
+/// The switch's catch-up waits before the save lock (#1128 item 5), so the switches in flight are
+/// admitted only as many as may wait for that lock (Codex's security review of #1130): one more is
+/// refused at once, busy, and records nothing.
+#[test]
+fn the_work_views_switches_in_flight_are_admitted_a_bounded_number() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Answer in Japanese.").clone();
+    let body = switch_body(&rule, "turn-off", &rule["ruleVersion"]);
+    let before = correction_ops(&s);
+    let in_flight = &v.rule_switches;
+    in_flight.store(crate::my_work::WAITERS, std::sync::atomic::Ordering::SeqCst);
+    let started = Instant::now();
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!((status, &answer["code"]), (503, &json!("busy")), "{answer}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(correction_ops(&s), before);
+    in_flight.store(0, std::sync::atomic::Ordering::SeqCst);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        in_flight.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "let go"
+    );
+}
+
 /// The switch's receipt waits within a deadline of its own: a catch-up that spent its whole wait
 /// leaves it its pass, which applies the switch.
 #[test]

@@ -303,12 +303,15 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   op naming its claim, an exclusion, a tombstone, a forget, another raw.db file; curation's other ops
   leave it be). A claim op names it by the uid it derives or by its `supersedes`, a correction by its
   `uid`, a rule decision by its `claim` or by the rule's suggestion (`about`); a claim that only
-  quotes the uid does not (#1128). It is refused as pending (409) while what it reads is not applied
-  yet: such an op past the claims or my_work consumer's checkpoint, or a correction of the rule a
-  worker of an older oboete passed, which the next step applies. The viewer's save lock is held from
-  the switch's locks to its append, through none of its waits. Applied and kept, its answer names
-  the version it left the rule at
-  (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
+  quotes the uid does not (#1128). Before its locks the switch waits for what it would be refused
+  for, and a viewer that runs its own passes runs one: such an op past the claims or my_work
+  consumer's checkpoint, or a correction of the rule a worker of an older oboete passed, which the
+  claims consumer's next step applies. Once the posted version and the rule's state are checked,
+  it is refused as pending (409) while any of these is still not applied. The viewer's save lock
+  is held from the switch's locks to its append: through its waits for those locks, each within
+  its own time, and through none of its waits for a consumer. As many switches as may wait for
+  that lock are let in at once (503 busy past them). Applied and kept, its answer names the version
+  it left the rule at (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
   also decides the rule, and the pages then offer no Undo; not applied yet, it is saved, and its
   receipt says so, with no Undo. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by
   that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is

@@ -699,6 +699,14 @@ fn an_approval_refused_after_its_event_is_checked_leaves_no_directive() {
     assert_eq!(h.waiting(), ["s1"]);
 }
 
+/// The op checkpoint of `consumer` for `device` in `home`'s knowledge.db, read on a handle of its
+/// own.
+fn checkpoint(home: &std::path::Path, device: &str, consumer: &str) -> i64 {
+    let k = crate::knowledge::open(home).unwrap();
+    let ops = crate::knowledge::checkpoint::OPS;
+    crate::knowledge::checkpoint::get_in(&k, ops, consumer, device).unwrap()
+}
+
 /// `f` with `claims::applied`'s wait set to `wait`.
 fn waiting<T>(wait: std::time::Duration, f: impl FnOnce() -> T) -> T {
     crate::claims::WAIT.with(|w| w.set(Some(wait)));
@@ -748,11 +756,19 @@ fn a_retry_while_its_approval_is_applied_records_no_second_preference() {
     let got = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap();
     assert_eq!(got["state"], "pending", "{got}");
     let home = h.s.home.path().to_owned();
+    let (device, decision) = (h.s.raw.device().to_owned(), before.1 + 2);
     crate::settings::claims::BETWEEN_READS.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || crate::worker::run_once(&home).unwrap()));
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            let at = checkpoint(&home, &device, "my_work");
+            assert!(
+                at >= decision,
+                "the decision is applied between the reads: {at}"
+            );
+        }));
     });
-    let retried = h.act(approve);
-    assert!(retried.is_err(), "{retried:?}");
+    let retried = h.act(approve).unwrap_err();
+    assert_eq!((retried.status, retried.code), (409, "rule_pending"));
     h.s.run();
     let (events, ops) = approval_since(&h, before);
     assert_eq!((events.len(), ops.len()), (1, 2));
@@ -793,6 +809,39 @@ fn an_approvals_decision_is_kept_only_as_it_was_written() {
     assert!(!kept("s1", &fields), "skipped");
 }
 
+/// #1130's review: an approval's and an undo's receipts are applied only on the rows they wrote, as
+/// written: a decision row the consumer kept unusable, or a retraction's row that is none, leaves
+/// them pending.
+#[test]
+fn receipts_stay_pending_on_rows_not_as_written() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let tamper = |h: &Home, sql: &'static str| {
+        let home = h.s.home.path().to_owned();
+        crate::claims::PROVING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let k = crate::knowledge::open(&home).unwrap();
+                assert_eq!(k.execute(sql, []).unwrap(), 1, "{sql}");
+            }));
+        });
+    };
+    let mut h = Home::new();
+    suggested(&mut h);
+    tamper(&h, "UPDATE my_work SET skipped = 1 WHERE job = 'rule'");
+    let got = h.act(approve.clone()).unwrap();
+    assert_eq!(got["state"], "pending", "an approval: {got}");
+    let mut h = Home::new();
+    suggested(&mut h);
+    assert_eq!(h.act(approve).unwrap()["state"], "applied");
+    tamper(
+        &h,
+        "UPDATE corrections SET status = 'decided' WHERE status = 'retracted'",
+    );
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "undo"}))
+        .unwrap();
+    assert_eq!(got["state"], "pending", "an undo: {got}");
+}
+
 /// #1083's R2b (PR 1): an approval's two waits share one deadline: one that the claims consumer's
 /// wait spends leaves the my_work consumer's none, and the approval is pending.
 #[test]
@@ -800,12 +849,22 @@ fn an_approvals_waits_share_one_deadline() {
     let mut h = Home::new();
     suggested(&mut h);
     let home = h.s.home.path().to_owned();
+    let before = tops(&h);
+    let (device, preference, decision) = (h.s.raw.device().to_owned(), before.1 + 1, before.1 + 2);
     let wait = std::time::Duration::from_millis(300);
     crate::claims::WAITING.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             let claims: Vec<Box<dyn crate::worker::Consumer>> =
                 vec![Box::new(crate::consumer::claims::Claims)];
             crate::worker::run_consumers(&home, 0, claims).unwrap();
+            assert!(
+                checkpoint(&home, &device, "claims") >= preference,
+                "the first wait's"
+            );
+            assert!(
+                checkpoint(&home, &device, "my_work") < decision,
+                "the second wait's"
+            );
             std::thread::sleep(wait * 2);
         }));
     });

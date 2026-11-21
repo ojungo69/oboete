@@ -393,30 +393,39 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The claims consumer past this device's newest correction, waited for within `claims::applied`'s
-/// time (the worker's pass run here where this process may run it): a switch made just after
-/// another correction finds it applied. Still behind once the wait ran out, the check under the
-/// locks refuses (`behind`).
+/// What the check under the locks refuses (`behind`), waited for first within `claims::applied`'s
+/// time, the worker's pass run here where this process may run it: the claims consumer past this
+/// device's newest correction, and the my_work consumer past its newest rule decision; and a pass
+/// where a correction an older worker passed waits, which the claims consumer's next step keeps
+/// (#1130's review: a viewer with no worker running of its own would else refuse each try). A
+/// switch made just after another correction finds it applied. Still behind once the wait ran out,
+/// the check under the locks refuses.
 fn caught_up(home: &Path) -> anyhow::Result<()> {
+    use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());
     };
     let device = raw.device().to_owned();
-    let at = crate::knowledge::checkpoint::get_in(
-        &k,
-        crate::knowledge::checkpoint::OPS,
-        "claims",
-        &device,
-    )?;
-    let Some(op) = raw.correction_after(at)? else {
-        return Ok(());
-    };
+    let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
+    let decision = raw.rule_decision_after(get_in(&k, OPS, "my_work", &device)?)?;
+    let passed = crate::consumer::claims::any_passed(&raw, &k)?;
     drop(raw);
     let deadline = crate::claims::deadline();
-    match crate::claims::applied_by(home, &k, &device, &[op], ("correction", "claims"), deadline) {
-        Err(e) if !e.is::<crate::claims::NotYet>() => Err(e),
-        _ => Ok(()),
+    let wait =
+        |op: i64, what| match crate::claims::applied_by(home, &k, &device, &[op], what, deadline) {
+            Err(e) if !e.is::<crate::claims::NotYet>() => Err(e),
+            _ => Ok(()),
+        };
+    if let Some(op) = correction {
+        wait(op, ("correction", "claims"))?;
     }
+    if let Some(op) = decision {
+        wait(op, ("decision", "my_work"))?;
+    }
+    if passed && crate::executable::may_run_worker() && std::time::Instant::now() < deadline {
+        crate::worker::run_once(home)?;
+    }
+    Ok(())
 }
 
 /// Whether what a switch of claim `uid`, of suggestion `suggestion` where it is an approved rule,

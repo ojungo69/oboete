@@ -771,6 +771,10 @@ thread_local! {
     /// pass (W3b-2: a test starts the worker that runs from there).
     pub(crate) static WAITING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// A test's hook, run once an owner's approval or undo has waited, before the read that proves
+    /// what it wrote is kept (#1083's R2b).
+    pub(crate) static PROVING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `pref_add_in` of every repository.
@@ -1048,6 +1052,10 @@ pub(crate) fn approve_recorded(
         });
     }
     // Both kept, read in one read of knowledge.db.
+    #[cfg(test)]
+    if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let decided = json!({"action": "approve", "claim": uid});
     let kept = k
         .unchecked_transaction()
@@ -1172,12 +1180,17 @@ pub(crate) fn undo_approval_recorded(
         return Ok(Undone::Recorded(false));
     }
     // Both kept, read in one read of knowledge.db.
+    #[cfg(test)]
+    if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let kept = (|| -> Result<bool> {
         let read = k.unchecked_transaction()?;
         let corrected = !retracted
             || read.query_row(
-                "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2)",
-                rusqlite::params![device, seqs[0]],
+                "SELECT EXISTS(SELECT 1 FROM corrections WHERE op_device = ?1 AND op_seq = ?2
+                   AND uid = ?3 AND status = 'retracted')",
+                rusqlite::params![device, seqs[0], uid],
                 |r| r.get::<_, bool>(0),
             )?;
         Ok(corrected

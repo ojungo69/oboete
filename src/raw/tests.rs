@@ -3958,13 +3958,14 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
         length: 1,
     };
     let ledger = [("/prompt".to_owned(), found)];
-    let counts = |raw: &Raw| -> (i64, i64, i64) {
+    let counts = |raw: &Raw| -> (i64, i64, i64, i64) {
         raw.conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM records), (SELECT COUNT(*) FROM ledger),
-                        (SELECT COUNT(*) FROM ops)",
+                        (SELECT COUNT(*) FROM ops),
+                        (SELECT COUNT(*) FROM meta WHERE key IN ('ops_text_scanned', 'ops_text_scanning'))",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap()
     };
@@ -3978,7 +3979,8 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
     let (seq, seqs) = (raw.append_event_with_ops(&event("x"), (&ledger, "test"), ops))
         .unwrap()
         .unwrap();
-    assert_eq!(counts(&raw), (1, 1, 2));
+    let written = counts(&raw);
+    assert_eq!((written.0, written.1, written.2), (1, 1, 2));
     let device = raw.device().to_owned();
     let written: Vec<_> = (raw.ops_after(&device, 0, 10).unwrap().into_iter())
         .map(|o| (o.op_seq, o.batch, o.body["seq"].as_i64()))
@@ -3996,11 +3998,12 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
     let none = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
         panic!("no ops are made for an event refused")
     };
+    let refused = counts(&raw);
     assert_eq!(
         (raw.append_event_with_ops(&excluded, (&ledger, "test"), none)).unwrap(),
         None
     );
-    let refused = counts(&raw);
+    assert_eq!(counts(&raw), refused, "an event refused");
     OPS_REFUSED.set(true);
     assert!(
         raw.append_event_with_ops(&event("y"), (&ledger, "test"), ops)
@@ -4018,6 +4021,27 @@ fn an_event_and_the_ops_it_makes_are_written_together_or_not_at_all() {
             .is_err()
     );
     assert_eq!(counts(&raw), refused, "an op over the cap");
+    raw.forget_apply(&[crate::forget::Request {
+        v: 2,
+        home: raw.home_id().into(),
+        job: "a".repeat(32),
+        started: 1,
+        target: crate::forget::Target::Uid {
+            uid: "f".repeat(64),
+        },
+        records: Vec::new(),
+    }])
+    .unwrap();
+    let refused = counts(&raw);
+    let naming = |_: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        let op = serde_json::json!({"uid": "f".repeat(64), "status": "retracted"});
+        Ok(vec![(OpKind::Correction, op)])
+    };
+    assert!(
+        raw.append_event_with_ops(&event("v"), (&ledger, "test"), naming)
+            .is_err()
+    );
+    assert_eq!(counts(&raw), refused, "an op of a forgotten uid");
     Connection::open(home.path().join("raw.db"))
         .unwrap()
         .execute_batch(&format!("PRAGMA user_version = {}", FORMAT + 1))
