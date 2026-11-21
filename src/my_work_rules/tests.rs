@@ -606,6 +606,306 @@ fn an_approval_keeps_its_decision_through_a_rescan_a_purge_and_a_rebuild() {
     assert_eq!(h.waiting(), ["s1"]);
 }
 
+/// The seqs of `h`'s directives, events of kind `directive`, in order.
+fn directive_seqs(h: &Home) -> Vec<i64> {
+    let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
+    (c.prepare(
+        "SELECT seq FROM records WHERE device = ?1 AND type = 'event' AND kind = 'directive'
+         ORDER BY seq",
+    )
+    .unwrap())
+    .query_map([h.s.raw.device()], |r| r.get(0))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// Whether `h`'s raw.db holds a row of any type at `seq` of its device.
+fn row_at(h: &Home, seq: i64) -> bool {
+    let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq = ?2)",
+        rusqlite::params![h.s.raw.device(), seq],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// The status knowledge.db's `active` gives `uid`, if it holds it.
+fn active_status(h: &Home, uid: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let k = crate::knowledge::open(h.s.home.path()).unwrap();
+    k.query_row("SELECT status FROM active WHERE uid = ?1", [uid], |r| {
+        r.get(0)
+    })
+    .optional()
+    .unwrap()
+}
+
+/// The ops of `h`'s device past op seq `after`, as (type, body).
+fn ops_past(h: &Home, after: i64) -> Vec<(String, Value)> {
+    let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
+    (c.prepare("SELECT type, body FROM ops WHERE device = ?1 AND op_seq > ?2 ORDER BY op_seq")
+        .unwrap())
+    .query_map(rusqlite::params![h.s.raw.device(), after], |r| {
+        Ok((
+            r.get(0)?,
+            serde_json::from_str(&r.get::<_, String>(1)?).unwrap(),
+        ))
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// The records segment of `home`'s backups that holds seq `seq`.
+fn segment_holding(home: &std::path::Path, seq: i64) -> std::path::PathBuf {
+    let dir = home.join("backups");
+    (std::fs::read_dir(&dir).unwrap())
+        .map(|e| e.unwrap().path())
+        .find(|path| {
+            (path.file_name())
+                .and_then(crate::backup::segment_name)
+                .is_some_and(|(ops, _, first, last)| !ops && first <= seq && seq <= last)
+        })
+        .unwrap()
+}
+
+/// The seal a backup segment is checked by: its sha256, beside it.
+fn sealed(segment: &std::path::Path) -> std::path::PathBuf {
+    let mut path = segment.as_os_str().to_owned();
+    path.push(".sha256");
+    path.into()
+}
+
+/// raw.db replaced with bytes that are not a database, as `run_once` restores it from the
+/// backups.
+fn damage_raw(home: &std::path::Path) {
+    std::fs::write(home.join("raw.db"), b"not a database at all").unwrap();
+    for f in ["raw.db-wal", "raw.db-shm"] {
+        let _ = std::fs::remove_file(home.join(f));
+    }
+}
+
+const APPROVE: &str = r#"{"suggestion": "s1", "action": "approve", "scope": "global"}"#;
+const UNDO: &str = r#"{"suggestion": "s1", "action": "undo"}"#;
+
+/// #1131 item 8: an approval after a restore takes a seq whose preference uid is not forgotten. A
+/// preference's uid derives from its directive's seq; a restore to a point before an approval
+/// frees that seq and keeps the forget of the preference, so approving the same suggestion again
+/// derived the forgotten uid, refused at every try. It takes the next seq, and the seq passed
+/// over holds no row.
+#[test]
+fn an_approval_after_a_restore_passes_over_the_seq_of_a_forgotten_preference() {
+    let mut h = Home::new();
+    h.s.raw
+        .append(&crate::raw::test_event("before the point"))
+        .unwrap();
+    suggested(&mut h);
+    crate::backup::export(h.s.home.path()).unwrap();
+    let point = (crate::backup::points(&h.s.home.path().join("backups")).unwrap())
+        .pop()
+        .unwrap();
+    let got = h.act(serde_json::from_str(APPROVE).unwrap()).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let first = got["uid"].as_str().unwrap().to_owned();
+    let [at] = directive_seqs(&h)[..] else {
+        panic!("one directive");
+    };
+    let forgotten = first.clone();
+    let h = h.closed(|home| {
+        let target = crate::forget::Target::Uid { uid: forgotten };
+        crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+        crate::worker::restore_to(home, &point).unwrap();
+    });
+    h.s.run();
+    assert_eq!(h.waiting(), ["s1"], "the restore took the approval back");
+    assert!(!row_at(&h, at), "the restore freed the directive's seq");
+    let got = h.act(serde_json::from_str(APPROVE).unwrap()).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let second = got["uid"].as_str().unwrap();
+    assert_ne!(second, first);
+    assert!(!h.s.raw.forgotten(second).unwrap());
+    assert_eq!(directive_seqs(&h), [at + 1]);
+    assert!(!row_at(&h, at), "the seq passed over holds no row");
+    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// `h` with an approved suggestion `s1` whose directive is alone in a middle segment of its
+/// backups, which is then damaged with raw.db, so that `run_once` restores the rest: the
+/// approval's ops come through, its directive does not, and knowledge.db holds no preference.
+/// The preference's uid, the directive's seq, its segment, and that segment's bytes and seal's.
+fn lost_directive() -> (Home, String, i64, std::path::PathBuf, [Vec<u8>; 2]) {
+    let mut h = Home::new();
+    h.s.raw.append(&crate::raw::test_event("before")).unwrap();
+    suggested(&mut h);
+    crate::backup::export(h.s.home.path()).unwrap();
+    let got = h.act(serde_json::from_str(APPROVE).unwrap()).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let uid = got["uid"].as_str().unwrap().to_owned();
+    let [at] = directive_seqs(&h)[..] else {
+        panic!("one directive");
+    };
+    crate::backup::export(h.s.home.path()).unwrap();
+    h.s.raw.append(&crate::raw::test_event("after")).unwrap();
+    crate::backup::export(h.s.home.path()).unwrap();
+    let segment = segment_holding(h.s.home.path(), at);
+    let saved = [&segment, &sealed(&segment)].map(|path| std::fs::read(path).unwrap());
+    let h = h.closed(|home| {
+        std::fs::write(&segment, b"damaged").unwrap();
+        damage_raw(home);
+        crate::worker::run_once(home).unwrap();
+    });
+    h.s.run();
+    assert!(!row_at(&h, at), "the restore lost the directive");
+    assert!(directive_seqs(&h).is_empty());
+    assert_eq!(
+        h.waiting(),
+        Vec::<String>::new(),
+        "the approval came through"
+    );
+    assert_eq!(active_status(&h, &uid), None, "no preference derived");
+    (h, uid, at, segment, saved)
+}
+
+/// #1131 item 9: an undo of an approval whose directive a restore lost for good retracts the
+/// preference where the directive stood, with its decision: the claims consumer keeps the
+/// retraction though it derived no preference, and a later restore that brings the directive
+/// back derives the preference retracted. Main waited for an anchor that never came (409).
+#[test]
+fn an_undo_of_an_approval_whose_directive_a_restore_lost_retracts_it_there() {
+    let (h, uid, at, segment, saved) = lost_directive();
+    let (_, before) = tops(&h);
+    let got = h.act(serde_json::from_str(UNDO).unwrap()).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    assert_eq!(h.waiting(), ["s1"]);
+    let ops = ops_past(&h, before);
+    let device = h.s.raw.device().to_owned();
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert_eq!(
+        (ops[0].0.as_str(), &ops[0].1),
+        (
+            "correction",
+            &json!({"uid": uid, "anchor": {"device": device, "seq": at},
+                "status": "retracted", "body": null})
+        )
+    );
+    assert_eq!(
+        (ops[1].0.as_str(), &ops[1].1["about"], &ops[1].1["fields"]),
+        ("my_work", &json!("s1"), &json!({"action": "undo"}))
+    );
+    // The directive back: the undo backed up, the segment's sound copy and its seal returned, and
+    // a restore.
+    let h = h.closed(|home| {
+        crate::backup::export(home).unwrap();
+        std::fs::write(&segment, &saved[0]).unwrap();
+        std::fs::write(sealed(&segment), &saved[1]).unwrap();
+        damage_raw(home);
+        crate::worker::run_once(home).unwrap();
+    });
+    h.s.run();
+    assert!(row_at(&h, at), "the directive is back");
+    assert_eq!(active_status(&h, &uid).as_deref(), Some("retracted"));
+    assert_eq!(h.waiting(), ["s1"]);
+}
+
+/// #1131 item 9: an undo whose approval a second viewer undid and approved again since its read
+/// refuses, writing nothing: its decision would undo the new approval, whose preference would stay.
+#[test]
+fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
+    let (h, _uid, _at, _segment, _saved) = lost_directive();
+    let home = h.s.home.path().to_owned();
+    crate::claims::LOST_UNDO.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let saving = std::sync::Mutex::new(());
+            for body in [UNDO, APPROVE] {
+                let got = crate::settings::claims::rule(&home, &saving, body.as_bytes()).unwrap();
+                assert_eq!(got["state"], "applied", "{body}: {got}");
+            }
+        }))
+    });
+    let refused = h.act(serde_json::from_str(UNDO).unwrap()).unwrap_err();
+    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert_eq!(h.waiting(), Vec::<String>::new(), "the new approval stands");
+    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// #1131 item 9: an undo with no anchor in knowledge.db still waits where the directive is not gone
+/// for good: one masked by a rule before its purge, and one whose record a forget took before
+/// its purge, both still a row; one at or past the device's top, whose seq the next record
+/// takes; and an approval whose preference is in another batch, as approvals were written
+/// before #1130. Each refuses as pending, and writes nothing.
+#[test]
+fn an_undo_with_no_anchor_waits_unless_the_directive_is_gone_for_good() {
+    let cases = ["masked", "forgotten record", "at the top", "another batch"];
+    for case in cases {
+        let mut h = Home::new();
+        h.s.raw.append(&crate::raw::test_event("before")).unwrap();
+        suggested(&mut h);
+        let uid = if case == "another batch" {
+            let home = h.s.home.path().to_owned();
+            let Ok(crate::claims::OwnerReceipt::Applied { uid }) =
+                crate::claims::pref_add_recorded(&home, RULE_TEXT, None)
+            else {
+                panic!("the preference is not applied");
+            };
+            assert!(record(&home, "s1", json!({"action": "approve", "claim": uid})).unwrap());
+            uid
+        } else {
+            let got = h.act(serde_json::from_str(APPROVE).unwrap()).unwrap();
+            got["uid"].as_str().unwrap().to_owned()
+        };
+        let [at] = directive_seqs(&h)[..] else {
+            panic!("{case}: one directive");
+        };
+        if case != "at the top" {
+            h.s.raw.append(&crate::raw::test_event("after")).unwrap();
+        }
+        let device = h.s.raw.device().to_owned();
+        let h = h.closed(|home| {
+            match case {
+                "masked" => {
+                    std::fs::write(
+                        home.join("config.toml"),
+                        "[redaction]\nextra_rules = [{ id = \"tests\", regex = 'tests' }]\n",
+                    )
+                    .unwrap();
+                }
+                "forgotten record" => {
+                    let target = crate::forget::Target::Record { device, seq: at };
+                    crate::forget::start(home, &crate::forget::preview(home, target).unwrap())
+                        .unwrap();
+                }
+                _ => {
+                    rusqlite::Connection::open(home.join("raw.db"))
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM records WHERE device = ?1 AND seq = ?2",
+                            rusqlite::params![device, at],
+                        )
+                        .unwrap();
+                }
+            }
+            // knowledge.db made again from raw.db as it now stands: no preference derived.
+            crate::worker::rebuild(home).unwrap();
+        });
+        h.s.run();
+        assert_eq!(active_status(&h, &uid), None, "{case}: no anchor");
+        let (_, before) = tops(&h);
+        let refused = h.act(serde_json::from_str(UNDO).unwrap()).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (409, "rule_pending"),
+            "{case}"
+        );
+        assert_eq!(
+            ops_past(&h, before),
+            Vec::<(String, Value)>::new(),
+            "{case}"
+        );
+    }
+}
+
 /// The tops of `h`'s raw.db for its device: its last record's seq and its last op's.
 fn tops(h: &Home) -> (i64, i64) {
     let c = rusqlite::Connection::open(h.s.home.path().join("raw.db")).unwrap();
