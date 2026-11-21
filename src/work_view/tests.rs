@@ -3369,8 +3369,12 @@ fn a_learning_op_of_the_suggestion_refuses_its_dismissal() {
 /// from records an event in a repository the exclusion list holds between the check and the append
 /// (a session that touches one is excluded, and what was learned from it with it), the session read
 /// by the learning op itself or, as the rules job reads in production, by a review it took, from
-/// records or a session's summary. The same session's record in another repository leaves the write
-/// its append, as 64 records since the check do; more than the write reads refuse it.
+/// records or a session's summary; so does any other session's first event in an excluded
+/// repository (#1132's review: the write checks who first touches one, not the suggestion's
+/// sources), right after the fence too, and in an excluded repository with no event yet. The same
+/// session's record in another repository leaves the write its append, as does a session excluded
+/// before the read recording again, and 64 records since the check; more than the write reads
+/// refuse it, but not while no repository is excluded.
 #[test]
 fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_write() {
     let cases = [
@@ -3380,6 +3384,11 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
         "sixty-four",
         "through a review",
         "through a turn",
+        "another session's first event",
+        "a session excluded before the read",
+        "a first event right after the fence",
+        "nothing excluded, 65 records",
+        "an excluded repository with no event yet",
     ];
     for case in cases {
         let mut h = Store::new();
@@ -3426,7 +3435,16 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             _ => learned_op("s1", "Keep commits small.", at, vec![(seq, seq)]),
         };
         h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-        h.raw.exclude(&secret, false).unwrap();
+        let empty = "github.com/x/empty";
+        match case {
+            "nothing excluded, 65 records" => {}
+            "an excluded repository with no event yet" => {
+                h.raw.exclude(empty, false).unwrap();
+            }
+            _ => {
+                h.raw.exclude(&secret, false).unwrap();
+            }
+        }
         h.run();
         let (reference, version, _) = row_of(&h, "s1");
         let home = h.home.path().to_owned();
@@ -3434,11 +3452,27 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             "elsewhere" => recorded(&home, "learned", &open),
             "many" => (0..65).for_each(|_| recorded(&home, "third", &open)),
             "sixty-four" => (0..64).for_each(|_| recorded(&home, "third", &open)),
+            "another session's first event" | "a first event right after the fence" => {
+                recorded(&home, "newcomer", &secret)
+            }
+            "a session excluded before the read" => recorded(&home, "other", &secret),
+            "nothing excluded, 65 records" => (0..65).for_each(|_| recorded(&home, "third", &open)),
+            "an excluded repository with no event yet" => recorded(&home, "newcomer", empty),
             _ => recorded(&home, "learned", &secret),
         };
-        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        if case == "a first event right after the fence" {
+            FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        } else {
+            CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        }
         let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
-        if matches!(case, "elsewhere" | "sixty-four") {
+        let through = [
+            "elsewhere",
+            "sixty-four",
+            "a session excluded before the read",
+            "nothing excluded, 65 records",
+        ];
+        if through.contains(&case) {
             assert_eq!(got, Switched::Pending, "{case}");
             assert_eq!(decisions_of(&h, "s1"), 1, "{case}");
         } else {

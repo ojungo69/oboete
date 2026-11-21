@@ -4345,3 +4345,164 @@ fn an_event_and_its_ops_against_a_rules_fence_are_refused_when_it_moved() {
     assert!(quiet.unwrap().is_some());
     assert_eq!(count(&raw), before + 1);
 }
+
+/// An event of `session` in `repo`, as a hook records one.
+fn event_in_repo(session: &str, repo: &str) -> Event {
+    Event {
+        session: session.into(),
+        repo: Some(repo.into()),
+        ..test_event(r#"{"prompt":"x"}"#)
+    }
+}
+
+/// #1083's R2b (#1132's review): who was already excluded when a write read is every session with
+/// an event in an excluded repository, but this device's records after the write's fence: another
+/// device's event counts whatever its seq, and nothing is read while no repository is excluded.
+#[test]
+fn the_sessions_already_excluded_leave_out_only_this_devices_records_after_the_fence() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    raw.append(&event_in_repo("before", "github.com/x/private"))
+        .unwrap();
+    raw.append(&event_in_repo("elsewhere", "github.com/x/open"))
+        .unwrap();
+    let fence = raw.rule_fence().unwrap();
+    raw.append(&event_in_repo("after", "github.com/x/private"))
+        .unwrap();
+    raw.conn
+        .execute(
+            "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, source, body)
+             VALUES('other-device', ?1, 'event', 0, 'prompt', 'claude', 'abroad',
+                    'github.com/x/private', 'hook', '{}')",
+            [fence.records + 100],
+        )
+        .unwrap();
+    let device = raw.device().to_owned();
+    let repos = vec!["github.com/x/private".to_owned()];
+    let got = raw
+        .excluded_through(&repos, &device, fence.records)
+        .unwrap();
+    let mut got: Vec<String> = got.into_iter().collect();
+    got.sort();
+    assert_eq!(got, ["claude\0abroad", "claude\0before"]);
+    assert!(
+        raw.excluded_through(&[], &device, fence.records)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// #1083's R2b (#1132's review): a rule's write that reads the exclusions is refused inside its
+/// append when a session not already excluded records its first event in an excluded repository
+/// since the fence, or under a label the read's test reads as never recorded (#1131 item 10); a
+/// session already excluded recording again, an event elsewhere, and 64 records since the fence
+/// leave it its append; 65 refuse it; with no repository excluded nothing is read.
+#[test]
+fn a_rules_write_is_refused_by_a_sessions_first_event_in_an_excluded_repository() {
+    let private = "github.com/x/private";
+    let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+    let write = || [(OpKind::MyWork, serde_json::json!({"job": "other"}))];
+    type Then = Box<dyn Fn(&mut Raw)>;
+    let cases: Vec<(&str, Then, bool)> = vec![
+        (
+            "a first event",
+            Box::new(move |raw| {
+                raw.append(&event_in_repo("newcomer", private)).unwrap();
+            }),
+            true,
+        ),
+        (
+            "one already excluded",
+            Box::new(move |raw| {
+                raw.append(&event_in_repo("before", private)).unwrap();
+            }),
+            false,
+        ),
+        (
+            "elsewhere",
+            Box::new(move |raw| {
+                raw.append(&event_in_repo("newcomer", "github.com/x/open"))
+                    .unwrap();
+            }),
+            false,
+        ),
+        (
+            "a masked label the test reads",
+            {
+                let m = masked.clone();
+                Box::new(move |raw| {
+                    raw.append(&event_in_repo("newcomer", &m)).unwrap();
+                })
+            },
+            true,
+        ),
+        (
+            "64 records",
+            Box::new(move |raw| {
+                (0..64).for_each(|_| {
+                    raw.append(&event_in_repo("third", "github.com/x/open"))
+                        .unwrap();
+                })
+            }),
+            false,
+        ),
+        (
+            "65 records",
+            Box::new(move |raw| {
+                (0..65).for_each(|_| {
+                    raw.append(&event_in_repo("third", "github.com/x/open"))
+                        .unwrap();
+                })
+            }),
+            true,
+        ),
+    ];
+    for (case, then, refused) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        raw.append(&event_in_repo("before", private)).unwrap();
+        let fence = raw.rule_fence().unwrap();
+        let device = raw.device().to_owned();
+        let repos = vec![private.to_owned()];
+        let excluded = raw
+            .excluded_through(&repos, &device, fence.records)
+            .unwrap();
+        let label = LabelTest {
+            never: std::collections::BTreeSet::from([format!("{private}-aaa")]),
+            now: std::collections::BTreeSet::new(),
+            settings: crate::capture::Settings::load(home.path()).unwrap(),
+        };
+        let sources = Sources {
+            repos,
+            excluded,
+            label: Some(label),
+        };
+        then(&mut raw);
+        let subject = Subject {
+            uid: None,
+            suggestion: Some("s1"),
+            sources: Some(&sources),
+        };
+        let got = raw.append_ops_ruled(&write(), &fence, &subject);
+        if refused {
+            assert!(got.unwrap_err().is::<OpsMoved>(), "{case}");
+        } else {
+            assert!(got.is_ok(), "{case}: {got:?}");
+        }
+    }
+    // No repository excluded: 65 records since the fence leave the write its append.
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let fence = raw.rule_fence().unwrap();
+    (0..65).for_each(|_| {
+        raw.append(&event_in_repo("third", "github.com/x/open"))
+            .unwrap();
+    });
+    let sources = Sources::default();
+    let subject = Subject {
+        uid: None,
+        suggestion: Some("s1"),
+        sources: Some(&sources),
+    };
+    assert!(raw.append_ops_ruled(&write(), &fence, &subject).is_ok());
+}

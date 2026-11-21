@@ -2024,13 +2024,48 @@ pub struct Subject<'a> {
     pub sources: Option<&'a Sources>,
 }
 
-/// A suggestion's sources (#1083's R2b): the sessions, as `agent` NUL `session`, of what its kept
-/// learning op read (`my_work_ops::sources`), and the repositories the exclusion list held when
-/// they were read (`Raw::exclusions_now`).
+/// What a suggestion's write is checked against inside its append (#1083's R2b; #1132's review): the
+/// repositories the exclusion list held when the write read them (`Raw::exclusions_read`), the
+/// sessions already excluded then (`Raw::excluded_through`), as `agent` NUL `session`, and the test
+/// that reads a repository label as one never recorded (#1131 item 10). A session that first
+/// touches an excluded repository between the read and the append refuses the write: a session the
+/// suggestion was learned from is one of them, so no walk of its sources is needed (#1131 items 13
+/// and 17).
 #[derive(Debug, Default)]
 pub struct Sources {
-    pub sessions: std::collections::HashSet<String>,
     pub repos: Vec<String>,
+    pub excluded: std::collections::HashSet<String>,
+    pub label: Option<LabelTest>,
+}
+
+/// How `exclusions_now` reads a repository label as one never recorded (#1131 item 10): its label as
+/// the rules now read it among the capture exclusions' repositories as they now read them, or a
+/// masked label that may name one of those, as given or as now read. Only while a repository is
+/// never recorded.
+pub struct LabelTest {
+    never: std::collections::BTreeSet<String>,
+    now: std::collections::BTreeSet<String>,
+    settings: crate::capture::Settings,
+}
+
+impl LabelTest {
+    /// Whether `label` is read as a repository never recorded.
+    pub fn excludes(&self, label: &str) -> bool {
+        self.now.contains(&crate::capture::exclusion_label(
+            "repo",
+            label,
+            &self.settings,
+        )) || may_name(label, self.never.iter().chain(&self.now))
+    }
+}
+
+impl std::fmt::Debug for LabelTest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LabelTest")
+            .field("never", &self.never)
+            .field("now", &self.now)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How many of the records recorded since a suggestion's write was checked its append reads, under
@@ -7266,30 +7301,65 @@ impl Raw {
     /// before the rule, which hold the label unmasked; Codex on #489). The settings are read only
     /// while a repository is never recorded; one that does not load sends nothing.
     pub fn exclusions_now(&self) -> Result<Vec<String>> {
+        Ok(self.exclusions_read()?.0)
+    }
+
+    /// `exclusions_now`, and the label test it read each label by (#1131 item 10: a rule's write
+    /// reads a label first recorded after its read the same way).
+    pub fn exclusions_read(&self) -> Result<(Vec<String>, Option<LabelTest>)> {
         let (mut sent, never) = exclusion_sets(&self.conn)?;
+        let mut test = None;
         if !never.repos.is_empty() {
             let settings = crate::capture::Settings::load(&self.home)?;
             let now = crate::capture::never_recorded(&never, &settings);
+            let label = LabelTest {
+                never: never.repos.clone(),
+                now: now.repos,
+                settings,
+            };
             self.repo_index()?;
             let mut st = self.conn.prepare(
                 "SELECT DISTINCT repo FROM records WHERE type = 'event' AND repo IS NOT NULL",
             )?;
-            for label in st.query_map([], |r| r.get::<_, String>(0))? {
-                let label = label?;
-                if now
-                    .repos
-                    .contains(&crate::capture::exclusion_label("repo", &label, &settings))
-                    || may_name(&label, never.repos.iter().chain(&now.repos))
-                {
-                    sent.insert(label);
+            for name in st.query_map([], |r| r.get::<_, String>(0))? {
+                let name = name?;
+                if label.excludes(&name) {
+                    sent.insert(name);
                 }
             }
             // And the entries as the rules now read them, for a key read so (Codex and Cursor on
             // #489: an import's project, a search's checkout).
-            sent.extend(now.repos);
+            sent.extend(label.now.iter().cloned());
+            test = Some(label);
         }
         sent.extend(never.repos);
-        Ok(sent.into_iter().collect())
+        Ok((sent.into_iter().collect(), test))
+    }
+
+    /// #1083's R2b (#1132's review): the sessions, as `agent` NUL `session`, of the events recorded
+    /// in one of `repos`, but this device's records after `records` (a write's fence): who was
+    /// already excluded when the write read. One read of `records_repo`; none for no repository.
+    pub fn excluded_through(
+        &self,
+        repos: &[String],
+        device: &str,
+        records: i64,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        if repos.is_empty() {
+            return Ok(out);
+        }
+        self.repo_index()?;
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
+             WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))
+               AND NOT (device = ?2 AND seq > ?3)",
+        )?;
+        let repos = serde_json::to_string(repos)?;
+        for session in st.query_map(params![repos, device, records], |r| r.get::<_, String>(0))? {
+            out.insert(session?);
+        }
+        Ok(out)
     }
 
     /// Appends an exclusion op, or its undo (spec 5.5, D13), with a clock past every exclusion op
@@ -7514,22 +7584,6 @@ impl Raw {
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
         )?;
         let rows = st.query_map([serde_json::to_string(repos)?], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// The sessions, as `agent` NUL `session`, of `device`'s events from seq `from` to `to`, both
-    /// included (#1083's R2b: a learning op's record span, `my_work_ops::sources`), as `sessions_in`
-    /// names them.
-    pub fn sessions_in_span(
-        &self,
-        device: &str,
-        (from, to): (i64, i64),
-    ) -> Result<std::collections::HashSet<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
-             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
-        )?;
-        let rows = st.query_map(params![device, from, to], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -10582,12 +10636,16 @@ fn fence_moved(
         || sources)
 }
 
-/// Whether this device recorded, since record `after`, an event of one of `sources`' sessions in a
-/// repository its exclusion list held (#1083's R2b: a session that touches one is excluded, and what
-/// was learned from it with it), read inside the write: at most `SOURCES_READ` records, more than
-/// that refusing too. None to read while the list holds no repository.
+/// Whether this device recorded, since record `after`, a session's first event in an excluded
+/// repository (#1083's R2b; #1132's review): an event in one of `sources`' repositories, or under a
+/// label its test reads as never recorded (#1131 item 10), of a session not already excluded when
+/// the write read. A session that touches one is excluded, and what was learned from it with it;
+/// a suggestion's sources are sessions, so this refuses every write the suggestion's own sources
+/// would, and a write while any other session first touches one. Read inside the write: at most
+/// `SOURCES_READ` records, more than that refusing too. None to read while no repository is
+/// excluded.
 fn sources_moved(tx: &Connection, device: &str, after: i64, sources: &Sources) -> Result<bool> {
-    if sources.repos.is_empty() || sources.sessions.is_empty() {
+    if sources.repos.is_empty() {
         return Ok(false);
     }
     let mut st = tx.prepare(
@@ -10595,12 +10653,22 @@ fn sources_moved(tx: &Connection, device: &str, after: i64, sources: &Sources) -
          WHERE device = ?1 AND seq > ?2 AND type = 'event' ORDER BY seq LIMIT ?3",
     )?;
     let mut rows = st.query(params![device, after, SOURCES_READ + 1])?;
-    let mut read = 0;
+    let (mut read, mut labels) = (0, std::collections::HashMap::<String, bool>::new());
     while let Some(row) = rows.next()? {
         read += 1;
+        if read > SOURCES_READ {
+            return Ok(true);
+        }
         let (session, repo): (String, Option<String>) = (row.get(0)?, row.get(1)?);
-        let excluded = repo.is_some_and(|r| sources.repos.contains(&r));
-        if read > SOURCES_READ || (excluded && sources.sessions.contains(&session)) {
+        let Some(repo) = repo else { continue };
+        if sources.excluded.contains(&session) {
+            continue;
+        }
+        // Each label once: one first seen since the read is read by the same test the read used.
+        let excluded = *labels.entry(repo).or_insert_with_key(|r| {
+            sources.repos.contains(r) || sources.label.as_ref().is_some_and(|t| t.excludes(r))
+        });
+        if excluded {
             return Ok(true);
         }
     }

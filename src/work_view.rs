@@ -425,6 +425,10 @@ pub(crate) fn decide<'a>(
     };
     let read = crate::dispatch::reading(home, wait)?;
     let fence = raw.rule_fence()?;
+    #[cfg(test)]
+    if let Some(hook) = FENCED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let device = raw.device().to_owned();
     let tx = k.unchecked_transaction()?;
     let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
@@ -451,14 +455,19 @@ pub(crate) fn decide<'a>(
     let Some(id) = row.of["suggestion"].as_str() else {
         return Ok(Switched::NotFound);
     };
-    // Every suggestion My Rules lists has the op that kept it; one without has no sources to check.
-    let Some(learned) = row.kept else {
+    // Every suggestion My Rules lists has the op that kept it.
+    if row.kept.is_none() {
         return Ok(Switched::NotFound);
-    };
-    let kept = Some(learned);
+    }
+    let kept = row.kept;
+    // What the append checks its window against: the repositories excluded now, who was excluded
+    // already, and the test of a label first recorded after this read (#1132's review).
+    let (repos, label) = raw.exclusions_read()?;
+    let excluded = raw.excluded_through(&repos, &device, fence.records)?;
     let sources = crate::raw::Sources {
-        repos: raw.exclusions_now()?,
-        sessions: crate::my_work_ops::sources(&raw, &tx, &device, learned)?,
+        repos,
+        excluded,
+        label,
     };
     let subject = crate::raw::Subject {
         uid: row.uid.as_deref(),
@@ -620,6 +629,9 @@ fn the_one(rows: Vec<Row>, reference: &str) -> Result<Row, Switched> {
 
 #[cfg(test)]
 thread_local! {
+    /// A test's hook, run once a decision has read its fence, before anything else it reads.
+    pub(crate) static FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     /// A test's hook, run once a switch has checked its rule, before its append.
     pub(crate) static CHECKED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
