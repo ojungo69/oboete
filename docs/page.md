@@ -303,10 +303,11 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   Undo after another change of the rule undoes none. The switch takes the locks W4's Mark finished
   takes (config.lock with the token asked again, raw.db and the readers' hold), reads My Rules on the
   handles it appends on, and appends its correction against a fence of what it read of the rule (an
-  op naming its claim, an exclusion, a tombstone, a forget, another raw.db file; curation's other ops
-  leave it be). A claim op names it by the uid it derives or by its `supersedes`, a correction by its
-  `uid`, a rule decision by its `claim` or by the rule's suggestion (`about`); a claim that only
-  quotes the uid does not (#1128). Before its locks the switch waits for the claims consumer past
+  op naming its claim, an exclusion, a tombstone, a forget, a row whose retention expired, another
+  raw.db file; curation's other ops leave it be). A claim op names it by the uid it derives or by
+  its `supersedes`, a correction by its `uid`, a rule decision by its `claim` or by the rule's
+  suggestion (`about`); a claim that only quotes the uid does not (#1128), nor does an op of any
+  other kind (#1131). Before its locks the switch waits for the claims consumer past
   this device's newest correction and for the my_work consumer past its newest rule decision; and
   where a correction a worker of an older oboete passed waits, a viewer that runs its own passes
   runs one, whose claims step keeps it. Once the posted version and the rule's state are checked,
@@ -317,9 +318,13 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   is held from the switch's locks to its append: through its waits for those locks, each within
   its own time, and through none of its waits for a consumer. As many switches as may wait for
   that lock are let in at once (503 busy past them). Applied and kept, its answer names the version
-  it left the rule at (`savedRuleVersion`), which the receipt's Undo posts back, null when a record came after it that
-  also decides the rule, and the pages then offer no Undo; not applied yet, it is saved, and its
-  receipt says so, with no Undo.
+  a read of My Rules after it gives the rule (`savedRuleVersion`), which the receipt's Undo posts
+  back. It is null when that read does not give the rule as the switch left it (a record came after
+  it that also decides the rule, or My Rules no longer lists the rule), while something not applied
+  yet would refuse the Undo as pending, and when the read fails: the change is saved, and the
+  receipt's Undo stays on screen, disabled, for as long as the rule does (the pages drop the receipt
+  of a rule they no longer show). Not applied yet, it is saved, and its receipt says so, with no
+  Undo.
 - A suggestion's decisions take the same route, the same locks in the same order and the same
   refusals (#1083's R2b): `approve` and `dismiss` a suggestion that waits, `restore-suggestion` a
   rejected or an approved one (claude-mem's one Undo of a decision), each at the version it posts.
@@ -330,16 +335,23 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   repository, as the main page's plain Approve does, and writes its directive, preference and
   decision in one transaction against the fence; an undo of an approved rule retracts its preference
   and undoes the decision in one append, and is refused as pending while knowledge.db does not hold
-  the preference's derivation. It always meets a preference not forgotten: My Rules lists no rule
+  the preference's derivation; My Rules lists no approved rule whose derivation knowledge.db does not
+  hold, so in practice such an undo answers not found (404), the pending refusal guarding a race. It always meets a preference not forgotten: My Rules lists no rule
   raw.db proves forgotten, and no forget commits while the undo holds the readers' hold. oboete's
   own page undoes an approval whose preference is forgotten, writing the decision alone. A decision's write is refused, nothing recorded, when since the check a decision of the
   suggestion, a rules job's op of it, or a correction of its rule's claim was appended, and when a
-  session it was learned from recorded an event in a repository the exclusion list held (that
-  session is then excluded, and what was learned from it with it): this device's records since the
-  check are read inside the write, at most 64, more refusing too. Its answer's version is the one
-  a read of My Rules after the write gives the row by its reference, only while the row is the one
-  the write left (an approval's preference derived by its own op with no correction deciding it);
-  else none. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by
+  session that had no event in a repository the exclusion list holds recorded its first one there
+  (that session is then excluded, and what was learned from it with it). A session the suggestion
+  was learned from is such a session, and so is any other, so that a retry goes through once the
+  write's read holds it, unless the exclusion hid the suggestion, when the retry answers not found
+  or stale. While the list holds a repository, this device's records since the check are read
+  inside the write, at most 64, more refusing too, each label read as the write's read reads one
+  never recorded. Its answer's version is the one a read of My Rules after the write gives the row
+  by its reference, only while the row is the one the write left (an approval's preference derived
+  by its own op with no correction deciding it) and nothing not applied yet would refuse the write
+  that follows as pending (the approval's undo, the dismissal's or the undo's own check, on the row
+  as read); else none. The version is a receipt of the row as that read matched it: the write that
+  posts it back makes its own checks. The other controls that write a rule are not shown (below); a quote's source record is named as a prompt a review quoted, dated by
   that review, the quote itself shown whole; a rule the owner wrote is theirs, and a suggestion is
   learned by oboete. claude-mem's rules file and where its edits go are not shown: oboete writes no
   such file, and gives the rules that are on to Claude Code, Codex and Grok with the context it gives each

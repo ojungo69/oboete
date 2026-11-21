@@ -387,7 +387,9 @@ pub(crate) enum Decision {
     Approve,
     /// Reject a suggestion that waits (`dismiss`).
     Dismiss,
-    /// Undo a suggestion's rejection (`restore-suggestion`).
+    /// Undo a suggestion's decision (`restore-suggestion`): its rejection, so that it waits again,
+    /// or an approved rule's approval, its preference retracted and its decision undone (#1131 item
+    /// 16).
     Restore,
 }
 
@@ -395,7 +397,7 @@ pub(crate) enum Decision {
 /// is at `version`, under the switch's locks and in its order (`switch`): dismissed while it waits,
 /// its rejection undone while it is rejected. Refused, nothing recorded, while what its row reads
 /// is not applied yet (`behind`), and when anything moved it between the read and the append, a
-/// record of its sources' in a repository the exclusion list held included
+/// session's first event in a repository the exclusion list held included
 /// (`Raw::append_ops_ruled`). Applied and kept, the row's version after is the one a read after the
 /// write gives it while it is the row the write left and nothing pending decides it
 /// (`fresh_version`).

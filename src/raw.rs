@@ -2069,7 +2069,7 @@ impl std::fmt::Debug for LabelTest {
 }
 
 /// How many of the records recorded since a suggestion's write was checked its append reads, under
-/// the writer's lock, for one of its sources' in a repository the exclusion list held
+/// the writer's lock, for a session's first event in a repository the exclusion list held
 /// (`sources_moved`); more than that refuses the write.
 const SOURCES_READ: i64 = 64;
 
