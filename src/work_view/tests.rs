@@ -3397,6 +3397,7 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
         "nothing excluded, 65 records",
         "an excluded repository with no event yet",
         "a source session excluded before the read",
+        "another device's first event right after the fence",
     ];
     for case in cases {
         let mut h = Store::new();
@@ -3482,11 +3483,22 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
             }
             "a session excluded before the read" => recorded(&home, "other", &secret),
             "a source session excluded before the read" => recorded(&home, "lifecycle", &secret),
+            "another device's first event right after the fence" => {
+                let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+                raw.execute(
+                    "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo,
+                       source, body)
+                     VALUES('other-device', 1, 'event', 0, 'prompt', 'claude', 'newcomer', ?1,
+                       'hook', '{}')",
+                    [&secret],
+                )
+                .unwrap();
+            }
             "nothing excluded, 65 records" => (0..65).for_each(|_| recorded(&home, "third", &open)),
             "an excluded repository with no event yet" => recorded(&home, "newcomer", empty),
             _ => recorded(&home, "learned", &secret),
         };
-        if case == "a first event right after the fence" {
+        if case.ends_with("right after the fence") {
             FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
         } else {
             CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
@@ -3505,6 +3517,13 @@ fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_writ
         } else {
             assert_eq!(got, Switched::Behind, "{case}");
             assert_eq!(decisions_of(&h, "s1"), 0, "{case}");
+        }
+        if matches!(case, "excluded" | "through a review" | "through a turn") {
+            // #1131 item 18: retried, My Rules hides the suggestion through what it was learned
+            // from, a review and a turn included, so the retry finds no row.
+            let again = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+            assert_eq!(again, Switched::NotFound, "{case}: the retry");
+            assert_eq!(decisions_of(&h, "s1"), 0, "{case}: nothing written");
         }
         if case == "another session's first event" {
             // A retry, under a fence of its own, is not refused for that session again.
@@ -3535,6 +3554,43 @@ fn a_label_a_never_recorded_repository_may_be_refuses_a_decision() {
     assert_eq!(got, Switched::Behind);
     assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
     assert_eq!(stored(&h).0, records + 1, "the hook's event is recorded");
+}
+
+/// #1131 item 19: a decision refused as pending reads no exclusion baseline: what is not applied
+/// yet is checked first, while a repository is excluded.
+#[test]
+fn a_decision_refused_as_pending_reads_no_exclusion_baseline() {
+    let (h, now, _place, _repo, _off) = ruled();
+    (crate::raw::open(h.home.path()).unwrap())
+        .exclude("github.com/x/elsewhere", false)
+        .unwrap();
+    let (reference, version, _) = row_of(&h, "s1");
+    let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+    (crate::raw::open(h.home.path()).unwrap())
+        .append_ops(&[(OpKind::MyWork, op)])
+        .unwrap();
+    let reads = || crate::raw::BASELINE_READS.with(|n| n.get());
+    let (before, decisions) = (reads(), decisions_of(&h, "s1"));
+    let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(reads(), before, "no baseline read");
+    assert_eq!(decisions_of(&h, "s1"), decisions, "nothing written");
+}
+
+/// #1131 item 22: a receipt whose read after the write fails answers saved with no version and is
+/// told on the viewer's stderr, a fixed line; a receipt whose read succeeds tells nothing.
+#[test]
+fn a_receipts_failed_read_is_told() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (id, version, _) = read_rule(&h, "Write the changelog.");
+    let told = || TOLD.with(|n| n.get());
+    let before = told();
+    FRESH_FAILS.with(|fails| fails.set(true));
+    assert_eq!(switched(&h, &id, &version, true), Switched::Applied(None));
+    assert_eq!(told(), before + 1, "the failed read is told");
+    let (_, version, _) = read_rule(&h, "Write the changelog.");
+    left(switched(&h, &id, &version, false));
+    assert_eq!(told(), before + 1, "a read that succeeds tells nothing");
 }
 
 /// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection

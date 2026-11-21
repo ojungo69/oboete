@@ -2002,8 +2002,8 @@ pub struct AnswerFence {
 
 /// #1083 (R2a): what a rule's write read before it found its rule, which its append compares in its
 /// write (`Raw::append_ops_ruled`): the raw.db file (`file_identity`), the forget fence
-/// (`fence_count`), this device's newest op and newest record, and the rows retention has made
-/// expired. Not every op since moves it: curation appends claims all day, so only an exclusion, an
+/// (`fence_count`), this device's newest op and newest record, the largest rowid of every device's
+/// records (`rows`, #1131 item 21), and the rows retention has made expired. Not every op since moves it: curation appends claims all day, so only an exclusion, an
 /// op whose body names the rule's claim (a correction of it, a claim that supersedes it) and a
 /// tombstone refuse the append.
 #[derive(Clone, Debug)]
@@ -2012,6 +2012,11 @@ pub struct RuleFence {
     pub forget: i64,
     pub top: i64,
     pub records: i64,
+    /// The largest rowid of `records`, every device's. A rowid only grows while a write is checked:
+    /// an insert takes the next one; a purge and an expiry rewrite rows in place, under the
+    /// dispatch's exclusive hold, which the write's readers' hold keeps out; a restore replaces the
+    /// file, which `file` refuses; nothing deletes a record row or vacuums raw.db.
+    pub rows: i64,
     pub expired: i64,
 }
 
@@ -2070,9 +2075,16 @@ impl std::fmt::Debug for LabelTest {
     }
 }
 
-/// How many of the records recorded since a suggestion's write was checked its append reads, under
-/// the writer's lock, for a session's first event in a repository the exclusion list held
-/// (`sources_moved`); more than that refuses the write.
+#[cfg(test)]
+thread_local! {
+    /// How many times `Raw::excluded_through` was called, for a test of a decision that reads none
+    /// (#1131 item 19).
+    pub(crate) static BASELINE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many of the records recorded since a suggestion's write was checked, every device's, its
+/// append reads, under the writer's lock, for a session's first event in a repository the
+/// exclusion list held (`sources_moved`); more than that refuses the write.
 const SOURCES_READ: i64 = 64;
 
 /// How many tool records recorded after J4's check its append decodes, under the writer's lock,
@@ -7157,6 +7169,11 @@ impl Raw {
             forget: self.fence_count()?,
             top: max_op_seq_in(&self.conn, &self.device)?,
             records: self.record_top()?,
+            rows: self
+                .conn
+                .query_row("SELECT COALESCE(MAX(rowid), 0) FROM records", [], |r| {
+                    r.get(0)
+                })?,
             expired: self.expired_rows()?,
         })
     }
@@ -7339,14 +7356,16 @@ impl Raw {
     }
 
     /// #1083's R2b (#1132's review): the sessions, as `agent` NUL `session`, of the events recorded
-    /// in one of `repos`, but this device's records after `records` (a write's fence): who was
-    /// already excluded when the write read. One read of `records_repo`; none for no repository.
+    /// in one of `repos` that were there at a write's fence, of every device (`rows`, the fence's
+    /// largest rowid; #1131 item 21): who was already excluded when the write read. One read of
+    /// `records_repo`; none for no repository.
     pub fn excluded_through(
         &self,
         repos: &[String],
-        device: &str,
-        records: i64,
+        rows: i64,
     ) -> Result<std::collections::HashSet<String>> {
+        #[cfg(test)]
+        BASELINE_READS.with(|n| n.set(n.get() + 1));
         let mut out = std::collections::HashSet::new();
         if repos.is_empty() {
             return Ok(out);
@@ -7354,11 +7373,10 @@ impl Raw {
         self.repo_index()?;
         let mut st = self.conn.prepare(
             "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
-             WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))
-               AND NOT (device = ?2 AND seq > ?3)",
+             WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1)) AND rowid <= ?2",
         )?;
         let repos = serde_json::to_string(repos)?;
-        for session in st.query_map(params![repos, device, records], |r| r.get::<_, String>(0))? {
+        for session in st.query_map(params![repos, rows], |r| r.get::<_, String>(0))? {
             out.insert(session?);
         }
         Ok(out)
@@ -10628,7 +10646,7 @@ fn fence_moved(
         |r| r.get(0),
     )?;
     let sources = match subject.sources {
-        Some(sources) => sources_moved(tx, device, fence.records, sources)?,
+        Some(sources) => sources_moved(tx, fence.rows, sources)?,
         None => false,
     };
     Ok(forget != fence.forget
@@ -10638,8 +10656,8 @@ fn fence_moved(
         || sources)
 }
 
-/// Whether this device recorded, since record `after`, a session's first event in an excluded
-/// repository (#1083's R2b; #1132's review): an event in one of `sources`' repositories, or under a
+/// Whether a record since rowid `after` (a write's fence, every device's; #1131 item 21) is a
+/// session's first event in an excluded repository (#1083's R2b; #1132's review): an event in one of `sources`' repositories, or under a
 /// label its test reads as never recorded (#1131 item 10), of a session not already excluded when
 /// the write read. A session that touches one is excluded, and what was learned from it with it:
 /// this refuses a write while any session, one the suggestion was learned from among them, first
@@ -10647,15 +10665,15 @@ fn fence_moved(
 /// (`my_work_ops::hidden`), and is not refused again. Read inside the write: at most
 /// `SOURCES_READ` records, more than that refusing too. None to read while no repository is
 /// excluded.
-fn sources_moved(tx: &Connection, device: &str, after: i64, sources: &Sources) -> Result<bool> {
+fn sources_moved(tx: &Connection, after: i64, sources: &Sources) -> Result<bool> {
     if sources.repos.is_empty() {
         return Ok(false);
     }
     let mut st = tx.prepare(
         "SELECT COALESCE(agent, '') || char(0) || COALESCE(session, ''), repo FROM records
-         WHERE device = ?1 AND seq > ?2 AND type = 'event' ORDER BY seq LIMIT ?3",
+         WHERE rowid > ?1 AND type = 'event' ORDER BY rowid LIMIT ?2",
     )?;
-    let mut rows = st.query(params![device, after, SOURCES_READ + 1])?;
+    let mut rows = st.query(params![after, SOURCES_READ + 1])?;
     let (mut read, mut labels) = (0, std::collections::HashMap::<String, bool>::new());
     while let Some(row) = rows.next()? {
         read += 1;

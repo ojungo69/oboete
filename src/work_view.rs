@@ -460,10 +460,21 @@ pub(crate) fn decide<'a>(
         return Ok(Switched::NotFound);
     }
     let kept = row.kept;
+    // What is not applied yet first, before any read of the exclusions' history (#1131 item 19):
+    // `behind` reads only whether the write has sources, not what they hold.
+    let none = crate::raw::Sources::default();
+    let pending = crate::raw::Subject {
+        uid: row.uid.as_deref(),
+        suggestion: Some(id),
+        sources: Some(&none),
+    };
+    if behind(&raw, &tx, &pending)? {
+        return Ok(Switched::Behind);
+    }
     // What the append checks its window against: the repositories excluded now, who was excluded
     // already, and the test of a label first recorded after this read (#1132's review).
     let (repos, label) = raw.exclusions_read()?;
-    let excluded = raw.excluded_through(&repos, &device, fence.records)?;
+    let excluded = raw.excluded_through(&repos, fence.rows)?;
     let sources = crate::raw::Sources {
         repos,
         excluded,
@@ -474,9 +485,6 @@ pub(crate) fn decide<'a>(
         suggestion: Some(id),
         sources: Some(&sources),
     };
-    if behind(&raw, &tx, &subject)? {
-        return Ok(Switched::Behind);
-    }
     // An approval's statement: the suggestion's own, stored, as the main page's approve takes it.
     let statement = match what {
         Decision::Approve => {
@@ -609,6 +617,10 @@ enum Wrote {
 /// Undo.
 fn fresh_version(home: &Path, reference: &str, expected: &Value, learning: bool) -> Option<String> {
     let read = || -> anyhow::Result<Option<String>> {
+        #[cfg(test)]
+        if FRESH_FAILS.with(|fails| fails.replace(false)) {
+            anyhow::bail!("a test's read that fails");
+        }
         let settings = crate::capture::Settings::load(home)?;
         let Some((raw, k)) = crate::search::b::stores(home)? else {
             return Ok(None);
@@ -628,7 +640,24 @@ fn fresh_version(home: &Path, reference: &str, expected: &Value, learning: bool)
         };
         Ok((!behind(&raw, &tx, &subject)?).then_some(row.version))
     };
-    read().ok().flatten()
+    read().unwrap_or_else(|_| {
+        told_failed_read();
+        None
+    })
+}
+
+/// The line a receipt's read after a rule's write writes on the viewer's stderr when that read fails
+/// (#1131 item 22): a fixed sentence, with no error text, which could carry a config line or a
+/// stored value.
+const RECEIPT_READ_FAILED: &str =
+    "oboete: the read after a rule's write failed; the change is saved, with no Undo";
+
+/// `RECEIPT_READ_FAILED` on stderr; a write that fails changes nothing (the change is saved).
+fn told_failed_read() {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{RECEIPT_READ_FAILED}");
+    #[cfg(test)]
+    TOLD.with(|told| told.set(told.get() + 1));
 }
 
 /// The one row of `rows` that goes by `reference`, else why none is.
@@ -643,6 +672,10 @@ fn the_one(rows: Vec<Row>, reference: &str) -> Result<Row, Switched> {
 
 #[cfg(test)]
 thread_local! {
+    /// A test's switch: the next receipt's read after a write fails (#1131 item 22).
+    pub(crate) static FRESH_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How many times a receipt's failed read was told (`told_failed_read`).
+    pub(crate) static TOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// A test's hook, run once a decision has read its fence, before anything else it reads.
     pub(crate) static FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
