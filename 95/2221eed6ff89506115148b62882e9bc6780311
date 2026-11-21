@@ -1,0 +1,39 @@
+docs/my-work-model.md
+  s_52c3955e48bff4::t_b5b3fe47933374 1670-1683
+docs/page.md
+  s_52c3955e48bff4::t_d6049e79c44213 306-314
+src/consumer/claims.rs
+  s_52c3955e48bff4::t_772080f20978e7 295-299
+src/my_work_rules/tests.rs
+  s_52c3955e48bff4::t_56e584a1759363 702-709,759,761-768,770-771,812-844,852-853,860-867
+src/raw/tests.rs
+  s_52c3955e48bff4::t_7d39e0e95aa9da 3961,3965-3966,3968,3982-3983,4001,4006,4024-4044
+src/view/tests.rs
+  s_52c3955e48bff4::t_ec0bd9ba4354f0 10914-10943
+src/work_view/tests.rs
+  s_52c3955e48bff4::t_0668f18f72d4df 2905-2952,2955,2959-3028,3032-3047,3049-3052
+src/raw.rs
+  s_52c3955e48bff4::t_5e5bce2d6d2ec7 7000-7018
+src/view.rs
+  s_52c3955e48bff4::t_bc43afaa4765ec 96-97,1334-1353,1410,2747-2752,2826
+src/claims.rs
+  s_52c3955e48bff4::t_34eefcd4f16f9c 774-777,1055-1058,1183-1186,1191-1193
+src/work_view.rs
+  s_52c3955e48bff4::t_1dd2eb3de5b124 396-402,404,409-411,414-426,428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "952221eed6ff89506115148b62882e9bc6780311",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
