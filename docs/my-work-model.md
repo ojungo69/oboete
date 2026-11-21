@@ -1684,7 +1684,10 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   waits again, and a second approve makes a new preference. A redaction rule of the owner's that
   finds a decision's `action` or `claim` masks it on a rescan, and that decision then names no
   preference (#1131). A decided suggestion is refused another
-  approve or reject (409), an undecided one an undo. Edit, on/off and add are the existing
+  approve or reject (409), an undecided one an undo. A suggestion's decisions are taken newest op
+  first, whatever their times say (#1131 item 2): the one appended last decides. The work-view's
+  pages decide through their own route on the same writes, fenced by what they read
+  (docs/page.md). Edit, on/off and add are the existing
   `/api/claims/correct`, `/api/claims/mute` and `/api/preferences`. After an approve or a reject
   the page shows what it did with Undo, and the rule's Undo approval and the Rejected list undo it
   after a reload too.

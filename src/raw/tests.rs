@@ -4284,11 +4284,7 @@ fn an_event_and_its_ops_against_a_rules_fence_are_refused_when_it_moved() {
         sources: None,
     };
     let event = || test_event(r#"{"prompt":"x"}"#);
-    let count = |raw: &Raw| {
-        raw.ops_after(&raw.device().to_owned(), 0, 100)
-            .unwrap()
-            .len()
-    };
+    let count = |raw: &Raw| raw.ops_after(raw.device(), 0, 100).unwrap().len();
     let fence = raw.rule_fence().unwrap();
     let decision = crate::my_work_ops::MyWorkOp {
         job: crate::my_work_rules::RULE.into(),
