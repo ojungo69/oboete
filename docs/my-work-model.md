@@ -1670,7 +1670,12 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   `/api/preferences`' confirmation, spec 3.3) or, slice 8b, `repo` with its repository; reject;
   undo. An approve records the directive and its preference as `pref add` does (its caps and
   refusals), and the `rule` op naming the preference's uid, in one transaction
-  (`claims::approve_recorded`, #1083's R2b): all of them or none. A retry in the same viewer finds
+  (`claims::approve_recorded`, #1083's R2b): all of them or none. The preference's uid derives
+  from the directive's seq, so after a restore to a point before an approval whose preference was
+  forgotten, an approval passes over the seq whose uid that forget names, which stays a gap
+  (#1131 item 8; docs/backup-points.md B6). It tries at most 8 seqs: when the forgotten uids of all
+  of them collide, the approval is refused and records nothing, as before, until another record
+  moves the device's next seq. A retry in the same viewer finds
   the decision, applied or not yet, and is refused, so it makes no second preference; what the page
   shows and what is not applied yet are read in one read of knowledge.db for that. Two viewers of
   one home approving the same suggestion at once can each record one (#1131). An undo of an
@@ -1680,7 +1685,13 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   approval not applied yet) is refused as pending (409 `rule_pending`) until it is. The forgotten case
   needs the preference's uid forget: a forget of the directive's record takes the preference out of
   knowledge.db first, and its purge writes that uid's forget later (`purge_record_claims`), so in
-  between the undo is refused as pending too. The suggestion
+  between the undo is refused as pending too. One whose directive a restore lost for good is undone
+  on the main page (#1131 item 9): raw.db holds no record at the directive's seq, below the
+  device's top, and the approval's batch holds its preference. The retraction is anchored where
+  the directive stood, and the write refuses if the suggestion was decided again since the read.
+  The claims consumer keeps the retraction though it derived no preference, so a later restore
+  that brings the directive back derives the preference retracted. The work view lists no such
+  approval. The suggestion
   waits again, and a second approve makes a new preference. A rescan keeps a decision's `action`
   and `claim` where they are exactly what a decision writes, one of its three actions and an
   approval's uid,

@@ -205,7 +205,7 @@ pub(crate) fn rule(home: &Path, saving: &Mutex<()>, body: &[u8]) -> Result<Value
         (_, None) => Ok(json!({"state": state(record(json!({"action": "reject"}))?)})),
         (_, Some(d)) => match &d.claim {
             // Its preference retracted and the decision undone in one append (#1083's R2b).
-            Some(uid) => match crate::claims::undo_approval_recorded(home, id, uid) {
+            Some(uid) => match crate::claims::undo_approval_recorded(home, id, uid, d.seq) {
                 Ok(crate::claims::Undone::Recorded(applied)) => {
                     Ok(json!({"state": state(applied)}))
                 }

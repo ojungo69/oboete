@@ -5204,12 +5204,13 @@ impl Raw {
     /// transaction, each checked as `append_with_ledger` and `append_ops` check them: an owner's
     /// approval writes its directive, its preference and its decision so, none of them without
     /// the others. None, and nothing written, when the event is refused; an op refused fails the
-    /// whole write.
+    /// whole write. `ops` may be called for more than one seq: past one whose ops name a forgotten
+    /// uid (`clear_of_forgotten`, #1131 item 8).
     pub fn append_event_with_ops(
         &mut self,
         e: &Event,
         ledger: (&[(String, crate::redact::Finding)], &str),
-        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        ops: impl FnMut(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
     ) -> Result<Option<(i64, Vec<i64>)>> {
         self.event_with_ops(e, ledger, ops, None)
     }
@@ -5222,7 +5223,7 @@ impl Raw {
         &mut self,
         e: &Event,
         ledger: (&[(String, crate::redact::Finding)], &str),
-        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        ops: impl FnMut(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
         fence: &RuleFence,
         subject: &Subject<'_>,
     ) -> Result<Option<(i64, Vec<i64>)>> {
@@ -5232,12 +5233,87 @@ impl Raw {
         self.event_with_ops(e, ledger, ops, Some((fence, subject)))
     }
 
+    /// #1131 item 9: the undo of an approval whose directive is gone for good, checked and appended
+    /// in one transaction. The approval is this device's rule op `decision` of suggestion `id`,
+    /// whose preference is `uid`. Three checks, all inside the write:
+    /// - no rule op of `id` on this device is newer: a second viewer's undo and approval since the
+    ///   read refuse it;
+    /// - a claim op of that rule op's batch derives `uid`: only an approval's batch holds one
+    ///   (since #1130 it writes the two together; an undo's holds a correction, a rejection's
+    ///   nothing else);
+    /// - that claim's first quote's (device, seq) holds no record and lies below that device's
+    ///   top: a gap a restore left, which no live write fills (docs/backup-points.md B6), though a
+    ///   later restore may.
+    ///
+    /// Then the ops `ops` makes of that (device, seq), checked as `append_ops` checks them. None,
+    /// and nothing written, when a check fails.
+    pub(crate) fn append_undo_of_lost_approval(
+        &mut self,
+        (decision, id, uid): (i64, &str, &str),
+        ops: impl FnOnce(&str, i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+    ) -> Result<Option<Vec<i64>>> {
+        use rusqlite::OptionalExtension;
+        let rule = crate::my_work_rules::RULE;
+        let tx = begin_batch(&self.conn, Duration::ZERO)?;
+        format_of(&tx)?;
+        let newer: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
+               AND json_extract(body, '$.job') = ?3 AND json_extract(body, '$.about') = ?4)",
+            params![self.device, decision, rule, id],
+            |r| r.get(0),
+        )?;
+        let batch: Option<i64> = tx
+            .query_row(
+                "SELECT batch FROM ops WHERE device = ?1 AND op_seq = ?2 AND type = 'my_work'
+                   AND json_extract(body, '$.job') = ?3 AND json_extract(body, '$.about') = ?4",
+                params![self.device, decision, rule, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(batch) = batch.filter(|_| !newer) else {
+            return Ok(None);
+        };
+        // A batch starts at its first op: the claim op is between it and the decision, which bounds
+        // the read of `ops_claims` (CodeRabbit and Codex on #1138).
+        let claims: Vec<String> = (tx.prepare(
+            "SELECT body FROM ops WHERE device = ?1 AND type = 'claim'
+               AND op_seq BETWEEN ?2 AND ?3 AND batch = ?2",
+        )?)
+        .query_map(params![self.device, batch, decision], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+        let first = claims.iter().find_map(|body| {
+            let v: serde_json::Value = serde_json::from_str(body).ok()?;
+            let e = &v["evidence"][0];
+            (crate::claims::op_uid(&v).as_deref() == Some(uid))
+                .then(|| Some((e["device"].as_str()?.to_owned(), e["seq"].as_i64()?)))?
+        });
+        let Some((device, seq)) = first else {
+            return Ok(None);
+        };
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq = ?2)",
+            params![device, seq],
+            |r| r.get(0),
+        )?;
+        if held || seq >= max_seq_in(&tx, &device)? {
+            return Ok(None);
+        }
+        let ops = ops(&device, seq)?;
+        let bodies = within_batch_cap(&ops)?;
+        let seqs = ops_in(&tx, &self.device, &ops, &bodies, (None, None, None), None)?;
+        if self.gated_off {
+            owe_op_text_scan(&tx)?;
+        }
+        tx.commit()?;
+        Ok(seqs)
+    }
+
     /// `append_event_with_ops`, against `ruled`'s fence for its subject where it is given.
     fn event_with_ops(
         &mut self,
         e: &Event,
         (ledger, ruleset): (&[(String, crate::redact::Finding)], &str),
-        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        mut ops: impl FnMut(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
         ruled: Option<(&RuleFence, &Subject<'_>)>,
     ) -> Result<Option<(i64, Vec<i64>)>> {
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
@@ -5247,10 +5323,12 @@ impl Raw {
         {
             return Err(OpsMoved.into());
         }
-        let Some(seq) = event_in(&tx, &self.device, e, (ledger, ruleset), None, None)? else {
+        // The event admitted first, as `event_in` admits it: an event refused calls no `ops`.
+        if !event_admitted(&tx, &self.device, e, ledger, None, None)? {
             return Ok(None);
-        };
-        let ops = ops(seq)?;
+        }
+        let (seq, ops) = clear_of_forgotten(&tx, &self.device, &mut ops)?;
+        insert_event_at(&tx, &self.device, e, ledger, ruleset, seq)?;
         let bodies = within_batch_cap(&ops)?;
         let seqs = ops_in(&tx, &self.device, &ops, &bodies, (None, None, None), None)?;
         if self.gated_off {
@@ -10749,19 +10827,61 @@ fn event_in(
     settings: Option<&crate::capture::Settings>,
     read: Option<(&str, Option<&str>)>,
 ) -> Result<Option<i64>> {
+    if !event_admitted(tx, device, e, ledger, settings, read)? {
+        return Ok(None);
+    }
+    insert_event(tx, device, e, ledger, ruleset).map(Some)
+}
+
+/// Whether `event_in` records `e`: neither a forget of its session's scope nor the capture
+/// exclusions (with `settings`, those the owner set never to be recorded) refuse it.
+fn event_admitted(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    e: &Event,
+    ledger: &[(String, crate::redact::Finding)],
+    settings: Option<&crate::capture::Settings>,
+    read: Option<(&str, Option<&str>)>,
+) -> Result<bool> {
     let never = capture_exclusions_in(tx)?;
     let now = settings.map(|s| crate::capture::never_recorded(&never, s));
-    if scope_tombstoned(
+    Ok(!(scope_tombstoned(
         tx,
         device,
         &crate::forget::session(&e.agent, &e.session),
         e,
         ledger,
-    )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)
-    {
-        return Ok(None);
+    )? || never.refuses(now.as_ref(), (e.repo.as_deref(), e.cwd.as_deref()), read)))
+}
+
+/// How many seqs `clear_of_forgotten` reads before it gives up on finding one clear.
+const SEQ_PROBES: usize = 8;
+
+/// The seq, at or past this device's next one, whose ops `ops` makes name no forgotten uid, with
+/// those ops (#1131 item 8): an approval's preference derives its uid from its directive's seq, so
+/// at a seq a restore freed it derives again the uid a forget the restore kept names, which
+/// `ops_in` refuses. The seqs passed over hold no row, a gap below the device's top that no live
+/// write fills (docs/backup-points.md B6). Past `SEQ_PROBES` seqs, the last one's ops, which
+/// `ops_in` refuses.
+fn clear_of_forgotten(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    ops: &mut impl FnMut(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+) -> Result<(i64, Vec<(OpKind, serde_json::Value)>)> {
+    let mut seq = next_seq(tx, device)?;
+    let mut made = ops(seq)?;
+    for _ in 1..SEQ_PROBES {
+        let mut forgotten = false;
+        for (kind, body) in &made {
+            forgotten = forgotten || forgotten_op(tx, *kind, body)?;
+        }
+        if !forgotten {
+            break;
+        }
+        seq += 1;
+        made = ops(seq)?;
     }
-    insert_event(tx, device, e, ledger, ruleset).map(Some)
+    Ok((seq, made))
 }
 
 /// What an op writer's own check read its batch under (`append_ops_from`): the writer's folder,
@@ -10844,7 +10964,18 @@ fn insert_event(
     ledger: &[(String, crate::redact::Finding)],
     ruleset: &str,
 ) -> Result<i64> {
-    let seq = next_seq(tx, device)?;
+    insert_event_at(tx, device, e, ledger, ruleset, next_seq(tx, device)?)
+}
+
+/// `insert_event` at `seq`, at or past the device's next seq (`clear_of_forgotten`).
+fn insert_event_at(
+    tx: &rusqlite::Transaction,
+    device: &str,
+    e: &Event,
+    ledger: &[(String, crate::redact::Finding)],
+    ruleset: &str,
+    seq: i64,
+) -> Result<i64> {
     raise_format(tx, record_format(&e.kind))?;
     tx.execute(
         "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch, head,

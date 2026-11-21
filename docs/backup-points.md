@@ -79,7 +79,9 @@ back, because forget and retention already rewrite the segments.
   seq and op seq it brought back: those through the highest seq it replayed, as the lines give it
   (a segment's name can overstate it, when the segment spans a range raw.db had lost), and through
   the op prefix it kept. A gap below that seq (a damaged segment skipped) is never used again, so
-  a point past the gap still names the records it named, less those that segment lost. Every
+  a point past the gap still names the records it named, less those that segment lost. An
+  approval leaves such a gap too, at a seq whose preference uid a forget the restore kept names
+  (#1131 item 8); B7's count of the records after a point counts it as one. Every
   export drops the points past raw's end (raw lost commits, MUST-M14) before it sets aside the
   segments past it, so a stop or a failure between the two is retried by the next export.
 - B7. **doctor** prints the newest point's time and how many records and ops came after it. When

@@ -775,6 +775,10 @@ thread_local! {
     /// what it wrote is kept (#1083's R2b).
     pub(crate) static PROVING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// A test's hook, run once an undo of an approval whose preference knowledge.db has no anchor
+    /// for has read it, before its checked append (#1131 item 9).
+    pub(crate) static LOST_UNDO: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// `pref_add_in` of every repository.
@@ -1154,7 +1158,8 @@ pub(crate) enum Undone {
     /// preference is forgotten: whether both are applied and kept.
     Recorded(bool),
     /// The preference is not in knowledge.db, nor forgotten (not derived yet, or its derivation
-    /// removed by a mask before a purge writes it again): nothing is recorded.
+    /// removed by a mask before a purge writes it again), and its directive is not gone for good
+    /// (`Raw::append_undo_of_lost_approval`): nothing is recorded.
     Waiting,
 }
 
@@ -1162,11 +1167,15 @@ pub(crate) enum Undone {
 /// retracted and the decision undone, in one append, so neither is kept without the other
 /// (`undo_ops`, `undo_receipt`). The decision alone only on raw.db's proof that the preference is
 /// forgotten for good: one absent for another reason would be active again with its approval
-/// undone.
+/// undone. #1131 item 9: where knowledge.db has no anchor because the approval's directive is gone
+/// for good, the retraction is anchored where the directive stood, checked in the write
+/// (`Raw::append_undo_of_lost_approval`, `decision` the approval's rule op): the claims consumer
+/// keeps it, and a restore that brings the directive back derives the preference retracted.
 pub(crate) fn undo_approval_recorded(
     home: &std::path::Path,
     id: &str,
     uid: &str,
+    decision: i64,
 ) -> std::result::Result<Undone, OwnerRefusal> {
     let rules = crate::capture::Settings::load(home)
         .map_err(OwnerRefusal::unavailable)?
@@ -1175,12 +1184,30 @@ pub(crate) fn undo_approval_recorded(
     let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
     let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
     schema(&k).map_err(OwnerRefusal::unavailable)?;
-    let Some(ops) = undo_ops(&raw, &k, id, uid).map_err(OwnerRefusal::unavailable)? else {
-        return Ok(Undone::Waiting);
-    };
+    let ops = undo_ops(&raw, &k, id, uid).map_err(OwnerRefusal::unavailable)?;
     // Owner decision 43, as every correction is appended.
     raw.gates_with(&rules);
-    let seqs = raw.append_ops(&ops).map_err(OwnerRefusal::unavailable)?;
+    let seqs = match ops {
+        Some(ops) => raw.append_ops(&ops).map_err(OwnerRefusal::unavailable)?,
+        None => {
+            let made = |device: &str, seq: i64| {
+                let anchor = Anchor {
+                    device: device.to_owned(),
+                    seq,
+                };
+                undone(id, uid, Some(anchor))
+            };
+            #[cfg(test)]
+            if let Some(hook) = LOST_UNDO.with(|hook| hook.borrow_mut().take()) {
+                hook();
+            }
+            match raw.append_undo_of_lost_approval((decision, id, uid), made) {
+                Ok(Some(seqs)) => seqs,
+                Ok(None) => return Ok(Undone::Waiting),
+                Err(e) => return Err(OwnerRefusal::unavailable(e)),
+            }
+        }
+    };
     let device = raw.device().to_owned();
     drop(raw);
     Ok(Undone::Recorded(undo_receipt(
@@ -1203,11 +1230,24 @@ pub(crate) fn undo_ops(
     id: &str,
     uid: &str,
 ) -> Result<Option<Vec<(crate::raw::OpKind, serde_json::Value)>>> {
+    if raw.forgotten(uid)? {
+        return undone(id, uid, None).map(Some);
+    }
+    let Some(anchor) = correction_anchor(k, uid)? else {
+        return Ok(None);
+    };
+    undone(id, uid, Some(anchor)).map(Some)
+}
+
+/// What an undo of the approval of suggestion `id` appends: the retraction of preference `uid` at
+/// `anchor`, where one is given, then the undo decision.
+fn undone(
+    id: &str,
+    uid: &str,
+    anchor: Option<Anchor>,
+) -> Result<Vec<(crate::raw::OpKind, serde_json::Value)>> {
     let mut ops = Vec::new();
-    if !raw.forgotten(uid)? {
-        let Some(anchor) = correction_anchor(k, uid)? else {
-            return Ok(None);
-        };
+    if let Some(anchor) = anchor {
         let retraction = CorrectionOp {
             uid: uid.to_owned(),
             anchor,
@@ -1224,7 +1264,7 @@ pub(crate) fn undo_ops(
         crate::my_work_rules::RULE,
         vec![(id.to_owned(), json!({"action": "undo"}))],
     )?);
-    Ok(Some(ops))
+    Ok(ops)
 }
 
 /// An undo of an approval's receipt (#1083's R2b): whether its retraction of `uid`, where `seqs`
