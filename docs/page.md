@@ -329,11 +329,10 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   approval takes the suggestion's own stored statement as the owner's preference of every
   repository, as the main page's plain Approve does, and writes its directive, preference and
   decision in one transaction against the fence; an undo of an approved rule retracts its preference
-  and undoes the decision in one append, the decision alone where raw.db proves the preference
-  forgotten, and is refused as pending while the preference is neither in knowledge.db nor
-  forgotten. My Rules lists no rule raw.db proves forgotten, so the pages' undo meets that case only
-  when the forget lands while the undo runs; oboete's own page undoes such an approval by its
-  suggestion. A decision's write is refused, nothing recorded, when since the check a decision of the
+  and undoes the decision in one append, and is refused as pending while knowledge.db does not hold
+  the preference's derivation. It always meets a preference not forgotten: My Rules lists no rule
+  raw.db proves forgotten, and no forget commits while the undo holds the readers' hold. oboete's
+  own page undoes an approval whose preference is forgotten, writing the decision alone. A decision's write is refused, nothing recorded, when since the check a decision of the
   suggestion, a rules job's op of it, or a correction of its rule's claim was appended, and when a
   session it was learned from recorded an event in a repository the exclusion list held (that
   session is then excluded, and what was learned from it with it): this device's records since the
