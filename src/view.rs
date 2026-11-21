@@ -2711,7 +2711,9 @@ impl Viewer {
     /// (`savedRuleId`) and the version the switch left it at (`savedRuleVersion`), which the pages'
     /// Undo posts back; none when a record came after the switch that also decides the rule. A
     /// correction recorded and not applied yet is saved, and its receipt says the local copy is still
-    /// updating. The other actions wait for the writes that bring them (R2b, R2c).
+    /// updating. A suggestion's decisions (#1083's R2b: `approve` and `dismiss` one that waits,
+    /// `restore-suggestion` a rejected or an approved one) go to `work_view::decide` the same way;
+    /// editing and adding a rule wait for R2c.
     fn work_view_rules(&self, body: &[u8], given: &str) -> Response {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2732,11 +2734,20 @@ impl Viewer {
         else {
             return unread();
         };
-        let muted = match posted.action.as_str() {
-            "turn-off" => true,
-            "turn-on" => false,
+        // A rule's switch (R2a), or a suggestion's decision (R2b).
+        enum Write {
+            Switch(bool),
+            Decide(crate::work_view::Decision),
+        }
+        let write = match posted.action.as_str() {
+            "turn-off" => Write::Switch(true),
+            "turn-on" => Write::Switch(false),
+            "approve" => Write::Decide(crate::work_view::Decision::Approve),
+            "dismiss" => Write::Decide(crate::work_view::Decision::Dismiss),
+            "restore-suggestion" => Write::Decide(crate::work_view::Decision::Restore),
             _ => return unread(),
         };
+        let muted = matches!(write, Write::Switch(true));
         let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
         let referenced = (posted.rule_id.strip_prefix("u:"))
             .or_else(|| posted.rule_id.strip_prefix("l:"))
@@ -2756,13 +2767,15 @@ impl Viewer {
         let saving = || self.saving_within(wait);
         let authorized = || self.work_view_token_ok(Some(given));
         let reference = &posted.rule_id;
-        let switched = crate::work_view::switch(
-            &self.home,
-            (reference, &posted.rule_version),
-            muted,
-            &saving,
-            &authorized,
-        );
+        let posted_at = (reference.as_str(), posted.rule_version.as_str());
+        let switched = match write {
+            Write::Switch(muted) => {
+                crate::work_view::switch(&self.home, posted_at, muted, &saving, &authorized)
+            }
+            Write::Decide(what) => {
+                crate::work_view::decide(&self.home, posted_at, what, &saving, &authorized)
+            }
+        };
         let refusal = |status, code, error| self.refusal_carrying(given, status, code, error);
         use crate::work_view::Switched;
         let (version, pending) = match switched {
@@ -2780,6 +2793,7 @@ impl Viewer {
                 let error = "A suggestion has no switch: approve it first.";
                 return refusal(409, "rule_state", error);
             }
+            Ok(Switched::State(error)) => return refusal(409, "rule_state", error),
             Ok(Switched::Already) => {
                 let error = if muted {
                     "This rule is off already."

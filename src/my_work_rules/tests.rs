@@ -682,6 +682,49 @@ fn an_approval_records_what_pref_add_and_its_decision_record_apart_in_one_batch(
     );
 }
 
+/// #1083's R2b (PR 2): the work-view's approval of a suggestion records what the main page's plain
+/// Approve records (the directive, its preference, the decision naming it), their device, seqs and
+/// times aside, its preference and its decision in one batch.
+#[test]
+fn the_work_views_approval_records_what_the_main_pages_approve_records() {
+    let mut a = Home::new();
+    suggested(&mut a);
+    let before = tops(&a);
+    let got = (a.act(json!({"suggestion": "s1", "action": "approve", "scope": "global"}))).unwrap();
+    assert_eq!(got["state"], "applied", "{got}");
+    let (events, ops) = approval_since(&a, before);
+    let mut b = Home::new();
+    suggested(&mut b);
+    let before = tops(&b);
+    let home = b.s.home.path();
+    let settings = crate::capture::Settings::load(home).unwrap();
+    let (raw, k) = crate::search::b::stores(home).unwrap().unwrap();
+    let found = crate::work_view::my_rules_on(home, crate::db::now_ms(), &settings, &raw, &k);
+    let row = (found.unwrap().rows.into_iter()).find(|r| r.of["suggestion"] == "s1");
+    let row = row.unwrap();
+    drop((raw, k));
+    let saving = std::sync::Mutex::new(());
+    let take = || saving.lock().ok();
+    let at = (row.reference.as_str(), row.version.as_str());
+    let what = crate::work_view::Decision::Approve;
+    let got = crate::work_view::decide(home, at, what, &take, &|| true).unwrap();
+    assert!(
+        matches!(got, crate::work_view::Switched::Applied(Some(_))),
+        "{got:?}"
+    );
+    let (events_pages, ops_pages) = approval_since(&b, before);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events, events_pages);
+    let bodies = |ops: &[(String, i64, Value)]| -> Vec<(String, Value)> {
+        (ops.iter())
+            .map(|(t, _, b)| (t.clone(), b.clone()))
+            .collect()
+    };
+    assert_eq!(bodies(&ops), bodies(&ops_pages));
+    assert_eq!(ops_pages.len(), 2);
+    assert_eq!(ops_pages[0].1, ops_pages[1].1, "one batch");
+}
+
 /// #1083's R2b (PR 1): an approval whose ops are refused once its event is checked, as a forget
 /// committed in between refuses them, records nothing: no directive is left without its
 /// preference, and the suggestion waits as it did.

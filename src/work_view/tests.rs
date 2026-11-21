@@ -2905,11 +2905,16 @@ fn a_switch_while_an_approval_of_its_rule_is_not_applied_is_refused() {
 /// A rule decision of `about` with `fields`, appended on a raw.db handle of its own and not applied:
 /// as the settings page's approval leaves it until the my_work consumer runs.
 fn decision_waiting(home: &Path, about: &str, fields: Value) {
+    decision_at(home, about, fields, crate::db::now_ms());
+}
+
+/// `decision_waiting` with its time `ts`.
+fn decision_at(home: &Path, about: &str, fields: Value, ts: i64) {
     let op = MyWorkOp {
         job: crate::my_work_rules::RULE.into(),
         about: about.into(),
         entry: String::new(),
-        ts: crate::db::now_ms(),
+        ts,
         read: Read::default(),
         removed: vec![],
         fields: fields.as_object().unwrap().clone().into_iter().collect(),
@@ -3116,6 +3121,7 @@ fn two_rows_of_one_reference_are_neither() {
         on: Some(true),
         version: "v".into(),
         of: Value::Null,
+        kept: None,
     };
     assert_eq!(
         the_one(vec![row("a"), row("b")], "u:same").err(),
@@ -3129,4 +3135,631 @@ fn two_rows_of_one_reference_are_neither() {
         the_one(vec![row("a")], "u:same").map(|r| r.uid),
         Ok(Some("a".into()))
     );
+}
+
+/// `decide` on `h`'s home, its token asked and taken.
+fn decided(h: &Store, reference: &str, version: &str, what: Decision) -> Switched {
+    let saving = std::sync::Mutex::new(());
+    let take = || saving.lock().ok();
+    decide(h.home.path(), (reference, version), what, &take, &|| true).unwrap()
+}
+
+/// `decided` with `claims::applied`'s wait set to none.
+fn decided_at_once(h: &Store, reference: &str, version: &str, what: Decision) -> Switched {
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let got = decided(h, reference, version, what);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    got
+}
+
+/// #1083's R2b: the row of suggestion `id` as the writes find it now: its reference, its version and
+/// what it was read from.
+fn row_of(h: &Store, id: &str) -> (String, String, Value) {
+    let home = h.home.path();
+    let settings = crate::capture::Settings::load(home).unwrap();
+    let (raw, k) = crate::search::b::stores(home).unwrap().unwrap();
+    let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &k).unwrap();
+    let row = (found.rows.into_iter()).find(|r| r.of["suggestion"] == id);
+    let row = row.unwrap_or_else(|| panic!("no row of {id}"));
+    (row.reference, row.version, row.of)
+}
+
+/// The rule decisions of suggestion `about` raw.db holds.
+fn decisions_of(h: &Store, about: &str) -> usize {
+    let device = h.raw.device().to_owned();
+    let ops = h.raw.ops_after(&device, 0, 100_000).unwrap();
+    let rule = crate::my_work_rules::RULE;
+    (ops.iter())
+        .filter(|op| op.kind == OpKind::MyWork)
+        .filter(|op| op.body["job"] == rule && op.body["about"] == about)
+        .count()
+}
+
+/// Whether the snapshot read now lists a rule whose `then` is `then`.
+fn listed(h: &Store, then: &str) -> bool {
+    let now = crate::db::now_ms();
+    let (work, goals) = answers(h, now);
+    let snapshot = snapshot_at(&work, &goals, now, &Utc, &Gate::now());
+    arr(&snapshot["rules"]).iter().any(|r| r["then"] == then)
+}
+
+/// A rules op of suggestion `id`, as `suggestion_op` makes one, that read record spans `spans`.
+fn learned_op(id: &str, statement: &str, at: i64, spans: Vec<(i64, i64)>) -> Value {
+    let fields = json!({"statement": statement, "seen": 2,
+        "requests": [format!("g:{id}0"), format!("g:{id}1")],
+        "quotes": [{"text": format!("Quoted for {id}."), "request": format!("g:{id}0"), "at": at}]});
+    let op = MyWorkOp {
+        job: crate::my_work_rules::NAME.into(),
+        about: id.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: Read { spans, ops: vec![] },
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    serde_json::to_value(op).unwrap()
+}
+
+/// A review op of request `about` (`my_work_progress::NAME`) that read `read`.
+fn review_op(about: &str, read: Read) -> Value {
+    let op = MyWorkOp {
+        job: crate::my_work_progress::NAME.into(),
+        about: about.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read,
+        removed: vec![],
+        fields: Default::default(),
+        skipped: false,
+        forgotten: None,
+    };
+    serde_json::to_value(op).unwrap()
+}
+
+/// The batches of the newest correction op and of the newest rule decision op `h`'s raw.db holds.
+fn rule_batches(h: &Store) -> [i64; 2] {
+    let c = rusqlite::Connection::open(h.home.path().join("raw.db")).unwrap();
+    let newest = |filter: &str| -> i64 {
+        let sql = format!("SELECT batch FROM ops WHERE {filter} ORDER BY op_seq DESC LIMIT 1");
+        c.query_row(&sql, [], |r| r.get(0)).unwrap()
+    };
+    [
+        newest("type = 'correction'"),
+        newest("type = 'my_work' AND json_extract(body, '$.job') = 'rule'"),
+    ]
+}
+
+/// A prompt of `session` in `repo`, recorded on a raw.db handle of its own, as a hook records one.
+fn recorded(home: &Path, session: &str, repo: &str) {
+    let e = Event {
+        kind: "prompt".into(),
+        session: session.into(),
+        repo: Some(repo.into()),
+        ts: crate::db::now_ms(),
+        ..crate::raw::test_event(&json!({"prompt": "More."}).to_string())
+    };
+    crate::raw::open(home).unwrap().append(&e).unwrap();
+}
+
+/// #1083's R2b: a suggestion waiting is dismissed by its reference at its version; its row is then a
+/// rejected one, which the writes find and the snapshot does not send yet, at the version the
+/// dismissal answered. Its rejection undone by that version brings it back to waiting by the same
+/// reference, at a version no read gave it before, so the first read's is stale.
+#[test]
+fn a_dismissal_and_its_undo_go_by_the_versions_each_answers() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, waiting, of) = row_of(&h, "s1");
+    assert_eq!(of["rule"], "waiting");
+    let rejected = left(decided(&h, &reference, &waiting, Decision::Dismiss));
+    let (again, version, of) = row_of(&h, "s1");
+    assert_eq!(
+        (again.as_str(), of["rule"].as_str()),
+        (reference.as_str(), Some("rejected"))
+    );
+    assert_eq!(version, rejected);
+    assert!(!listed(&h, "Keep commits small."));
+    let restored = left(decided(&h, &reference, &rejected, Decision::Restore));
+    let (again, version, of) = row_of(&h, "s1");
+    assert_eq!(
+        (again.as_str(), of["rule"].as_str()),
+        (reference.as_str(), Some("waiting"))
+    );
+    assert_eq!(version, restored);
+    assert_ne!(restored, waiting, "a version the first read never gave");
+    assert!(listed(&h, "Keep commits small."));
+    assert_eq!(
+        decided(&h, &reference, &waiting, Decision::Dismiss),
+        Switched::Stale
+    );
+}
+
+/// #1083's R2b: a decision takes only the rows it decides: an approval and a dismissal a suggestion
+/// waiting, an undo a rejected or an approved one; a version not the row's is stale. None records
+/// anything.
+#[test]
+fn a_decision_takes_only_the_rows_it_decides() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (waiting, at_waiting, _) = row_of(&h, "s1");
+    let (approved, at_approved, _) = row_of(&h, "s2");
+    let (rejected, at_rejected, _) = row_of(&h, "s3");
+    let counts = || ["s1", "s2", "s3"].map(|s| decisions_of(&h, s));
+    let before = counts();
+    let refused = |got: Switched| matches!(got, Switched::State(_));
+    for (reference, version) in [(&rejected, &at_rejected), (&approved, &at_approved)] {
+        assert!(refused(decided(&h, reference, version, Decision::Approve)));
+    }
+    assert!(refused(decided(
+        &h,
+        &rejected,
+        &at_rejected,
+        Decision::Dismiss
+    )));
+    assert!(refused(decided(
+        &h,
+        &approved,
+        &at_approved,
+        Decision::Dismiss
+    )));
+    assert!(refused(decided(
+        &h,
+        &waiting,
+        &at_waiting,
+        Decision::Restore
+    )));
+    let stale = decided(&h, &waiting, &at_rejected, Decision::Dismiss);
+    assert_eq!(stale, Switched::Stale);
+    assert_eq!(counts(), before);
+}
+
+/// #1083's R2b: a decision of the suggestion recorded and not applied yet refuses its dismissal, and
+/// so does one appended between the check and the append; nothing is recorded. Another
+/// suggestion's, appended between them, leaves the dismissal its append.
+#[test]
+fn a_decision_of_the_suggestion_not_applied_or_since_the_check_refuses_its_dismissal() {
+    for (about, between) in [("s1", false), ("s1", true), ("s3", true)] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        let append = move || decision_waiting(&home, about, json!({"action": "undo"}));
+        if between {
+            CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(append)));
+        } else {
+            append();
+        }
+        let before = decisions_of(&h, "s1");
+        let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+        if about == "s1" {
+            assert_eq!(got, Switched::Behind, "between: {between}");
+            assert_eq!(decisions_of(&h, "s1"), before + usize::from(between));
+        } else {
+            assert_eq!(got, Switched::Pending, "another suggestion's");
+            assert_eq!(decisions_of(&h, "s1"), before + 1);
+        }
+    }
+}
+
+/// #1083's R2b: a rules job's op of the suggestion, not applied yet or appended between the check
+/// and the append, refuses its dismissal: it may change what the row reads.
+#[test]
+fn a_learning_op_of_the_suggestion_refuses_its_dismissal() {
+    for between in [false, true] {
+        let (h, now, _place, _repo, _off) = ruled();
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        let learn = move || {
+            let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+            (crate::raw::open(&home).unwrap())
+                .append_ops(&[(OpKind::MyWork, op)])
+                .unwrap();
+        };
+        if between {
+            CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(learn)));
+        } else {
+            learn();
+        }
+        let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+        assert_eq!(got, Switched::Behind, "between: {between}");
+        assert_eq!(decisions_of(&h, "s1"), 0, "between: {between}");
+    }
+}
+
+/// #1083's R2b: a suggestion's write is refused, and writes nothing, when a session it was learned
+/// from records an event in a repository the exclusion list holds between the check and the append
+/// (a session that touches one is excluded, and what was learned from it with it), the session read
+/// by the learning op itself or, as the rules job reads in production, by a review it took, from
+/// records or a session's summary. The same session's record in another repository leaves the write
+/// its append, as 64 records since the check do; more than the write reads refuse it.
+#[test]
+fn a_source_sessions_record_in_an_excluded_repository_refuses_a_suggestions_write() {
+    let cases = [
+        "excluded",
+        "elsewhere",
+        "many",
+        "sixty-four",
+        "through a review",
+        "through a turn",
+    ];
+    for case in cases {
+        let mut h = Store::new();
+        let now = crate::db::now_ms();
+        let place = tempfile::tempdir().unwrap();
+        let open = started_in(
+            &mut h,
+            &place.path().join("open"),
+            "learned",
+            now - 5 * 60_000,
+        );
+        let secret = started_in(
+            &mut h,
+            &place.path().join("secret"),
+            "other",
+            now - 5 * 60_000,
+        );
+        let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+        let at = now - 4 * 60_000;
+        // As the rules job reads in production: the reviews it took, by their ops, and what each
+        // review read, records or a session's summary.
+        let op = match case {
+            "through a review" | "through a turn" => {
+                let read = if case == "through a review" {
+                    Read {
+                        spans: vec![(seq, seq)],
+                        ops: vec![],
+                    }
+                } else {
+                    let turn = h.turn(json!({"agent": "claude", "session": "learned",
+                        "repo": &open, "ts": at, "from": seq, "through": seq, "read": [],
+                        "goals": [], "removed": [], "fields": {}, "skipped": false}));
+                    Read {
+                        spans: vec![],
+                        ops: vec![turn[1..].parse().unwrap()],
+                    }
+                };
+                let review = review_op("g:s10", read);
+                let review = h.raw.append_ops(&[(OpKind::MyWork, review)]).unwrap()[0];
+                let mut op = learned_op("s1", "Keep commits small.", at, vec![]);
+                op["read"]["ops"] = json!([review]);
+                op
+            }
+            _ => learned_op("s1", "Keep commits small.", at, vec![(seq, seq)]),
+        };
+        h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.raw.exclude(&secret, false).unwrap();
+        h.run();
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        let record = move || match case {
+            "elsewhere" => recorded(&home, "learned", &open),
+            "many" => (0..65).for_each(|_| recorded(&home, "third", &open)),
+            "sixty-four" => (0..64).for_each(|_| recorded(&home, "third", &open)),
+            _ => recorded(&home, "learned", &secret),
+        };
+        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(record)));
+        let got = decided_at_once(&h, &reference, &version, Decision::Dismiss);
+        if matches!(case, "elsewhere" | "sixty-four") {
+            assert_eq!(got, Switched::Pending, "{case}");
+            assert_eq!(decisions_of(&h, "s1"), 1, "{case}");
+        } else {
+            assert_eq!(got, Switched::Behind, "{case}");
+            assert_eq!(decisions_of(&h, "s1"), 0, "{case}");
+        }
+    }
+}
+
+/// #1131 item 2: a suggestion's decisions go in op order: an undo appended after its rejection
+/// undoes it, even when its time is older than the rejection's.
+#[test]
+fn a_suggestions_decisions_go_in_op_order_whatever_their_times() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    decision_at(h.home.path(), "s3", json!({"action": "undo"}), 1);
+    h.run();
+    let (_, _, of) = row_of(&h, "s3");
+    assert_eq!(of["rule"], "waiting");
+}
+
+/// #1083's R2b: a dismissal behind a rules job's op of its suggestion catches up by itself where
+/// this process runs its own passes, with no other activity: its catch-up applies the op, so the
+/// version the page read is stale, and the next read's dismisses it.
+#[test]
+fn a_dismissal_behind_a_learning_op_catches_up_by_itself() {
+    let (h, now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+    (crate::raw::open(h.home.path()).unwrap())
+        .append_ops(&[(OpKind::MyWork, op)])
+        .unwrap();
+    let got = decided(&h, &reference, &version, Decision::Dismiss);
+    assert_eq!(got, Switched::Stale);
+    let (reference, version, _) = row_of(&h, "s1");
+    let got = decided(&h, &reference, &version, Decision::Dismiss);
+    assert!(matches!(got, Switched::Applied(Some(_))), "{got:?}");
+}
+
+/// #1083's R2b (#1128 item 3): a dismissal whose row moved between its append and its receipt's
+/// read (a rules job's op of the suggestion applied there) is saved and answers no version: the
+/// version a read gives then is not of the row the write left.
+#[test]
+fn a_dismissal_whose_row_moved_before_its_receipt_answers_no_version() {
+    let (h, now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let op = learned_op("s1", "Keep commits smaller.", now, vec![]);
+            (crate::raw::open(&home).unwrap())
+                .append_ops(&[(OpKind::MyWork, op)])
+                .unwrap();
+            crate::worker::run_once(&home).unwrap();
+        }))
+    });
+    let got = decided(&h, &reference, &version, Decision::Dismiss);
+    assert_eq!(got, Switched::Applied(None));
+    assert_eq!(row_of(&h, "s1").2["rule"], "rejected");
+}
+
+/// raw.db's records, ledger rows and ops of `h`'s home, read on a connection of their own.
+fn stored(h: &Store) -> (i64, i64, i64) {
+    let raw = rusqlite::Connection::open(h.home.path().join("raw.db")).unwrap();
+    raw.query_row(
+        "SELECT (SELECT COUNT(*) FROM records), (SELECT COUNT(*) FROM ledger),
+                (SELECT COUNT(*) FROM ops)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+/// The uid an approval of suggestion `about` named, the newest one raw.db holds.
+fn approved_uid(home: &Path, about: &str) -> String {
+    let raw = crate::raw::open(home).unwrap();
+    let device = raw.device().to_owned();
+    let ops = raw.ops_after(&device, 0, 100_000).unwrap();
+    let decision = (ops.iter().rev()).find(|op| {
+        op.body["job"] == crate::my_work_rules::RULE
+            && op.body["about"] == about
+            && op.body["fields"]["action"] == "approve"
+    });
+    decision.unwrap().body["fields"]["claim"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// #1083's R2b: a suggestion waiting is approved from the pages by its reference at its version, its
+/// own statement as the owner's preference of every repository, as the main page's approve records
+/// it: the row is then its approved rule, on, by the same reference, at the version the approval
+/// answered, and the decision names the preference the row goes by.
+#[test]
+fn an_approval_from_the_pages_records_the_main_pages_approval() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let before = stored(&h);
+    let approved = left(decided(&h, &reference, &version, Decision::Approve));
+    let (again, at, of) = row_of(&h, "s1");
+    assert_eq!(
+        (again.as_str(), of["rule"].as_str()),
+        (reference.as_str(), Some("approved"))
+    );
+    assert_eq!(at, approved);
+    assert_eq!(of["uid"], approved_uid(h.home.path(), "s1"));
+    let (_, _, rule) = read_rule(&h, "Keep commits small.");
+    let fields = ["setBy", "status", "scopeId"].map(|k| rule[k].as_str().unwrap().to_owned());
+    assert_eq!(fields, ["approved", "on", "everywhere"]);
+    let after = stored(&h);
+    assert_eq!(
+        (after.0 - before.0, after.2 - before.2),
+        (1, 2),
+        "a directive, its two ops"
+    );
+    assert_eq!(decisions_of(&h, "s1"), 1);
+}
+
+/// #1083's R2b: an approval from the pages is refused, and writes nothing (no directive, ledger
+/// row, preference or decision), when a decision of its suggestion is appended between the check
+/// and the append, and when a session it was learned from records an event in a repository the
+/// exclusion list holds there.
+#[test]
+fn an_approval_from_the_pages_is_refused_whole_when_its_suggestion_moved() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    let decide_elsewhere = move || decision_waiting(&home, "s1", json!({"action": "reject"}));
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(decide_elsewhere)));
+    let before = stored(&h);
+    let got = decided_at_once(&h, &reference, &version, Decision::Approve);
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(
+        stored(&h),
+        (before.0, before.1, before.2 + 1),
+        "the other decision alone"
+    );
+    let mut h = Store::new();
+    let now = crate::db::now_ms();
+    let place = tempfile::tempdir().unwrap();
+    let open = started_in(
+        &mut h,
+        &place.path().join("open"),
+        "learned",
+        now - 5 * 60_000,
+    );
+    let secret = started_in(
+        &mut h,
+        &place.path().join("secret"),
+        "other",
+        now - 5 * 60_000,
+    );
+    let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+    let op = learned_op(
+        "s1",
+        "Keep commits small.",
+        now - 4 * 60_000,
+        vec![(seq, seq)],
+    );
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    h.raw.exclude(&secret, false).unwrap();
+    h.run();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    let excluded = move || recorded(&home, "learned", &secret);
+    CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(excluded)));
+    let before = stored(&h);
+    let got = decided_at_once(&h, &reference, &version, Decision::Approve);
+    assert_eq!(got, Switched::Behind);
+    assert_eq!(
+        stored(&h),
+        (before.0 + 1, before.1, before.2),
+        "the hook's record alone"
+    );
+}
+
+/// #1083's R2b: an approval from the pages whose preference was muted between its append and its
+/// receipt's read is saved and answers no version: what decides its rule is not what it left.
+#[test]
+fn an_approval_whose_preference_moved_before_its_receipt_answers_no_version() {
+    let (h, _now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s1");
+    let home = h.home.path().to_owned();
+    SWITCHED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            muted_elsewhere(&home, &approved_uid(&home, "s1"), true);
+            crate::worker::run_once(&home).unwrap();
+        }))
+    });
+    let got = decided(&h, &reference, &version, Decision::Approve);
+    assert_eq!(got, Switched::Applied(None));
+    assert_eq!(row_of(&h, "s1").2["rule"], "approved");
+}
+
+/// #1083's R2b: an approved rule, on or off, is undone from the pages by its reference at its
+/// version (`restore-suggestion`): its preference retracted and its approval undone in one append,
+/// its suggestion waits again by the same reference, at the version the undo answered.
+#[test]
+fn an_approved_rules_undo_from_the_pages_brings_its_suggestion_back() {
+    for off in [false, true] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let (reference, mut version, of) = row_of(&h, "s2");
+        assert_eq!(of["rule"], "approved");
+        if off {
+            version = left(switched(&h, &reference, &version, true));
+        }
+        let before = corrections(&h);
+        let restored = left(decided(&h, &reference, &version, Decision::Restore));
+        let (again, at, of) = row_of(&h, "s2");
+        let state = (again.as_str(), of["rule"].as_str());
+        assert_eq!(state, (reference.as_str(), Some("waiting")), "off: {off}");
+        assert_eq!(at, restored);
+        assert_eq!(corrections(&h), before + 1, "its retraction");
+        let [retraction, undo] = rule_batches(&h);
+        assert_eq!(
+            retraction, undo,
+            "its retraction and its undo in one batch, off: {off}"
+        );
+        let (_, _, rule) = read_rule(&h, "Run the tests before a push.");
+        assert_eq!(rule["status"], "suggested");
+    }
+}
+
+/// #1083's R2b: an approved rule's undo is refused, and records nothing, when between the check and
+/// the append a session its suggestion was learned from records an event in a repository the
+/// exclusion list holds, or a correction of its preference is appended: its preference and its
+/// approval are as they were, the preference listed still.
+#[test]
+fn an_approved_rules_undo_is_refused_when_its_rule_moved() {
+    for case in ["excluded", "muted"] {
+        let mut h = Store::new();
+        let now = crate::db::now_ms();
+        let place = tempfile::tempdir().unwrap();
+        let open = started_in(
+            &mut h,
+            &place.path().join("open"),
+            "learned",
+            now - 5 * 60_000,
+        );
+        let secret = started_in(
+            &mut h,
+            &place.path().join("secret"),
+            "other",
+            now - 5 * 60_000,
+        );
+        let seq = h.said("learned", &open, now - 4 * 60_000, "Keep commits small.");
+        let op = learned_op(
+            "s1",
+            "Keep commits small.",
+            now - 4 * 60_000,
+            vec![(seq, seq)],
+        );
+        h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+        h.raw.exclude(&secret, false).unwrap();
+        h.run();
+        let (reference, version, _) = row_of(&h, "s1");
+        let version = left(decided(&h, &reference, &version, Decision::Approve));
+        let home = h.home.path().to_owned();
+        let moved = move || match case {
+            "excluded" => recorded(&home, "learned", &secret),
+            _ => muted_elsewhere(&home, &approved_uid(&home, "s1"), true),
+        };
+        CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(moved)));
+        let (before, decisions) = (corrections(&h), decisions_of(&h, "s1"));
+        let got = decided_at_once(&h, &reference, &version, Decision::Restore);
+        assert_eq!(got, Switched::Behind, "{case}");
+        let theirs = usize::from(case == "muted");
+        assert_eq!(corrections(&h), before + theirs, "{case}");
+        assert_eq!(decisions_of(&h, "s1"), decisions, "{case}");
+        // The preference stands: listed by its suggestion, or, its source excluded since, as the
+        // owner's own.
+        assert!(listed(&h, "Keep commits small."), "{case}");
+    }
+}
+
+/// #1083's R2b (#1132's review): a rule's switch waits for no learning op, which it does not read.
+/// With one the my_work consumer has not applied, the switch's first wait is its own receipt's,
+/// after its correction is appended.
+#[test]
+fn a_switch_waits_for_no_learning_op() {
+    let (mut h, now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = read_rule(&h, "Write the changelog.");
+    let op = learned_op("s9", "Use spaces.", now, vec![]);
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    let before = corrections(&h);
+    let raw = h.home.path().join("raw.db");
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let saw = seen.clone();
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let c = rusqlite::Connection::open(&raw).unwrap();
+            let sql = "SELECT COUNT(*) FROM ops WHERE type = 'correction'";
+            saw.set(Some(
+                c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() as usize
+            ));
+        }))
+    });
+    let got = switched(&h, &reference, &version, true);
+    assert!(matches!(got, Switched::Applied(Some(_))), "{got:?}");
+    assert_eq!(
+        seen.get(),
+        Some(before + 1),
+        "its first wait is its receipt's"
+    );
+}
+
+/// #1083's R2b (#1132's round 2): an approved rule's version goes by what its switch and its undo
+/// act on, its claim and its decision, not by its suggestion's learning op: after a rules round that
+/// only adds a quote to it, the switch's Undo still goes through, as on main.
+#[test]
+fn an_approved_rules_switch_is_undone_after_a_learning_op_of_it() {
+    let (mut h, now, _place, _repo, _off) = ruled();
+    let (reference, version, _) = row_of(&h, "s2");
+    let off = left(switched(&h, &reference, &version, true));
+    let op = learned_op("s2", "Run the tests before a push.", now, vec![]);
+    h.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+    h.run();
+    let (again, at, of) = row_of(&h, "s2");
+    let state = (again.as_str(), of["rule"].as_str());
+    assert_eq!(state, (reference.as_str(), Some("approved")));
+    assert_eq!(at, off, "a quote added moves no version");
+    let on = switched(&h, &reference, &off, false);
+    assert!(matches!(on, Switched::Applied(Some(_))), "{on:?}");
 }

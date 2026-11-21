@@ -11026,7 +11026,8 @@ fn the_work_views_switch_turns_a_rule_off_and_its_undo_on_again() {
     assert_eq!(undone["rules"][0]["status"], "on");
     let version = &rule["ruleVersion"];
     for body in [
-        json!({"action": "approve", "ruleId": rule["ruleId"], "ruleVersion": version}),
+        json!({"action": "edit", "ruleId": rule["ruleId"], "ruleVersion": version}),
+        json!({"action": "add", "ruleId": rule["ruleId"], "ruleVersion": version}),
         json!({"action": "turn-off", "ruleId": rule["ruleId"]}),
         json!({"action": "turn-off", "ruleId": "u:nope", "ruleVersion": version}),
         json!({"action": "turn-off", "ruleId": rule["ruleId"], "ruleVersion": "nope"}),
@@ -11074,4 +11075,99 @@ fn a_work_view_switch_whose_token_is_replaced_records_nothing_or_sends_no_snapsh
         json!({"save": {"scope": "local", "state": "saved"}})
     );
     assert_eq!(correction_ops(&s), before + 1);
+}
+
+/// #1083's R2b: suggestion `id` of `statement`, as the rules job keeps one, appended on `s`'s raw.db.
+fn suggested(s: &Store, id: &str, statement: &str) {
+    let now = crate::db::now_ms();
+    let fields = json!({"statement": statement, "seen": 2,
+        "requests": [format!("g:{id}0"), format!("g:{id}1")],
+        "quotes": [{"text": format!("Quoted for {id}."), "request": format!("g:{id}0"), "at": now}]});
+    let op = crate::my_work_ops::MyWorkOp {
+        job: crate::my_work_rules::NAME.into(),
+        about: id.into(),
+        entry: "fake".into(),
+        ts: now,
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    (crate::raw::open(s.home.path()).unwrap())
+        .append_ops(&[(crate::raw::OpKind::MyWork, op)])
+        .unwrap();
+}
+
+/// #1083's R2b: the work-view's rules route takes a suggestion's dismissal and its undo, each by the
+/// version the one before answered: the dismissal's answer names its rejected row's version and the
+/// snapshot no longer lists it; the undo posted with that version brings it back as a suggestion by
+/// the same reference, at a new version its answer names.
+#[test]
+fn the_work_views_rules_route_dismisses_a_suggestion_and_undoes_it() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(rule["status"], "suggested", "{rule}");
+    let body = switch_body(&rule, "dismiss", &rule["ruleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let rejected = answer["savedRuleVersion"].clone();
+    assert!(rejected.is_string(), "{answer}");
+    let rules = work_view_of(&v, "t0k")["rules"].clone();
+    let shown = (rules.as_array().unwrap().iter()).any(|r| r["then"] == "Keep commits small.");
+    assert!(!shown, "{rules}");
+    let body = switch_body(&rule, "restore-suggestion", &rejected);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let back = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(
+        (&back["ruleId"], &back["status"]),
+        (&rule["ruleId"], &json!("suggested"))
+    );
+    assert_ne!(back["ruleVersion"], rule["ruleVersion"]);
+    assert_eq!(back["ruleVersion"], answer["savedRuleVersion"]);
+}
+
+/// #1083's R2b: the work-view's rules route approves a suggestion by its version: the snapshot
+/// then lists it as the owner's approved rule, on, by the same reference, at the version the
+/// answer names.
+#[test]
+fn the_work_views_rules_route_approves_a_suggestion() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let body = switch_body(&rule, "approve", &rule["ruleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let approved = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let fields = (&approved["ruleId"], &approved["setBy"], &approved["status"]);
+    assert_eq!(fields, (&rule["ruleId"], &json!("approved"), &json!("on")));
+    assert_eq!(approved["ruleVersion"], answer["savedRuleVersion"]);
+}
+
+/// #1083's R2b: the work-view's rules route undoes an approved rule (`restore-suggestion`) by the
+/// version its approval answered: its suggestion is then listed as waiting again, at the version
+/// the undo's answer names.
+#[test]
+fn the_work_views_rules_route_undoes_an_approval() {
+    let (s, v) = rules_fixture(Token::Run("t0k".into()));
+    suggested(&s, "s1", "Keep commits small.");
+    s.run();
+    let rule = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    let body = switch_body(&rule, "approve", &rule["ruleVersion"]);
+    let (status, approved) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{approved}");
+    let body = switch_body(&rule, "restore-suggestion", &approved["savedRuleVersion"]);
+    let (status, answer) = post_work_view(&v, RULES, "t0k", &body);
+    assert_eq!(status, 200, "{answer}");
+    let back = rule_then(&work_view_of(&v, "t0k")["rules"], "Keep commits small.").clone();
+    assert_eq!(
+        (&back["ruleId"], &back["status"]),
+        (&rule["ruleId"], &json!("suggested"))
+    );
+    assert_eq!(back["ruleVersion"], answer["savedRuleVersion"]);
 }

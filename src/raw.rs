@@ -2013,6 +2013,29 @@ pub struct RuleFence {
     pub expired: i64,
 }
 
+/// What a rule's write on the pages is about (#1083's R2b): its claim's uid where its rule has one,
+/// its suggestion where it is a suggestion's, and for a write that goes by its suggestion, the
+/// suggestion's sources.
+pub struct Subject<'a> {
+    pub uid: Option<&'a str>,
+    pub suggestion: Option<&'a str>,
+    pub sources: Option<&'a Sources>,
+}
+
+/// A suggestion's sources (#1083's R2b): the sessions, as `agent` NUL `session`, of what its kept
+/// learning op read (`my_work_ops::sources`), and the repositories the exclusion list held when
+/// they were read (`Raw::exclusions_now`).
+#[derive(Debug, Default)]
+pub struct Sources {
+    pub sessions: std::collections::HashSet<String>,
+    pub repos: Vec<String>,
+}
+
+/// How many of the records recorded since a suggestion's write was checked its append reads, under
+/// the writer's lock, for one of its sources' in a repository the exclusion list held
+/// (`sources_moved`); more than that refuses the write.
+const SOURCES_READ: i64 = 64;
+
 /// How many tool records recorded after J4's check its append decodes, under the writer's lock,
 /// to find a work state write's call among them; more than that refuses the answer undecoded.
 const CALLS_READ: i64 = 64;
@@ -5134,11 +5157,45 @@ impl Raw {
     pub fn append_event_with_ops(
         &mut self,
         e: &Event,
+        ledger: (&[(String, crate::redact::Finding)], &str),
+        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+    ) -> Result<Option<(i64, Vec<i64>)>> {
+        self.event_with_ops(e, ledger, ops, None)
+    }
+
+    /// `append_event_with_ops` for a rule's write on `subject` (#1083's R2b: the work-view's
+    /// approval), only while the stores stand as `fence` read them for it (`fence_moved`, and the
+    /// same raw.db file), compared inside the write before anything is inserted; else nothing is
+    /// written and the error is `OpsMoved`.
+    pub fn append_event_with_ops_ruled(
+        &mut self,
+        e: &Event,
+        ledger: (&[(String, crate::redact::Finding)], &str),
+        ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        fence: &RuleFence,
+        subject: &Subject<'_>,
+    ) -> Result<Option<(i64, Vec<i64>)>> {
+        if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
+            return Err(OpsMoved.into());
+        }
+        self.event_with_ops(e, ledger, ops, Some((fence, subject)))
+    }
+
+    /// `append_event_with_ops`, against `ruled`'s fence for its subject where it is given.
+    fn event_with_ops(
+        &mut self,
+        e: &Event,
         (ledger, ruleset): (&[(String, crate::redact::Finding)], &str),
         ops: impl FnOnce(i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        ruled: Option<(&RuleFence, &Subject<'_>)>,
     ) -> Result<Option<(i64, Vec<i64>)>> {
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
+        if let Some((fence, subject)) = ruled
+            && fence_moved(&tx, &self.device, fence, subject)?
+        {
+            return Err(OpsMoved.into());
+        }
         let Some(seq) = event_in(&tx, &self.device, e, (ledger, ruleset), None, None)? else {
             return Ok(None);
         };
@@ -6991,15 +7048,30 @@ impl Raw {
     /// Whether this device has a rule decision past `after` that names claim `uid` or is about
     /// suggestion `suggestion` (`decides`; #1128 item 2: one the my_work consumer has not applied
     /// to the rule a switch reads).
-    pub fn decides_after(&self, after: i64, uid: &str, suggestion: Option<&str>) -> Result<bool> {
+    pub fn decides_after(
+        &self,
+        after: i64,
+        uid: Option<&str>,
+        suggestion: Option<&str>,
+    ) -> Result<bool> {
         self.any_op_after(after, "type = 'my_work'", |kind, body| {
             decides(kind, body, uid, suggestion)
         })
     }
 
-    /// This device's newest rule decision past `after` (a `my_work` op of job `rule`): one the
-    /// my_work consumer has not applied, which a rule's switch waits for first (#1130's review).
-    pub fn rule_decision_after(&self, after: i64) -> Result<Option<i64>> {
+    /// Whether this device has a rules job's op of suggestion `suggestion` past `after` (`learns`;
+    /// #1083's R2b: one the my_work consumer has not applied to the row a suggestion's write reads).
+    pub fn learns_after(&self, after: i64, suggestion: &str) -> Result<bool> {
+        self.any_op_after(after, "type = 'my_work'", |kind, body| {
+            learns(kind, body, suggestion)
+        })
+    }
+
+    /// This device's newest My Rules op past `after` (a `my_work` op of job `rule`, a decision, and
+    /// with `learning` of job `rules` too, the learning job's): one the my_work consumer has not
+    /// applied, which a rule's write waits for first (#1130's review; #1083's R2b: a suggestion's
+    /// decision reads its learning op, a rule's switch none).
+    pub fn my_rules_op_after(&self, after: i64, learning: bool) -> Result<Option<i64>> {
         let mut s = self.conn.prepare(
             "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
              ORDER BY op_seq DESC",
@@ -7007,8 +7079,10 @@ impl Raw {
         let mut rows = s.query(params![self.device, after])?;
         while let Some(row) = rows.next()? {
             let body: String = row.get(1)?;
-            let decision = serde_json::from_str::<serde_json::Value>(&body)
-                .is_ok_and(|v| v["job"] == crate::my_work_rules::RULE);
+            let decision = serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|v| {
+                v["job"] == crate::my_work_rules::RULE
+                    || (learning && v["job"] == crate::my_work_rules::NAME)
+            });
             if decision {
                 return Ok(Some(row.get(0)?));
             }
@@ -7048,36 +7122,27 @@ impl Raw {
         })
     }
 
-    /// `append_ops` for a rule's write on claim `uid` (#1083, R2a), only while the stores stand as
-    /// `fence` read them for it: the same raw.db file, forget denying what it denied, retention
-    /// having expired no row, and since its `top` this device having appended no exclusion, no op
-    /// that names `uid` (`names_claim`) and no rule decision of it or of its suggestion `suggestion`
-    /// (`decides`), and since its `records` no tombstone, compared inside the write; else nothing is
-    /// written and the error is `OpsMoved`.
+    /// `append_ops` for a rule's write on `subject` (#1083, R2a; R2b: a suggestion's too, which has
+    /// no claim yet), only while the stores stand as `fence` read them for it (`fence_moved`),
+    /// compared inside the write; else nothing is written and the error is `OpsMoved`.
     pub fn append_ops_ruled(
         &mut self,
         ops: &[(OpKind, serde_json::Value)],
         fence: &RuleFence,
-        (uid, suggestion): (&str, Option<&str>),
+        subject: &Subject<'_>,
     ) -> Result<Vec<i64>> {
-        anyhow::ensure!(!uid.is_empty(), "a rule's write names its claim");
+        let named = |s: Option<&str>| s.is_some_and(|s| !s.is_empty());
+        anyhow::ensure!(
+            named(subject.uid) || named(subject.suggestion),
+            "a rule's write names its claim or its suggestion"
+        );
         if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
             return Err(OpsMoved.into());
         }
         let bodies = within_batch_cap(ops)?;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
-        let forget: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
-        let named = any_op_in(&tx, &self.device, fence.top, "1", |kind, body| {
-            names_claim(kind, body, uid) || decides(kind, body, uid, suggestion)
-        })?;
-        let tombstoned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2
-               AND type = 'tombstone')",
-            params![self.device, fence.records],
-            |r| r.get(0),
-        )?;
-        if forget != fence.forget || named || tombstoned || expired_rows_in(&tx)? != fence.expired {
+        if fence_moved(&tx, &self.device, fence, subject)? {
             return Err(OpsMoved.into());
         }
         for (kind, body) in ops {
@@ -7447,6 +7512,22 @@ impl Raw {
              WHERE type = 'event' AND repo IN (SELECT value FROM json_each(?1))",
         )?;
         let rows = st.query_map([serde_json::to_string(repos)?], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The sessions, as `agent` NUL `session`, of `device`'s events from seq `from` to `to`, both
+    /// included (#1083's R2b: a learning op's record span, `my_work_ops::sources`), as `sessions_in`
+    /// names them.
+    pub fn sessions_in_span(
+        &self,
+        device: &str,
+        (from, to): (i64, i64),
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT COALESCE(agent, '') || char(0) || COALESCE(session, '') FROM records
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 AND type = 'event'",
+        )?;
+        let rows = st.query_map(params![device, from, to], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -10437,12 +10518,89 @@ fn names_claim(kind: &str, body: &str, uid: &str) -> bool {
 
 /// #1128 item 2: whether op `body` of type `kind` is a rule decision that names claim `uid` (an
 /// approval) or is about suggestion `suggestion`, compared whole (an undo, a rejection).
-fn decides(kind: &str, body: &str, uid: &str, suggestion: Option<&str>) -> bool {
+fn decides(kind: &str, body: &str, uid: Option<&str>, suggestion: Option<&str>) -> bool {
     kind == "my_work"
         && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
             v["job"] == crate::my_work_rules::RULE
-                && (v["fields"]["claim"] == uid || suggestion.is_some_and(|s| v["about"] == s))
+                && (uid.is_some_and(|u| v["fields"]["claim"] == u)
+                    || suggestion.is_some_and(|s| v["about"] == s))
         })
+}
+
+/// #1083's R2b: whether op `body` of type `kind` is the rules job's op of suggestion `suggestion`
+/// (`my_work_rules::NAME`), compared whole: one that may change what the suggestion's row reads.
+fn learns(kind: &str, body: &str, suggestion: &str) -> bool {
+    kind == "my_work"
+        && serde_json::from_str::<serde_json::Value>(body)
+            .is_ok_and(|v| v["job"] == crate::my_work_rules::NAME && v["about"] == suggestion)
+}
+
+/// Whether op `body` of type `kind` moves a rule's write on `subject` since its check (#1083's
+/// R2b): an exclusion, always, as it may take any rule's sessions; a claim or correction that names
+/// its claim (`names_claim`), where it has one; a rule decision of its claim or of its suggestion
+/// (`decides`); and for a write that goes by its suggestion (`sources`), a rules job's op of it
+/// (`learns`).
+fn moves(kind: &str, body: &str, subject: &Subject<'_>) -> bool {
+    kind == "exclusion"
+        || subject.uid.is_some_and(|uid| names_claim(kind, body, uid))
+        || decides(kind, body, subject.uid, subject.suggestion)
+        || (subject.sources.is_some() && subject.suggestion.is_some_and(|s| learns(kind, body, s)))
+}
+
+/// Whether the stores moved, inside `tx`, from what `fence` read for a rule's write on `subject`
+/// (#1083, R2a and R2b): forget denying more than it did, an op since its `top` that moves the
+/// subject (`moves`), a tombstone since its `records`, retention having expired a row, or a record
+/// of the subject's sources since its `records` (`sources_moved`).
+fn fence_moved(
+    tx: &Connection,
+    device: &str,
+    fence: &RuleFence,
+    subject: &Subject<'_>,
+) -> Result<bool> {
+    let forget: i64 = tx.query_row(FENCE_COUNT, [], |r| r.get(0))?;
+    let moved = any_op_in(tx, device, fence.top, "1", |kind, body| {
+        moves(kind, body, subject)
+    })?;
+    let tombstoned: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM records WHERE device = ?1 AND seq > ?2
+           AND type = 'tombstone')",
+        params![device, fence.records],
+        |r| r.get(0),
+    )?;
+    let sources = match subject.sources {
+        Some(sources) => sources_moved(tx, device, fence.records, sources)?,
+        None => false,
+    };
+    Ok(forget != fence.forget
+        || moved
+        || tombstoned
+        || expired_rows_in(tx)? != fence.expired
+        || sources)
+}
+
+/// Whether this device recorded, since record `after`, an event of one of `sources`' sessions in a
+/// repository its exclusion list held (#1083's R2b: a session that touches one is excluded, and what
+/// was learned from it with it), read inside the write: at most `SOURCES_READ` records, more than
+/// that refusing too. None to read while the list holds no repository.
+fn sources_moved(tx: &Connection, device: &str, after: i64, sources: &Sources) -> Result<bool> {
+    if sources.repos.is_empty() || sources.sessions.is_empty() {
+        return Ok(false);
+    }
+    let mut st = tx.prepare(
+        "SELECT COALESCE(agent, '') || char(0) || COALESCE(session, ''), repo FROM records
+         WHERE device = ?1 AND seq > ?2 AND type = 'event' ORDER BY seq LIMIT ?3",
+    )?;
+    let mut rows = st.query(params![device, after, SOURCES_READ + 1])?;
+    let mut read = 0;
+    while let Some(row) = rows.next()? {
+        read += 1;
+        let (session, repo): (String, Option<String>) = (row.get(0)?, row.get(1)?);
+        let excluded = repo.is_some_and(|r| sources.repos.contains(&r));
+        if read > SOURCES_READ || (excluded && sources.sessions.contains(&session)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `append_under`'s checks of event `e` and its insert, in `tx` (#1083's R2b: `append_event_with_ops`

@@ -325,6 +325,61 @@ pub(crate) fn applied(
     crate::claims::applied(home, k, device, seqs, (job, "my_work")).is_ok()
 }
 
+/// #1083's R2b: the sessions, as `agent` NUL `session`, of what My Work op `op_seq` of `device`
+/// read: the events of its record spans, and the sessions of the turns and cards among its ops, the
+/// My Work ops among them followed, as `hidden` follows them.
+pub(crate) fn sources(
+    raw: &crate::raw::Raw,
+    k: &Connection,
+    device: &str,
+    op_seq: i64,
+) -> Result<std::collections::HashSet<String>> {
+    use rusqlite::OptionalExtension;
+    let mut out = std::collections::HashSet::new();
+    if !crate::consumer::manifest::exists(k, "table", "my_work")? {
+        return Ok(out);
+    }
+    let mut tables = Vec::new();
+    for table in ["turns", "cards"] {
+        if crate::consumer::manifest::exists(k, "table", table)? {
+            tables.push(table);
+        }
+    }
+    let (mut seen, mut next) = (std::collections::HashSet::new(), vec![op_seq]);
+    while let Some(seq) = next.pop() {
+        if !seen.insert(seq) {
+            continue;
+        }
+        let read: Option<String> = k
+            .query_row(
+                "SELECT read FROM my_work WHERE device = ?1 AND op_seq = ?2",
+                rusqlite::params![device, seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(read) = read {
+            let read: Read = serde_json::from_str(&read)?;
+            for span in read.spans {
+                out.extend(raw.sessions_in_span(device, span)?);
+            }
+            next.extend(read.ops);
+            continue;
+        }
+        for table in &tables {
+            let mut st = k.prepare_cached(&format!(
+                "SELECT agent || char(0) || session FROM {table}
+                 WHERE device = ?1 AND op_seq = ?2 AND agent IS NOT NULL AND session IS NOT NULL"
+            ))?;
+            for session in
+                st.query_map(rusqlite::params![device, seq], |r| r.get::<_, String>(0))?
+            {
+                out.insert(session?);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The owner's ops of `job` as raw.db takes them.
 pub(crate) fn bodies(
     job: &str,

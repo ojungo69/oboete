@@ -4102,7 +4102,15 @@ fn a_rule_decision_of_the_claim_or_its_suggestion_refuses_a_rules_write() {
     for (n, (op, refuses)) in cases.into_iter().enumerate() {
         let fence = raw.rule_fence().unwrap();
         raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
-        let got = raw.append_ops_ruled(&write(), &fence, (&uid, Some("s1")));
+        let got = raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: Some("s1"),
+                sources: None,
+            },
+        );
         assert_eq!(got.is_err(), refuses, "case {n}: {got:?}");
         if refuses {
             assert!(got.unwrap_err().is::<OpsMoved>(), "case {n}");
@@ -4143,8 +4151,16 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
     let quoting = serde_json::json!({"text": format!("the rule {uid} again")});
     raw.append_ops(&[(OpKind::Claim, quoting)]).unwrap();
     assert_eq!(
-        raw.append_ops_ruled(&write(), &fence, (&uid, None))
-            .unwrap(),
+        raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None
+            }
+        )
+        .unwrap(),
         vec![5]
     );
     let device = raw.device().to_owned();
@@ -4188,7 +4204,15 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         moved(&mut raw);
         let before = written(&raw);
         let refused = raw
-            .append_ops_ruled(&write(), &fence, (&uid, None))
+            .append_ops_ruled(
+                &write(),
+                &fence,
+                &Subject {
+                    uid: Some(&uid),
+                    suggestion: None,
+                    sources: None,
+                },
+            )
             .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "move {n}: {refused:#}");
         assert_eq!(written(&raw), before, "move {n}: nothing written");
@@ -4201,7 +4225,15 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         };
         let before = written(&raw);
         let refused = raw
-            .append_ops_ruled(&write(), &moved, (&uid, None))
+            .append_ops_ruled(
+                &write(),
+                &moved,
+                &Subject {
+                    uid: Some(&uid),
+                    suggestion: None,
+                    sources: None,
+                },
+            )
             .unwrap_err();
         assert!(refused.is::<OpsMoved>(), "{refused:#}");
         assert_eq!(written(&raw), before, "nothing written");
@@ -4211,8 +4243,80 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
         ..fence.clone()
     };
     let refused = raw
-        .append_ops_ruled(&write(), &expired, (&uid, None))
+        .append_ops_ruled(
+            &write(),
+            &expired,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None,
+            },
+        )
         .unwrap_err();
     assert!(refused.is::<OpsMoved>(), "{refused:#}");
-    assert!(raw.append_ops_ruled(&write(), &fence, (&uid, None)).is_ok());
+    assert!(
+        raw.append_ops_ruled(
+            &write(),
+            &fence,
+            &Subject {
+                uid: Some(&uid),
+                suggestion: None,
+                sources: None
+            }
+        )
+        .is_ok()
+    );
+}
+
+/// #1083's R2b: an event and its ops written against a rule's fence (the work-view's approval) are
+/// refused, and nothing is written, when a decision of the subject's suggestion was appended since
+/// the fence, or the fence read another raw.db file; a fence nothing moved since lets them in.
+#[test]
+fn an_event_and_its_ops_against_a_rules_fence_are_refused_when_it_moved() {
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = open(home.path()).unwrap();
+    let ops = |seq: i64| -> Result<Vec<(OpKind, serde_json::Value)>> {
+        Ok(vec![(OpKind::Claim, serde_json::json!({"seq": seq}))])
+    };
+    let subject = Subject {
+        uid: None,
+        suggestion: Some("s1"),
+        sources: None,
+    };
+    let event = || test_event(r#"{"prompt":"x"}"#);
+    let count = |raw: &Raw| raw.ops_after(raw.device(), 0, 100).unwrap().len();
+    let fence = raw.rule_fence().unwrap();
+    let decision = crate::my_work_ops::MyWorkOp {
+        job: crate::my_work_rules::RULE.into(),
+        about: "s1".into(),
+        entry: String::new(),
+        ts: 1,
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: serde_json::json!({"action": "reject"})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let decision = serde_json::to_value(decision).unwrap();
+    raw.append_ops(&[(OpKind::MyWork, decision)]).unwrap();
+    let before = count(&raw);
+    let moved = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &fence, &subject);
+    assert!(moved.unwrap_err().is::<OpsMoved>());
+    assert_eq!(count(&raw), before);
+    let fence = raw.rule_fence().unwrap();
+    let elsewhere = RuleFence {
+        file: Some("another raw.db".into()),
+        ..raw.rule_fence().unwrap()
+    };
+    let moved = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &elsewhere, &subject);
+    assert!(moved.unwrap_err().is::<OpsMoved>());
+    assert_eq!(count(&raw), before);
+    let quiet = raw.append_event_with_ops_ruled(&event(), (&[], "v"), ops, &fence, &subject);
+    assert!(quiet.unwrap().is_some());
+    assert_eq!(count(&raw), before + 1);
 }

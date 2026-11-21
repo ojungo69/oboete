@@ -214,6 +214,9 @@ pub(crate) struct Row {
     pub on: Option<bool>,
     pub version: String,
     pub of: Value,
+    /// A suggestion's kept learning op (#1083's R2b), which an approved row's version leaves out:
+    /// the row its undo leaves is made of it.
+    pub kept: Option<i64>,
 }
 
 /// A rule's version (R2a): the keyed hash of what it was read from (`Row::of`), so that two reads
@@ -244,7 +247,7 @@ pub(crate) fn my_rules_on(
     my_rules(home, &page, &states)
 }
 
-/// What a rule's switch from the pages did (#1083, R2a).
+/// What a rule's write from the pages did (#1083: R2a's switch, R2b's decisions).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Switched {
     /// Its correction is applied and kept: with the rule's version after it, none when a record
@@ -259,6 +262,8 @@ pub(crate) enum Switched {
     Ambiguous,
     /// A suggestion waiting, which has no switch.
     Suggestion,
+    /// The row is not one this decision takes (#1083's R2b): what the pages are told.
+    State(&'static str),
     /// The rule is on or off already, as asked.
     Already,
     /// The rule's version is not the one posted.
@@ -290,7 +295,7 @@ pub(crate) fn switch<'a>(
     saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
     authorized: &dyn Fn() -> bool,
 ) -> anyhow::Result<Switched> {
-    caught_up(home)?;
+    caught_up(home, false)?;
     let Some(saving) = saving() else {
         return Ok(Switched::Busy);
     };
@@ -326,7 +331,12 @@ pub(crate) fn switch<'a>(
         return Ok(Switched::Already);
     }
     let suggestion = row.of["suggestion"].as_str();
-    if behind(&raw, &tx, uid, suggestion)? {
+    let subject = crate::raw::Subject {
+        uid: Some(uid),
+        suggestion,
+        sources: None,
+    };
+    if behind(&raw, &tx, &subject)? {
         return Ok(Switched::Behind);
     }
     let Some(op) = crate::claims::mute_op(&tx, uid, muted)? else {
@@ -339,8 +349,7 @@ pub(crate) fn switch<'a>(
     }
     // Owner decision 43, as every correction is appended.
     raw.gates_with(&settings.rules);
-    let named = (uid, suggestion);
-    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, named);
+    let appended = raw.append_ops_ruled(&[(crate::raw::OpKind::Correction, op)], &fence, &subject);
     drop((read, raw, config, saving));
     let seqs = match appended {
         Ok(seqs) => seqs,
@@ -373,6 +382,232 @@ pub(crate) fn switch<'a>(
     }
 }
 
+/// What a suggestion's decision from the pages does (#1083's R2b).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Decision {
+    /// Approve a suggestion that waits, its own statement as the owner's preference of every
+    /// repository (`approve`), as the main page's plain Approve does.
+    Approve,
+    /// Reject a suggestion that waits (`dismiss`).
+    Dismiss,
+    /// Undo a suggestion's rejection (`restore-suggestion`).
+    Restore,
+}
+
+/// #1083's R2b: the suggestion the pages name by `reference` decided as `what`, only while its row
+/// is at `version`, under the switch's locks and in its order (`switch`): dismissed while it waits,
+/// its rejection undone while it is rejected. Refused, nothing recorded, while what its row reads
+/// is not applied yet (`behind`), and when anything moved it between the read and the append, a
+/// record of its sources' in a repository the exclusion list held included
+/// (`Raw::append_ops_ruled`). Applied and kept, the row's version after is the one a read after the
+/// write gives it while it is the row the write left (`fresh_version`).
+pub(crate) fn decide<'a>(
+    home: &Path,
+    (reference, version): (&str, &str),
+    what: Decision,
+    saving: &dyn Fn() -> Option<std::sync::MutexGuard<'a, ()>>,
+    authorized: &dyn Fn() -> bool,
+) -> anyhow::Result<Switched> {
+    caught_up(home, true)?;
+    let Some(saving) = saving() else {
+        return Ok(Switched::Busy);
+    };
+    let wait = crate::db::OPEN_WRITE_WAIT;
+    let Some(config) = crate::settings::config_lock_within(home, wait)? else {
+        return Ok(Switched::Busy);
+    };
+    if !authorized() {
+        return Ok(Switched::Unauthorized);
+    }
+    let settings = crate::capture::Settings::load(home)?;
+    let Some((mut raw, k)) = crate::search::b::stores(home)? else {
+        return Ok(Switched::NotFound);
+    };
+    let read = crate::dispatch::reading(home, wait)?;
+    let fence = raw.rule_fence()?;
+    let device = raw.device().to_owned();
+    let tx = k.unchecked_transaction()?;
+    let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
+    let row = match the_one(found.rows, reference) {
+        Ok(row) => row,
+        Err(refused) => return Ok(refused),
+    };
+    let (fields, left) = match (what, row.of["rule"].as_str()) {
+        (Decision::Approve, Some("waiting")) => (json!({"action": "approve"}), "approved"),
+        (Decision::Dismiss, Some("waiting")) => (json!({"action": "reject"}), "rejected"),
+        (Decision::Restore, Some("rejected" | "approved")) => {
+            (json!({"action": "undo"}), "waiting")
+        }
+        (Decision::Approve | Decision::Dismiss, _) => {
+            return Ok(Switched::State("This suggestion is decided already."));
+        }
+        (Decision::Restore, _) => {
+            return Ok(Switched::State("There is no decision to undo here."));
+        }
+    };
+    if row.version != version {
+        return Ok(Switched::Stale);
+    }
+    let Some(id) = row.of["suggestion"].as_str() else {
+        return Ok(Switched::NotFound);
+    };
+    // Every suggestion My Rules lists has the op that kept it; one without has no sources to check.
+    let Some(learned) = row.kept else {
+        return Ok(Switched::NotFound);
+    };
+    let kept = Some(learned);
+    let sources = crate::raw::Sources {
+        repos: raw.exclusions_now()?,
+        sessions: crate::my_work_ops::sources(&raw, &tx, &device, learned)?,
+    };
+    let subject = crate::raw::Subject {
+        uid: row.uid.as_deref(),
+        suggestion: Some(id),
+        sources: Some(&sources),
+    };
+    if behind(&raw, &tx, &subject)? {
+        return Ok(Switched::Behind);
+    }
+    // An approval's statement: the suggestion's own, stored, as the main page's approve takes it.
+    let statement = match what {
+        Decision::Approve => {
+            let shown = crate::my_work_rules::shown(&raw, &tx)?;
+            let sg = (shown.suggestions.into_iter()).find(|sg| sg.id == id);
+            let Some(sg) = sg else {
+                return Ok(Switched::NotFound);
+            };
+            Some(sg.statement)
+        }
+        Decision::Dismiss | Decision::Restore => None,
+    };
+    // An approved rule's undo: its preference's retraction and the undo decision, built on the
+    // read's knowledge.db, or nothing while the preference is neither there nor forgotten.
+    let undo = match (what, row.uid.as_deref()) {
+        (Decision::Restore, Some(uid)) => match crate::claims::undo_ops(&raw, &tx, id, uid)? {
+            Some(ops) => Some(ops),
+            None => return Ok(Switched::Behind),
+        },
+        _ => None,
+    };
+    drop(tx);
+    #[cfg(test)]
+    if let Some(hook) = CHECKED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    raw.gates_with(&settings.rules);
+    let rule = crate::my_work_rules::RULE;
+    let wrote = match &statement {
+        Some(statement) => {
+            let Ok((c, quote)) = crate::claims::directive_text(&settings, statement, None) else {
+                return Ok(Switched::State(
+                    "This suggestion cannot be approved as it reads.",
+                ));
+            };
+            let ruled = Some((&fence, &subject));
+            (crate::claims::approve_append(&mut raw, &settings, (&c, &quote), id, ruled))
+                .map(Wrote::Approval)
+                .map_err(|refused| refused.cause)
+        }
+        None => match undo {
+            Some(ops) => raw
+                .append_ops_ruled(&ops, &fence, &subject)
+                .map(Wrote::Undo),
+            None => crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields.clone())])
+                .and_then(|ops| raw.append_ops_ruled(&ops, &fence, &subject))
+                .map(Wrote::Decision),
+        },
+    };
+    drop((read, raw, config, saving));
+    let wrote = match wrote {
+        Ok(wrote) => wrote,
+        Err(e) if e.is::<crate::raw::OpsMoved>() => return Ok(Switched::Behind),
+        Err(e) => return Err(e),
+    };
+    #[cfg(test)]
+    if let Some(hook) = SWITCHED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let file = row.of["file"].as_str().map(str::to_owned);
+    let expected = match wrote {
+        Wrote::Decision(seqs) => {
+            let what = ("decision", "my_work");
+            let deadline = crate::claims::deadline();
+            // Saved: a wait that runs out, or a checkpoint that cannot be read, leaves it pending.
+            if crate::claims::applied_by(home, &k, &device, &seqs, what, deadline).is_err() {
+                return Ok(Switched::Pending);
+            }
+            let Some(&seq) = seqs.first() else {
+                return Ok(Switched::Pending);
+            };
+            // Saved: a proof that cannot be read leaves it pending, not an error.
+            if !crate::my_work_ops::kept(&k, &device, seq, (rule, id), &fields).unwrap_or(false) {
+                return Ok(Switched::Pending);
+            }
+            match left {
+                "rejected" => rejected_of(id, kept, Some(seq), Some(seq), &file),
+                _ => waiting_of(id, kept, Some(seq), &file),
+            }
+        }
+        Wrote::Undo(seqs) => {
+            let uid = row.uid.as_deref().unwrap_or_default();
+            if !crate::claims::undo_receipt(home, &k, &device, (id, uid), &seqs) {
+                return Ok(Switched::Pending);
+            }
+            let Some(&seq) = seqs.last() else {
+                return Ok(Switched::Pending);
+            };
+            waiting_of(id, kept, Some(seq), &file)
+        }
+        Wrote::Approval(a) => {
+            let receipt = crate::claims::approve_receipt(home, &k, &device, id, &a);
+            if !matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }) {
+                return Ok(Switched::Pending);
+            }
+            // What decides the preference, as the approval left it: derived by its own op, and
+            // no correction deciding it; else the pages offer no Undo.
+            let by = crate::claims::decided_by(&k, &a.uid).ok().flatten();
+            let left_so = |by: &Value| {
+                by["derivation"] == json!([device, a.preference])
+                    && by["by"] == json!([null, null, null])
+                    && by["muted"] == false
+            };
+            let Some(by) = by.filter(left_so) else {
+                return Ok(Switched::Applied(None));
+            };
+            approved_of(id, &a.uid, &by, Some(a.decision), Some(a.decision), &file)
+        }
+    };
+    Ok(Switched::Applied(fresh_version(home, reference, &expected)))
+}
+
+/// What a suggestion's decision appended (#1083's R2b): a decision's op seqs, an approval's
+/// preference and decision, or an approved rule's undo's ops (its retraction where it has one, and
+/// its decision).
+enum Wrote {
+    Decision(Vec<i64>),
+    Approval(crate::claims::Approved),
+    Undo(Vec<i64>),
+}
+
+/// The version of the row by `reference` that a read of My Rules after a write gives (#1083's R2b;
+/// #1128 item 3), read as the writes read it, on handles of its own under the readers' hold, while
+/// that row's whole `of` is `expected`, what the write left; else none. A read that fails gives none:
+/// the write is saved, and the pages offer no Undo.
+fn fresh_version(home: &Path, reference: &str, expected: &Value) -> Option<String> {
+    let read = || -> anyhow::Result<Option<String>> {
+        let settings = crate::capture::Settings::load(home)?;
+        let Some((raw, k)) = crate::search::b::stores(home)? else {
+            return Ok(None);
+        };
+        let _read = crate::dispatch::reading(home, crate::db::OPEN_WRITE_WAIT)?;
+        let tx = k.unchecked_transaction()?;
+        let found = my_rules_on(home, crate::db::now_ms(), &settings, &raw, &tx)?;
+        let row = the_one(found.rows, reference).ok();
+        Ok(row.filter(|row| row.of == *expected).map(|row| row.version))
+    };
+    read().ok().flatten()
+}
+
 /// The one row of `rows` that goes by `reference`, else why none is.
 fn the_one(rows: Vec<Row>, reference: &str) -> Result<Row, Switched> {
     let mut going = rows.into_iter().filter(|r| r.reference == reference);
@@ -396,12 +631,14 @@ thread_local! {
 /// Some of what the check under the locks refuses (`behind`), waited for first within
 /// `claims::applied`'s time, the worker's pass run here where this process may run it: the claims
 /// consumer past this device's newest correction, and the my_work consumer past its newest rule
-/// decision; and, where this process may run a pass and a correction an older worker passed waits,
+/// decision, and for a suggestion's decision (`learning`) past its newest learning op too, which a
+/// switch does not read (#1132's review); and, where this process may run a pass and a correction an
+/// older worker passed waits,
 /// a pass, whose claims step keeps it (#1130's review: a viewer with no worker running of its own
 /// would else refuse each try). A switch made just after another correction finds it applied.
 /// Still behind once the wait ran out, or behind for what is not waited for here, the check under
 /// the locks refuses.
-fn caught_up(home: &Path) -> anyhow::Result<()> {
+fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
     use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());
@@ -409,7 +646,7 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     let deadline = crate::claims::deadline();
     let device = raw.device().to_owned();
     let correction = raw.correction_after(get_in(&k, OPS, "claims", &device)?)?;
-    let decision = raw.rule_decision_after(get_in(&k, OPS, "my_work", &device)?)?;
+    let decision = raw.my_rules_op_after(get_in(&k, OPS, "my_work", &device)?, learning)?;
     // The passed corrections are read only where a pass may follow (#1130's security review).
     let may_run = crate::executable::may_run_worker();
     let passed = may_run && crate::consumer::claims::any_passed(&raw, &k)?;
@@ -431,26 +668,35 @@ fn caught_up(home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether what a switch of claim `uid`, of suggestion `suggestion` where it is an approved rule,
-/// reads is not applied yet, read on `k` (the switch's read): a claim or correction op of this
-/// device that names `uid` past the claims consumer's checkpoint; a rule decision of it or of its
-/// suggestion past the my_work consumer's (#1128 item 2); a correction of it that a worker of an
-/// older oboete passed, which the claims consumer's next step keeps (#1128 item 13); or a tombstone
-/// past the anchors consumer's (a forget or a mask of the record the rule quotes).
+/// Whether what a rule's write on `subject` reads is not applied yet, read on `k` (the write's
+/// read): where the rule has a claim, a claim or correction op of this device that names it past the
+/// claims consumer's checkpoint, or a correction of it that a worker of an older oboete passed,
+/// which the claims consumer's next step keeps (#1128 item 13); a rule decision of its claim or of
+/// its suggestion past the my_work consumer's (#1128 item 2); for a write that goes by its
+/// suggestion (#1083's R2b), a rules job's op of it past the same; or a tombstone past the anchors
+/// consumer's (a forget or a mask of the record the rule quotes).
 fn behind(
     raw: &crate::raw::Raw,
     k: &rusqlite::Connection,
-    uid: &str,
-    suggestion: Option<&str>,
+    subject: &crate::raw::Subject<'_>,
 ) -> anyhow::Result<bool> {
     use crate::knowledge::checkpoint::{OPS, SEQS, get_in};
     let device = raw.device();
     let claims = get_in(k, OPS, "claims", device)?;
     let my_work = get_in(k, OPS, "my_work", device)?;
     let anchors = get_in(k, SEQS, "anchors", device)?;
-    Ok(raw.names_after(claims, uid)?
-        || raw.decides_after(my_work, uid, suggestion)?
-        || crate::consumer::claims::passed_correction_of(raw, k, uid)?
+    if let Some(uid) = subject.uid
+        && (raw.names_after(claims, uid)?
+            || crate::consumer::claims::passed_correction_of(raw, k, uid)?)
+    {
+        return Ok(true);
+    }
+    let learned = match (subject.sources, subject.suggestion) {
+        (Some(_), Some(suggestion)) => raw.learns_after(my_work, suggestion)?,
+        _ => false,
+    };
+    Ok(raw.decides_after(my_work, subject.uid, subject.suggestion)?
+        || learned
         || raw.tombstone_after(anchors)?)
 }
 
@@ -459,14 +705,58 @@ fn everywhere() -> Value {
     json!({"id": "everywhere", "tier": "everywhere", "name": "Everywhere"})
 }
 
+/// #1083's R2b: what a waiting suggestion's row is read from, the projection's and a write's
+/// receipt's alike: its id, its kept learning op, its newest decision op of any action (an undo
+/// leaves the row another version than the one it had before it was decided), the raw.db file.
+pub(crate) fn waiting_of(
+    id: &str,
+    kept: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "waiting", "suggestion": id, "kept": kept, "transition": transition,
+        "file": file})
+}
+
+/// #1083's R2b: what a rejected suggestion's row is read from: as a waiting one's, and its
+/// rejection's op.
+pub(crate) fn rejected_of(
+    id: &str,
+    kept: Option<i64>,
+    decision: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "rejected", "suggestion": id, "kept": kept, "decision": decision,
+        "transition": transition, "file": file})
+}
+
+/// What an approved rule's row is read from (R2a): its suggestion, its claim and what decides it
+/// (`by`), its approval's op, and (R2b) its newest decision op of any action, the raw.db file. Not
+/// its suggestion's learning op, which changes only its quotes: the switch's Undo goes by this
+/// version, and a rules round between the switch and its Undo would refuse it (#1132's round 2).
+pub(crate) fn approved_of(
+    suggestion: &str,
+    uid: &str,
+    by: &Value,
+    decision: Option<i64>,
+    transition: Option<i64>,
+    file: &Option<String>,
+) -> Value {
+    json!({"rule": "approved", "suggestion": suggestion, "uid": uid, "by": by,
+        "decision": decision, "transition": transition, "file": file})
+}
+
 /// #1083 (R1): My Rules as claude-mem's pages read it (`WorkViewRule`, `work-view-api-types.ts`),
 /// from `my_work_rules::page`'s answer, its texts gated already: the suggestions waiting, and the
 /// owner's rules, an approved one by its suggestion; the scopes, Everywhere and each repository a
 /// rule is for, one per repository. Each rule and scope goes by the whole keyed hash of its key
 /// (`l:` a learned suggestion's id, `u:` the uid of a rule the owner wrote, `r:` a repository's
 /// key), the same in every read whatever else is read with it, so no key, uid or suggestion id
-/// leaves and no two share an id. The rejected and removed suggestions wait for the writes that
-/// bring their Undo (#1083's R2).
+/// leaves and no two share an id. A rejected suggestion is a row the writes find (#1083's R2b), which
+/// the snapshot sends with the pull request that brings its Undo to the pages; a removed one waits.
+/// The rows' versions are made of what each was read from (`waiting_of`, `rejected_of`,
+/// `approved_of`).
 fn my_rules(
     home: &Path,
     page: &Value,
@@ -479,6 +769,12 @@ fn my_rules(
     let suggestions: Vec<String> = (waiting.iter().filter_map(|c| c["id"].as_str()))
         .map(str::to_owned)
         .chain(yours.iter().flat_map(|g| arr(&g["rules"])).filter_map(from))
+        .chain(
+            (arr(&page["rejected"])
+                .iter()
+                .filter_map(|c| c["id"].as_str()))
+            .map(str::to_owned),
+        )
         .collect();
     let uids: Vec<String> = (yours.iter().flat_map(|g| arr(&g["rules"])))
         .filter(|r| from(r).is_none())
@@ -533,8 +829,8 @@ fn my_rules(
         let (quotes, newest) = quoted(c);
         let Some(id) = c["id"].as_str() else { continue };
         let reference = format!("l:{}", sg[id]);
-        let of = json!({"rule": "waiting", "suggestion": id, "kept": states.kept.get(id),
-            "file": file});
+        let transition = states.transitions.get(id).copied();
+        let of = waiting_of(id, states.kept.get(id).copied(), transition, file);
         let v = versioned(&of, home, &mut key)?;
         rules.push(json!({"ruleId": reference, "scopeId": "everywhere",
             "scopeTier": "everywhere", "scopeName": "Everywhere", "when": "",
@@ -548,6 +844,30 @@ fn my_rules(
             on: None,
             version: v,
             of,
+            kept: states.kept.get(id).copied(),
+        });
+    }
+    for c in arr(&page["rejected"]) {
+        let Some(id) = c["id"].as_str() else { continue };
+        let (kept, decision) = (
+            states.kept.get(id).copied(),
+            states.decisions.get(id).copied(),
+        );
+        let of = rejected_of(
+            id,
+            kept,
+            decision,
+            states.transitions.get(id).copied(),
+            file,
+        );
+        let version = versioned(&of, home, &mut key)?;
+        rows.push(Row {
+            reference: format!("l:{}", sg[id]),
+            uid: None,
+            on: None,
+            version,
+            of,
+            kept,
         });
     }
     for g in yours {
@@ -566,9 +886,9 @@ fn my_rules(
             let by = states.claims.get(uid).cloned().unwrap_or(Value::Null);
             let (id, set_by, source, of) = match from(r) {
                 Some(s) => {
-                    let decision = states.decisions.get(&s);
-                    let of = json!({"rule": "approved", "suggestion": s, "uid": uid, "by": by,
-                        "decision": decision, "file": file});
+                    let decision = states.decisions.get(&s).copied();
+                    let transition = states.transitions.get(&s).copied();
+                    let of = approved_of(&s, uid, &by, decision, transition, file);
                     (format!("l:{}", sg[&s]), "approved", "request-progress", of)
                 }
                 None => {
@@ -585,12 +905,14 @@ fn my_rules(
                 "latestAt": newest.or(since).map_or(Value::Null, iso), "quotes": quotes,
                 "replacedBy": null, "replacedAt": null,
                 "savedAt": since.map_or(Value::Null, iso), "ruleVersion": v}));
+            let kept = from(r).and_then(|s| states.kept.get(&s).copied());
             rows.push(Row {
                 reference: id,
                 uid: Some(uid.to_owned()),
                 on: Some(on),
                 version: v,
                 of,
+                kept,
             });
         }
     }
