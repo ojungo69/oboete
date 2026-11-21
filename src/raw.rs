@@ -2031,13 +2031,15 @@ pub struct Subject<'a> {
 }
 
 /// What a suggestion's write is checked against inside its append (#1083's R2b; #1132's review): the
-/// repositories the exclusion list held when the append read them (`Raw::exclusions_read`), the
+/// repositories the exclusion list held when the decision read them for its append, after its
+/// pending check (`Raw::exclusions_read`), the
 /// sessions already excluded at the write's fence (`Raw::excluded_through`: an event in one of them
 /// through the fence's rows), as `agent` NUL `session`, and the test that reads a repository label
 /// as one never recorded (#1131 item 10). A session that first touches an excluded repository after
 /// the fence refuses the write, a session the suggestion was learned from among them, so no walk of
 /// its sources is needed (#1131 items 13 and 17). A session excluded already at the fence is the
-/// read's to judge (`my_work_ops::hidden`): its next event refuses nothing.
+/// read's to judge (`my_work_ops::hidden`): its later events are no first events, and count only
+/// toward `SOURCES_READ`.
 #[derive(Debug, Default)]
 pub struct Sources {
     pub repos: Vec<String>,
@@ -7436,7 +7438,7 @@ impl Raw {
     /// #1083's R2b (#1132's review): the sessions, as `agent` NUL `session`, of the events recorded
     /// in one of `repos` that were there at a write's fence, of every device (`rows`, the fence's
     /// largest rowid; #1131 item 21): who was already excluded at the fence, by the list the
-    /// append read. One read of `records_repo`; none for no repository.
+    /// decision read for its append. One read of `records_repo`; none for no repository.
     pub fn excluded_through(
         &self,
         repos: &[String],

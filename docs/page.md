@@ -348,8 +348,8 @@ the study of serving claude-mem's web UI from oboete (2026-11-17), kept outside 
   refuses it, one the suggestion was learned from or another. A retry, under a fence of its own, is
   not refused for that session again, unless the exclusion hid the suggestion, when it answers not
   found or stale; the 64-event limit, another session's first event and the fence's other checks
-  still apply to it. A session excluded already at the fence was the read's to judge: its next
-  event refuses nothing. The window starts at the write's fence, which it reads before My
+  still apply to it. A session excluded already at the fence was the read's to judge: its later
+  events are no first events, and count only toward the 64-event limit. The window starts at the write's fence, which it reads before My
   Rules, and is checked while the list holds a repository: a session excluded between the fence and
   the read may hide the suggestion from that read already, and one still shown is checked in the
   window. Every device's events since the fence are read inside the write, at most 64: the 65th

@@ -460,9 +460,10 @@ pub(crate) fn decide<'a>(
         return Ok(Switched::NotFound);
     }
     let kept = row.kept;
-    // What is not applied yet first (#1131 item 19), before the append's own read of the exclusion
-    // list and its baseline: `behind` reads only whether the write has sources, not what they hold.
-    // My Rules' read above has read the exclusions in force already.
+    // What is not applied yet first (#1131 item 19), before this decision reads the exclusion list
+    // and its baseline for the append, which checks its window against them: `behind` reads only
+    // whether the write has sources, not what they hold. My Rules' read above has read the
+    // exclusions in force already.
     let none = crate::raw::Sources::default();
     let pending = crate::raw::Subject {
         uid: row.uid.as_deref(),
