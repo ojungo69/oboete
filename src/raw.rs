@@ -5273,9 +5273,13 @@ impl Raw {
         let Some(batch) = batch.filter(|_| !newer) else {
             return Ok(None);
         };
-        let claims: Vec<String> = (tx
-            .prepare("SELECT body FROM ops WHERE device = ?1 AND batch = ?2 AND type = 'claim'")?)
-        .query_map(params![self.device, batch], |r| r.get(0))?
+        // A batch starts at its first op: the claim op is between it and the decision, which bounds
+        // the read of `ops_claims` (CodeRabbit and Codex on #1138).
+        let claims: Vec<String> = (tx.prepare(
+            "SELECT body FROM ops WHERE device = ?1 AND type = 'claim'
+               AND op_seq BETWEEN ?2 AND ?3 AND batch = ?2",
+        )?)
+        .query_map(params![self.device, batch, decision], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
         let first = claims.iter().find_map(|body| {
             let v: serde_json::Value = serde_json::from_str(body).ok()?;

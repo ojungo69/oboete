@@ -1673,7 +1673,9 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   (`claims::approve_recorded`, #1083's R2b): all of them or none. The preference's uid derives
   from the directive's seq, so after a restore to a point before an approval whose preference was
   forgotten, an approval passes over the seq whose uid that forget names, which stays a gap
-  (#1131 item 8; docs/backup-points.md B6). A retry in the same viewer finds
+  (#1131 item 8; docs/backup-points.md B6). It tries at most 8 seqs: when the forgotten uids of all
+  of them collide, the approval is refused and records nothing, as before, until another record
+  moves the device's next seq. A retry in the same viewer finds
   the decision, applied or not yet, and is refused, so it makes no second preference; what the page
   shows and what is not applied yet are read in one read of knowledge.db for that. Two viewers of
   one home approving the same suggestion at once can each record one (#1131). An undo of an

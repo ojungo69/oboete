@@ -815,6 +815,11 @@ fn an_undo_of_an_approval_whose_directive_a_restore_lost_retracts_it_there() {
 fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
     let (h, _uid, _at, _segment, _saved) = lost_directive();
     let home = h.s.home.path().to_owned();
+    // The op top once the second viewer is done: the first viewer's refusal writes nothing past
+    // it (CodeRabbit on #1138).
+    let top = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = top.clone();
+    let device = h.s.raw.device().to_owned();
     crate::claims::LOST_UNDO.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             let saving = std::sync::Mutex::new(());
@@ -822,10 +827,25 @@ fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
                 let got = crate::settings::claims::rule(&home, &saving, body.as_bytes()).unwrap();
                 assert_eq!(got["state"], "applied", "{body}: {got}");
             }
+            let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+            seen.set(
+                raw.query_row(
+                    "SELECT MAX(op_seq) FROM ops WHERE device = ?1",
+                    [&device],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            );
         }))
     });
     let refused = h.act(serde_json::from_str(UNDO).unwrap()).unwrap_err();
     assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert!(top.get() > 0);
+    assert_eq!(
+        ops_past(&h, top.get()),
+        Vec::<(String, Value)>::new(),
+        "nothing written"
+    );
     assert_eq!(h.waiting(), Vec::<String>::new(), "the new approval stands");
     assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
 }
