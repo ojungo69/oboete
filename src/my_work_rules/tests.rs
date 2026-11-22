@@ -905,42 +905,49 @@ fn recorded_in(home: &std::path::Path, session: &str, repo: &str) {
 
 /// #1131 items 3 and 7: the main page's rule action holds, from before its read until its write,
 /// config.lock (a save of the redaction rules waits), the dispatch hold (a purge, which rewrites ops
-/// in place, waits) and raw.db's shared hold (a restore cannot swap the store it writes to).
+/// in place, waits) and raw.db's shared hold (a restore cannot swap the store it writes to): each
+/// is held in its read and again once it prepared its write.
 #[test]
 fn a_rule_action_holds_its_locks_until_its_write() {
     let mut h = Home::new();
     suggested(&mut h);
     let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let seen = held.clone();
     let h = h.closed(|home| {
-        let at = home.to_owned();
-        on_checked(move || {
-            let wait = std::time::Duration::ZERO;
-            let config = crate::settings::config_lock_within(&at, wait).unwrap();
-            let dispatch = crate::dispatch::exclusive_within(&at, wait);
-            let lock = std::fs::OpenOptions::new()
-                .write(true)
-                .open(at.join("raw.lock"));
-            let swap = lock.unwrap().try_lock();
-            seen.borrow_mut()
-                .extend([config.is_none(), dispatch.is_err(), swap.is_err()]);
-        });
-        let got = acted(
-            home,
-            json!({"suggestion": "s1", "action": "approve", "scope": "global"}),
-        );
-        assert_eq!(got.unwrap()["state"], "applied");
+        let reading = held_probe(home, held.clone());
+        crate::settings::claims::BETWEEN_READS
+            .with(|hook| *hook.borrow_mut() = Some(Box::new(reading)));
+        on_checked(held_probe(home, held.clone()));
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
     });
-    assert_eq!(
-        *held.borrow(),
-        [true, true, true],
-        "config.lock, dispatch, raw.lock"
-    );
+    let all = [true; 6];
+    let said = "config.lock, dispatch, raw.lock: in the read, then before the write";
+    assert_eq!(*held.borrow(), all, "{said}");
     assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
 }
 
+/// A hook that records, into `seen`, whether config.lock, an exclusive dispatch hold and an
+/// exclusive raw.lock of `home` are each refused now (true: held by someone).
+fn held_probe(
+    home: &std::path::Path,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+) -> impl FnOnce() + 'static {
+    let at = home.to_owned();
+    move || {
+        let wait = std::time::Duration::ZERO;
+        let config = crate::settings::config_lock_within(&at, wait).unwrap();
+        let dispatch = crate::dispatch::exclusive_within(&at, wait);
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at.join("raw.lock"));
+        let swap = lock.unwrap().try_lock();
+        let held = [config.is_none(), dispatch.is_err(), swap.is_err()];
+        seen.borrow_mut().extend(held);
+    }
+}
+
 /// #1131 item 4: a decision of the suggestion recorded since the main page's rule action read it
-/// refuses the action's write as pending, with nothing written: an approval, a rejection, an
+/// refuses the action's write (`rule_moved`), with nothing written: an approval, a rejection, an
 /// approval's undo, and the undo of an approval whose preference is forgotten.
 #[test]
 fn a_decision_since_its_read_refuses_a_rule_actions_write() {
@@ -989,8 +996,8 @@ fn a_decision_since_its_read_refuses_a_rule_actions_write() {
 }
 
 /// #1131 item 7: an exclusion since the main page's approval read its suggestion, or a first event
-/// of a session in a repository excluded at its read, refuses the approval as pending, with nothing
-/// written: the suggestion's source may be excluded with it.
+/// of a session in a repository excluded at its read, refuses the approval (`rule_moved`), with
+/// nothing written: the suggestion's source may be excluded with it.
 #[test]
 fn an_exclusion_since_its_read_refuses_a_rule_actions_write() {
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
@@ -1033,8 +1040,8 @@ fn an_exclusion_since_its_read_refuses_a_rule_actions_write() {
 
 /// #1131 item 7: a forget between the main page's read and its write cannot register, since the
 /// dispatch hold keeps it out (`a_rule_action_holds_its_locks_until_its_write`); a tombstone that
-/// lands there anyway, as one written without that hold would, refuses the approval as pending,
-/// with nothing written: the suggestion's source may be what it hides.
+/// lands there anyway, as one written without that hold would, refuses the approval
+/// (`rule_moved`), with nothing written: the suggestion's source may be what it hides.
 #[test]
 fn a_tombstone_since_its_read_refuses_a_rule_actions_write() {
     let mut h = Home::new();
@@ -1125,6 +1132,15 @@ fn an_event_of_a_session_excluded_at_its_fence_leaves_a_rule_action_be() {
         on_checked(move || recorded_in(&at, "old-timer", "github.com/o/secret"));
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+        let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let events: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE type = 'event' AND session = 'old-timer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 2, "its event since the read landed");
     });
     assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
 }
@@ -1200,36 +1216,22 @@ fn a_first_event_under_a_masked_label_since_its_read_refuses_a_rule_action() {
 
 /// #1131 C1: the main page's rule action lets go of its locks before its receipt waits, which can
 /// run the worker: config.lock, an exclusive dispatch hold and an exclusive raw.lock can each be
-/// taken while the receipt proves the approval.
+/// taken before the wait's first pass and while the receipt proves the approval.
 #[test]
 fn a_rule_actions_receipt_holds_none_of_its_locks() {
     let mut h = Home::new();
     suggested(&mut h);
-    let free = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let seen = free.clone();
+    let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let _h = h.closed(|home| {
-        let at = home.to_owned();
-        crate::claims::PROVING.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                let wait = std::time::Duration::ZERO;
-                let config = crate::settings::config_lock_within(&at, wait).unwrap();
-                let dispatch = crate::dispatch::exclusive_within(&at, wait);
-                let lock = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(at.join("raw.lock"));
-                let swap = lock.unwrap().try_lock();
-                seen.borrow_mut()
-                    .extend([config.is_some(), dispatch.is_ok(), swap.is_ok()]);
-            }))
-        });
+        let waiting = held_probe(home, held.clone());
+        crate::claims::WAITING.with(|hook| *hook.borrow_mut() = Some(Box::new(waiting)));
+        let proving = held_probe(home, held.clone());
+        crate::claims::PROVING.with(|hook| *hook.borrow_mut() = Some(Box::new(proving)));
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         assert_eq!(acted(home, approve).unwrap()["state"], "applied");
     });
-    assert_eq!(
-        *free.borrow(),
-        [true, true, true],
-        "config.lock, dispatch, raw.lock"
-    );
+    let said = "config.lock, dispatch, raw.lock: in the wait, then in the proof";
+    assert_eq!(*held.borrow(), [false; 6], "{said}");
 }
 
 /// #1131 item 9: the undo of a lost approval checks itself that no decision of its suggestion is
@@ -1274,7 +1276,7 @@ fn a_lost_approvals_undo_refuses_a_newer_decision_its_fence_did_not_see() {
 
 /// #1131 items 7 and 9: the undo of an approval whose directive a restore lost is checked against
 /// the rule fence too: a first event of a session in a repository excluded at its read refuses it
-/// as pending, with nothing written (Codex on the plan of #1131 C1).
+/// (`rule_moved`), with nothing written (Codex on the plan of #1131 C1).
 #[test]
 fn a_lost_approvals_undo_is_refused_by_an_event_since_its_read() {
     let (mut h, _uid, _at, _segment, _saved) = lost_directive();

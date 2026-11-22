@@ -309,7 +309,8 @@ pub(crate) fn rule(
             }
         }
     };
-    // The receipts' waits, which can run the worker, hold none of the write's locks.
+    // The receipts' waits, which can run the worker, hold none of the store's locks: config.lock,
+    // the dispatch hold and raw.db. The page's own save lock stays held to the end, as before.
     drop((reading, raw, config));
     let state = |applied: bool| if applied { "applied" } else { "pending" };
     match wrote {

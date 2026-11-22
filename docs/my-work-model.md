@@ -1689,15 +1689,20 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
     with nothing written (409 `rule_moved`; the page reads again). Two viewers of one home approving the
     same suggestion at once record one approval; the other is refused.
 
-  config.lock, the dispatch hold and raw.db's hold each wait up to 10 seconds, as the work view's
-  do; one that does not come answers 503 `rule_unavailable`. So an action is refused while a purge
-  or a rescan holds the dispatch lock longer than that, and while a transcript import, a rebuild or
-  a restore holds config.lock. The page's own save lock, taken first as before, waits for the
-  page's other saves with no limit. The answers are otherwise as before, in the same order: a home
-  with no store is 404 before any lock. The settings are read after the read's refusals (an
+  The page's own save lock is taken first, as before, and waits for the page's other saves with
+  no limit. config.lock and the dispatch hold each wait up to 10 seconds, as the work view's do,
+  and raw.db's open waits up to 2 seconds for raw.lock, as every open of it does; one that does not
+  come answers 503 `rule_unavailable`. So an action is refused while a purge or a rescan holds the
+  dispatch lock longer than that, while a transcript import, a rebuild or a restore holds
+  config.lock, and while a restore holds raw.lock. The fence's check is conservative: while a
+  repository is excluded, any session's first event in an excluded repository since the read
+  refuses the write, and so do more than 64 events since the fence, whatever their repository.
+
+  The answers are otherwise as before, in the same order. A home with no store is 404 once the
+  save lock is held, before the store's locks. The settings are read after the read's refusals (an
   approval and an approval's undo answer a failed read 503 `claim_unavailable`, the rest 503
   `rule_unavailable`), except while a repository is never recorded: the read reads them itself
-  then, and one that does not load fails the read, 503 `rule_unavailable` for every action.
+  then, and settings that do not load fail the read, 503 `rule_unavailable` for every action.
 
   An undo of an approve retracts that preference (status `retracted`) and writes the undo op in
   one append (`claims::undo_append`); one forgotten since (raw.db's proof) has nothing left to
