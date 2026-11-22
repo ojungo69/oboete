@@ -10,6 +10,33 @@ pub fn open(home: &Path) -> Result<Connection> {
     open_report(home, &mut || Ok(()))
 }
 
+/// #1131 items 43 and 46: knowledge.db opened read-only, its busy wait within `deadline` and no
+/// longer than 2 seconds: no file is created and no schema runs, for a caller that only reads (the
+/// main page's catch-up before its locks). `None` when there is no knowledge.db.
+pub(crate) fn read_only_until(
+    home: &Path,
+    deadline: std::time::Instant,
+) -> Result<Option<Connection>> {
+    let path = home.join("knowledge.db");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => anyhow::ensure!(metadata.is_file(), "knowledge.db is not a regular file"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("read knowledge.db"),
+    }
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    anyhow::ensure!(!left.is_zero(), "out of time");
+    crate::db::register_sqlite_vec();
+    // SQLite NOFOLLOW rejects ancestor aliases too: the home resolved, the leaf checked above.
+    let k = Connection::open_with_flags(
+        home.canonicalize()?.join("knowledge.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    k.busy_timeout(left.min(std::time::Duration::from_secs(2)))?;
+    Ok(Some(k))
+}
+
 pub(crate) fn rewind_facts(conn: &Connection) -> Result<(i64, Option<i64>, Option<String>)> {
     Ok(conn.query_row(
         "SELECT COUNT(*), CASE WHEN typeof(MAX(ts))='integer' THEN MAX(ts) END,

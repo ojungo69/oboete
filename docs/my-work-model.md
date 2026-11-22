@@ -1700,13 +1700,23 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
     approving the same suggestion at once record one approval; the other is refused. `rule_decided`
     and `rule_not_decided` are the read's refusals of an action that conflicts with the state it
     read, and `rule_pending` the read's of a suggestion whose decision or change (a learning op of
-    it, #1131 item 34) is recorded and not applied yet; `rule_moved` is the write's. Before its
-    locks, an action waits for those to be applied, as the work view does (`work_view::caught_up`):
-    up to the receipts' 10 seconds, the worker's pass run where the process may run it, so a
-    learning op the worker just wrote is applied, not refused.
+    it, #1131 item 34) is recorded and not applied yet; `rule_moved` is the write's, and also the
+    read's for a decision applied while the catch-up below waited. Before its locks, an action
+    waits for the suggestion's own learning op not applied yet (#1131 item 46): up to the receipts'
+    10 seconds, the worker's pass run where the process may run it, so a learning op the worker
+    just wrote is applied, not refused. It waits for nothing else: not for a decision of the
+    suggestion not applied yet, which the read refuses at once (#739: a wait would apply a decision
+    the page has not shown), nor for another suggestion's op or a correction, which the read does
+    not refuse on, nor when more than 500 ops past the consumer's checkpoint would have to be read.
+    It reads both stores read-only within 100 ms, so a restore or a rebuild holding raw.lock skips
+    it at once (#1131 item 43), and an error in it refuses nothing: the read under the locks
+    answers. When it waited, the read under the locks refuses the action as `rule_moved` once
+    raw.db is another file or the suggestion's newest rule op another than the catch-up first read
+    (#1131 item 40's second case).
 
   The page's own save lock is taken first, as before, and waits for the page's other saves with
-  no limit. config.lock and the dispatch hold each wait up to 10 seconds, as the work view's do,
+  no limit. config.lock waits up to 10 seconds less what the catch-up took, so that it ends where
+  it did before #1143, and the dispatch hold up to 10 seconds, as the work view's do,
   and raw.db's open waits up to 2 seconds for raw.lock, as every open of it does; one that does not
   come answers 503 `rule_unavailable`. So an action is refused while a purge or a rescan holds the
   dispatch lock longer than that, while a transcript import, a rebuild or a restore holds

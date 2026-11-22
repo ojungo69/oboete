@@ -4615,3 +4615,47 @@ fn a_rules_write_is_refused_by_a_sessions_first_event_in_an_excluded_repository(
     };
     assert!(raw.append_ops_ruled(&write(), &fence, &subject).is_ok());
 }
+
+/// #1131 item 46: `ReadOnly::suggestion_ops_after` gives the newest rule op and the newest learning
+/// op of a suggestion among the device's my_work ops past a seq, read newest first, though an older
+/// one of the same job comes before the other job's, and nothing when more ops than its limit are
+/// past it.
+#[test]
+fn suggestion_ops_after_finds_the_newest_of_each() {
+    use crate::my_work_rules::{NAME, RULE};
+    let home = tempfile::tempdir().unwrap();
+    let mut raw = crate::raw::open(home.path()).unwrap();
+    let mut seqs = Vec::new();
+    let ops = [
+        (RULE, "s1"),
+        (NAME, "s1"),
+        (NAME, "s1"),
+        (RULE, "s1"),
+        (RULE, "s1"),
+        (NAME, "s9"),
+        (RULE, "s2"),
+        (NAME, "s2"),
+        (NAME, "s2"),
+    ];
+    for (job, about) in ops {
+        let body = vec![(about.to_owned(), serde_json::json!({}))];
+        seqs.extend(
+            raw.append_ops(&crate::my_work_ops::bodies(job, body).unwrap())
+                .unwrap(),
+        );
+    }
+    let device = raw.device().to_owned();
+    drop(raw);
+    let read = crate::raw::read_only(home.path()).unwrap().unwrap();
+    let found = |id, after, limit| {
+        read.suggestion_ops_after(&device, after, id, limit)
+            .unwrap()
+    };
+    // Two decisions of s1 before its learning op, read newest first: the newest decision.
+    assert_eq!(found("s1", 0, 500), Some((Some(seqs[4]), Some(seqs[2]))));
+    // Two learning ops of s2 before its decision: the newest learning op.
+    assert_eq!(found("s2", 0, 500), Some((Some(seqs[6]), Some(seqs[8]))));
+    assert_eq!(found("s1", seqs[2], 500), Some((Some(seqs[4]), None)));
+    assert_eq!(found("s1", seqs[4], 500), Some((None, None)));
+    assert_eq!(found("s1", 0, 3), None, "more past it than the limit");
+}

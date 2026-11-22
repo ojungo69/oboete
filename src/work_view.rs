@@ -695,7 +695,7 @@ thread_local! {
 /// would else refuse each try). A switch made just after another correction finds it applied.
 /// Still behind once the wait ran out, or behind for what is not waited for here, the check under
 /// the locks refuses.
-pub(crate) fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
+fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
     use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());

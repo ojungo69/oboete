@@ -990,13 +990,15 @@ fn free_probe(
 ) -> impl FnOnce() + 'static {
     let at = home.to_owned();
     move || {
-        let wait = std::time::Duration::ZERO;
+        // A short wait for each (#1131 item 44): a forked child of a parallel test may hold a lock
+        // released here for a moment. config.lock's and raw.lock's are `worker::try_lock`'s.
+        let wait = std::time::Duration::from_millis(200);
         let config = crate::settings::config_lock_within(&at, wait).unwrap();
         let dispatch = crate::dispatch::exclusive_within(&at, wait);
         let lock = std::fs::OpenOptions::new()
             .write(true)
             .open(at.join("raw.lock"));
-        let swap = lock.unwrap().try_lock();
+        let swap = crate::worker::try_lock(&lock.unwrap());
         seen.borrow_mut()
             .extend([config.is_some(), dispatch.is_ok(), swap.is_ok()]);
     }
@@ -1394,7 +1396,7 @@ fn a_receipt_answers_replaced_once_a_later_decision_of_its_suggestion_is_applied
 /// another suggestion, each applied before its proof, leave it applied.
 #[test]
 fn a_receipt_reads_the_suggestions_kept_rule_ops_alone() {
-    let cases: [(&str, Option<&str>); 4] = [
+    let cases: [(&str, Option<&str>); 5] = [
         (
             "a later decision skipped",
             Some(
@@ -1409,6 +1411,15 @@ fn a_receipt_reads_the_suggestions_kept_rule_ops_alone() {
         ),
         ("a learning op of it", None),
         ("a decision of another suggestion", None),
+        // #1131 item 42: op seqs are counted per device.
+        (
+            "a decision of another device",
+            Some(
+                "INSERT INTO my_work SELECT 'zzzz', op_seq + 1000, ts, job, about, entry, read, removed, fields,
+                   skipped, forgotten FROM my_work WHERE job = 'rule' AND about = 's1'
+                   ORDER BY op_seq DESC LIMIT 1",
+            ),
+        ),
     ];
     for (case, tamper) in cases {
         let mut h = Home::new();
@@ -1438,6 +1449,7 @@ fn a_receipt_reads_the_suggestions_kept_rule_ops_alone() {
                         "a decision of another suggestion" => {
                             decided_elsewhere(&at, "s9", json!({"action": "reject"}))
                         }
+                        "a decision of another device" => {}
                         _ => decided_elsewhere(&at, "s1", json!({"action": "reject"})),
                     }
                     crate::worker::run_once(&at).unwrap();
@@ -1570,8 +1582,9 @@ fn an_approval_behind_a_learning_op_of_its_suggestion_waits_for_it() {
     assert_eq!(h.yours(), [(changed.to_owned(), true)], "what it changed");
 }
 
-/// #1131 item 34: only a learning op of the suggestion acted on waits: one of another suggestion,
-/// not applied yet, leaves the action be, its wait run out.
+/// #1131 items 34 and 46: only a learning op of the suggestion acted on is waited for: one of
+/// another suggestion, not applied yet, leaves the action be (and no wait for it:
+/// `an_action_waits_for_no_other_suggestions_op`).
 #[test]
 fn a_learning_op_of_another_suggestion_leaves_an_action_be() {
     let mut h = Home::new();
@@ -1582,6 +1595,325 @@ fn a_learning_op_of_another_suggestion_leaves_an_action_be() {
     let got = h.act(approve);
     crate::claims::WAIT.with(|wait| wait.set(None));
     assert!(got.is_ok(), "{got:?}");
+}
+
+/// #1131 item 46: the route's catch-up waits only for what its read refuses on as pending: a
+/// learning op of another suggestion or a correction recorded and not applied leaves the action's
+/// first wait to be its receipt's, once the action is recorded.
+#[test]
+fn an_action_waits_for_no_other_suggestions_op() {
+    for case in ["a learning op of another suggestion", "a correction"] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let home = h.s.home.path().to_owned();
+        if case == "a correction" {
+            let uid = match crate::claims::pref_add_recorded(&home, "Another rule.", None).unwrap()
+            {
+                crate::claims::OwnerReceipt::Applied { uid }
+                | crate::claims::OwnerReceipt::Pending { uid, .. } => uid,
+                other => panic!("{other:?}"),
+            };
+            h.s.run();
+            // Recorded and not applied: no wait, so no pass; its receipt says so.
+            let ops = stored(&home).2;
+            let muted = waiting(std::time::Duration::ZERO, || {
+                crate::claims::mute(&home, &uid, true)
+            });
+            assert!(muted.is_err_and(|e| e.is::<crate::claims::NotYet>()));
+            assert_eq!(stored(&home).2, ops + 1, "the correction recorded");
+        } else {
+            learned_unapplied(&mut h, "s9", "Another rule.");
+        }
+        let before = stored(&home).2;
+        let first = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (seen, at) = (first.clone(), home.clone());
+        crate::claims::WAITING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || seen.set(Some(stored(&at).2 > before))))
+        });
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let got = waiting(std::time::Duration::ZERO, || h.act(approve)).unwrap();
+        crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+        let said = "the first wait came once the approval was recorded";
+        assert_eq!(first.get(), Some(true), "{case}: {said}");
+        assert_eq!(got["state"], "pending", "{case}: {got}");
+    }
+}
+
+/// #739, #1131 item 40's second case: a decision of the suggestion recorded and not applied refuses
+/// an action at once, as before #1143: the route's catch-up does not wait for it, which would apply
+/// a decision the page has not shown.
+#[test]
+fn a_decision_of_its_suggestion_not_applied_refuses_an_action_at_once() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    decided_elsewhere(h.s.home.path(), "s1", json!({"action": "reject"}));
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|| panic!("the action waited")));
+    });
+    let before = stored(h.s.home.path());
+    for body in [
+        json!({"suggestion": "s1", "action": "approve", "scope": "global"}),
+        json!({"suggestion": "s1", "action": "reject"}),
+        json!({"suggestion": "s1", "action": "undo"}),
+    ] {
+        let refused = h.act(body.clone()).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (409, "rule_pending"),
+            "{body}"
+        );
+    }
+    crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+    assert_eq!(stored(h.s.home.path()), before, "nothing written");
+}
+
+/// The statement viewer B approves suggestion s1 with in the stale Undo tests.
+const B_RULE: &str = "Keep each commit to one change.";
+
+/// Viewer A's approval of s1, applied, and viewer B's undo of it, applied: A's page still shows
+/// its approval's Undo.
+fn approved_then_undone_elsewhere(h: &mut Home) {
+    suggested(h);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    assert_eq!(h.act(approve).unwrap()["state"], "applied", "A approves");
+    h.s.run();
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    assert_eq!(h.act(undo).unwrap()["state"], "applied", "B undoes it");
+    h.s.run();
+}
+
+/// #1131 item 40's second case: A's stale Undo behind B's new approval, recorded and not applied,
+/// is refused as pending, as before #1143, and B's approval and its preference stand.
+#[test]
+fn a_stale_undo_behind_a_decision_not_applied_is_refused() {
+    let mut h = Home::new();
+    approved_then_undone_elsewhere(&mut h);
+    let b =
+        json!({"suggestion": "s1", "action": "approve", "scope": "global", "statement": B_RULE});
+    let got = waiting(std::time::Duration::ZERO, || h.act(b)).unwrap();
+    assert_eq!(
+        got["state"], "pending",
+        "B approves again, not applied: {got}"
+    );
+    let refused = h
+        .act(json!({"suggestion": "s1", "action": "undo"}))
+        .unwrap_err();
+    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    h.s.run();
+    assert_eq!(
+        h.yours(),
+        [(B_RULE.to_owned(), true)],
+        "B's approval stands"
+    );
+}
+
+/// #1131 item 40's second case (Codex on the plan of C1'b): B's approval made while A's action
+/// waits for a learning op of the suggestion, and applied by that wait's pass, is one A's page has
+/// not shown: A's stale Undo is refused as moved, and B's approval and its preference stand.
+#[test]
+fn a_stale_undo_behind_a_decision_made_during_the_wait_is_refused() {
+    let mut h = Home::new();
+    approved_then_undone_elsewhere(&mut h);
+    learned_unapplied(&mut h, "s1", RULE_TEXT);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (home, seen) = (h.s.home.path().to_owned(), ran.clone());
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let b = json!({"suggestion": "s1", "action": "approve", "scope": "global",
+                "statement": B_RULE});
+            assert_eq!(
+                acted(&home, b).unwrap()["state"],
+                "applied",
+                "B approves again"
+            );
+            seen.set(true);
+        }))
+    });
+    let refused = h
+        .act(json!({"suggestion": "s1", "action": "undo"}))
+        .unwrap_err();
+    assert!(ran.get(), "B approved during A's wait");
+    assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+    h.s.run();
+    assert_eq!(
+        h.yours(),
+        [(B_RULE.to_owned(), true)],
+        "B's approval stands"
+    );
+}
+
+/// #1131 item 40's second case (Codex on the plan of C1'b): raw.db replaced while the catch-up
+/// waited, as a restore puts another file in place with the same device and the same op seqs,
+/// refuses the action as moved by the file alone: the suggestion's newest rule op reads the same.
+#[test]
+fn a_rule_action_whose_raw_db_was_replaced_during_the_wait_is_refused() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let _h = h.closed(|home| {
+        let (at, seen) = (home.to_owned(), ran.clone());
+        crate::claims::WAITING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                use crate::executable::RESUMED_AS;
+                RESUMED_AS.with(|r| r.set(None));
+                crate::worker::run_once(&at).unwrap();
+                RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+                let (raw, copy) = (at.join("raw.db"), at.join("raw.db.swap"));
+                let c = rusqlite::Connection::open(&raw).unwrap();
+                c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+                c.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+                    .unwrap();
+                drop(c);
+                let file = crate::db::store_file(&copy);
+                let c = rusqlite::Connection::open(&copy).unwrap();
+                let bound = "UPDATE meta SET value = ?1 WHERE key = 'store_file'";
+                assert_eq!(c.execute(bound, [&file]).unwrap(), 1);
+                drop(c);
+                for ext in ["-wal", "-shm"] {
+                    let _ = std::fs::remove_file(at.join(format!("raw.db{ext}")));
+                }
+                std::fs::rename(&copy, &raw).unwrap();
+                seen.set(true);
+            }))
+        });
+        // No pass of the wait's own: the hook's applied the learning op before the swap.
+        crate::executable::RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let got = waiting(std::time::Duration::from_millis(500), || {
+            acted(home, approve)
+        });
+        crate::executable::RESUMED_AS.with(|r| r.set(None));
+        assert!(ran.get(), "raw.db was replaced during the wait");
+        let refused = got.unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+    });
+}
+
+/// #1131 item 43: a restore holding raw.lock skips the route's catch-up at once, so the route waits
+/// for config.lock as before #1143, and the action goes on once the restore lets go.
+#[test]
+fn a_rule_action_skips_its_catch_up_while_a_restore_holds_raw_lock() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let _h = h.closed(|home| {
+        let config = crate::settings::config_lock_within(home, std::time::Duration::ZERO);
+        let swap = crate::raw::lock_for_swap(home).unwrap();
+        let held = std::rc::Rc::new(std::cell::RefCell::new(Some((config.unwrap(), swap))));
+        let (release, seen) = (held.clone(), ran.clone());
+        crate::settings::CONFIG_BLOCKED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                seen.set(true);
+                release.borrow_mut().take();
+            }))
+        });
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let got = acted(home, approve);
+        crate::settings::CONFIG_BLOCKED.with(|hook| hook.borrow_mut().take());
+        drop(held);
+        assert!(ran.get(), "the route reached its own config.lock wait");
+        assert_eq!(got.unwrap()["state"], "applied");
+    });
+}
+
+/// #1131 item 43: a restore that holds config.lock and raw.lock past the route's config.lock wait
+/// refuses the action as unavailable once that wait runs out, with nothing written.
+#[test]
+fn a_rule_action_behind_a_restore_past_its_wait_is_unavailable() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let _h = h.closed(|home| {
+        let config = crate::settings::config_lock_within(home, std::time::Duration::ZERO);
+        let swap = crate::raw::lock_for_swap(home).unwrap();
+        let seen = ran.clone();
+        crate::settings::CONFIG_BLOCKED
+            .with(|hook| *hook.borrow_mut() = Some(Box::new(move || seen.set(true))));
+        let second = std::time::Duration::from_secs(1);
+        crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(second)));
+        let before = stored(home);
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let got = acted(home, approve);
+        crate::settings::claims::ADMISSION.with(|wait| wait.set(None));
+        crate::settings::CONFIG_BLOCKED.with(|hook| hook.borrow_mut().take());
+        drop((config, swap));
+        assert!(ran.get(), "the route waited for config.lock");
+        let refused = got.unwrap_err();
+        assert_eq!((refused.status, refused.code), (503, "rule_unavailable"));
+        assert_eq!(stored(home), before, "nothing written");
+    });
+}
+
+/// #1131 item 43: what the route's catch-up waits comes out of its config.lock wait: behind a
+/// learning op no pass applies, with config.lock held, the action is refused at the end of the one
+/// budget, not of both.
+#[test]
+fn the_catch_ups_wait_comes_out_of_the_config_lock_wait() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+    let home = h.s.home.path().to_owned();
+    let config = crate::settings::config_lock_within(&home, std::time::Duration::ZERO).unwrap();
+    let budget = std::time::Duration::from_secs(2);
+    crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(budget)));
+    crate::executable::RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+    let contending = crate::worker::contending();
+    let started = std::time::Instant::now();
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let got = waiting(std::time::Duration::from_secs(1), || h.act(approve));
+    let took = started.elapsed();
+    drop(contending);
+    crate::executable::RESUMED_AS.with(|r| r.set(None));
+    crate::settings::claims::ADMISSION.with(|wait| wait.set(None));
+    drop(config);
+    let refused = got.unwrap_err();
+    assert_eq!((refused.status, refused.code), (503, "rule_unavailable"));
+    let said = "the catch-up's 1 s came out of the 2 s config.lock wait";
+    assert!(
+        took < std::time::Duration::from_millis(2500),
+        "{took:?}: {said}"
+    );
+}
+
+/// #1131 item 46: the route's catch-up runs no pass for a correction an older worker passed, which
+/// its read does not refuse on: the correction is still passed once the action read and prepared
+/// its write.
+#[test]
+fn the_route_runs_no_pass_for_a_passed_correction() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let home = h.s.home.path().to_owned();
+    let uid = match crate::claims::pref_add_recorded(&home, "Another rule.", None).unwrap() {
+        crate::claims::OwnerReceipt::Applied { uid }
+        | crate::claims::OwnerReceipt::Pending { uid, .. } => uid,
+        other => panic!("{other:?}"),
+    };
+    h.s.run();
+    let k = crate::knowledge::open(&home).unwrap();
+    let op = crate::claims::mute_op(&k, &uid, false).unwrap().unwrap();
+    let seq = h.s.raw.append_ops(&[(OpKind::Correction, op)]).unwrap()[0];
+    let device = h.s.raw.device().to_owned();
+    k.execute(
+        "INSERT INTO claim_skips(op_device, op_seq, reason) VALUES(?1, ?2, 'corrects nothing')",
+        rusqlite::params![device, seq],
+    )
+    .unwrap();
+    let ops = crate::knowledge::checkpoint::OPS;
+    crate::knowledge::checkpoint::set_in(&k, ops, "claims", &device, seq).unwrap();
+    drop(k);
+    let passed = move |home: &std::path::Path| -> i64 {
+        let k = crate::knowledge::open(home).unwrap();
+        let sql = "SELECT COUNT(*) FROM claim_skips WHERE op_seq = ?1";
+        k.query_row(sql, [seq], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(passed(&home), 1, "passed");
+    let (at, seen) = (home.clone(), std::rc::Rc::new(std::cell::Cell::new(None)));
+    let checked = seen.clone();
+    on_checked(move || checked.set(Some(passed(&at))));
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    assert_eq!(h.act(approve).unwrap()["state"], "applied");
+    assert_eq!(seen.get(), Some(1), "no pass ran before the write");
 }
 
 /// #1131 items 7 and 39: the suggestion's own source session's later event, under a label first
@@ -2005,8 +2337,7 @@ fn a_retry_while_its_approval_is_applied_records_no_second_preference() {
             );
         }));
     });
-    // Its catch-up's wait run out, so that the hook applies it between the reads (#1131 item 34).
-    let retried = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap_err();
+    let retried = h.act(approve.clone()).unwrap_err();
     assert_eq!((retried.status, retried.code), (409, "rule_pending"));
     h.s.run();
     let (events, ops) = approval_since(&h, before);
@@ -2836,19 +3167,13 @@ fn a_decision_not_applied_yet_is_not_made_again() {
     let op = serde_json::to_value(op).unwrap();
     h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
-    // Its wait run out: the catch-up before the read applies it otherwise (#1131 item 34).
-    let refused = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap_err();
+    // Refused at once: the catch-up waits for no decision of the suggestion (#1131 item 40).
+    let refused = h.act(approve.clone()).unwrap_err();
     assert_eq!((refused.status, refused.code), (409, "rule_pending"));
     assert_eq!(
         h.yours(),
         Vec::<(String, bool)>::new(),
         "no preference made"
-    );
-    let refused = h.act(approve.clone()).unwrap_err();
-    assert_eq!(
-        (refused.status, refused.code),
-        (409, "rule_decided"),
-        "caught up, it holds"
     );
     h.s.run();
     let refused = h.act(approve).unwrap_err();
