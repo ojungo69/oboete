@@ -1,0 +1,21 @@
+docs/my-work-model.md
+  s_52c3955e48bff4::t_3d5d89811af0e4 1692-1700
+src/my_work_rules/tests.rs
+  s_52c3955e48bff4::t_9a956d595b64bf 1141-1155,1159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "38155e12190f82a8084ea9efbbcf81472bd0dae3",
+  "prompts": {},
+  "sessions": {
+    "s_52c3955e48bff4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71325e2b-fe13-4768-9035-42503a99e9fb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
