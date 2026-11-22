@@ -10665,9 +10665,11 @@ async function myRulesWrite(path, body, done) {
     }
     // Only what was applied is done (#739): a partial record says what it kept, and closes nothing.
     const applied = answer.state === 'applied';
-    // Saved, but a later decision is the suggestion's now (#1131 item 2): the last action's Undo
-    // would undo that one, so its line goes.
-    if (answer.state === 'replaced' && mr.last?.id === body.suggestion) mr.last = null;
+    // The last action's line names a decision that is no longer the suggestion's (#1131 item 2):
+    // one a later decision replaced, or one an Undo from another row just undid. Its Undo would undo
+    // what decides the suggestion now, so the line goes.
+    const moved = answer.state === 'replaced' || (applied && body.action === 'undo');
+    if (moved && mr.last?.id === body.suggestion) mr.last = null;
     message = applied ? t(done) : t(Object.hasOwn(TEXT, answer.code ?? '') ? answer.code : 'my_rules_pending');
     failed = !applied;
     return applied;

@@ -1389,29 +1389,126 @@ fn a_receipt_answers_replaced_once_a_later_decision_of_its_suggestion_is_applied
     });
 }
 
-/// #1131 item 2 (Codex on its plan): an approval's receipt classifies only once every proof holds:
-/// its decision kept while its preference's derivation is not leaves it pending, though a later
-/// decision is the suggestion's now.
+/// #1131 item 2: a receipt reads the suggestion's decision now from its kept rule ops alone: a later
+/// decision skipped or forgotten by the consumer, a learning op of the suggestion, and a decision of
+/// another suggestion, each applied before its proof, leave it applied.
 #[test]
-fn an_approvals_receipt_is_pending_before_it_is_replaced() {
-    let mut h = Home::new();
-    suggested(&mut h);
-    let _h = h.closed(|home| {
-        let at = home.to_owned();
-        crate::claims::PROVING.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                decided_elsewhere(&at, "s1", json!({"action": "reject"}));
-                crate::worker::run_once(&at).unwrap();
-                let k = crate::knowledge::open(&at).unwrap();
-                let sql = "DELETE FROM derivations WHERE uid IN
-                    (SELECT uid FROM claims WHERE kind = 'preference')";
-                assert!(k.execute(sql, []).unwrap() >= 1, "{sql}");
-            }))
+fn a_receipt_reads_the_suggestions_kept_rule_ops_alone() {
+    let cases: [(&str, Option<&str>); 4] = [
+        (
+            "a later decision skipped",
+            Some(
+                "UPDATE my_work SET skipped = 1 WHERE op_seq = (SELECT MAX(op_seq) FROM my_work WHERE job = 'rule')",
+            ),
+        ),
+        (
+            "a later decision forgotten",
+            Some(
+                "UPDATE my_work SET forgotten = 'j' WHERE op_seq = (SELECT MAX(op_seq) FROM my_work WHERE job = 'rule')",
+            ),
+        ),
+        ("a learning op of it", None),
+        ("a decision of another suggestion", None),
+    ];
+    for (case, tamper) in cases {
+        let mut h = Home::new();
+        suggested(&mut h);
+        let _h = h.closed(|home| {
+            let at = home.to_owned();
+            crate::claims::PROVING.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    match case {
+                        "a learning op of it" => {
+                            let fields = json!({"statement": "Changed.", "seen": 2,
+                                "requests": [], "quotes": []});
+                            let op = MyWorkOp {
+                                job: NAME.into(),
+                                about: "s1".into(),
+                                entry: "fake".into(),
+                                ts: crate::db::now_ms(),
+                                read: Read::default(),
+                                removed: vec![],
+                                fields: fields.as_object().unwrap().clone().into_iter().collect(),
+                                skipped: false,
+                                forgotten: None,
+                            };
+                            let op = (OpKind::MyWork, serde_json::to_value(op).unwrap());
+                            crate::raw::open(&at).unwrap().append_ops(&[op]).unwrap();
+                        }
+                        "a decision of another suggestion" => {
+                            decided_elsewhere(&at, "s9", json!({"action": "reject"}))
+                        }
+                        _ => decided_elsewhere(&at, "s1", json!({"action": "reject"})),
+                    }
+                    crate::worker::run_once(&at).unwrap();
+                    if let Some(sql) = tamper {
+                        let k = crate::knowledge::open(&at).unwrap();
+                        assert_eq!(k.execute(sql, []).unwrap(), 1, "{sql}");
+                    }
+                }))
+            });
+            let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+            let got = acted(home, approve).unwrap();
+            assert_eq!(got["state"], "applied", "{case}: {got}");
         });
-        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
-        let got = acted(home, approve).unwrap();
-        assert_eq!(got["state"], "pending", "{got}");
-    });
+    }
+}
+
+/// #1131 item 2 (Codex on its plan): a receipt classifies only once every proof holds: an
+/// approval whose preference's derivation is not kept, an undo whose retraction is not as written,
+/// and a rejection whose row is not as written are pending, though a later decision is the
+/// suggestion's now.
+#[test]
+fn a_receipt_is_pending_before_it_is_replaced() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    let reject = json!({"suggestion": "s1", "action": "reject"});
+    let cases = [
+        (
+            None,
+            approve.clone(),
+            "DELETE FROM derivations WHERE uid IN
+            (SELECT uid FROM claims WHERE kind = 'preference')",
+        ),
+        (
+            Some(approve.clone()),
+            undo,
+            "UPDATE corrections SET status = 'decided' WHERE status = 'retracted'",
+        ),
+        (
+            None,
+            reject,
+            "UPDATE my_work SET fields = '{\"action\":\"reject\",\"x\":1}'
+            WHERE job = 'rule' AND json_extract(fields, '$.action') = 'reject'",
+        ),
+    ];
+    for (first, action, sql) in cases {
+        let mut h = Home::new();
+        suggested(&mut h);
+        if let Some(first) = &first {
+            assert_eq!(h.act(first.clone()).unwrap()["state"], "applied");
+            h.s.run();
+        }
+        let later = if action["action"] == "reject" {
+            "undo"
+        } else {
+            "reject"
+        };
+        let _h = h.closed(|home| {
+            let at = home.to_owned();
+            crate::claims::PROVING.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let k = crate::knowledge::open(&at).unwrap();
+                    assert!(k.execute(sql, []).unwrap() >= 1, "{sql}");
+                    drop(k);
+                    decided_elsewhere(&at, "s1", json!({"action": later}));
+                    crate::worker::run_once(&at).unwrap();
+                }))
+            });
+            let got = acted(home, action.clone()).unwrap();
+            assert_eq!(got["state"], "pending", "{action}: {got}");
+        });
+    }
 }
 
 /// #1131 item 2 (Codex on its plan): a later decision recorded and not applied when the receipt
@@ -1454,22 +1551,37 @@ fn learned_unapplied(h: &mut Home, id: &str, statement: &str) {
 }
 
 /// #1131 item 34: a learning op of a suggestion recorded and not applied yet changes what the
-/// suggestion is: an action on it now is refused as pending, with nothing written, and one once it
-/// is applied acts on what it changed.
+/// suggestion is. An action waits for it, as the work view does, and acts on what it changed; one
+/// whose wait runs out is refused as pending, with nothing written.
 #[test]
-fn an_approval_behind_a_learning_op_of_its_suggestion_is_pending() {
+fn an_approval_behind_a_learning_op_of_its_suggestion_waits_for_it() {
+    let changed = "Write the tests before the code, always.";
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
     let mut h = Home::new();
     suggested(&mut h);
-    let changed = "Write the tests before the code, always.";
     learned_unapplied(&mut h, "s1", changed);
-    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
     let before = stored(h.s.home.path());
     let refused = h.act(approve.clone()).unwrap_err();
+    crate::claims::WAIT.with(|wait| wait.set(None));
     assert_eq!((refused.status, refused.code), (409, "rule_pending"));
     assert_eq!(stored(h.s.home.path()), before, "nothing written");
-    h.s.run();
     assert_eq!(h.act(approve).unwrap()["state"], "applied");
-    assert_eq!(h.yours(), [(changed.to_owned(), true)]);
+    assert_eq!(h.yours(), [(changed.to_owned(), true)], "what it changed");
+}
+
+/// #1131 item 34: only a learning op of the suggestion acted on waits: one of another suggestion,
+/// not applied yet, leaves the action be, its wait run out.
+#[test]
+fn a_learning_op_of_another_suggestion_leaves_an_action_be() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    learned_unapplied(&mut h, "s9", "Another rule.");
+    crate::claims::WAIT.with(|wait| wait.set(Some(std::time::Duration::ZERO)));
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let got = h.act(approve);
+    crate::claims::WAIT.with(|wait| wait.set(None));
+    assert!(got.is_ok(), "{got:?}");
 }
 
 /// #1131 items 7 and 39: the suggestion's own source session's later event, under a label first
@@ -1495,7 +1607,12 @@ fn an_event_of_its_source_session_under_a_masked_label_since_its_read_refuses_a_
         .exclude_capture(("repo", "github.com/x/private-aaa"), false)
         .unwrap();
     h.s.run();
-    let _h = h.closed(|home| {
+    assert_eq!(
+        h.waiting(),
+        ["s1"],
+        "learned from session learned, which is recorded"
+    );
+    let h = h.closed(|home| {
         let at = home.to_owned();
         let masked = format!("github.com/x/private-{}", crate::redact::MASK);
         on_checked(move || recorded_in(&at, "learned", &masked));
@@ -1509,6 +1626,12 @@ fn an_event_of_its_source_session_under_a_masked_label_since_its_read_refuses_a_
             "the event alone"
         );
     });
+    // Its source session is excluded with its event: the suggestion goes with it.
+    assert_eq!(
+        h.waiting(),
+        Vec::<String>::new(),
+        "a fresh read leaves it out"
+    );
 }
 
 /// #1131 items 7 and 9: the undo of an approval whose directive a restore lost is checked against
@@ -1882,7 +2005,8 @@ fn a_retry_while_its_approval_is_applied_records_no_second_preference() {
             );
         }));
     });
-    let retried = h.act(approve).unwrap_err();
+    // Its catch-up's wait run out, so that the hook applies it between the reads (#1131 item 34).
+    let retried = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap_err();
     assert_eq!((retried.status, retried.code), (409, "rule_pending"));
     h.s.run();
     let (events, ops) = approval_since(&h, before);
@@ -2712,12 +2836,19 @@ fn a_decision_not_applied_yet_is_not_made_again() {
     let op = serde_json::to_value(op).unwrap();
     h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
-    let refused = h.act(approve.clone()).unwrap_err();
+    // Its wait run out: the catch-up before the read applies it otherwise (#1131 item 34).
+    let refused = waiting(std::time::Duration::ZERO, || h.act(approve.clone())).unwrap_err();
     assert_eq!((refused.status, refused.code), (409, "rule_pending"));
     assert_eq!(
         h.yours(),
         Vec::<(String, bool)>::new(),
         "no preference made"
+    );
+    let refused = h.act(approve.clone()).unwrap_err();
+    assert_eq!(
+        (refused.status, refused.code),
+        (409, "rule_decided"),
+        "caught up, it holds"
     );
     h.s.run();
     let refused = h.act(approve).unwrap_err();

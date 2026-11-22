@@ -146,10 +146,12 @@ struct Rule {
 /// a restore from swapping raw.db, under config.lock (the redaction rules it gates with stay those
 /// in force; the token is asked again once it is held, `authorized`) and the dispatch hold (a purge
 /// rewrites ops in place, which no count of the fence shows), and written against the rule fence
-/// taken before the read, as the work view writes: anything `fence_moved` reads moving since then
-/// (docs/my-work-model.md lists it: a decision, an exclusion, a forget, a tombstone, an expiry, an
-/// op about the suggestion or the preference an undo retracts, a first event in an excluded
-/// repository) refuses it, with nothing written (409 `rule_moved`: the page reads again).
+/// taken before the read, as the work view writes. The append refuses it, with nothing written (409
+/// `rule_moved`: the page reads again), when its raw.db is not the fence's file, checked before its
+/// transaction, or, inside it, when anything `fence_moved` reads moved since the fence
+/// (docs/my-work-model.md lists it): a decision, an exclusion, a forget, a tombstone, an expiry, an
+/// op about the suggestion or the preference an undo retracts, and, while a repository is excluded,
+/// a session's first event in one or under a label that may name one, or a 65th event read.
 pub(crate) fn rule(
     home: &Path,
     saving: &Mutex<()>,
@@ -176,6 +178,10 @@ pub(crate) fn rule(
         (Some("repo"), Some(repo)) => Some(repo),
         _ => return Err(refused(422, "rule_scope", "scope")),
     };
+    // What the read would refuse as pending, waited for first within the receipts' time, the
+    // worker's pass run here where this process may run it, as the work view waits (#1131 item 34):
+    // a decision or a learning op the worker appended just before is applied, not refused.
+    crate::work_view::caught_up(home, true).map_err(|_| refused(503, "rule_unavailable", ""))?;
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

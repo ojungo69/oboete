@@ -789,8 +789,9 @@ thread_local! {
     /// pass (W3b-2: a test starts the worker that runs from there).
     pub(crate) static WAITING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
-    /// A test's hook, run once an owner's approval or undo has waited, before the read that proves
-    /// what it wrote is kept (#1083's R2b).
+    /// A test's hook, run once a rule decision's receipt has waited (an approval, an undo, a
+    /// rejection, a dismissal; #1083's R2b, #1131 item 2), before the read that proves what it wrote
+    /// is kept and is the suggestion's decision now.
     pub(crate) static PROVING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
     /// A test's hook, run once an undo of an approval whose preference knowledge.db has no anchor
