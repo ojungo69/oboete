@@ -1921,8 +1921,12 @@ fn a_rule_action_skips_its_catch_up_while_a_restore_holds_raw_lock() {
                 release.borrow_mut().take();
             }))
         });
+        // No test retries in config.lock's try (`worker::try_lock`): slow sleeps (macOS CI) made
+        // them most of the time measured.
+        let contending = crate::worker::contending();
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         let got = acted(home, approve);
+        drop(contending);
         crate::settings::CONFIG_BLOCKED.with(|hook| hook.borrow_mut().take());
         drop(held);
         assert!(ran.get(), "the route reached its own config.lock wait");
@@ -1954,8 +1958,11 @@ fn a_rule_action_behind_a_restore_past_its_wait_is_unavailable() {
         let budget = std::time::Duration::from_secs(2);
         crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(budget)));
         let before = stored(home);
+        // No test retries in config.lock's try, which on macOS CI took the whole second left.
+        let contending = crate::worker::contending();
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         let got = acted(home, approve);
+        drop(contending);
         crate::settings::claims::ADMISSION.with(|wait| wait.set(None));
         crate::settings::CONFIG_BLOCKED.with(|hook| hook.borrow_mut().take());
         drop((config, swap));
