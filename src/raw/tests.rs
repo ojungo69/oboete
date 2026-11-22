@@ -4658,4 +4658,32 @@ fn suggestion_ops_after_finds_the_newest_of_each() {
     assert_eq!(found("s1", seqs[2], 500), Some((Some(seqs[4]), None)));
     assert_eq!(found("s1", seqs[4], 500), Some((None, None)));
     assert_eq!(found("s1", 0, 3), None, "more past it than the limit");
+    // Exactly the limit past it reads them all; one more is too many (any kind of op counts).
+    let all = seqs[0] - 1;
+    assert!(
+        found("s1", all, 9).is_some(),
+        "nine past it, a limit of nine"
+    );
+    assert_eq!(found("s1", all, 8), None, "nine past it, a limit of eight");
+    drop(read);
+    // Another device's op of s1, newer than any of this device's, is not this device's.
+    let c = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
+    let body = crate::my_work_ops::bodies(NAME, vec![("s1".to_owned(), serde_json::json!({}))]);
+    let body = body.unwrap().remove(0).1.to_string();
+    c.execute(
+        "INSERT INTO ops(device, op_seq, type, ts, body, batch) VALUES('zzzz', 1000, 'my_work', 1, ?1, 1000)",
+        [body],
+    )
+    .unwrap();
+    drop(c);
+    let read = crate::raw::read_only(home.path()).unwrap().unwrap();
+    let found = |id, after, limit| {
+        read.suggestion_ops_after(&device, after, id, limit)
+            .unwrap()
+    };
+    assert_eq!(
+        found("s1", 0, 500),
+        Some((Some(seqs[4]), Some(seqs[2]))),
+        "this device's"
+    );
 }

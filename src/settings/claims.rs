@@ -199,7 +199,8 @@ pub(crate) fn rule(
         return Err(not_found());
     }
     // config.lock before raw.lock, as the work view takes them, its wait less what the catch-up
-    // took, so that the catch-up never moves where that wait ends (#1131 item 43).
+    // took, so that the catch-up never moves where that wait ends (#1131 item 43): a pass the
+    // catch-up started may end after its time, and the wait is then one try.
     let wait = crate::db::OPEN_WRITE_WAIT;
     let config = crate::settings::config_lock_within(home, admission().saturating_sub(took))
         .map_err(|e| unavailable(anyhow::Error::from(e)))?
@@ -225,23 +226,29 @@ pub(crate) fn rule(
         hook();
     }
     let unapplied = crate::my_work_rules::unapplied(&raw, &read, id).map_err(unavailable)?;
-    // #1131 item 40's second case: a decision of the suggestion applied while the catch-up waited
-    // is one the page has not shown, which the action would act on.
-    let moved = match &waited {
-        Some(before) => {
-            raw.file_identity() != Some(before.raw.as_str())
-                || crate::my_work_ops::rule_now(&read, raw.device(), id).map_err(unavailable)?
-                    != before.decision
-        }
-        None => false,
+    // #1131 item 40's second case: what the catch-up read before it waited, and the page showed,
+    // is no longer so: raw.db another file (a restore), or a decision of the suggestion applied
+    // while it waited, which the action would act on.
+    let (swapped, moved) = match &waited {
+        Some(before) => (
+            raw.file_identity() != Some(before.raw.as_str()),
+            crate::my_work_ops::rule_now(&read, raw.device(), id).map_err(unavailable)?
+                != before.decision,
+        ),
+        None => (false, false),
     };
     drop(read);
+    // Another raw.db than the catch-up read first, whatever this one holds (Codex on C1'b).
+    if swapped {
+        return Err(changed());
+    }
     let Some(suggestion) = shown.suggestions.iter().find(|sg| sg.id == id) else {
         return Err(not_found());
     };
     let decision = shown.decided.get(id);
     let write = match (posted.action.as_str(), decision) {
-        // #739: a decision recorded but not applied yet is waited for, not made again.
+        // #739: a decision recorded but not applied yet is refused, not made again: the catch-up
+        // waits for none (#1131 item 40).
         _ if unapplied => return Err(pending()),
         _ if moved => return Err(changed()),
         ("approve" | "reject", Some(_)) => return Err(refused(409, "rule_decided", "suggestion")),
@@ -417,32 +424,47 @@ struct Waited {
 /// recorded and not applied, which the read refuses at once as #739 did (a wait would apply a
 /// decision the page has not shown, #1131 item 40), nor for another suggestion's op, a correction
 /// or a correction an older worker passed, none of which the read refuses on, nor when more than
-/// 500 ops past the checkpoint would have to be read. Both stores are read read-only within 100 ms:
-/// a restore or a rebuild holding raw.lock skips it at once, and nothing is created and no schema
-/// runs before the token is asked again under config.lock. An error refuses nothing: the read under
+/// 500 ops of any kind are past the checkpoint. Both stores are read read-only, each wait within a
+/// second: a restore or a rebuild holding raw.lock skips it within that time, and no store is
+/// created (SQLite may still create a WAL store's side files to read it) and no schema runs before
+/// the token is asked again under config.lock. An error refuses nothing: the read under
 /// the locks answers, after its own waits, a store that cannot be read among them; a pass that
 /// failed once its checkpoint moved leaves that read to read what it applied. `Some` only when it
 /// waited, with what it read before the wait, whatever the wait did.
 fn caught_up(home: &Path, id: &str) -> Option<Waited> {
     let caught = (|| -> anyhow::Result<Option<Waited>> {
         use crate::knowledge::checkpoint::{OPS, get_in};
-        let within = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let within = std::time::Instant::now() + std::time::Duration::from_secs(1);
         let Some(read) = crate::raw::read_only_until(home, Some(within))? else {
             return Ok(None);
         };
         let Some(k) = crate::knowledge::read_only_until(home, within)? else {
             return Ok(None);
         };
+        // Each statement's busy wait within what is left of the second: a wait, not the reads'
+        // own time, which a loaded machine stretches.
+        let left = || {
+            (within.saturating_duration_since(std::time::Instant::now()))
+                .max(std::time::Duration::from_millis(10))
+        };
+        read.conn.busy_timeout(left())?;
         let device = crate::db::device_id(&read.conn)?;
-        let after = get_in(&k, OPS, "my_work", &device)?;
+        // The checkpoint and the suggestion's decision in one read of knowledge.db, before raw.db's
+        // ops past it are read: a decision applied after that read is never taken for the one
+        // before the wait (Codex on C1'b).
+        k.busy_timeout(left())?;
+        let snapshot = k.unchecked_transaction()?;
+        let after = get_in(&snapshot, OPS, "my_work", &device)?;
+        let decision = crate::my_work_ops::rule_now(&snapshot, &device, id)?;
+        drop(snapshot);
+        read.conn.busy_timeout(left())?;
         let Some((None, Some(op))) = read.suggestion_ops_after(&device, after, id, 500)? else {
             return Ok(None);
         };
-        let waited = Waited {
-            raw: read.identity().to_owned(),
-            decision: crate::my_work_ops::rule_now(&k, &device, id)?,
-        };
+        let raw = read.identity().to_owned();
         drop(read);
+        let waited = Waited { raw, decision };
+        k.busy_timeout(std::time::Duration::from_secs(2))?;
         let what = ("learning op", "my_work");
         match crate::claims::applied_by(home, &k, &device, &[op], what, crate::claims::deadline()) {
             Err(e) if !e.is::<crate::claims::NotYet>() => {

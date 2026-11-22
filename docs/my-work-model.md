@@ -1707,16 +1707,19 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
     just wrote is applied, not refused. It waits for nothing else: not for a decision of the
     suggestion not applied yet, which the read refuses at once (#739: a wait would apply a decision
     the page has not shown), nor for another suggestion's op or a correction, which the read does
-    not refuse on, nor when more than 500 ops past the consumer's checkpoint would have to be read.
-    It reads both stores read-only within 100 ms, so a restore or a rebuild holding raw.lock skips
-    it at once (#1131 item 43), and an error in it refuses nothing: the read under the locks
-    answers. When it waited, the read under the locks refuses the action as `rule_moved` once
-    raw.db is another file or the suggestion's newest rule op another than the catch-up first read
-    (#1131 item 40's second case).
+    not refuse on, nor when more than 500 ops of any kind are past the consumer's checkpoint. It
+    reads both stores read-only, each wait within a second, so a restore or a rebuild holding
+    raw.lock skips it within that time (#1131 item 43); it creates no store, though SQLite may create a WAL
+    store's side files to read it. An error in it refuses nothing: the read under the locks
+    answers. When it waited, what it first read decides two more refusals, both `rule_moved` (#1131
+    item 40's second case): raw.db another file, before anything else of the read (a restore's file
+    can reuse the same seqs); and the suggestion's newest rule op another than it read, after
+    `rule_pending`.
 
   The page's own save lock is taken first, as before, and waits for the page's other saves with
   no limit. config.lock waits up to 10 seconds less what the catch-up took, so that it ends where
-  it did before #1143, and the dispatch hold up to 10 seconds, as the work view's do,
+  it did before #1143 (a pass the catch-up started may end after its time, and the wait is then one
+  try), and the dispatch hold up to 10 seconds, as the work view's do,
   and raw.db's open waits up to 2 seconds for raw.lock, as every open of it does; one that does not
   come answers 503 `rule_unavailable`. So an action is refused while a purge or a rescan holds the
   dispatch lock longer than that, while a transcript import, a rebuild or a restore holds

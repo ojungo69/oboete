@@ -1667,6 +1667,104 @@ fn a_decision_of_its_suggestion_not_applied_refuses_an_action_at_once() {
     assert_eq!(stored(h.s.home.path()), before, "nothing written");
 }
 
+/// #739, #1131 item 40's second case: a decision and a learning op of the suggestion both recorded
+/// and not applied refuse an action at once, with no wait for the learning op, whose pass would
+/// apply the decision too.
+#[test]
+fn a_decision_and_a_learning_op_of_its_suggestion_both_pending_refuse_at_once() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+    decided_elsewhere(h.s.home.path(), "s1", json!({"action": "reject"}));
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(|| panic!("the action waited")));
+    });
+    let before = stored(h.s.home.path());
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let refused = h.act(approve).unwrap_err();
+    crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert_eq!(stored(h.s.home.path()), before, "nothing written");
+}
+
+/// #1131 item 40's second case: an action on a decided suggestion that waits for its learning op
+/// goes on once it is applied, the decision being the one the catch-up read before it waited: the
+/// owner's Undo of an approval retracts it.
+#[test]
+fn an_action_on_a_decided_suggestion_behind_its_learning_op_waits_and_goes_on() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    assert_eq!(h.act(approve).unwrap()["state"], "applied");
+    h.s.run();
+    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+    let entered = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = entered.clone();
+    crate::claims::WAITING.with(|hook| *hook.borrow_mut() = Some(Box::new(move || seen.set(true))));
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "undo"}))
+        .unwrap();
+    crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+    assert!(entered.get(), "the undo waited for the learning op");
+    assert_eq!(got["state"], "applied", "{got}");
+    assert_eq!(
+        h.yours(),
+        Vec::<(String, bool)>::new(),
+        "the approval retracted"
+    );
+}
+
+/// #1131 item 43: the route's catch-up lets go of raw.db, and of its shared hold on raw.lock, before
+/// it waits: a restore could take raw.lock then.
+#[test]
+fn the_catch_up_lets_go_of_raw_db_before_it_waits() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+    let free = std::rc::Rc::new(std::cell::Cell::new(None));
+    let _h = h.closed(|home| {
+        let (at, seen) = (home.to_owned(), free.clone());
+        crate::claims::WAITING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let lock = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(at.join("raw.lock"));
+                seen.set(Some(crate::worker::try_lock(&lock.unwrap()).is_ok()));
+            }))
+        });
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let _ = acted(home, approve);
+        crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+    });
+    assert_eq!(
+        free.get(),
+        Some(true),
+        "raw.lock could be taken in the catch-up's wait"
+    );
+}
+
+/// #1131 item 43: the route's catch-up creates no store and runs no schema before the token is asked
+/// again: a home whose knowledge.db is gone keeps it gone through a refused token.
+#[test]
+fn the_catch_up_creates_no_store_before_the_token_is_asked_again() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let _h = h.closed(|home| {
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(home.join(format!("knowledge.db{ext}")));
+        }
+        let body = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let body = serde_json::to_vec(&body).unwrap();
+        let saving = std::sync::Mutex::new(());
+        let refused = crate::settings::claims::rule(home, &saving, &|| false, &body).unwrap_err();
+        assert_eq!(refused.status, 401);
+        assert!(
+            !home.join("knowledge.db").exists(),
+            "no knowledge.db created"
+        );
+    });
+}
+
 /// The statement viewer B approves suggestion s1 with in the stale Undo tests.
 const B_RULE: &str = "Keep each commit to one change.";
 
@@ -1742,52 +1840,64 @@ fn a_stale_undo_behind_a_decision_made_during_the_wait_is_refused() {
     );
 }
 
-/// #1131 item 40's second case (Codex on the plan of C1'b): raw.db replaced while the catch-up
-/// waited, as a restore puts another file in place with the same device and the same op seqs,
-/// refuses the action as moved by the file alone: the suggestion's newest rule op reads the same.
+/// #1131 item 40's second case (Codex on the plan of C1'b and on C1'b): raw.db replaced while the
+/// catch-up waited, as a restore puts another file in place with the same device and the same op
+/// seqs, refuses the action as moved by the file alone, the suggestion's newest rule op reading the
+/// same, and before the read finds the suggestion gone from the store.
 #[test]
 fn a_rule_action_whose_raw_db_was_replaced_during_the_wait_is_refused() {
-    let mut h = Home::new();
-    suggested(&mut h);
-    learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
-    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-    let _h = h.closed(|home| {
-        let (at, seen) = (home.to_owned(), ran.clone());
-        crate::claims::WAITING.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move || {
-                use crate::executable::RESUMED_AS;
-                RESUMED_AS.with(|r| r.set(None));
-                crate::worker::run_once(&at).unwrap();
-                RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
-                let (raw, copy) = (at.join("raw.db"), at.join("raw.db.swap"));
-                let c = rusqlite::Connection::open(&raw).unwrap();
-                c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-                c.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
-                    .unwrap();
-                drop(c);
-                let file = crate::db::store_file(&copy);
-                let c = rusqlite::Connection::open(&copy).unwrap();
-                let bound = "UPDATE meta SET value = ?1 WHERE key = 'store_file'";
-                assert_eq!(c.execute(bound, [&file]).unwrap(), 1);
-                drop(c);
-                for ext in ["-wal", "-shm"] {
-                    let _ = std::fs::remove_file(at.join(format!("raw.db{ext}")));
-                }
-                std::fs::rename(&copy, &raw).unwrap();
-                seen.set(true);
-            }))
+    for gone in [false, true] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        learned_unapplied(&mut h, "s1", "Write the tests before the code, always.");
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _h = h.closed(|home| {
+            let (at, seen) = (home.to_owned(), ran.clone());
+            crate::claims::WAITING.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    use crate::executable::RESUMED_AS;
+                    RESUMED_AS.with(|r| r.set(None));
+                    crate::worker::run_once(&at).unwrap();
+                    RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+                    let (raw, copy) = (at.join("raw.db"), at.join("raw.db.swap"));
+                    let c = rusqlite::Connection::open(&raw).unwrap();
+                    c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+                    c.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+                        .unwrap();
+                    drop(c);
+                    let file = crate::db::store_file(&copy);
+                    let c = rusqlite::Connection::open(&copy).unwrap();
+                    let bound = "UPDATE meta SET value = ?1 WHERE key = 'store_file'";
+                    assert_eq!(c.execute(bound, [&file]).unwrap(), 1);
+                    drop(c);
+                    for ext in ["-wal", "-shm"] {
+                        let _ = std::fs::remove_file(at.join(format!("raw.db{ext}")));
+                    }
+                    std::fs::rename(&copy, &raw).unwrap();
+                    if gone {
+                        let k = crate::knowledge::open(&at).unwrap();
+                        let sql = "DELETE FROM my_work WHERE about = 's1'";
+                        assert!(k.execute(sql, []).unwrap() >= 1, "{sql}");
+                    }
+                    seen.set(true);
+                }))
+            });
+            // No pass of the wait's own: the hook's applied the learning op before the swap.
+            crate::executable::RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+            let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+            let got = waiting(std::time::Duration::from_millis(500), || {
+                acted(home, approve)
+            });
+            crate::executable::RESUMED_AS.with(|r| r.set(None));
+            assert!(
+                ran.get(),
+                "gone: {gone}: raw.db was replaced during the wait"
+            );
+            let refused = got.unwrap_err();
+            let answered = (refused.status, refused.code);
+            assert_eq!(answered, (409, "rule_moved"), "gone: {gone}");
         });
-        // No pass of the wait's own: the hook's applied the learning op before the swap.
-        crate::executable::RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
-        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
-        let got = waiting(std::time::Duration::from_millis(500), || {
-            acted(home, approve)
-        });
-        crate::executable::RESUMED_AS.with(|r| r.set(None));
-        assert!(ran.get(), "raw.db was replaced during the wait");
-        let refused = got.unwrap_err();
-        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
-    });
+    }
 }
 
 /// #1131 item 43: a restore holding raw.lock skips the route's catch-up at once, so the route waits
@@ -1801,10 +1911,13 @@ fn a_rule_action_skips_its_catch_up_while_a_restore_holds_raw_lock() {
         let config = crate::settings::config_lock_within(home, std::time::Duration::ZERO);
         let swap = crate::raw::lock_for_swap(home).unwrap();
         let held = std::rc::Rc::new(std::cell::RefCell::new(Some((config.unwrap(), swap))));
-        let (release, seen) = (held.clone(), ran.clone());
+        let reached = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (release, seen, at) = (held.clone(), ran.clone(), reached.clone());
+        let started = std::time::Instant::now();
         crate::settings::CONFIG_BLOCKED.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 seen.set(true);
+                at.set(Some(started.elapsed()));
                 release.borrow_mut().take();
             }))
         });
@@ -1814,6 +1927,13 @@ fn a_rule_action_skips_its_catch_up_while_a_restore_holds_raw_lock() {
         drop(held);
         assert!(ran.get(), "the route reached its own config.lock wait");
         assert_eq!(got.unwrap()["state"], "applied");
+        // The catch-up skipped within its second; raw.db's own open waits 2 s for raw.lock.
+        let reached = reached.get().unwrap();
+        let said = "the catch-up skipped the held raw.lock within its time";
+        assert!(
+            reached < std::time::Duration::from_millis(1800),
+            "{reached:?}: {said}"
+        );
     });
 }
 
@@ -1830,8 +1950,9 @@ fn a_rule_action_behind_a_restore_past_its_wait_is_unavailable() {
         let seen = ran.clone();
         crate::settings::CONFIG_BLOCKED
             .with(|hook| *hook.borrow_mut() = Some(Box::new(move || seen.set(true))));
-        let second = std::time::Duration::from_secs(1);
-        crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(second)));
+        // Past the catch-up's second for the held raw.lock, a second left for config.lock.
+        let budget = std::time::Duration::from_secs(2);
+        crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(budget)));
         let before = stored(home);
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         let got = acted(home, approve);
@@ -1858,18 +1979,27 @@ fn the_catch_ups_wait_comes_out_of_the_config_lock_wait() {
     let budget = std::time::Duration::from_secs(2);
     crate::settings::claims::ADMISSION.with(|wait| wait.set(Some(budget)));
     crate::executable::RESUMED_AS.with(|r| r.set(Some(crate::executable::Role::Viewer)));
+    let entered = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = entered.clone();
+    crate::claims::WAITING.with(|hook| *hook.borrow_mut() = Some(Box::new(move || seen.set(true))));
     let contending = crate::worker::contending();
     let started = std::time::Instant::now();
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
     let got = waiting(std::time::Duration::from_secs(1), || h.act(approve));
     let took = started.elapsed();
     drop(contending);
+    crate::claims::WAITING.with(|hook| hook.borrow_mut().take());
+    assert!(entered.get(), "the catch-up waited for the learning op");
     crate::executable::RESUMED_AS.with(|r| r.set(None));
     crate::settings::claims::ADMISSION.with(|wait| wait.set(None));
     drop(config);
     let refused = got.unwrap_err();
     assert_eq!((refused.status, refused.code), (503, "rule_unavailable"));
-    let said = "the catch-up's 1 s came out of the 2 s config.lock wait";
+    let said = "the catch-up's 1 s came out of the 2 s config.lock wait, and no more";
+    assert!(
+        took >= std::time::Duration::from_millis(1800),
+        "{took:?}: {said}"
+    );
     assert!(
         took < std::time::Duration::from_millis(2500),
         "{took:?}: {said}"

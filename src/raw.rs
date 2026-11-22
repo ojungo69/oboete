@@ -1309,7 +1309,8 @@ impl ReadOnly {
 
     /// #1131 item 46: of `device`'s `my_work` ops past `after`, read newest first, the newest rule
     /// op of suggestion `id` (a decision, `decides`) and its newest learning op (`learns`); `None`
-    /// when more than `limit` ops are past `after`, since one of those may lie beyond them.
+    /// when more than `limit` ops of any kind are past `after`, so that the scan reads at most that
+    /// many rows (Codex on C1'b) and a backlog is left to the read under the locks.
     pub(crate) fn suggestion_ops_after(
         &self,
         device: &str,
@@ -1317,21 +1318,21 @@ impl ReadOnly {
         id: &str,
         limit: usize,
     ) -> Result<Option<(Option<i64>, Option<i64>)>> {
+        let top: Option<i64> = (self.conn).query_row(
+            "SELECT MAX(op_seq) FROM ops WHERE device = ?1",
+            [device],
+            |r| r.get(0),
+        )?;
+        if top.unwrap_or(after).saturating_sub(after) > i64::try_from(limit)? {
+            return Ok(None);
+        }
         let mut s = self.conn.prepare(
             "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
-             ORDER BY op_seq DESC LIMIT ?3",
+             ORDER BY op_seq DESC",
         )?;
-        let mut rows = s.query(params![
-            device,
-            after,
-            i64::try_from(limit)?.saturating_add(1)
-        ])?;
-        let (mut decided, mut learned, mut read) = (None, None, 0_usize);
+        let mut rows = s.query(params![device, after])?;
+        let (mut decided, mut learned) = (None, None);
         while let Some(row) = rows.next()? {
-            read += 1;
-            if read > limit {
-                return Ok(None);
-            }
             let (seq, body): (i64, String) = (row.get(0)?, row.get(1)?);
             if decided.is_none() && decides("my_work", &body, None, Some(id)) {
                 decided = Some(seq);
