@@ -29,7 +29,7 @@ regex = "1"
 # already in the tree, under regex.
 regex-syntax = "0.8"
 rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-io"] }
-rusqlite = { version = "0.42.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 ryu-js = "1.0.3"
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -66,5 +66,5 @@ strip = true
 
 [dev-dependencies]
 # The commit hook of M2's crash harness (src/crash.rs), in test builds only.
-rusqlite = { version = "0.42.0", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
 tempfile = "3"
