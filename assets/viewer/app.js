@@ -2836,6 +2836,7 @@ const TEXT = {
   preference_repo_masked: ['That repository’s name holds a value the privacy rules hide, so no rule is kept for it.', 'そのリポジトリ名には伏せ字の対象が含まれるので、規則は保存しません。'],
   rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
   rule_pending: ['That decision is still being applied. The page reads again shortly.', 'その判断はまだ反映中です。少ししてからページを読み直します。'],
+  rule_moved: ['The records changed while this decision was being saved, so nothing was saved. The page reads again: look it over, then decide again.', '判断を保存する間に記録が変わったため、保存しませんでした。ページを読み直しますので、内容を確かめてからもう一度判断してください。'],
   rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
   my_work_stands: ['Where it stands', '現在の状況'],

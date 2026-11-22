@@ -399,7 +399,7 @@ impl OwnerRefusal {
         }
     }
 
-    fn unavailable(cause: impl Into<anyhow::Error>) -> Self {
+    pub(crate) fn unavailable(cause: impl Into<anyhow::Error>) -> Self {
         Self {
             code: OwnerRefusalCode::Unavailable,
             cause: cause.into(),
@@ -848,17 +848,7 @@ impl Directive {
         let (c, quote) = directive_text(&settings, text, repo)?;
         let raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
         let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
-        if let (Some(given), Some(label)) = (repo, &c.event.repo) {
-            // #743: a name the gate masks could stand for another repository's, and so could its
-            // directives' session (#745).
-            if label != given || c.event.session != format!("owner:{given}") {
-                return Err(OwnerRefusal {
-                    code: OwnerRefusalCode::PreferenceRepoMasked,
-                    cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),
-                });
-            }
-            repo_refusal(&raw, &k, &settings, (given, label))?;
-        }
+        repo_checked(&raw, &k, &settings, &c, repo)?;
         Ok(Self {
             settings,
             captured: c,
@@ -867,6 +857,31 @@ impl Directive {
             k,
         })
     }
+}
+
+/// What `Directive::checked` checks of a directive `c` of one repository's, `repo`, on handles the
+/// caller holds (#1131 items 3 and 4: the main page's approval checks it on the handles it reads and
+/// writes with): its name as the gate leaves it, and the repository as records and the exclusion
+/// list name it (`repo_refusal`). Nothing for a directive of every repository.
+pub(crate) fn repo_checked(
+    raw: &crate::raw::Raw,
+    k: &Connection,
+    settings: &crate::capture::Settings,
+    c: &crate::capture::Captured,
+    repo: Option<&str>,
+) -> std::result::Result<(), OwnerRefusal> {
+    let (Some(given), Some(label)) = (repo, &c.event.repo) else {
+        return Ok(());
+    };
+    // #743: a name the gate masks could stand for another repository's, and so could its
+    // directives' session (#745).
+    if label != given || c.event.session != format!("owner:{given}") {
+        return Err(OwnerRefusal {
+            code: OwnerRefusalCode::PreferenceRepoMasked,
+            cause: anyhow::anyhow!("the repository's name holds a value the gate masks"),
+        });
+    }
+    repo_refusal(raw, k, settings, (given, label))
 }
 
 /// What `Directive::checked` checks of `text` alone (#1083's R2b: the work-view's approval checks it
@@ -998,31 +1013,6 @@ pub(crate) struct Approved {
     pub decision: i64,
 }
 
-/// #1083's R2b: suggestion `id` approved as the owner's preference of `text`, of every repository
-/// or of `repo`. Its directive, its preference and its decision, which names the preference, are
-/// written in one transaction (`approve_append`), checked as `pref add` checks a directive and as
-/// `append_ops` checks ops: an approval is recorded whole or not at all. Applied once the claims
-/// consumer kept the preference and the my_work consumer the decision, within one wait
-/// (`approve_receipt`).
-pub(crate) fn approve_recorded(
-    home: &std::path::Path,
-    id: &str,
-    text: &str,
-    repo: Option<&str>,
-) -> std::result::Result<OwnerReceipt, OwnerRefusal> {
-    let Directive {
-        settings,
-        captured,
-        quote,
-        mut raw,
-        k,
-    } = Directive::checked(home, text, repo)?;
-    let device = raw.device().to_owned();
-    let approved = approve_append(&mut raw, &settings, (&captured, &quote), id, None);
-    drop(raw);
-    Ok(approve_receipt(home, &k, &device, id, &approved?))
-}
-
 /// An approval's directive (`c`, whose whole text is `quote`), its preference and its decision of
 /// suggestion `id`, appended in one transaction on `raw` (`Raw::append_event_with_ops`), gated as
 /// `pref add` gates its preference; for the work-view's approval, against `ruled`'s fence for its
@@ -1152,43 +1142,29 @@ pub(crate) fn approve_receipt(
     }
 }
 
-/// What an undo of an approval did (#1083's R2b).
-pub(crate) enum Undone {
-    /// Its retraction and its decision recorded in one append, or the decision alone where the
-    /// preference is forgotten: whether both are applied and kept.
-    Recorded(bool),
-    /// The preference is not in knowledge.db, nor forgotten (not derived yet, or its derivation
-    /// removed by a mask before a purge writes it again), and its directive is not gone for good
-    /// (`Raw::append_undo_of_lost_approval`): nothing is recorded.
-    Waiting,
-}
-
 /// #1083's R2b: the approval of suggestion `id`, whose preference is `uid`, undone: the preference
 /// retracted and the decision undone, in one append, so neither is kept without the other
-/// (`undo_ops`, `undo_receipt`). The decision alone only on raw.db's proof that the preference is
-/// forgotten for good: one absent for another reason would be active again with its approval
-/// undone. #1131 item 9: where knowledge.db has no anchor because the approval's directive is gone
-/// for good, the retraction is anchored where the directive stood, checked in the write
-/// (`Raw::append_undo_of_lost_approval`, `decision` the approval's rule op): the claims consumer
-/// keeps it, and a restore that brings the directive back derives the preference retracted.
-pub(crate) fn undo_approval_recorded(
-    home: &std::path::Path,
-    id: &str,
-    uid: &str,
-    decision: i64,
-) -> std::result::Result<Undone, OwnerRefusal> {
-    let rules = crate::capture::Settings::load(home)
-        .map_err(OwnerRefusal::unavailable)?
-        .rules;
-    // raw.db first, as every reader of knowledge.db holds it.
-    let mut raw = crate::raw::open(home).map_err(OwnerRefusal::unavailable)?;
-    let k = crate::knowledge::open(home).map_err(OwnerRefusal::unavailable)?;
-    schema(&k).map_err(OwnerRefusal::unavailable)?;
-    let ops = undo_ops(&raw, &k, id, uid).map_err(OwnerRefusal::unavailable)?;
+/// (`undo_ops` read them, `undo_receipt` proves them). The decision alone only on raw.db's proof
+/// that the preference is forgotten for good: one absent for another reason would be active again
+/// with its approval undone. #1131 item 9: where knowledge.db has no anchor (`ops` none) because the
+/// approval's directive is gone for good, the retraction is anchored where the directive stood,
+/// checked in the write (`Raw::append_undo_of_lost_approval`, `decision` the approval's rule op):
+/// the claims consumer keeps it. #1131 items 3, 4 and 7: appended on the handle the decision read
+/// with, against `ruled`'s fence (`Raw::append_ops_ruled`), its moving an error that is
+/// `OpsMoved`. None, and nothing written, while the lost approval's checks refuse it.
+pub(crate) fn undo_append(
+    raw: &mut crate::raw::Raw,
+    rules: &crate::redact::Rules,
+    (id, uid, decision): (&str, &str, i64),
+    ops: Option<Vec<(crate::raw::OpKind, serde_json::Value)>>,
+    (fence, subject): (&crate::raw::RuleFence, &crate::raw::Subject<'_>),
+) -> std::result::Result<Option<Vec<i64>>, OwnerRefusal> {
     // Owner decision 43, as every correction is appended.
-    raw.gates_with(&rules);
-    let seqs = match ops {
-        Some(ops) => raw.append_ops(&ops).map_err(OwnerRefusal::unavailable)?,
+    raw.gates_with(rules);
+    match ops {
+        Some(ops) => (raw.append_ops_ruled(&ops, fence, subject))
+            .map(Some)
+            .map_err(OwnerRefusal::unavailable),
         None => {
             let made = |device: &str, seq: i64| {
                 let anchor = Anchor {
@@ -1201,22 +1177,10 @@ pub(crate) fn undo_approval_recorded(
             if let Some(hook) = LOST_UNDO.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
-            match raw.append_undo_of_lost_approval((decision, id, uid), made) {
-                Ok(Some(seqs)) => seqs,
-                Ok(None) => return Ok(Undone::Waiting),
-                Err(e) => return Err(OwnerRefusal::unavailable(e)),
-            }
+            (raw.append_undo_of_lost_approval((decision, id, uid), made, (fence, subject)))
+                .map_err(OwnerRefusal::unavailable)
         }
-    };
-    let device = raw.device().to_owned();
-    drop(raw);
-    Ok(Undone::Recorded(undo_receipt(
-        home,
-        &k,
-        &device,
-        (id, uid),
-        &seqs,
-    )))
+    }
 }
 
 /// What an undo of the approval of suggestion `id`, whose preference is `uid`, appends, read on

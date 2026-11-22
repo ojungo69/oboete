@@ -456,8 +456,11 @@ pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &st
 }
 
 /// R3: the owner's action on suggestion `id`, a `rule` op holding `fields` (no text: the action and
-/// an approve's preference uid). Whether the my_work consumer applied it within 10 seconds; an
-/// error when nothing was recorded.
+/// an approve's preference uid), appended with no rule fence. Whether the my_work consumer applied
+/// it within 10 seconds; an error when nothing was recorded. The settings route writes through the
+/// fence since #1131 items 3, 4 and 7; tests write an approval as it was written before #1130 with
+/// this, its preference in another batch.
+#[cfg(test)]
 pub(crate) fn record(home: &std::path::Path, id: &str, fields: Value) -> Result<bool> {
     crate::my_work_ops::record(home, RULE, vec![(id.to_owned(), fields)])
 }

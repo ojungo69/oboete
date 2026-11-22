@@ -10615,6 +10615,76 @@ fn oboetes_page_mark_finished_whose_token_is_replaced_records_nothing() {
     assert_eq!(stops_and_kept(&s), (stops, kept));
 }
 
+/// #1131 items 3, 4 and 7 (Codex on the plan of #1131 C1): oboete's page's My Rules action asks its
+/// token again once it has config.lock, as Mark finished does: a token replaced while it waits for
+/// the lock is 401, and the suggestion it would reject stays undecided; the token the page holds
+/// now rejects it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_my_rules_action_whose_token_is_replaced_records_nothing() {
+    let (mut s, v, _place) = mark_fixture(Token::File);
+    let fields = json!({"statement": "Use tabs.", "seen": 2, "requests": ["g:s10", "g:s11"],
+        "quotes": [{"text": "Quoted for s1.", "request": "g:s10", "at": crate::db::now_ms()}]});
+    let op = crate::my_work_ops::MyWorkOp {
+        job: crate::my_work_rules::NAME.into(),
+        about: "s1".into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: crate::my_work_ops::Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = (
+        crate::raw::OpKind::MyWork,
+        serde_json::to_value(op).unwrap(),
+    );
+    s.raw.append_ops(&[op]).unwrap();
+    s.run();
+    let home = s.home.path().to_owned();
+    write_token(&home).unwrap();
+    let counts = |home: &Path| -> (i64, i64) {
+        let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        raw.query_row(
+            "SELECT (SELECT COUNT(*) FROM ops), (SELECT COUNT(*) FROM ops WHERE type = 'my_work'
+               AND json_extract(body, '$.job') = 'rule' AND json_extract(body, '$.about') = 's1')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let before = counts(&home);
+    assert_eq!(before.1, 0);
+    let reject = br#"{"suggestion":"s1","action":"reject"}"#;
+    let given = file_token(&home).unwrap();
+    let (status, answer) = replaced_while_it_waits(&home, || post_rule_as(&v, reject, &given));
+    assert_eq!((status, answer.as_str()), (401, "missing or wrong token"));
+    assert_eq!(counts(&home), before, "nothing recorded");
+    let (status, answer) = post_rule_as(&v, reject, &file_token(&home).unwrap());
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(counts(&home).1, 1, "the page's token now rejects it");
+}
+
+/// oboete's page's My Rules action `body`, with `token`: its status and its body's text.
+#[cfg(target_os = "linux")]
+fn post_rule_as(v: &Viewer, body: &[u8], token: &str) -> (u16, String) {
+    let len = body.len().to_string();
+    let h = [
+        HOST,
+        ("Origin", "http://127.0.0.1:4321"),
+        ("X-Oboete-Token", token),
+        ("Content-Type", "application/json"),
+        ("Content-Length", len.as_str()),
+    ];
+    let r = match v.head("POST", "/api/my-rules", &h) {
+        Head::Body(_, save, given, site) => v.take(save, body, &given, site),
+        Head::Answer(r) => r,
+        Head::File(_) => panic!("no link"),
+    };
+    (r.status, String::from_utf8_lossy(&r.body).into_owned())
+}
+
 /// What `post` answers when its token is replaced while it waits for config.lock, as by a new
 /// token made meanwhile: the test holds the lock, replaces `home`'s token once the request waits
 /// for it, then lets go.

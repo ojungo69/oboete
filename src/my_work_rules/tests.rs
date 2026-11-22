@@ -65,7 +65,12 @@ impl Home {
     /// Slice 8: the owner's action on a suggestion, as the page posts it.
     fn act(&self, body: Value) -> std::result::Result<Value, crate::settings::Refusal> {
         let body = serde_json::to_vec(&body).unwrap();
-        crate::settings::claims::rule(self.s.home.path(), &std::sync::Mutex::new(()), &body)
+        crate::settings::claims::rule(
+            self.s.home.path(),
+            &std::sync::Mutex::new(()),
+            &|| true,
+            &body,
+        )
     }
 
     fn page(&self) -> Value {
@@ -822,11 +827,13 @@ fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
     let device = h.s.raw.device().to_owned();
     crate::claims::LOST_UNDO.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
-            let saving = std::sync::Mutex::new(());
-            for body in [UNDO, APPROVE] {
-                let got = crate::settings::claims::rule(&home, &saving, body.as_bytes()).unwrap();
-                assert_eq!(got["state"], "applied", "{body}: {got}");
-            }
+            // Another writer's undo and approval: the route would wait for this one's config.lock.
+            decided_elsewhere(&home, "s1", json!({"action": "undo"}));
+            let settings = crate::capture::Settings::load(&home).unwrap();
+            let (c, quote) = crate::claims::directive_text(&settings, RULE_TEXT, None).unwrap();
+            let mut raw = crate::raw::open(&home).unwrap();
+            crate::claims::approve_append(&mut raw, &settings, (&c, &quote), "s1", None).unwrap();
+            drop(raw);
             let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
             seen.set(
                 raw.query_row(
@@ -839,7 +846,8 @@ fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
         }))
     });
     let refused = h.act(serde_json::from_str(UNDO).unwrap()).unwrap_err();
-    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+    h.s.run();
     assert!(top.get() > 0);
     assert_eq!(
         ops_past(&h, top.get()),
@@ -848,6 +856,470 @@ fn an_undo_of_a_lost_approval_refuses_after_another_undo_and_approval() {
     );
     assert_eq!(h.waiting(), Vec::<String>::new(), "the new approval stands");
     assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// A rule decision of suggestion `id` holding `fields`, appended on a raw handle of its own, as
+/// another writer appends one (it waits for no config.lock and no consumer).
+fn decided_elsewhere(home: &std::path::Path, id: &str, fields: Value) {
+    let ops = crate::my_work_ops::bodies(RULE, vec![(id.to_owned(), fields)]).unwrap();
+    crate::raw::open(home).unwrap().append_ops(&ops).unwrap();
+}
+
+/// How many records, ledger rows and ops raw.db holds.
+fn stored(home: &std::path::Path) -> (i64, i64, i64) {
+    let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    raw.query_row(
+        "SELECT (SELECT COUNT(*) FROM records), (SELECT COUNT(*) FROM ledger),
+                (SELECT COUNT(*) FROM ops)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+/// The main page's rule action `body` on `home`, its token the page's.
+fn acted(
+    home: &std::path::Path,
+    body: Value,
+) -> std::result::Result<Value, crate::settings::Refusal> {
+    let body = serde_json::to_vec(&body).unwrap();
+    crate::settings::claims::rule(home, &std::sync::Mutex::new(()), &|| true, &body)
+}
+
+/// `f` as the main page's rule action's `CHECKED` hook: run once it read and prepared its write.
+fn on_checked(f: impl FnOnce() + 'static) {
+    crate::settings::claims::CHECKED.with(|hook| *hook.borrow_mut() = Some(Box::new(f)));
+}
+
+/// An event of `session`'s, a prompt in `repo`, appended on a raw handle of its own.
+fn recorded_in(home: &std::path::Path, session: &str, repo: &str) {
+    let e = crate::raw::Event {
+        kind: "prompt".into(),
+        session: session.into(),
+        repo: Some(repo.into()),
+        ts: crate::db::now_ms(),
+        ..crate::raw::test_event(&json!({"prompt": "Hello."}).to_string())
+    };
+    crate::raw::open(home).unwrap().append(&e).unwrap();
+}
+
+/// #1131 items 3 and 7: the main page's rule action holds, from before its read until its write,
+/// config.lock (a save of the redaction rules waits), the dispatch hold (a purge, which rewrites ops
+/// in place, waits) and raw.db's shared hold (a restore cannot swap the store it writes to): each
+/// is held in its read and again once it prepared its write.
+#[test]
+fn a_rule_action_holds_its_locks_until_its_write() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let h = h.closed(|home| {
+        let reading = held_probe(home, held.clone());
+        crate::settings::claims::BETWEEN_READS
+            .with(|hook| *hook.borrow_mut() = Some(Box::new(reading)));
+        on_checked(held_probe(home, held.clone()));
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+    });
+    let all = [true; 6];
+    let said = "config.lock, dispatch, raw.lock: in the read, then before the write";
+    assert_eq!(*held.borrow(), all, "{said}");
+    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// A hook that records, into `seen`, whether config.lock, an exclusive dispatch hold and an
+/// exclusive raw.lock of `home` are each refused now (true: held by someone).
+fn held_probe(
+    home: &std::path::Path,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+) -> impl FnOnce() + 'static {
+    let at = home.to_owned();
+    move || {
+        let wait = std::time::Duration::ZERO;
+        let config = crate::settings::config_lock_within(&at, wait).unwrap();
+        let dispatch = crate::dispatch::exclusive_within(&at, wait);
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at.join("raw.lock"));
+        let swap = lock.unwrap().try_lock();
+        let held = [config.is_none(), dispatch.is_err(), swap.is_err()];
+        seen.borrow_mut().extend(held);
+    }
+}
+
+/// #1131 item 4: a decision of the suggestion recorded since the main page's rule action read it
+/// refuses the action's write (`rule_moved`), with nothing written: an approval, a rejection, an
+/// approval's undo, and the undo of an approval whose preference is forgotten.
+#[test]
+fn a_decision_since_its_read_refuses_a_rule_actions_write() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    for (body, approved_first, forgotten) in [
+        (approve.clone(), false, false),
+        (
+            json!({"suggestion": "s1", "action": "reject"}),
+            false,
+            false,
+        ),
+        (undo.clone(), true, false),
+        (undo, true, true),
+    ] {
+        let mut h = Home::new();
+        suggested(&mut h);
+        if approved_first {
+            let got = h.act(approve.clone()).unwrap();
+            if forgotten {
+                let uid = got["uid"].as_str().unwrap().to_owned();
+                let target = crate::forget::Target::Uid { uid };
+                let home = h.s.home.path();
+                crate::forget::start(home, &crate::forget::preview(home, target).unwrap()).unwrap();
+            }
+            h.s.run();
+        }
+        let _h = h.closed(|home| {
+            let at = home.to_owned();
+            on_checked(move || decided_elsewhere(&at, "s1", json!({"action": "reject"})));
+            let before = stored(home);
+            let refused = acted(home, body.clone()).unwrap_err();
+            assert_eq!(
+                (refused.status, refused.code),
+                (409, "rule_moved"),
+                "{body}"
+            );
+            let after = stored(home);
+            assert_eq!(
+                after,
+                (before.0, before.1, before.2 + 1),
+                "the other decision alone: {body}"
+            );
+        });
+    }
+}
+
+/// #1131 item 7: an exclusion since the main page's approval read its suggestion, or a first event
+/// of a session in a repository excluded at its read, refuses the approval (`rule_moved`), with
+/// nothing written: the suggestion's source may be excluded with it.
+#[test]
+fn an_exclusion_since_its_read_refuses_a_rule_actions_write() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let mut h = Home::new();
+    suggested(&mut h);
+    let h = h.closed(|home| {
+        let at = home.to_owned();
+        on_checked(move || {
+            let op = json!({"repo": "github.com/o/elsewhere", "undo": false});
+            let ops = [(OpKind::Exclusion, op)];
+            crate::raw::open(&at).unwrap().append_ops(&ops).unwrap();
+        });
+        let before = stored(home);
+        let refused = acted(home, approve.clone()).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0, before.1, before.2 + 1),
+            "the exclusion alone"
+        );
+    });
+    drop(h);
+    let mut h = Home::new();
+    suggested(&mut h);
+    h.s.raw.exclude("github.com/o/secret", false).unwrap();
+    h.s.run();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        on_checked(move || recorded_in(&at, "a newcomer", "github.com/o/secret"));
+        let before = stored(home);
+        let refused = acted(home, approve.clone()).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0 + 1, before.1, before.2),
+            "the event alone"
+        );
+    });
+}
+
+/// #1131 item 7: a forget between the main page's read and its write cannot register, since the
+/// dispatch hold keeps it out (`a_rule_action_holds_its_locks_until_its_write`); a tombstone that
+/// lands there anyway, as one written without that hold would, refuses the approval
+/// (`rule_moved`), with nothing written: the suggestion's source may be what it hides.
+#[test]
+fn a_tombstone_since_its_read_refuses_a_rule_actions_write() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let seq = h.s.said(
+        "learned",
+        "github.com/o/open",
+        crate::db::now_ms(),
+        "Hello.",
+    );
+    h.s.run();
+    let device = h.s.raw.device().to_owned();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        on_checked(move || {
+            let target = crate::raw::Target::Record { device, seq };
+            crate::raw::open(&at)
+                .unwrap()
+                .append_tombstone(target)
+                .unwrap();
+        });
+        let before = stored(home);
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let refused = acted(home, approve).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0 + 1, before.1, before.2),
+            "the tombstone alone"
+        );
+    });
+}
+
+/// #1131 C1 (Codex on its plan): the main page's rule action answers as it did before its locks
+/// when the settings cannot be read: a suggestion it does not show is 404, a rejection 503
+/// `rule_unavailable`, an approval and an approval's undo 503 `claim_unavailable`, each with
+/// nothing written.
+#[test]
+fn a_rule_action_whose_settings_cannot_be_read_answers_as_before() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let home = h.s.home.path().to_owned();
+    let config = home.join("config.toml");
+    let kept = std::fs::read(&config).ok();
+    let broken = || std::fs::write(&config, "invalid = [").unwrap();
+    let mended = || match &kept {
+        Some(kept) => std::fs::write(&config, kept).unwrap(),
+        None => std::fs::remove_file(&config).unwrap(),
+    };
+    let answered = |body: Value| {
+        let before = stored(&home);
+        let refused = acted(&home, body.clone()).unwrap_err();
+        assert_eq!(stored(&home), before, "nothing written: {body}");
+        (refused.status, refused.code)
+    };
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    broken();
+    let missing = json!({"suggestion": "s9", "action": "reject"});
+    assert_eq!(answered(missing), (404, "rule_not_found"));
+    let reject = json!({"suggestion": "s1", "action": "reject"});
+    assert_eq!(answered(reject), (503, "rule_unavailable"));
+    assert_eq!(answered(approve.clone()), (503, "claim_unavailable"));
+    mended();
+    acted(&home, approve).unwrap();
+    h.s.run();
+    broken();
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    assert_eq!(answered(undo), (503, "claim_unavailable"));
+    mended();
+}
+
+/// #1131 item 7: a session excluded already at the main page's fence was the read's to judge: its
+/// later event in the excluded repository leaves the approval be.
+#[test]
+fn an_event_of_a_session_excluded_at_its_fence_leaves_a_rule_action_be() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    h.s.raw.exclude("github.com/o/secret", false).unwrap();
+    h.s.said(
+        "old-timer",
+        "github.com/o/secret",
+        crate::db::now_ms(),
+        "Hello.",
+    );
+    h.s.run();
+    let h = h.closed(|home| {
+        let at = home.to_owned();
+        on_checked(move || recorded_in(&at, "old-timer", "github.com/o/secret"));
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+        let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let events: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE type = 'event' AND session = 'old-timer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 2, "its event since the read landed");
+    });
+    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+}
+
+/// #1131 items 4 and 7: an undo's fence names its preference: a correction of the preference since
+/// the main page's undo read it refuses the undo, with nothing written but the correction.
+#[test]
+fn a_correction_of_its_preference_since_its_read_refuses_an_undo() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let uid = h.act(approve).unwrap()["uid"].as_str().unwrap().to_owned();
+    h.s.run();
+    let [seq] = directive_seqs(&h)[..] else {
+        panic!("one directive");
+    };
+    // A mute as the claim page writes one, anchored at the preference's directive.
+    let mute = crate::claims::CorrectionOp {
+        uid,
+        anchor: crate::claims::Anchor {
+            device: h.s.raw.device().to_owned(),
+            seq,
+        },
+        status: None,
+        body: None,
+        muted: Some(true),
+    };
+    let mute = serde_json::to_value(mute).unwrap();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        on_checked(move || {
+            let ops = [(OpKind::Correction, mute)];
+            crate::raw::open(&at).unwrap().append_ops(&ops).unwrap();
+        });
+        let before = stored(home);
+        let undo = json!({"suggestion": "s1", "action": "undo"});
+        let refused = acted(home, undo).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0, before.1, before.2 + 1),
+            "the correction alone"
+        );
+    });
+}
+
+/// #1131 items 7 and 10: a session's first event since the main page's read under a label first
+/// recorded then, which a repository never recorded may be (a mask in it), refuses its approval,
+/// with nothing written but the event.
+#[test]
+fn a_first_event_under_a_masked_label_since_its_read_refuses_a_rule_action() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    (h.s.raw)
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    h.s.run();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+        on_checked(move || recorded_in(&at, "learned", &masked));
+        let before = stored(home);
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let refused = acted(home, approve).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0 + 1, before.1, before.2),
+            "the event alone"
+        );
+    });
+}
+
+/// #1131 C1: the main page's rule action lets go of its locks before its receipt waits, which can
+/// run the worker: config.lock, an exclusive dispatch hold and an exclusive raw.lock can each be
+/// taken before the wait's first pass and while the receipt proves the approval.
+#[test]
+fn a_rule_actions_receipt_holds_none_of_its_locks() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _h = h.closed(|home| {
+        let waiting = held_probe(home, held.clone());
+        crate::claims::WAITING.with(|hook| *hook.borrow_mut() = Some(Box::new(waiting)));
+        let proving = held_probe(home, held.clone());
+        crate::claims::PROVING.with(|hook| *hook.borrow_mut() = Some(Box::new(proving)));
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+    });
+    let said = "config.lock, dispatch, raw.lock: in the wait, then in the proof";
+    assert_eq!(*held.borrow(), [false; 6], "{said}");
+}
+
+/// #1131 item 9: the undo of a lost approval checks itself that no decision of its suggestion is
+/// newer than the approval it undoes: a fence taken after another writer's undo and approval does
+/// not see them, and the append still refuses, making and writing nothing.
+#[test]
+fn a_lost_approvals_undo_refuses_a_newer_decision_its_fence_did_not_see() {
+    let (mut h, uid, _at, _segment, _saved) = lost_directive();
+    let home = h.s.home.path().to_owned();
+    let raw = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    let decision: i64 = raw
+        .query_row(
+            "SELECT MAX(op_seq) FROM ops WHERE type = 'my_work'
+               AND json_extract(body, '$.job') = ?1 AND json_extract(body, '$.about') = 's1'",
+            [RULE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(raw);
+    decided_elsewhere(&home, "s1", json!({"action": "undo"}));
+    let settings = crate::capture::Settings::load(&home).unwrap();
+    let (c, quote) = crate::claims::directive_text(&settings, RULE_TEXT, None).unwrap();
+    crate::claims::approve_append(&mut h.s.raw, &settings, (&c, &quote), "s1", None).unwrap();
+    let fence = h.s.raw.rule_fence().unwrap();
+    let subject = crate::raw::Subject {
+        uid: Some(uid.as_str()),
+        suggestion: Some("s1"),
+        sources: None,
+    };
+    let made = std::cell::Cell::new(false);
+    let ops = |_: &str, _: i64| {
+        made.set(true);
+        Ok(Vec::new())
+    };
+    let undone = (decision, "s1", uid.as_str());
+    let got = (h.s.raw)
+        .append_undo_of_lost_approval(undone, ops, (&fence, &subject))
+        .unwrap();
+    assert_eq!(got, None, "nothing written");
+    assert!(!made.get(), "no ops made");
+}
+
+/// #1131 items 7 and 9: the undo of an approval whose directive a restore lost is checked against
+/// the rule fence too: a first event of a session in a repository excluded at its read refuses it
+/// (`rule_moved`), with nothing written (Codex on the plan of #1131 C1).
+#[test]
+fn a_lost_approvals_undo_is_refused_by_an_event_since_its_read() {
+    let (mut h, _uid, _at, _segment, _saved) = lost_directive();
+    h.s.raw.exclude("github.com/o/secret", false).unwrap();
+    h.s.run();
+    let home = h.s.home.path().to_owned();
+    crate::claims::LOST_UNDO.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            recorded_in(&home, "a newcomer", "github.com/o/secret");
+        }))
+    });
+    let before = stored(h.s.home.path());
+    let refused = h.act(serde_json::from_str(UNDO).unwrap()).unwrap_err();
+    assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+    let after = stored(h.s.home.path());
+    assert_eq!(after, (before.0 + 1, before.1, before.2), "the event alone");
+}
+
+/// #1131 C1: the main page's rule action asks for its token again once it holds config.lock: a
+/// token replaced while it waited for the lock is refused, with nothing written.
+#[test]
+fn a_rule_action_whose_token_changed_while_it_waited_is_refused() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let home = h.s.home.path().to_owned();
+    let lock = crate::settings::config_lock_within(&home, std::time::Duration::ZERO);
+    let lock = std::rc::Rc::new(std::cell::RefCell::new(lock.unwrap()));
+    let revoked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (release, revoke) = (lock.clone(), revoked.clone());
+    crate::settings::CONFIG_BLOCKED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            revoke.set(true);
+            release.borrow_mut().take();
+        }))
+    });
+    let before = stored(&home);
+    let body = serde_json::to_vec(&json!({"suggestion": "s1", "action": "reject"})).unwrap();
+    let authorized = || !revoked.get();
+    let saving = std::sync::Mutex::new(());
+    let refused = crate::settings::claims::rule(&home, &saving, &authorized, &body).unwrap_err();
+    assert_eq!(refused.status, 401);
+    assert!(revoked.get(), "the lock was waited for");
+    assert_eq!(stored(&home), before, "nothing written");
 }
 
 /// #1131 item 9: an undo with no anchor in knowledge.db still waits where the directive is not gone

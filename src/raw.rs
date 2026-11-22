@@ -5237,7 +5237,10 @@ impl Raw {
 
     /// #1131 item 9: the undo of an approval whose directive is gone for good, checked and appended
     /// in one transaction. The approval is this device's rule op `decision` of suggestion `id`,
-    /// whose preference is `uid`. Three checks, all inside the write:
+    /// whose preference is `uid`. Before the transaction, the handle is the file `fence` read; inside
+    /// it, nothing `fence` reads for `subject` moved (`fence_moved`), as `append_ops_ruled` checks a
+    /// rule's write (#1131 items 3, 4 and 7): else the error is `OpsMoved`. Then three checks, inside
+    /// the write too:
     /// - no rule op of `id` on this device is newer: a second viewer's undo and approval since the
     ///   read refuse it;
     /// - a claim op of that rule op's batch derives `uid`: only an approval's batch holds one
@@ -5248,16 +5251,23 @@ impl Raw {
     ///   later restore may.
     ///
     /// Then the ops `ops` makes of that (device, seq), checked as `append_ops` checks them. None,
-    /// and nothing written, when a check fails.
+    /// and nothing written, when one of the three checks fails.
     pub(crate) fn append_undo_of_lost_approval(
         &mut self,
         (decision, id, uid): (i64, &str, &str),
         ops: impl FnOnce(&str, i64) -> Result<Vec<(OpKind, serde_json::Value)>>,
+        (fence, subject): (&RuleFence, &Subject<'_>),
     ) -> Result<Option<Vec<i64>>> {
         use rusqlite::OptionalExtension;
+        if fence.file.is_none() || self.file_identity() != fence.file.as_deref() {
+            return Err(OpsMoved.into());
+        }
         let rule = crate::my_work_rules::RULE;
         let tx = begin_batch(&self.conn, Duration::ZERO)?;
         format_of(&tx)?;
+        if fence_moved(&tx, &self.device, fence, subject)? {
+            return Err(OpsMoved.into());
+        }
         let newer: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
                AND json_extract(body, '$.job') = ?3 AND json_extract(body, '$.about') = ?4)",
