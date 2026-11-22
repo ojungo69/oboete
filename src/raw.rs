@@ -1302,6 +1302,51 @@ pub(crate) struct ReadOnly {
 }
 
 impl ReadOnly {
+    /// The raw.db file this handle read (`db::store_file`), as `Raw::file_identity` names one.
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    /// #1131 item 46: of `device`'s `my_work` ops past `after`, read newest first, the newest rule
+    /// op of suggestion `id` (a decision, `decides`) and its newest learning op (`learns`); `None`
+    /// when more than `limit` ops of any kind are past `after`, so that the scan reads at most that
+    /// many rows (Codex on C1'b) and a backlog is left to the read under the locks.
+    pub(crate) fn suggestion_ops_after(
+        &self,
+        device: &str,
+        after: i64,
+        id: &str,
+        limit: usize,
+    ) -> Result<Option<(Option<i64>, Option<i64>)>> {
+        let top: Option<i64> = (self.conn).query_row(
+            "SELECT MAX(op_seq) FROM ops WHERE device = ?1",
+            [device],
+            |r| r.get(0),
+        )?;
+        if top.unwrap_or(after).saturating_sub(after) > i64::try_from(limit)? {
+            return Ok(None);
+        }
+        let mut s = self.conn.prepare(
+            "SELECT op_seq, body FROM ops WHERE device = ?1 AND op_seq > ?2 AND type = 'my_work'
+             ORDER BY op_seq DESC",
+        )?;
+        let mut rows = s.query(params![device, after])?;
+        let (mut decided, mut learned) = (None, None);
+        while let Some(row) = rows.next()? {
+            let (seq, body): (i64, String) = (row.get(0)?, row.get(1)?);
+            if decided.is_none() && decides("my_work", &body, None, Some(id)) {
+                decided = Some(seq);
+            }
+            if learned.is_none() && learns("my_work", &body, id) {
+                learned = Some(seq);
+            }
+            if decided.is_some() && learned.is_some() {
+                break;
+            }
+        }
+        Ok(Some((decided, learned)))
+    }
+
     /// Milestone 5 D5: whether `uid` is forgotten.
     pub(crate) fn forgotten(&self, uid: &str) -> Result<bool> {
         forgotten_uid(&self.conn, uid)
@@ -5231,9 +5276,10 @@ impl Raw {
     }
 
     /// `append_event_with_ops` for a rule's write on `subject` (#1083's R2b: an approval from either
-    /// page, `work_view::decide` and `settings::claims::rule`), only while the stores stand as `fence` read them for it (`fence_moved`, and the
-    /// same raw.db file), compared inside the write before anything is inserted; else nothing is
-    /// written and the error is `OpsMoved`.
+    /// page, `work_view::decide` and `settings::claims::rule`), only while the stores stand as
+    /// `fence` read them for it: the same raw.db file, compared before the transaction, and
+    /// `fence_moved`, inside it before anything is inserted; else nothing is written and the error
+    /// is `OpsMoved` (#1131 item 45).
     pub fn append_event_with_ops_ruled(
         &mut self,
         e: &Event,

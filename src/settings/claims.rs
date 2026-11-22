@@ -142,6 +142,8 @@ struct Rule {
 /// (its text the suggestion's, or the one posted), reject it, or undo either; an approve is undone
 /// by retracting the preference it made.
 ///
+/// Before its locks, a learning op of the suggestion not applied yet is waited for (`caught_up`).
+///
 /// #1131 items 3, 4 and 7: read and written on one raw handle, whose shared hold on raw.lock keeps
 /// a restore from swapping raw.db, under config.lock (the redaction rules it gates with stay those
 /// in force; the token is asked again once it is held, `authorized`) and the dispatch hold (a purge
@@ -178,10 +180,11 @@ pub(crate) fn rule(
         (Some("repo"), Some(repo)) => Some(repo),
         _ => return Err(refused(422, "rule_scope", "scope")),
     };
-    // What the read would refuse as pending, waited for first within the receipts' time, the
-    // worker's pass run here where this process may run it, as the work view waits (#1131 item 34):
-    // a decision or a learning op the worker appended just before is applied, not refused.
-    crate::work_view::caught_up(home, true).map_err(|_| refused(503, "rule_unavailable", ""))?;
+    // A learning op of the suggestion the worker appended just before, waited for first (#1131
+    // items 34, 43 and 46): its time comes out of the config.lock wait below.
+    let started = std::time::Instant::now();
+    let waited = caught_up(home, id);
+    let took = started.elapsed();
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -195,9 +198,11 @@ pub(crate) fn rule(
     if !crate::raw::exists(home) {
         return Err(not_found());
     }
-    // config.lock before raw.lock, as the work view takes them.
+    // config.lock before raw.lock, as the work view takes them, its wait less what the catch-up
+    // took, so that the catch-up never moves where that wait ends (#1131 item 43): a pass the
+    // catch-up started may end after its time, and the wait is then one try.
     let wait = crate::db::OPEN_WRITE_WAIT;
-    let config = crate::settings::config_lock_within(home, wait)
+    let config = crate::settings::config_lock_within(home, admission().saturating_sub(took))
         .map_err(|e| unavailable(anyhow::Error::from(e)))?
         .ok_or_else(|| refused(503, "rule_unavailable", ""))?;
     if !authorized() {
@@ -221,14 +226,31 @@ pub(crate) fn rule(
         hook();
     }
     let unapplied = crate::my_work_rules::unapplied(&raw, &read, id).map_err(unavailable)?;
+    // #1131 item 40's second case: what the catch-up read before it waited, and the page showed,
+    // is no longer so: raw.db another file (a restore), or a decision of the suggestion applied
+    // while it waited, which the action would act on.
+    let (swapped, moved) = match &waited {
+        Some(before) => (
+            raw.file_identity() != Some(before.raw.as_str()),
+            crate::my_work_ops::rule_now(&read, raw.device(), id).map_err(unavailable)?
+                != before.decision,
+        ),
+        None => (false, false),
+    };
     drop(read);
+    // Another raw.db than the catch-up read first, whatever this one holds (Codex on C1'b).
+    if swapped {
+        return Err(changed());
+    }
     let Some(suggestion) = shown.suggestions.iter().find(|sg| sg.id == id) else {
         return Err(not_found());
     };
     let decision = shown.decided.get(id);
     let write = match (posted.action.as_str(), decision) {
-        // #739: a decision recorded but not applied yet is waited for, not made again.
+        // #739: a decision recorded but not applied yet is refused, not made again: the catch-up
+        // waits for none (#1131 item 40).
         _ if unapplied => return Err(pending()),
+        _ if moved => return Err(changed()),
         ("approve" | "reject", Some(_)) => return Err(refused(409, "rule_decided", "suggestion")),
         ("undo", None) => return Err(refused(409, "rule_not_decided", "suggestion")),
         ("approve", None) => {
@@ -387,6 +409,88 @@ enum Wrote<'a> {
     Undo(&'a str, Vec<i64>),
 }
 
+/// What the route's catch-up read before it waited (#1131 item 40's second case): raw.db's file and
+/// the suggestion's decision then (`my_work_ops::rule_now`), which the read under the locks
+/// compares.
+struct Waited {
+    raw: String,
+    decision: Option<i64>,
+}
+
+/// #1131 items 34, 43 and 46: before the route's locks, what its read refuses as pending for
+/// suggestion `id`, waited for first, best effort: the newest learning op of it past the my_work
+/// consumer's checkpoint (`NAME`, which changes what the suggestion is), within `claims::applied`'s
+/// time, the worker's pass run where this process may run one. No wait for a decision of it
+/// recorded and not applied, which the read refuses at once as #739 did (a wait would apply a
+/// decision the page has not shown, #1131 item 40), nor for another suggestion's op, a correction
+/// or a correction an older worker passed, none of which the read refuses on, nor when more than
+/// 500 ops of any kind are past the checkpoint. Both stores are read read-only, each wait within a
+/// second: a restore or a rebuild holding raw.lock skips it within that time, and no store is
+/// created (SQLite may still create a WAL store's side files to read it) and no schema runs before
+/// the token is asked again under config.lock. An error refuses nothing: the read under
+/// the locks answers, after its own waits, a store that cannot be read among them; a pass that
+/// failed once its checkpoint moved leaves that read to read what it applied. `Some` only when it
+/// waited, with what it read before the wait, whatever the wait did.
+fn caught_up(home: &Path, id: &str) -> Option<Waited> {
+    let caught = (|| -> anyhow::Result<Option<Waited>> {
+        use crate::knowledge::checkpoint::{OPS, get_in};
+        let within = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let Some(read) = crate::raw::read_only_until(home, Some(within))? else {
+            return Ok(None);
+        };
+        let Some(k) = crate::knowledge::read_only_until(home, within)? else {
+            return Ok(None);
+        };
+        // Each statement's busy wait within what is left of the second: a wait, not the reads'
+        // own time, which a loaded machine stretches.
+        let left = || {
+            (within.saturating_duration_since(std::time::Instant::now()))
+                .max(std::time::Duration::from_millis(10))
+        };
+        read.conn.busy_timeout(left())?;
+        let device = crate::db::device_id(&read.conn)?;
+        // The checkpoint and the suggestion's decision in one read of knowledge.db, before raw.db's
+        // ops past it are read: a decision applied after that read is never taken for the one
+        // before the wait (Codex on C1'b).
+        k.busy_timeout(left())?;
+        let snapshot = k.unchecked_transaction()?;
+        let after = get_in(&snapshot, OPS, "my_work", &device)?;
+        let decision = crate::my_work_ops::rule_now(&snapshot, &device, id)?;
+        drop(snapshot);
+        read.conn.busy_timeout(left())?;
+        let Some((None, Some(op))) = read.suggestion_ops_after(&device, after, id, 500)? else {
+            return Ok(None);
+        };
+        let raw = read.identity().to_owned();
+        drop(read);
+        let waited = Waited { raw, decision };
+        k.busy_timeout(std::time::Duration::from_secs(2))?;
+        let what = ("learning op", "my_work");
+        match crate::claims::applied_by(home, &k, &device, &[op], what, crate::claims::deadline()) {
+            Err(e) if !e.is::<crate::claims::NotYet>() => {
+                eprintln!("oboete view: my rules catch-up: {e:#}");
+            }
+            _ => {}
+        }
+        Ok(Some(waited))
+    })();
+    caught.unwrap_or_else(|e| {
+        if !e.is::<crate::raw::Restoring>() {
+            eprintln!("oboete view: my rules catch-up: {e:#}");
+        }
+        None
+    })
+}
+
+/// The route's config.lock wait: `OPEN_WRITE_WAIT`, which a test may shorten (`ADMISSION`).
+fn admission() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(wait) = ADMISSION.get() {
+        return wait;
+    }
+    crate::db::OPEN_WRITE_WAIT
+}
+
 /// The `CHECKED` hook of a test: once a rule action read and prepared what it writes.
 fn checked_hook() {
     #[cfg(test)]
@@ -397,6 +501,9 @@ fn checked_hook() {
 
 #[cfg(test)]
 thread_local! {
+    /// A test's config.lock wait for the route in place of `OPEN_WRITE_WAIT` (#1131 item 43).
+    pub(crate) static ADMISSION: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
     /// A test's hook, run once a rule action took its fence, before its first read (#1131 item 38).
     pub(crate) static FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
