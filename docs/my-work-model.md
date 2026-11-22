@@ -1689,12 +1689,15 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
     with nothing written (409 `rule_moved`; the page reads again). Two viewers of one home approving the
     same suggestion at once record one approval; the other is refused.
 
-  Each lock waits up to 10 seconds, as the work view's do; one that does not come answers 503
-  `rule_unavailable`. So an action is refused while a purge or a rescan holds the dispatch lock
-  longer than that, and while a transcript import, a rebuild or a restore holds config.lock. The answers are otherwise as before, in the same order: a home with
-  no store is 404 before any lock, and the settings are read after the read's refusals (an approval
-  and an approval's undo answer a failed read 503 `claim_unavailable`, the rest 503
-  `rule_unavailable`).
+  config.lock, the dispatch hold and raw.db's hold each wait up to 10 seconds, as the work view's
+  do; one that does not come answers 503 `rule_unavailable`. So an action is refused while a purge
+  or a rescan holds the dispatch lock longer than that, and while a transcript import, a rebuild or
+  a restore holds config.lock. The page's own save lock, taken first as before, waits for the
+  page's other saves with no limit. The answers are otherwise as before, in the same order: a home
+  with no store is 404 before any lock. The settings are read after the read's refusals (an
+  approval and an approval's undo answer a failed read 503 `claim_unavailable`, the rest 503
+  `rule_unavailable`), except while a repository is never recorded: the read reads them itself
+  then, and one that does not load fails the read, 503 `rule_unavailable` for every action.
 
   An undo of an approve retracts that preference (status `retracted`) and writes the undo op in
   one append (`claims::undo_append`); one forgotten since (raw.db's proof) has nothing left to

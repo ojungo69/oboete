@@ -1138,10 +1138,25 @@ fn a_correction_of_its_preference_since_its_read_refuses_an_undo() {
     let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
     let uid = h.act(approve).unwrap()["uid"].as_str().unwrap().to_owned();
     h.s.run();
+    let [seq] = directive_seqs(&h)[..] else {
+        panic!("one directive");
+    };
+    // A mute as the claim page writes one, anchored at the preference's directive.
+    let mute = crate::claims::CorrectionOp {
+        uid,
+        anchor: crate::claims::Anchor {
+            device: h.s.raw.device().to_owned(),
+            seq,
+        },
+        status: None,
+        body: None,
+        muted: Some(true),
+    };
+    let mute = serde_json::to_value(mute).unwrap();
     let _h = h.closed(|home| {
         let at = home.to_owned();
         on_checked(move || {
-            let ops = [(OpKind::Correction, json!({"uid": uid, "muted": true}))];
+            let ops = [(OpKind::Correction, mute)];
             crate::raw::open(&at).unwrap().append_ops(&ops).unwrap();
         });
         let before = stored(home);
