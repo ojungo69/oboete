@@ -58,6 +58,7 @@ fn answer(result: Result<OwnerReceipt, OwnerRefusal>) -> Result<Value, Refusal> 
         Ok(OwnerReceipt::DirectiveOnly { .. }) => {
             Ok(json!({"state": "directive_only", "code": "preference_partly_recorded"}))
         }
+        Ok(OwnerReceipt::Replaced { uid }) => Ok(replaced(Some(&uid))),
         Err(e) => Err(match e.code {
             OwnerRefusalCode::ClaimMissing => refused(404, "claim_not_found", "uid"),
             OwnerRefusalCode::CorrectionInvalid => refused(422, "claim_invalid", ""),
@@ -145,9 +146,12 @@ struct Rule {
 /// a restore from swapping raw.db, under config.lock (the redaction rules it gates with stay those
 /// in force; the token is asked again once it is held, `authorized`) and the dispatch hold (a purge
 /// rewrites ops in place, which no count of the fence shows), and written against the rule fence
-/// taken before the read, as the work view writes: a decision, an exclusion, a forget or a first
-/// event in an excluded repository since then refuses it, with nothing written (409 `rule_moved`:
-/// the page reads again).
+/// taken before the read, as the work view writes. The append refuses it, with nothing written (409
+/// `rule_moved`: the page reads again), when its raw.db is not the fence's file, checked before its
+/// transaction, or, inside it, when anything `fence_moved` reads moved since the fence
+/// (docs/my-work-model.md lists it): a decision, an exclusion, a forget, a tombstone, an expiry, an
+/// op about the suggestion or the preference an undo retracts, and, while a repository is excluded,
+/// a session's first event in one or under a label that may name one, or a 65th event read.
 pub(crate) fn rule(
     home: &Path,
     saving: &Mutex<()>,
@@ -174,6 +178,10 @@ pub(crate) fn rule(
         (Some("repo"), Some(repo)) => Some(repo),
         _ => return Err(refused(422, "rule_scope", "scope")),
     };
+    // What the read would refuse as pending, waited for first within the receipts' time, the
+    // worker's pass run here where this process may run it, as the work view waits (#1131 item 34):
+    // a decision or a learning op the worker appended just before is applied, not refused.
+    crate::work_view::caught_up(home, true).map_err(|_| refused(503, "rule_unavailable", ""))?;
     let _held = saving
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -200,6 +208,10 @@ pub(crate) fn rule(
     };
     let reading = crate::dispatch::reading(home, wait).map_err(unavailable)?;
     let fence = raw.rule_fence().map_err(unavailable)?;
+    #[cfg(test)]
+    if let Some(hook) = FENCED.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     // One read of knowledge.db (#1083's R2b): a decision the my_work consumer applies between two
     // reads would read as neither shown nor waiting, and a retry would approve again.
     let read = (k.unchecked_transaction().map_err(anyhow::Error::from)).map_err(unavailable)?;
@@ -285,10 +297,11 @@ pub(crate) fn rule(
         Write::Decision(fields) => {
             checked_hook();
             raw.gates_with(&settings.rules);
+            let written = fields.clone();
             let appended = crate::my_work_ops::bodies(rule, vec![(id.to_owned(), fields)])
                 .and_then(|ops| raw.append_ops_ruled(&ops, &fence, &subject));
             match appended {
-                Ok(seqs) => Wrote::Decision(seqs),
+                Ok(seqs) => Wrote::Decision(seqs, written),
                 Err(e) if moved(&e) => return Err(changed()),
                 Err(e) => return Err(unavailable(e)),
             }
@@ -312,7 +325,13 @@ pub(crate) fn rule(
     // The receipts' waits, which can run the worker, hold none of the store's locks: config.lock,
     // the dispatch hold and raw.db. The page's own save lock stays held to the end, as before.
     drop((reading, raw, config));
-    let state = |applied: bool| if applied { "applied" } else { "pending" };
+    // #1131 item 2: each receipt is applied only while its decision is the suggestion's decision
+    // now; one a later decision replaced answers `replaced`, which the page says and reads again.
+    let decided = |d: crate::claims::Decided| match d {
+        crate::claims::Decided::Applied => json!({"state": "applied"}),
+        crate::claims::Decided::Pending => json!({"state": "pending"}),
+        crate::claims::Decided::Replaced => replaced(None),
+    };
     match wrote {
         Wrote::Approval(approved) => {
             match crate::claims::approve_receipt(home, &k, &device, id, &approved) {
@@ -321,15 +340,34 @@ pub(crate) fn rule(
                 receipt => answer(Ok(receipt)),
             }
         }
-        Wrote::Decision(seqs) => {
-            let applied = crate::my_work_ops::applied(home, &k, &device, &seqs, rule);
-            Ok(json!({"state": state(applied)}))
-        }
-        Wrote::Undo(uid, seqs) => {
-            let applied = crate::claims::undo_receipt(home, &k, &device, (id, uid), &seqs);
-            Ok(json!({"state": state(applied)}))
-        }
+        Wrote::Decision(seqs, fields) => Ok(match seqs.last() {
+            Some(&seq) => decided(crate::claims::decision_receipt(
+                home,
+                &k,
+                &device,
+                (id, seq),
+                &fields,
+            )),
+            None => json!({"state": "pending"}),
+        }),
+        Wrote::Undo(uid, seqs) => Ok(decided(crate::claims::undo_receipt(
+            home,
+            &k,
+            &device,
+            (id, uid),
+            &seqs,
+        ))),
     }
+}
+
+/// #1131 item 2: the answer of a rule action whose decision is saved, while a later decision of its
+/// suggestion is the one now: an approval's with its preference's uid.
+fn replaced(uid: Option<&str>) -> Value {
+    let mut answer = json!({"state": "replaced", "code": "my_rules_replaced"});
+    if let Some(uid) = uid {
+        answer["uid"] = json!(uid);
+    }
+    answer
 }
 
 /// What a rule action writes, from its read.
@@ -342,10 +380,10 @@ enum Write<'a> {
     Undo(&'a str, i64),
 }
 
-/// What a rule action wrote, for its receipt.
+/// What a rule action wrote, for its receipt: a decision's op seqs with its fields as written.
 enum Wrote<'a> {
     Approval(crate::claims::Approved),
-    Decision(Vec<i64>),
+    Decision(Vec<i64>, Value),
     Undo(&'a str, Vec<i64>),
 }
 
@@ -359,6 +397,9 @@ fn checked_hook() {
 
 #[cfg(test)]
 thread_local! {
+    /// A test's hook, run once a rule action took its fence, before its first read (#1131 item 38).
+    pub(crate) static FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     /// A test's hook, run between a rule action's read of what My Rules shows and of what is not
     /// applied yet.
     pub(crate) static BETWEEN_READS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =

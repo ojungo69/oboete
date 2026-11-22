@@ -383,7 +383,7 @@ pub(crate) fn switch<'a>(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Decision {
     /// Approve a suggestion that waits, its own statement as the owner's preference of every
-    /// repository (`approve`), as the main page's plain Approve does.
+    /// repository (`approve`), as the main page's Approve does.
     Approve,
     /// Reject a suggestion that waits (`dismiss`).
     Dismiss,
@@ -549,18 +549,15 @@ pub(crate) fn decide<'a>(
     let file = row.of["file"].as_str().map(str::to_owned);
     let expected = match wrote {
         Wrote::Decision(seqs) => {
-            let what = ("decision", "my_work");
-            let deadline = crate::claims::deadline();
-            // Saved: a wait that runs out, or a checkpoint that cannot be read, leaves it pending.
-            if crate::claims::applied_by(home, &k, &device, &seqs, what, deadline).is_err() {
-                return Ok(Switched::Pending);
-            }
             let Some(&seq) = seqs.first() else {
                 return Ok(Switched::Pending);
             };
-            // Saved: a proof that cannot be read leaves it pending, not an error.
-            if !crate::my_work_ops::kept(&k, &device, seq, (rule, id), &fields).unwrap_or(false) {
-                return Ok(Switched::Pending);
+            // Saved: a wait that runs out, or a proof that cannot be read, leaves it pending; a
+            // later decision of the suggestion that is the one now leaves no version (#1131 item 2).
+            match crate::claims::decision_receipt(home, &k, &device, (id, seq), &fields) {
+                crate::claims::Decided::Applied => {}
+                crate::claims::Decided::Pending => return Ok(Switched::Pending),
+                crate::claims::Decided::Replaced => return Ok(Switched::Applied(None)),
             }
             match left {
                 "rejected" => rejected_of(id, kept, Some(seq), Some(seq), &file),
@@ -569,8 +566,10 @@ pub(crate) fn decide<'a>(
         }
         Wrote::Undo(seqs) => {
             let uid = row.uid.as_deref().unwrap_or_default();
-            if !crate::claims::undo_receipt(home, &k, &device, (id, uid), &seqs) {
-                return Ok(Switched::Pending);
+            match crate::claims::undo_receipt(home, &k, &device, (id, uid), &seqs) {
+                crate::claims::Decided::Applied => {}
+                crate::claims::Decided::Pending => return Ok(Switched::Pending),
+                crate::claims::Decided::Replaced => return Ok(Switched::Applied(None)),
             }
             let Some(&seq) = seqs.last() else {
                 return Ok(Switched::Pending);
@@ -578,9 +577,10 @@ pub(crate) fn decide<'a>(
             waiting_of(id, kept, Some(seq), &file)
         }
         Wrote::Approval(a) => {
-            let receipt = crate::claims::approve_receipt(home, &k, &device, id, &a);
-            if !matches!(receipt, crate::claims::OwnerReceipt::Applied { .. }) {
-                return Ok(Switched::Pending);
+            match crate::claims::approve_receipt(home, &k, &device, id, &a) {
+                crate::claims::OwnerReceipt::Applied { .. } => {}
+                crate::claims::OwnerReceipt::Replaced { .. } => return Ok(Switched::Applied(None)),
+                _ => return Ok(Switched::Pending),
             }
             // What decides the preference, as the approval left it: derived by its own op, and
             // no correction deciding it; else the pages offer no Undo.
@@ -695,7 +695,7 @@ thread_local! {
 /// would else refuse each try). A switch made just after another correction finds it applied.
 /// Still behind once the wait ran out, or behind for what is not waited for here, the check under
 /// the locks refuses.
-fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
+pub(crate) fn caught_up(home: &Path, learning: bool) -> anyhow::Result<()> {
     use crate::knowledge::checkpoint::{OPS, get_in};
     let Some((raw, k)) = crate::search::b::stores(home)? else {
         return Ok(());

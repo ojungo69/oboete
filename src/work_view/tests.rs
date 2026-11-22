@@ -2238,6 +2238,7 @@ fn uid_of(receipt: crate::claims::OwnerReceipt) -> String {
         crate::claims::OwnerReceipt::Applied { uid }
         | crate::claims::OwnerReceipt::Pending { uid, .. } => uid,
         crate::claims::OwnerReceipt::DirectiveOnly { .. } => panic!("no preference recorded"),
+        crate::claims::OwnerReceipt::Replaced { uid } => uid,
     }
 }
 
@@ -3738,6 +3739,53 @@ fn a_dismissal_whose_row_moved_before_its_receipt_answers_no_version() {
     let got = decided(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Applied(None));
     assert_eq!(row_of(&h, "s1").2["rule"], "rejected");
+}
+
+/// #1131 item 2: a decision from the pages that a later decision of its suggestion replaced before
+/// its receipt read it is saved and answers no version, with no read of My Rules for one: a
+/// dismissal, an approval, the restore of a dismissal and the restore of an approval (its
+/// preference retracted).
+#[test]
+fn a_decision_replaced_before_its_receipt_answers_no_version() {
+    for (first, what, later) in [
+        (None, Decision::Dismiss, json!({"action": "undo"})),
+        (None, Decision::Approve, json!({"action": "reject"})),
+        (
+            Some(Decision::Dismiss),
+            Decision::Restore,
+            json!({"action": "reject"}),
+        ),
+        (
+            Some(Decision::Approve),
+            Decision::Restore,
+            json!({"action": "reject"}),
+        ),
+    ] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        let label = format!("{first:?} then {what:?}");
+        if let Some(first) = first {
+            let (reference, version, _) = row_of(&h, "s1");
+            let got = decided(&h, &reference, &version, first);
+            assert!(
+                matches!(got, Switched::Applied(Some(_))),
+                "{label}: {got:?}"
+            );
+        }
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                decision_waiting(&home, "s1", later);
+                crate::worker::run_once(&home).unwrap();
+                // A read of My Rules for a version would run this; a replaced decision has none.
+                crate::my_work_rules::READ.with(|hook| *hook.borrow_mut() = Some(Box::new(|| {})));
+            }))
+        });
+        let got = decided(&h, &reference, &version, what);
+        let read = crate::my_work_rules::READ.with(|hook| hook.borrow_mut().take().is_none());
+        assert_eq!(got, Switched::Applied(None), "{label}");
+        assert!(!read, "{label}: no read of My Rules for a version");
+    }
 }
 
 /// #1128 item 3: a switch whose rule My Rules no longer lists once its correction is applied (its

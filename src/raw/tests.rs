@@ -4372,7 +4372,7 @@ fn a_rules_write_is_appended_only_while_nothing_it_reads_of_its_claim_moved() {
     );
 }
 
-/// #1083's R2b: an event and its ops written against a rule's fence (the work-view's approval) are
+/// #1083's R2b: an event and its ops written against a rule's fence (an approval from either page) are
 /// refused, and nothing is written, when a decision of the subject's suggestion was appended since
 /// the fence, or the fence read another raw.db file; a fence nothing moved since lets them in.
 #[test]

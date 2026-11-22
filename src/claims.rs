@@ -424,6 +424,21 @@ pub(crate) enum OwnerReceipt {
     DirectiveOnly {
         cause: anyhow::Error,
     },
+    /// #1131 item 2: an approval applied and kept, its preference with it, whose suggestion a later
+    /// decision decides now: what the pages show is that decision.
+    Replaced {
+        uid: String,
+    },
+}
+
+/// What a rule decision's receipt proved (#1131 item 2): applied and kept as it was written, and
+/// the suggestion's decision now (`Applied`); applied and kept, but a later decision of the
+/// suggestion is the one now (`Replaced`); else not proved yet (`Pending`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decided {
+    Applied,
+    Pending,
+    Replaced,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -437,6 +452,9 @@ impl OwnerReceipt {
         match self {
             Self::Applied { uid } => Ok(uid),
             Self::Pending { cause, .. } | Self::DirectiveOnly { cause } => Err(cause),
+            Self::Replaced { .. } => Err(anyhow::anyhow!(
+                "it is recorded, and a later decision of its suggestion replaced it"
+            )),
         }
     }
 }
@@ -771,8 +789,9 @@ thread_local! {
     /// pass (W3b-2: a test starts the worker that runs from there).
     pub(crate) static WAITING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
-    /// A test's hook, run once an owner's approval or undo has waited, before the read that proves
-    /// what it wrote is kept (#1083's R2b).
+    /// A test's hook, run once a rule decision's receipt has waited (an approval, an undo, a
+    /// rejection, a dismissal; #1083's R2b, #1131 item 2), before the read that proves what it wrote
+    /// is kept and is the suggestion's decision now.
     pub(crate) static PROVING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
     /// A test's hook, run once an undo of an approval whose preference knowledge.db has no anchor
@@ -793,7 +812,7 @@ pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
 /// consumer has applied it: the next SessionStart shows it.
 // shortcut: two appends; a crash between them leaves the directive event with no claim, which
 // the receipt reports without retrying. An approval of a suggestion writes its directive and its
-// preference in one transaction (`approve_recorded`); `pref add` can, should a crash there matter.
+// preference in one transaction (`approve_append`); `pref add` can, should a crash there matter.
 pub fn pref_add_in(home: &std::path::Path, text: &str, repo: Option<&str>) -> Result<String> {
     pref_add_recorded(home, text, repo)
         .map_err(|e| e.cause)?
@@ -1015,7 +1034,8 @@ pub(crate) struct Approved {
 
 /// An approval's directive (`c`, whose whole text is `quote`), its preference and its decision of
 /// suggestion `id`, appended in one transaction on `raw` (`Raw::append_event_with_ops`), gated as
-/// `pref add` gates its preference; for the work-view's approval, against `ruled`'s fence for its
+/// `pref add` gates its preference; for an approval from either page (`work_view::decide`,
+/// `settings::claims::rule`), against `ruled`'s fence for its
 /// subject (`Raw::append_event_with_ops_ruled`), its moving an error that is `OpsMoved`.
 pub(crate) fn approve_append(
     raw: &mut crate::raw::Raw,
@@ -1070,7 +1090,8 @@ pub(crate) fn approve_append(
 
 /// An approval's receipt (#1083's R2b): applied once the claims consumer kept its preference and
 /// the my_work consumer its decision of suggestion `id`, both waited for within one deadline and
-/// read in one read of knowledge.db; else pending, and why.
+/// read in one read of knowledge.db; else pending, and why. #1131 item 2: both proved, its decision
+/// is the suggestion's decision now, else `Replaced`.
 pub(crate) fn approve_receipt(
     home: &std::path::Path,
     k: &Connection,
@@ -1125,7 +1146,26 @@ pub(crate) fn approve_receipt(
             .map(|kept| (read, kept))
         });
     match kept {
-        Ok((read, true)) => preference_kept(&read, device, a.preference, uid),
+        // The decision now only once every proof holds: a row not kept is pending, never replaced.
+        Ok((read, true)) => match preference_kept(&read, device, a.preference, uid) {
+            OwnerReceipt::Applied { uid } => match decision_now(&read, device, id, a.decision) {
+                Ok(Decided::Applied) => OwnerReceipt::Applied { uid },
+                Ok(Decided::Replaced) => OwnerReceipt::Replaced { uid },
+                Ok(Decided::Pending) => OwnerReceipt::Pending {
+                    uid,
+                    reason: PendingReason::NotKept,
+                    cause: anyhow::anyhow!(
+                        "the approval is recorded; its suggestion reads no decision"
+                    ),
+                },
+                Err(cause) => OwnerReceipt::Pending {
+                    uid,
+                    reason: PendingReason::Application,
+                    cause,
+                },
+            },
+            other => other,
+        },
         Ok((_, false)) => OwnerReceipt::Pending {
             uid,
             reason: PendingReason::NotKept,
@@ -1233,14 +1273,15 @@ fn undone(
 
 /// An undo of an approval's receipt (#1083's R2b): whether its retraction of `uid`, where `seqs`
 /// hold one before the decision, and its undo decision of suggestion `id` are applied and kept,
-/// waited for within one deadline and read in one read of knowledge.db.
+/// waited for within one deadline and read in one read of knowledge.db; #1131 item 2: and whether
+/// the undo is the suggestion's decision now (`decision_now`).
 pub(crate) fn undo_receipt(
     home: &std::path::Path,
     k: &Connection,
     device: &str,
     (id, uid): (&str, &str),
     seqs: &[i64],
-) -> bool {
+) -> Decided {
     let deadline = deadline();
     let decision = seqs.last().copied().unwrap_or_default();
     let retracted = seqs.len() > 1;
@@ -1267,7 +1308,7 @@ pub(crate) fn undo_receipt(
         )
     });
     if waited.is_err() {
-        return false;
+        return Decided::Pending;
     }
     // Both kept, read in one read of knowledge.db.
     #[cfg(test)]
@@ -1275,7 +1316,7 @@ pub(crate) fn undo_receipt(
         hook();
     }
     let undo = json!({"action": "undo"});
-    let kept = (|| -> Result<bool> {
+    let proved = (|| -> Result<Decided> {
         let read = k.unchecked_transaction()?;
         let corrected = !retracted
             || read.query_row(
@@ -1284,16 +1325,63 @@ pub(crate) fn undo_receipt(
                 rusqlite::params![device, seqs[0], uid],
                 |r| r.get::<_, bool>(0),
             )?;
-        Ok(corrected
-            && crate::my_work_ops::kept(
-                &read,
+        let kept = |read: &Connection| {
+            crate::my_work_ops::kept(
+                read,
                 device,
                 decision,
                 (crate::my_work_rules::RULE, id),
                 &undo,
-            )?)
+            )
+        };
+        if !(corrected && kept(&read)?) {
+            return Ok(Decided::Pending);
+        }
+        decision_now(&read, device, id, decision)
     })();
-    kept.unwrap_or(false)
+    proved.unwrap_or(Decided::Pending)
+}
+
+/// #1131 item 2: a rule decision's receipt (a rejection, the undo of one, the work view's
+/// dismissal): the my_work consumer applied its op `seq` of suggestion `id`, kept as `fields`, and
+/// it is the suggestion's decision now; waited for within one deadline and read in one read of
+/// knowledge.db.
+pub(crate) fn decision_receipt(
+    home: &std::path::Path,
+    k: &Connection,
+    device: &str,
+    (id, seq): (&str, i64),
+    fields: &serde_json::Value,
+) -> Decided {
+    let waited = applied_by(home, k, device, &[seq], ("decision", "my_work"), deadline());
+    if waited.is_err() {
+        return Decided::Pending;
+    }
+    #[cfg(test)]
+    if let Some(hook) = PROVING.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let proved = (|| -> Result<Decided> {
+        let read = k.unchecked_transaction()?;
+        let rule = (crate::my_work_rules::RULE, id);
+        if !crate::my_work_ops::kept(&read, device, seq, rule, fields)? {
+            return Ok(Decided::Pending);
+        }
+        decision_now(&read, device, id, seq)
+    })();
+    proved.unwrap_or(Decided::Pending)
+}
+
+/// #1131 item 2: whether `device`'s rule op `seq` of suggestion `id`, which its receipt proved
+/// kept, is the suggestion's decision now (`Applied`), or a later one the my_work consumer kept is
+/// (`Replaced`): a suggestion's decision is its newest kept rule op, an undo included
+/// (`my_work_rules::decisions`).
+fn decision_now(k: &Connection, device: &str, id: &str, seq: i64) -> Result<Decided> {
+    Ok(match crate::my_work_ops::rule_now(k, device, id)? {
+        Some(now) if now > seq => Decided::Replaced,
+        Some(now) if now == seq => Decided::Applied,
+        _ => Decided::Pending,
+    })
 }
 
 /// Slice 8b: why a preference of repository `given`, labelled `label` by the gate, is refused before

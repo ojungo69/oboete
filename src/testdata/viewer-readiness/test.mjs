@@ -7277,6 +7277,36 @@ answers=[json({state:'applied'})];
 button('last:undo').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'undo'}});
 assert(!button('last:undo'),'undone');
+// #1131 item 2: an Undo answered replaced (a later decision is the suggestion's now) leaves no Undo
+// line, whose Undo would undo that later decision, and says so; the reload draws what is left.
+draw(answer);
+answers=[json({state:'applied',uid:'w'.repeat(64)})];
+button('approve:s1').click();await settle();
+assert(button('last:undo'),'the line and its Undo');
+run('show=async()=>{myRulesDraw();}');
+answers=[json({state:'replaced',code:'my_rules_replaced'})];
+button('last:undo').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'undo'}});
+assert(!button('last:undo'),'no Undo of the later decision');
+assert.equal(run('$("status").textContent'),'Saved, but a later decision on this suggestion replaced it.','what happened');
+// An Undo from the rule's own row, applied, leaves no last line for that suggestion either.
+draw(answer);
+run('mr.last={id:"s3",action:"approve"};myRulesDraw()');
+assert(button('last:undo'),'a last line for s3');
+answers=[json({state:'applied'})];
+button('undo:s3').click();await settle();
+assert.deepEqual(posted.at(-1).body,{suggestion:'s3',action:'undo'});
+assert(!button('last:undo'),'no Undo of what decides s3 now');
+// The line stays for an answer about another suggestion, and for an Undo that is only pending.
+draw(answer);
+run('mr.last={id:"s4",action:"reject"};myRulesDraw()');
+answers=[json({state:'replaced',code:'my_rules_replaced'})];
+button('approve:s1').click();await settle();
+assert(button('last:undo'),'s4\'s line, whatever s1\'s answer');
+answers=[json({state:'pending'})];
+button('last:undo').click();await settle();
+assert(button('last:undo'),'an Undo still pending keeps its line');
+run('show=async()=>{}');
 // Edit, then approve: the edited words are posted.
 draw(answer);
 button('edit:s1').click();

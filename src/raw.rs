@@ -524,6 +524,18 @@ thread_local! {
     /// The next op append of this thread refused once its transaction is open, as a forget
     /// committed in between refuses one (#1083's R2b): a test's look at what is left.
     pub(crate) static OPS_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's hook, run in a rule's write just before its transaction commits (#1131 item 38):
+    /// what holds there holds through the write.
+    pub(crate) static RULED_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs what a test set to happen in a rule's write just before its commit (`RULED_COMMIT`).
+fn ruled_commit_hook() {
+    #[cfg(test)]
+    if let Some(hook) = RULED_COMMIT.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
 }
 
 /// Runs what a test set to happen between an import's checks and its append.
@@ -2003,9 +2015,10 @@ pub struct AnswerFence {
 /// #1083 (R2a): what a rule's write read before it found its rule, which its append compares in its
 /// write (`Raw::append_ops_ruled`): the raw.db file (`file_identity`), the forget fence
 /// (`fence_count`), this device's newest op and newest record, the largest rowid of every device's
-/// records (`rows`, #1131 item 21), and the rows retention has made expired. Not every op since moves it: curation appends claims all day, so only an exclusion, an
-/// op whose body names the rule's claim (a correction of it, a claim that supersedes it) and a
-/// tombstone refuse the append.
+/// records (`rows`, #1131 item 21), and the rows retention has made expired. Not every op since
+/// moves it: curation appends claims all day, so only what `fence_moved` reads refuses the append
+/// (an exclusion; an op about the rule's claim or suggestion; a tombstone; an expiry; and, while a
+/// repository is excluded, a session's first event in one; docs/my-work-model.md lists them).
 #[derive(Clone, Debug)]
 pub struct RuleFence {
     pub file: Option<String>,
@@ -5217,8 +5230,8 @@ impl Raw {
         self.event_with_ops(e, ledger, ops, None)
     }
 
-    /// `append_event_with_ops` for a rule's write on `subject` (#1083's R2b: the work-view's
-    /// approval), only while the stores stand as `fence` read them for it (`fence_moved`, and the
+    /// `append_event_with_ops` for a rule's write on `subject` (#1083's R2b: an approval from either
+    /// page, `work_view::decide` and `settings::claims::rule`), only while the stores stand as `fence` read them for it (`fence_moved`, and the
     /// same raw.db file), compared inside the write before anything is inserted; else nothing is
     /// written and the error is `OpsMoved`.
     pub fn append_event_with_ops_ruled(
@@ -5316,6 +5329,7 @@ impl Raw {
         if self.gated_off {
             owe_op_text_scan(&tx)?;
         }
+        ruled_commit_hook();
         tx.commit()?;
         Ok(seqs)
     }
@@ -5345,6 +5359,9 @@ impl Raw {
         let seqs = ops_in(&tx, &self.device, &ops, &bodies, (None, None, None), None)?;
         if self.gated_off {
             owe_op_text_scan(&tx)?;
+        }
+        if ruled.is_some() {
+            ruled_commit_hook();
         }
         tx.commit()?;
         Ok(Some((seq, seqs.unwrap_or_default())))
@@ -7301,6 +7318,7 @@ impl Raw {
         if self.gated_off {
             owe_op_text_scan(&tx)?;
         }
+        ruled_commit_hook();
         tx.commit()?;
         Ok(seqs)
     }

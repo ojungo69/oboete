@@ -1684,19 +1684,41 @@ The links job and its tests were retired with it in slice 10c-3b; no test of the
   - under config.lock, so the redaction rules it gates with stay those in force, and its token is
     asked again once the lock is held (401 when it was replaced meanwhile);
   - under the dispatch hold, so no purge rewrites ops in place between its read and its write;
-  - against the rule fence taken before its read: a decision of the suggestion, an exclusion, a
-    forget, a tombstone or a session's first event in an excluded repository since then refuses it
-    with nothing written (409 `rule_moved`; the page reads again). Two viewers of one home approving the
-    same suggestion at once record one approval; the other is refused.
+  - against the rule fence taken before its read. The append refuses the write with nothing
+    written, as 409 `rule_moved` (the page reads again): before its transaction, when its raw.db is
+    not the fence's file or has no identity; inside it (`fence_moved`), when the forget count moved
+    (denied records, forget ops, forget history, range tombstones); on this device's ops since the
+    fence that move the subject: any exclusion, a rule decision of the suggestion, a rule decision,
+    claim or correction naming the preference an undo retracts whatever suggestion it is about, and
+    a rules job op of the suggestion; on this device's tombstones since the fence; on a retention
+    expiry; and, while a repository is excluded, on every device's events since the fence. Those it
+    judges in order as it reads them, at most 64: a session's first in an excluded repository, or
+    under a label first seen that may name one, refuses the write; and a 65th refuses it too, even
+    one with no repository or of a session already excluded. The undo of an approval whose
+    directive a restore lost makes its own checks in the same transaction (#1131 item 9), and
+    answers `rule_pending` when they refuse. Two viewers of one home
+    approving the same suggestion at once record one approval; the other is refused. `rule_decided`
+    and `rule_not_decided` are the read's refusals of an action that conflicts with the state it
+    read, and `rule_pending` the read's of a suggestion whose decision or change (a learning op of
+    it, #1131 item 34) is recorded and not applied yet; `rule_moved` is the write's. Before its
+    locks, an action waits for those to be applied, as the work view does (`work_view::caught_up`):
+    up to the receipts' 10 seconds, the worker's pass run where the process may run it, so a
+    learning op the worker just wrote is applied, not refused.
 
   The page's own save lock is taken first, as before, and waits for the page's other saves with
   no limit. config.lock and the dispatch hold each wait up to 10 seconds, as the work view's do,
   and raw.db's open waits up to 2 seconds for raw.lock, as every open of it does; one that does not
   come answers 503 `rule_unavailable`. So an action is refused while a purge or a rescan holds the
   dispatch lock longer than that, while a transcript import, a rebuild or a restore holds
-  config.lock, and while a restore holds raw.lock. The fence's check is conservative: while a
-  repository is excluded, any session's first event in an excluded repository since the read
-  refuses the write, and so do more than 64 events since the fence, whatever their repository.
+  config.lock, and while a restore holds raw.lock.
+
+  Each action's receipt is applied only while its decision is the suggestion's decision now: its
+  newest rule op the my_work consumer kept, an undo included (#1131 item 2). It proves what it
+  wrote first: the decision's row as written, and an approval's preference, or an undo's
+  retraction where it wrote one. One proved so while a later decision is the one now answers
+  `replaced` (code `my_rules_replaced`): the page says so, drops the last action's Undo for that
+  suggestion, and reads again; the work view saves it with no version. An Undo from another row
+  that is applied drops that line too, since it names what no longer decides the suggestion.
 
   The answers are otherwise as before, in the same order. A home with no store is 404 once the
   save lock is held, before the store's locks. The settings are read after the read's refusals (an

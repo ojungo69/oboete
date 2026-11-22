@@ -314,6 +314,19 @@ pub(crate) fn kept(
         .is_some_and(|kept| serde_json::from_str::<Value>(&kept).is_ok_and(|kept| &kept == fields)))
 }
 
+/// #1131 item 2: the op seq of `device`'s newest rule op of suggestion `id` the my_work consumer
+/// kept, an undo included: what `my_work_rules::decisions` takes as the suggestion's decision now.
+/// A rule op reads nothing (`bodies` gives it `Read::default()`), so `hidden` never leaves one out,
+/// and this reads it with none.
+pub(crate) fn rule_now(k: &Connection, device: &str, id: &str) -> Result<Option<i64>> {
+    Ok(k.query_row(
+        "SELECT MAX(op_seq) FROM my_work WHERE device = ?1 AND job = ?2 AND about = ?3
+           AND skipped = 0 AND forgotten IS NULL",
+        rusqlite::params![device, crate::my_work_rules::RULE, id],
+        |r| r.get(0),
+    )?)
+}
+
 /// Whether the my_work consumer applied `device`'s ops `seqs` of `job` within 10 seconds.
 pub(crate) fn applied(
     home: &std::path::Path,
