@@ -433,7 +433,8 @@ pub(crate) fn page_on(
 }
 
 /// #739: whether a `rule` op of suggestion `id` is recorded but not applied yet, so the decision it
-/// makes is not read: another action on it now would act on what it was before.
+/// makes is not read: another action on it now would act on what it was before. #1131 item 34: and
+/// a learning op of it (`NAME`), which changes what the suggestion is.
 pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &str) -> Result<bool> {
     let device = raw.device();
     let checkpoint = crate::knowledge::checkpoint::OPS;
@@ -446,7 +447,7 @@ pub(crate) fn unapplied(raw: &crate::raw::Raw, k: &rusqlite::Connection, id: &st
         after = last.op_seq;
         let rule = |op: &crate::raw::Op| {
             op.kind == crate::raw::OpKind::MyWork
-                && op.body["job"] == RULE
+                && (op.body["job"] == RULE || op.body["job"] == NAME)
                 && op.body["about"] == id
         };
         if ops.iter().any(rule) {

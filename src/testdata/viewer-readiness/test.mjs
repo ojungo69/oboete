@@ -7277,6 +7277,19 @@ answers=[json({state:'applied'})];
 button('last:undo').click();await settle();
 assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'undo'}});
 assert(!button('last:undo'),'undone');
+// #1131 item 2: an Undo answered replaced (a later decision is the suggestion's now) leaves no Undo
+// line, whose Undo would undo that later decision, and says so; the reload draws what is left.
+draw(answer);
+answers=[json({state:'applied',uid:'w'.repeat(64)})];
+button('approve:s1').click();await settle();
+assert(button('last:undo'),'the line and its Undo');
+run('show=async()=>{myRulesDraw();}');
+answers=[json({state:'replaced',code:'my_rules_replaced'})];
+button('last:undo').click();await settle();
+assert.deepEqual(posted.at(-1),{url:'/api/my-rules',body:{suggestion:'s1',action:'undo'}});
+assert(!button('last:undo'),'no Undo of the later decision');
+assert.equal(run('$("status").textContent'),'Saved, but a later decision on this suggestion replaced it.','what happened');
+run('show=async()=>{}');
 // Edit, then approve: the edited words are posted.
 draw(answer);
 button('edit:s1').click();

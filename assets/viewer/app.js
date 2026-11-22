@@ -2827,6 +2827,7 @@ const TEXT = {
   my_rules_undone: ['Undone. The suggestion waits for your decision again.', '元に戻しました。提案はまたあなたの判断を待っています。'],
   my_rules_saved: ['Saved.', '保存しました。'],
   my_rules_pending: ['Recorded. The worker applies it shortly.', '記録しました。まもなく反映されます。'],
+  my_rules_replaced: ['Saved, but a later decision on this suggestion replaced it.', '保存しましたが、この提案にはその後に別の判断が記録され、そちらが今の判断です。'],
   rule_not_found: ['That suggestion is no longer there. The page reads again.', 'その提案はもうありません。ページを読み直します。'],
   rule_decided: ['That suggestion is already decided. The page reads again.', 'その提案はもう判断済みです。ページを読み直します。'],
   rule_not_decided: ['That suggestion has no decision to undo. The page reads again.', 'その提案には元に戻す判断がありません。ページを読み直します。'],
@@ -2835,7 +2836,7 @@ const TEXT = {
   preference_repo_excluded: ['That repository is not recorded, so no rule is kept for it.', 'そのリポジトリは記録しない設定なので、規則は保存しません。'],
   preference_repo_masked: ['That repository’s name holds a value the privacy rules hide, so no rule is kept for it.', 'そのリポジトリ名には伏せ字の対象が含まれるので、規則は保存しません。'],
   rule_partly_recorded: ['The rule is saved, but the suggestion still shows as waiting. Reject it, or leave it: approving it again adds the rule twice.', '規則は保存しましたが、提案は判断待ちのまま表示されます。却下するか、そのままにしてください。もう一度承認すると規則が 2 つになります。'],
-  rule_pending: ['That decision is still being applied. The page reads again shortly.', 'その判断はまだ反映中です。少ししてからページを読み直します。'],
+  rule_pending: ['A change to that suggestion is still being applied. The page reads again shortly.', 'その提案への変更はまだ反映中です。少ししてからページを読み直します。'],
   rule_moved: ['The records changed while this decision was being saved, so nothing was saved. The page reads again: look it over, then decide again.', '判断を保存する間に記録が変わったため、保存しませんでした。ページを読み直しますので、内容を確かめてからもう一度判断してください。'],
   rule_unavailable: ['My Rules could not save now. Try again shortly.', 'いまは保存できませんでした。少ししてからもう一度お試しください。'],
   my_goals_no_reviews: ['No request reviews cover this month, so it shows what you asked for, not what moved.', 'この月の依頼の見直しはまだないため、進んだことではなく、頼んだことを表示しています。'],
@@ -10664,6 +10665,9 @@ async function myRulesWrite(path, body, done) {
     }
     // Only what was applied is done (#739): a partial record says what it kept, and closes nothing.
     const applied = answer.state === 'applied';
+    // Saved, but a later decision is the suggestion's now (#1131 item 2): the last action's Undo
+    // would undo that one, so its line goes.
+    if (answer.state === 'replaced' && mr.last?.id === body.suggestion) mr.last = null;
     message = applied ? t(done) : t(Object.hasOwn(TEXT, answer.code ?? '') ? answer.code : 'my_rules_pending');
     failed = !applied;
     return applied;

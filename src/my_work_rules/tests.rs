@@ -903,31 +903,63 @@ fn recorded_in(home: &std::path::Path, session: &str, repo: &str) {
     crate::raw::open(home).unwrap().append(&e).unwrap();
 }
 
-/// #1131 items 3 and 7: the main page's rule action holds, from before its read until its write,
-/// config.lock (a save of the redaction rules waits), the dispatch hold (a purge, which rewrites ops
-/// in place, waits) and raw.db's shared hold (a restore cannot swap the store it writes to): each
-/// is held in its read and again once it prepared its write.
+/// #1131 items 3, 7 and 38: the main page's rule action holds, from before its read until its
+/// write commits, config.lock (a save of the redaction rules waits), the dispatch hold (a purge,
+/// which rewrites ops in place, waits) and raw.db's shared hold (a restore cannot swap the store it
+/// writes to): held once its fence is taken, in its read, once it prepared its write, and just
+/// before its write commits, for an approval, its undo and a rejection.
 #[test]
 fn a_rule_action_holds_its_locks_until_its_write() {
     let mut h = Home::new();
     suggested(&mut h);
     let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let h = h.closed(|home| {
-        let reading = held_probe(home, held.clone());
-        crate::settings::claims::BETWEEN_READS
-            .with(|hook| *hook.borrow_mut() = Some(Box::new(reading)));
-        on_checked(held_probe(home, held.clone()));
-        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
-        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+        for body in [
+            json!({"suggestion": "s1", "action": "approve", "scope": "global"}),
+            json!({"suggestion": "s1", "action": "undo"}),
+            json!({"suggestion": "s1", "action": "reject"}),
+        ] {
+            let fenced = held_probe(home, held.clone());
+            crate::settings::claims::FENCED
+                .with(|hook| *hook.borrow_mut() = Some(Box::new(fenced)));
+            let reading = held_probe(home, held.clone());
+            crate::settings::claims::BETWEEN_READS
+                .with(|hook| *hook.borrow_mut() = Some(Box::new(reading)));
+            on_checked(held_probe(home, held.clone()));
+            let committing = held_probe(home, held.clone());
+            crate::raw::RULED_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(committing)));
+            assert_eq!(
+                acted(home, body.clone()).unwrap()["state"],
+                "applied",
+                "{body}"
+            );
+        }
     });
-    let all = [true; 6];
-    let said = "config.lock, dispatch, raw.lock: in the read, then before the write";
-    assert_eq!(*held.borrow(), all, "{said}");
-    assert_eq!(h.yours(), [(RULE_TEXT.to_owned(), true)]);
+    let said =
+        "config.lock, dispatch, raw.lock: at the fence, in the read, before and in the write";
+    assert_eq!(*held.borrow(), [true; 36], "{said}");
+    assert_eq!(h.waiting(), Vec::<String>::new(), "rejected");
+}
+
+/// #1131 items 3 and 38: the undo of an approval whose directive a restore lost holds its locks
+/// until its write commits, as every rule action does.
+#[test]
+fn a_lost_approvals_undo_holds_its_locks_until_its_write() {
+    let (h, _uid, _at, _segment, _saved) = lost_directive();
+    let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _h = h.closed(|home| {
+        on_checked(held_probe(home, held.clone()));
+        let committing = held_probe(home, held.clone());
+        crate::raw::RULED_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(committing)));
+        let got = acted(home, serde_json::from_str(UNDO).unwrap()).unwrap();
+        assert_eq!(got["state"], "applied", "{got}");
+    });
+    assert_eq!(*held.borrow(), [true; 6], "config.lock, dispatch, raw.lock");
 }
 
 /// A hook that records, into `seen`, whether config.lock, an exclusive dispatch hold and an
-/// exclusive raw.lock of `home` are each refused now (true: held by someone).
+/// exclusive raw.lock of `home` are each held by someone now: refused as busy, and for no other
+/// reason (#1131 item 38's review). It touches no SQLite, so it can run inside an open write.
 fn held_probe(
     home: &std::path::Path,
     seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
@@ -941,8 +973,32 @@ fn held_probe(
             .write(true)
             .open(at.join("raw.lock"));
         let swap = lock.unwrap().try_lock();
-        let held = [config.is_none(), dispatch.is_err(), swap.is_err()];
+        let held = [
+            config.is_none(),
+            dispatch.as_ref().is_err_and(crate::dispatch::busy),
+            matches!(swap, Err(std::fs::TryLockError::WouldBlock)),
+        ];
         seen.borrow_mut().extend(held);
+    }
+}
+
+/// A hook that records, into `seen`, whether config.lock, an exclusive dispatch hold and an
+/// exclusive raw.lock of `home` can each be taken now.
+fn free_probe(
+    home: &std::path::Path,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+) -> impl FnOnce() + 'static {
+    let at = home.to_owned();
+    move || {
+        let wait = std::time::Duration::ZERO;
+        let config = crate::settings::config_lock_within(&at, wait).unwrap();
+        let dispatch = crate::dispatch::exclusive_within(&at, wait);
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at.join("raw.lock"));
+        let swap = lock.unwrap().try_lock();
+        seen.borrow_mut()
+            .extend([config.is_some(), dispatch.is_ok(), swap.is_ok()]);
     }
 }
 
@@ -1221,17 +1277,17 @@ fn a_first_event_under_a_masked_label_since_its_read_refuses_a_rule_action() {
 fn a_rule_actions_receipt_holds_none_of_its_locks() {
     let mut h = Home::new();
     suggested(&mut h);
-    let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let free = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let _h = h.closed(|home| {
-        let waiting = held_probe(home, held.clone());
+        let waiting = free_probe(home, free.clone());
         crate::claims::WAITING.with(|hook| *hook.borrow_mut() = Some(Box::new(waiting)));
-        let proving = held_probe(home, held.clone());
+        let proving = free_probe(home, free.clone());
         crate::claims::PROVING.with(|hook| *hook.borrow_mut() = Some(Box::new(proving)));
         let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
         assert_eq!(acted(home, approve).unwrap()["state"], "applied");
     });
     let said = "config.lock, dispatch, raw.lock: in the wait, then in the proof";
-    assert_eq!(*held.borrow(), [false; 6], "{said}");
+    assert_eq!(*free.borrow(), [true; 6], "{said}");
 }
 
 /// #1131 item 9: the undo of a lost approval checks itself that no decision of its suggestion is
@@ -1272,6 +1328,187 @@ fn a_lost_approvals_undo_refuses_a_newer_decision_its_fence_did_not_see() {
         .unwrap();
     assert_eq!(got, None, "nothing written");
     assert!(!made.get(), "no ops made");
+}
+
+/// #1131 item 2: a rule action's receipt is applied only while its decision is the suggestion's
+/// decision now: one a later decision of the suggestion replaced before its receipt read it is
+/// saved and answers `replaced` (an approval's with its uid): an approval, its undo, a rejection,
+/// the undo of one, and the undo of an approval whose directive a restore lost.
+#[test]
+fn a_receipt_answers_replaced_once_a_later_decision_of_its_suggestion_is_applied() {
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let undo = json!({"suggestion": "s1", "action": "undo"});
+    let reject = json!({"suggestion": "s1", "action": "reject"});
+    let cases = [
+        (None, approve.clone(), json!({"action": "reject"})),
+        (
+            Some(approve.clone()),
+            undo.clone(),
+            json!({"action": "reject"}),
+        ),
+        (None, reject.clone(), json!({"action": "undo"})),
+        (Some(reject), undo, json!({"action": "reject"})),
+    ];
+    for (first, action, later) in cases {
+        let mut h = Home::new();
+        suggested(&mut h);
+        if let Some(first) = &first {
+            assert_eq!(h.act(first.clone()).unwrap()["state"], "applied", "{first}");
+            h.s.run();
+        }
+        let _h = h.closed(|home| {
+            let at = home.to_owned();
+            let later = later.clone();
+            crate::claims::WAITING.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || decided_elsewhere(&at, "s1", later)))
+            });
+            let before = stored(home);
+            let got = acted(home, action.clone()).unwrap();
+            let answered = (got["state"].as_str(), got["code"].as_str());
+            assert_eq!(
+                answered,
+                (Some("replaced"), Some("my_rules_replaced")),
+                "{action}: {got}"
+            );
+            assert_eq!(got["uid"].is_string(), action == approve, "{action}: {got}");
+            assert!(
+                stored(home).2 > before.2 + 1,
+                "{action}: its ops and the later one stored"
+            );
+        });
+    }
+    let (h, _uid, _at, _segment, _saved) = lost_directive();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        crate::claims::WAITING.with(|hook| {
+            let later = move || decided_elsewhere(&at, "s1", json!({"action": "reject"}));
+            *hook.borrow_mut() = Some(Box::new(later))
+        });
+        let got = acted(home, serde_json::from_str(UNDO).unwrap()).unwrap();
+        assert_eq!(got["state"], "replaced", "a lost approval's undo: {got}");
+    });
+}
+
+/// #1131 item 2 (Codex on its plan): an approval's receipt classifies only once every proof holds:
+/// its decision kept while its preference's derivation is not leaves it pending, though a later
+/// decision is the suggestion's now.
+#[test]
+fn an_approvals_receipt_is_pending_before_it_is_replaced() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        crate::claims::PROVING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                decided_elsewhere(&at, "s1", json!({"action": "reject"}));
+                crate::worker::run_once(&at).unwrap();
+                let k = crate::knowledge::open(&at).unwrap();
+                let sql = "DELETE FROM derivations WHERE uid IN
+                    (SELECT uid FROM claims WHERE kind = 'preference')";
+                assert!(k.execute(sql, []).unwrap() >= 1, "{sql}");
+            }))
+        });
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let got = acted(home, approve).unwrap();
+        assert_eq!(got["state"], "pending", "{got}");
+    });
+}
+
+/// #1131 item 2 (Codex on its plan): a later decision recorded and not applied when the receipt
+/// reads is not the suggestion's decision yet: the receipt answers by what is applied.
+#[test]
+fn a_later_decision_not_applied_yet_leaves_a_receipt_applied() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        crate::claims::PROVING.with(|hook| {
+            let later = move || decided_elsewhere(&at, "s1", json!({"action": "reject"}));
+            *hook.borrow_mut() = Some(Box::new(later))
+        });
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        assert_eq!(acted(home, approve).unwrap()["state"], "applied");
+    });
+}
+
+/// A learning op of suggestion `id` (`NAME`) whose statement is `statement`, appended and not
+/// applied: a rules job's change of the suggestion.
+fn learned_unapplied(h: &mut Home, id: &str, statement: &str) {
+    let fields = json!({"statement": statement, "seen": 2,
+        "requests": [format!("g:{id}0"), format!("g:{id}1")],
+        "quotes": [{"text": format!("Quoted for {id}."), "request": format!("g:{id}0"),
+            "at": crate::db::now_ms()}]});
+    let op = MyWorkOp {
+        job: NAME.into(),
+        about: id.into(),
+        entry: "fake".into(),
+        ts: crate::db::now_ms(),
+        read: Read::default(),
+        removed: vec![],
+        fields: fields.as_object().unwrap().clone().into_iter().collect(),
+        skipped: false,
+        forgotten: None,
+    };
+    let op = serde_json::to_value(op).unwrap();
+    h.s.raw.append_ops(&[(OpKind::MyWork, op)]).unwrap();
+}
+
+/// #1131 item 34: a learning op of a suggestion recorded and not applied yet changes what the
+/// suggestion is: an action on it now is refused as pending, with nothing written, and one once it
+/// is applied acts on what it changed.
+#[test]
+fn an_approval_behind_a_learning_op_of_its_suggestion_is_pending() {
+    let mut h = Home::new();
+    suggested(&mut h);
+    let changed = "Write the tests before the code, always.";
+    learned_unapplied(&mut h, "s1", changed);
+    let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+    let before = stored(h.s.home.path());
+    let refused = h.act(approve.clone()).unwrap_err();
+    assert_eq!((refused.status, refused.code), (409, "rule_pending"));
+    assert_eq!(stored(h.s.home.path()), before, "nothing written");
+    h.s.run();
+    assert_eq!(h.act(approve).unwrap()["state"], "applied");
+    assert_eq!(h.yours(), [(changed.to_owned(), true)]);
+}
+
+/// #1131 items 7 and 39: the suggestion's own source session's later event, under a label first
+/// recorded since the read that a repository never recorded may be (a mask in it), refuses the
+/// approval, with nothing written but the event.
+#[test]
+fn an_event_of_its_source_session_under_a_masked_label_since_its_read_refuses_a_rule_action() {
+    let mut h = Home::new();
+    let now = crate::db::now_ms();
+    let x =
+        h.s.said("learned", "github.com/x/open", now, "write the tests first");
+    let read = Read {
+        spans: vec![(x, x)],
+        ops: vec![],
+    };
+    h.reviewed_reading(
+        "g:1",
+        &[("Tests come first.", "write the tests first")],
+        read,
+    );
+    h.pass(&|_| answer(&[("", "Write the tests before the code.")]));
+    (h.s.raw)
+        .exclude_capture(("repo", "github.com/x/private-aaa"), false)
+        .unwrap();
+    h.s.run();
+    let _h = h.closed(|home| {
+        let at = home.to_owned();
+        let masked = format!("github.com/x/private-{}", crate::redact::MASK);
+        on_checked(move || recorded_in(&at, "learned", &masked));
+        let before = stored(home);
+        let approve = json!({"suggestion": "s1", "action": "approve", "scope": "global"});
+        let refused = acted(home, approve).unwrap_err();
+        assert_eq!((refused.status, refused.code), (409, "rule_moved"));
+        assert_eq!(
+            stored(home),
+            (before.0 + 1, before.1, before.2),
+            "the event alone"
+        );
+    });
 }
 
 /// #1131 items 7 and 9: the undo of an approval whose directive a restore lost is checked against
@@ -1517,7 +1754,7 @@ fn an_approval_records_what_pref_add_and_its_decision_record_apart_in_one_batch(
     );
 }
 
-/// #1083's R2b (PR 2): the work-view's approval of a suggestion records what the main page's plain
+/// #1083's R2b (PR 2): the work-view's approval of a suggestion records what the main page's
 /// Approve records (the directive, its preference, the decision naming it), their device, seqs and
 /// times aside, its preference and its decision in one batch.
 #[test]
@@ -1720,6 +1957,27 @@ fn receipts_stay_pending_on_rows_not_as_written() {
             .unwrap();
         assert_eq!(got["state"], "pending", "an undo, {sql}: {got}");
     }
+    // #1131 item 2: a rejection's receipt proves its row as written: its fields changed once the
+    // consumer kept it, still the suggestion's newest, leave it pending.
+    let mut h = Home::new();
+    suggested(&mut h);
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (seen, home) = (ran.clone(), h.s.home.path().to_owned());
+    crate::claims::WAITING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            crate::worker::run_once(&home).unwrap();
+            let k = crate::knowledge::open(&home).unwrap();
+            let sql =
+                "UPDATE my_work SET fields = '{\"action\":\"reject\",\"x\":1}' WHERE job = 'rule'";
+            assert_eq!(k.execute(sql, []).unwrap(), 1, "{sql}");
+            seen.set(true);
+        }))
+    });
+    let got = h
+        .act(json!({"suggestion": "s1", "action": "reject"}))
+        .unwrap();
+    assert!(ran.get(), "the tamper ran");
+    assert_eq!(got["state"], "pending", "a rejection: {got}");
 }
 
 /// #1083's R2b (PR 1): an approval's two waits share one deadline: one that the claims consumer's

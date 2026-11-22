@@ -2238,6 +2238,7 @@ fn uid_of(receipt: crate::claims::OwnerReceipt) -> String {
         crate::claims::OwnerReceipt::Applied { uid }
         | crate::claims::OwnerReceipt::Pending { uid, .. } => uid,
         crate::claims::OwnerReceipt::DirectiveOnly { .. } => panic!("no preference recorded"),
+        crate::claims::OwnerReceipt::Replaced { uid } => uid,
     }
 }
 
@@ -3738,6 +3739,37 @@ fn a_dismissal_whose_row_moved_before_its_receipt_answers_no_version() {
     let got = decided(&h, &reference, &version, Decision::Dismiss);
     assert_eq!(got, Switched::Applied(None));
     assert_eq!(row_of(&h, "s1").2["rule"], "rejected");
+}
+
+/// #1131 item 2: a decision from the pages that a later decision of its suggestion replaced before
+/// its receipt read it is saved and answers no version: a dismissal, an approval and a restore.
+#[test]
+fn a_decision_replaced_before_its_receipt_answers_no_version() {
+    for (what, later) in [
+        (Decision::Dismiss, json!({"action": "undo"})),
+        (Decision::Approve, json!({"action": "reject"})),
+        (Decision::Restore, json!({"action": "reject"})),
+    ] {
+        let (h, _now, _place, _repo, _off) = ruled();
+        if matches!(what, Decision::Restore) {
+            let (reference, version, _) = row_of(&h, "s1");
+            assert!(matches!(
+                decided(&h, &reference, &version, Decision::Dismiss),
+                Switched::Applied(Some(_))
+            ));
+        }
+        let (reference, version, _) = row_of(&h, "s1");
+        let home = h.home.path().to_owned();
+        let label = format!("{what:?}");
+        SWITCHED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                decision_waiting(&home, "s1", later);
+                crate::worker::run_once(&home).unwrap();
+            }))
+        });
+        let got = decided(&h, &reference, &version, what);
+        assert_eq!(got, Switched::Applied(None), "{label}");
+    }
 }
 
 /// #1128 item 3: a switch whose rule My Rules no longer lists once its correction is applied (its
